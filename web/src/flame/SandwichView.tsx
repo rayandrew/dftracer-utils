@@ -101,10 +101,18 @@ export function SandwichView(props: {
           </div>
         </Show>
         <div class="sw-thead">
-          <button class="sw-h num" classList={{ active: sortKey() === "self" }} onClick={() => setSortKey("self")}>
+          <button
+            class="sw-h num"
+            classList={{ active: sortKey() === "self" }}
+            onClick={() => setSortKey("self")}
+          >
             self
           </button>
-          <button class="sw-h num" classList={{ active: sortKey() === "total" }} onClick={() => setSortKey("total")}>
+          <button
+            class="sw-h num"
+            classList={{ active: sortKey() === "total" }}
+            onClick={() => setSortKey("total")}
+          >
             total
           </button>
           <span class="sw-h">function</span>

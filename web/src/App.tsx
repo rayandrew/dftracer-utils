@@ -81,7 +81,8 @@ const METRIC_HELP: Record<string, string> = {
   processes: "Number of distinct processes (pids) in the trace.",
   files: "Distinct files the trace declared (FH metadata records).",
   "i/o files": "Distinct files actually read from or written to (a subset of files).",
-  "i/o util": "Fraction of wall time a process spent in I/O operations. Host rows show mean +/- stdev across their processes.",
+  "i/o util":
+    "Fraction of wall time a process spent in I/O operations. Host rows show mean +/- stdev across their processes.",
   ops: "Operations per second (traced events) for the process.",
   bytes: "Total bytes read + written by the process.",
   track: "Node -> process (fork tree) -> thread. Click a row to collapse/expand.",
@@ -138,10 +139,6 @@ function layerOf(name: string): string {
   return "app";
 }
 
-const ICON_SUN =
-  '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8h1.5M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M12.6 3.4l-1 1M4.4 11.6l-1 1"/></svg>';
-const ICON_MOON =
-  '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M11.5 2.5a6 6 0 1 0 2.2 8.4A5 5 0 0 1 11.5 2.5z"/></svg>';
 const ICON_GEAR =
   '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
 
@@ -153,7 +150,6 @@ export default function App() {
   let flame: Flamegraph | undefined;
   let flameInflight: AbortController | undefined;
   let flameLoadedQuery: string | null = null;
-  let bottomFlameCanvas: HTMLCanvasElement | undefined;
   let bottomFlame: Flamegraph | undefined;
   let timeline: Timeline | undefined;
   let inflight: AbortController | undefined;
@@ -166,9 +162,7 @@ export default function App() {
   const [meta, setMeta] = createSignal<VizMetadata | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [view, setView] = createSignal<"timeline" | "flamegraph" | "sandwich" | "api">(
-    "timeline",
-  );
+  const [view, setView] = createSignal<"timeline" | "flamegraph" | "sandwich" | "api">("timeline");
   const [navCollapsed, setNavCollapsed] = createSignal(false);
   const [theme, setTheme] = createSignal<"dark" | "light">(initialTheme());
   const [kpis, setKpis] = createSignal<{
@@ -531,7 +525,10 @@ export default function App() {
     }
     if (args.offset != null) {
       const off = Number(args.offset);
-      rows.push(["offset", Number.isFinite(off) ? "0x" + off.toString(16).toUpperCase() : String(args.offset)]);
+      rows.push([
+        "offset",
+        Number.isFinite(off) ? "0x" + off.toString(16).toUpperCase() : String(args.offset),
+      ]);
     }
     if (args.fd != null) rows.push(["fd", String(args.fd)]);
     return rows;
@@ -550,7 +547,6 @@ export default function App() {
     }
     return out;
   }
-
 
   function showView(v: "timeline" | "flamegraph" | "sandwich" | "api") {
     setView(v);
@@ -643,7 +639,9 @@ export default function App() {
         setFileByHash(fh);
       }
       setCats(
-        [...counts.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+        [...counts.entries()]
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count),
       );
 
       const hosts = new Map<number, string>();
@@ -857,8 +855,7 @@ export default function App() {
     timeline.attachMinimap(minimap);
     timeline.attachCounters(counterCanvas);
     flame = new Flamegraph(flameCanvas, {
-      onHover: (node, pct, x, y) =>
-        setFlameHover(node ? { node, pct, x, y } : null),
+      onHover: (node, pct, x, y) => setFlameHover(node ? { node, pct, x, y } : null),
     });
     window.addEventListener("keydown", onGlobalKey);
     if (CONFIG.vscode) {
@@ -1023,430 +1020,551 @@ export default function App() {
         </div>
       </nav>
       <div class="main">
-      <Show when={loading()}>
-        <div class="loadbar" />
-      </Show>
-      <header class="toolbar">
-        <form class="query" onSubmit={applyQuery}>
-          <input
-            type="text"
-            placeholder='query, e.g.  dur >= 1000 and cat == "POSIX"'
-            value={queryText()}
-            onInput={(e) => setQueryText(e.currentTarget.value)}
-            spellcheck={false}
-          />
-          <button type="submit">Apply</button>
-          <Show when={appliedQuery()}>
-            <button type="button" class="ghost" onClick={clearQuery}>
-              Clear
-            </button>
-          </Show>
-        </form>
-        <Show when={view() === "timeline"}>
-          <div class="search">
+        <Show when={loading()}>
+          <div class="loadbar" />
+        </Show>
+        <header class="toolbar">
+          <form class="query" onSubmit={applyQuery}>
             <input
-              ref={searchInput}
               type="text"
-              placeholder="find (Ctrl+F)"
-              value={searchTerm()}
-              onInput={(e) => doSearch(e.currentTarget.value)}
-              onKeyDown={onSearchKey}
+              placeholder='query, e.g.  dur >= 1000 and cat == "POSIX"'
+              value={queryText()}
+              onInput={(e) => setQueryText(e.currentTarget.value)}
               spellcheck={false}
             />
-            <Show when={searchTerm()}>
-              <span class="match-count">
-                {matchCount()
-                  ? matchPos()
-                    ? `${matchPos()}/${matchCount()}`
-                    : String(matchCount())
-                  : "0"}
-              </span>
-              <button type="button" class="ghost sm" title="previous (Shift+Enter)" onClick={() => navMatch(-1)}>
-                {"<"}
-              </button>
-              <button type="button" class="ghost sm" title="next (Enter)" onClick={() => navMatch(1)}>
-                {">"}
+            <button type="submit">Apply</button>
+            <Show when={appliedQuery()}>
+              <button type="button" class="ghost" onClick={clearQuery}>
+                Clear
               </button>
             </Show>
-          </div>
-          <label class="toggle">
-            <input
-              type="checkbox"
-              checked={fullDetail()}
-              onChange={(e) => {
-                setFullDetail(e.currentTarget.checked);
-                const vp = timeline?.getViewport();
-                if (vp) ensureData(vp.begin, vp.end, true);
-              }}
-            />
-            Full detail
-          </label>
-          <button
-            type="button"
-            class="ghost"
-            classList={{ active: showLegend() }}
-            onClick={() => setShowLegend(!showLegend())}
-          >
-            Legend
-          </button>
-          <button
-            type="button"
-            class="ghost"
-            classList={{ active: showGaps() }}
-            onClick={() => {
-              const v = !showGaps();
-              setShowGaps(v);
-              timeline?.setShowGaps(v);
-            }}
-          >
-            Gaps
-          </button>
-        </Show>
-        <Show when={view() === "flamegraph"}>
-          <button
-            type="button"
-            class="ghost"
-            classList={{ active: byProcess() }}
-            title="Split the tree by process instead of merging all processes"
-            onClick={() => {
-              setByProcess(!byProcess());
-              loadFlame();
-            }}
-          >
-            Group by process
-          </button>
-        </Show>
-        <button
-          type="button"
-          class="ghost"
-          classList={{ active: sidebarOpen() }}
-          onClick={() => {
-            const open = !sidebarOpen();
-            setSidebarOpen(open);
-            if (open) loadAnalyze(analyzeTab());
-          }}
-        >
-          Analyze
-        </button>
-        <Show when={view() !== "sandwich"}>
-          <button
-            type="button"
-            class="ghost"
-            onClick={() => (view() === "flamegraph" ? flame?.resetFocus() : timeline?.resetView())}
-          >
-            Reset
-          </button>
-        </Show>
-        <button type="button" class="ghost" title="shortcuts (?)" onClick={() => setShowHelp(true)}>
-          ?
-        </button>
-      </header>
-
-      <Show when={kpis()}>
-        {(k) => (
-          <div class="kpi-strip">
-            <div class="kpi">
-              <span {...help("wall time")}>wall time</span>
-              <b>{formatTime(k().wall)}</b>
-            </div>
-            <div class="kpi">
-              <span {...help("total i/o")}>total i/o</span>
-              <b>{formatBytes(k().totalIO)}</b>
-            </div>
-            <div class="kpi">
-              <span {...help("i/o share")}>i/o share</span>
-              <b class="hot">{k().ioShare.toFixed(1)}%</b>
-            </div>
-            <div class="kpi">
-              <span {...help("processes")}>processes</span>
-              <b>{k().procs}</b>
-            </div>
-            <Show when={fileCounts()}>
-              {(f) => (
-                <>
-                  <div class="kpi">
-                    <span {...help("files")}>files</span>
-                    <b>{f().total.toLocaleString()}</b>
-                  </div>
-                  <div class="kpi">
-                    <span {...help("i/o files")}>i/o files</span>
-                    <b>{f().io.toLocaleString()}</b>
-                  </div>
-                </>
-              )}
-            </Show>
-          </div>
-        )}
-      </Show>
-
-      <Show when={showHelp()}>
-        <div class="modal-backdrop" onClick={() => setShowHelp(false)}>
-          <div class="modal" onClick={(e) => e.stopPropagation()}>
-            <div class="modal-head">
-              <b>Keyboard & mouse</b>
-              <button class="ghost sm" onClick={() => setShowHelp(false)}>
-                x
-              </button>
-            </div>
-            <table class="help">
-              <tbody>
-                <For
-                  each={[
-                    ["drag / two-finger swipe", "pan"],
-                    ["wheel", "scroll lanes"],
-                    ["ctrl+wheel / pinch", "zoom at cursor"],
-                    ["W / S", "zoom in / out"],
-                    ["A / D", "pan left / right"],
-                    ["double-click", "zoom in"],
-                    ["drag on ruler / shift+drag", "measure a range (stats)"],
-                    ["click a slice", "details"],
-                    ["Ctrl+F", "find events"],
-                    ["Enter / Shift+Enter", "next / previous match"],
-                    ["minimap: click / drag", "jump / zoom to region"],
-                    ["?", "this help"],
-                  ]}
-                >
-                  {([k, v]) => (
-                    <tr>
-                      <td class="help-k">{k}</td>
-                      <td class="help-v">{v}</td>
-                    </tr>
-                  )}
-                </For>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </Show>
-
-      <Show when={showSettings()}>
-        <div class="modal-backdrop" onClick={() => setShowSettings(false)}>
-          <div class="modal" onClick={(e) => e.stopPropagation()}>
-            <div class="modal-head">
-              <b>Settings</b>
-              <button class="ghost sm" onClick={() => setShowSettings(false)}>
-                x
-              </button>
-            </div>
-            <div class="settings-body">
-              <div class="settings-row">
-                <span>Theme</span>
-                <button
-                  class="ghost sm"
-                  onClick={() => applyTheme(theme() === "dark" ? "light" : "dark", true)}
-                >
-                  {theme() === "dark" ? "Switch to light" : "Switch to dark"}
-                </button>
-              </div>
-              <Show when={CONFIG.vscode}>
-                <div class="settings-section">dftracer_server</div>
-                <div class="settings-row">
-                  <span>Server path</span>
-                  <input
-                    type="text"
-                    class="settings-input"
-                    placeholder="dftracer_server"
-                    value={serverPath()}
-                    onChange={(e) => {
-                      setServerPath(e.currentTarget.value);
-                      post({ type: "setServerPath", path: e.currentTarget.value });
-                    }}
-                  />
-                </div>
-                <div class="settings-section">Load traces</div>
-                <div class="settings-row">
-                  <button class="ghost sm" onClick={() => post({ type: "pickTrace", mode: "file" })}>
-                    Open trace file...
-                  </button>
-                  <button class="ghost sm" onClick={() => post({ type: "pickTrace", mode: "dir" })}>
-                    Open trace directory...
-                  </button>
-                </div>
-              </Show>
-            </div>
-          </div>
-        </div>
-      </Show>
-
-      <Show when={NEEDS_LOAD}>
-        <div class="load-screen">
-          <div class="load-card">
-            <div class="load-title">DFTracer Trace Viewer</div>
-            <Show when={CONFIG.error}>
-              <div class="load-error">{CONFIG.error}</div>
-            </Show>
-            <div class="load-field">
-              <label>dftracer_server path (this machine)</label>
+          </form>
+          <Show when={view() === "timeline"}>
+            <div class="search">
               <input
+                ref={searchInput}
                 type="text"
-                class="settings-input"
-                placeholder="dftracer_server"
-                value={serverPath()}
-                onInput={(e) => setServerPath(e.currentTarget.value)}
-                onChange={(e) => post({ type: "setServerPath", path: e.currentTarget.value })}
+                placeholder="find (Ctrl+F)"
+                value={searchTerm()}
+                onInput={(e) => doSearch(e.currentTarget.value)}
+                onKeyDown={onSearchKey}
+                spellcheck={false}
               />
-              <div class="muted sm">
-                Set the full path if it is not on PATH. When connected to a remote host, this is
-                the path on that host.
-              </div>
-            </div>
-            <div class="load-actions">
-              <button class="primary" onClick={() => post({ type: "pickTrace", mode: "dir" })}>
-                Open trace directory...
-              </button>
-              <button class="ghost" onClick={() => post({ type: "pickTrace", mode: "file" })}>
-                Open trace file...
-              </button>
-              <Show when={CONFIG.error}>
-                <button class="ghost" onClick={() => post({ type: "retry" })}>
-                  Retry
+              <Show when={searchTerm()}>
+                <span class="match-count">
+                  {matchCount()
+                    ? matchPos()
+                      ? `${matchPos()}/${matchCount()}`
+                      : String(matchCount())
+                    : "0"}
+                </span>
+                <button
+                  type="button"
+                  class="ghost sm"
+                  title="previous (Shift+Enter)"
+                  onClick={() => navMatch(-1)}
+                >
+                  {"<"}
+                </button>
+                <button
+                  type="button"
+                  class="ghost sm"
+                  title="next (Enter)"
+                  onClick={() => navMatch(1)}
+                >
+                  {">"}
                 </button>
               </Show>
             </div>
-          </div>
-        </div>
-      </Show>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                checked={fullDetail()}
+                onChange={(e) => {
+                  setFullDetail(e.currentTarget.checked);
+                  const vp = timeline?.getViewport();
+                  if (vp) ensureData(vp.begin, vp.end, true);
+                }}
+              />
+              Full detail
+            </label>
+            <button
+              type="button"
+              class="ghost"
+              classList={{ active: showLegend() }}
+              onClick={() => setShowLegend(!showLegend())}
+            >
+              Legend
+            </button>
+            <button
+              type="button"
+              class="ghost"
+              classList={{ active: showGaps() }}
+              onClick={() => {
+                const v = !showGaps();
+                setShowGaps(v);
+                timeline?.setShowGaps(v);
+              }}
+            >
+              Gaps
+            </button>
+          </Show>
+          <Show when={view() === "flamegraph"}>
+            <button
+              type="button"
+              class="ghost"
+              classList={{ active: byProcess() }}
+              title="Split the tree by process instead of merging all processes"
+              onClick={() => {
+                setByProcess(!byProcess());
+                loadFlame();
+              }}
+            >
+              Group by process
+            </button>
+          </Show>
+          <button
+            type="button"
+            class="ghost"
+            classList={{ active: sidebarOpen() }}
+            onClick={() => {
+              const open = !sidebarOpen();
+              setSidebarOpen(open);
+              if (open) loadAnalyze(analyzeTab());
+            }}
+          >
+            Analyze
+          </button>
+          <Show when={view() !== "sandwich"}>
+            <button
+              type="button"
+              class="ghost"
+              onClick={() =>
+                view() === "flamegraph" ? flame?.resetFocus() : timeline?.resetView()
+              }
+            >
+              Reset
+            </button>
+          </Show>
+          <button
+            type="button"
+            class="ghost"
+            title="shortcuts (?)"
+            onClick={() => setShowHelp(true)}
+          >
+            ?
+          </button>
+        </header>
 
-      <div class="workspace">
-        <Show when={sidebarOpen()}>
-          <aside class="sidebar">
-            <div class="sidebar-head">
-              <b>
-                Analysis ·{" "}
-                <Show when={anScope()} fallback={<span>whole trace</span>}>
-                  {(s) => <span class="scope-tag">selection {formatTime(s().t1 - s().t0)}</span>}
-                </Show>
-              </b>
-              <div class="head-actions">
-                <Show when={anScope()}>
-                  <button class="ghost sm" onClick={clearSelection}>
-                    analyze whole trace
-                  </button>
-                </Show>
-                <button class="ghost sm" onClick={() => setSidebarOpen(false)}>
+        <Show when={kpis()}>
+          {(k) => (
+            <div class="kpi-strip">
+              <div class="kpi">
+                <span {...help("wall time")}>wall time</span>
+                <b>{formatTime(k().wall)}</b>
+              </div>
+              <div class="kpi">
+                <span {...help("total i/o")}>total i/o</span>
+                <b>{formatBytes(k().totalIO)}</b>
+              </div>
+              <div class="kpi">
+                <span {...help("i/o share")}>i/o share</span>
+                <b class="hot">{k().ioShare.toFixed(1)}%</b>
+              </div>
+              <div class="kpi">
+                <span {...help("processes")}>processes</span>
+                <b>{k().procs}</b>
+              </div>
+              <Show when={fileCounts()}>
+                {(f) => (
+                  <>
+                    <div class="kpi">
+                      <span {...help("files")}>files</span>
+                      <b>{f().total.toLocaleString()}</b>
+                    </div>
+                    <div class="kpi">
+                      <span {...help("i/o files")}>i/o files</span>
+                      <b>{f().io.toLocaleString()}</b>
+                    </div>
+                  </>
+                )}
+              </Show>
+            </div>
+          )}
+        </Show>
+
+        <Show when={showHelp()}>
+          <div class="modal-backdrop" onClick={() => setShowHelp(false)}>
+            <div class="modal" onClick={(e) => e.stopPropagation()}>
+              <div class="modal-head">
+                <b>Keyboard & mouse</b>
+                <button class="ghost sm" onClick={() => setShowHelp(false)}>
                   x
                 </button>
               </div>
+              <table class="help">
+                <tbody>
+                  <For
+                    each={[
+                      ["drag / two-finger swipe", "pan"],
+                      ["wheel", "scroll lanes"],
+                      ["ctrl+wheel / pinch", "zoom at cursor"],
+                      ["W / S", "zoom in / out"],
+                      ["A / D", "pan left / right"],
+                      ["double-click", "zoom in"],
+                      ["drag on ruler / shift+drag", "measure a range (stats)"],
+                      ["click a slice", "details"],
+                      ["Ctrl+F", "find events"],
+                      ["Enter / Shift+Enter", "next / previous match"],
+                      ["minimap: click / drag", "jump / zoom to region"],
+                      ["?", "this help"],
+                    ]}
+                  >
+                    {([k, v]) => (
+                      <tr>
+                        <td class="help-k">{k}</td>
+                        <td class="help-v">{v}</td>
+                      </tr>
+                    )}
+                  </For>
+                </tbody>
+              </table>
             </div>
-            <div class="tabs">
-              <For each={BOTTOM_TABS}>
-                {([id, label, group]) => (
+          </div>
+        </Show>
+
+        <Show when={showSettings()}>
+          <div class="modal-backdrop" onClick={() => setShowSettings(false)}>
+            <div class="modal" onClick={(e) => e.stopPropagation()}>
+              <div class="modal-head">
+                <b>Settings</b>
+                <button class="ghost sm" onClick={() => setShowSettings(false)}>
+                  x
+                </button>
+              </div>
+              <div class="settings-body">
+                <div class="settings-row">
+                  <span>Theme</span>
                   <button
                     class="ghost sm"
-                    classList={{ active: bottomTab() === id }}
-                    onClick={() => selectBottomTab(id, group)}
+                    onClick={() => applyTheme(theme() === "dark" ? "light" : "dark", true)}
                   >
-                    {label}
+                    {theme() === "dark" ? "Switch to light" : "Switch to dark"}
                   </button>
-                )}
-              </For>
-            </div>
-            <div class="analyze-body">
-              <Show when={bottomTab() === "eventlog"}>
-                <Show when={eventLogLoading() && !eventLog()}>
-                  <div class="muted">loading events...</div>
-                </Show>
-                <Show when={eventLog()}>
-                  <table class="kv stats analyze-table op-table evlog-table">
-                    <thead>
-                      <tr>
-                        <th class="num">time</th>
-                        <th class="num">dur</th>
-                        <th>operation</th>
-                        <th>layer</th>
-                        <th class="num">pid/tid</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <For each={eventLog()}>
-                        {(e) => {
-                          const name = String(e.name ?? "");
-                          return (
-                            <tr>
-                              <td class="num">{formatTime(Number(e.ts))}</td>
-                              <td class="num">{formatTime(Number(e.dur))}</td>
-                              <td class="op-name" style={{ color: colorFor(name) }} title={name}>
-                                {name}
-                              </td>
-                              <td class="op-layer">{String(e.cat || layerOf(name))}</td>
-                              <td class="num">
-                                {String(e.pid)}/{String(e.tid)}
-                              </td>
-                            </tr>
-                          );
-                        }}
-                      </For>
-                    </tbody>
-                  </table>
-                  <Show when={eventLogTruncated()}>
-                    <div class="muted">showing first 1000 events (truncated)</div>
-                  </Show>
-                </Show>
-              </Show>
-
-              <Show when={bottomTab() === "calltree"}>
-                <Show when={anFlameLoading() && !anFlameTree()}>
-                  <div class="muted">building call tree...</div>
-                </Show>
-                <div class="bottom-flame">
-                  <canvas
-                    ref={(el) => {
-                      bottomFlame?.destroy();
-                      bottomFlame = new Flamegraph(el, {
-                        onHover: (node, pct, x, y) =>
-                          setBottomFlameHover(node ? { node, pct, x, y } : null),
-                      });
-                      bottomFlame.setTheme(theme());
-                      bottomFlame.setTree(anFlameTree());
-                    }}
-                  />
-                  <Show when={bottomFlameHover()}>
-                    {(h) => <FlameTooltip hover={h()} />}
-                  </Show>
                 </div>
-              </Show>
-
-              <Show when={isFlameTab()}>
-                <Show when={anFlameLoading() && !anFlameTree()}>
-                  <div class="muted">building call tree...</div>
+                <Show when={CONFIG.vscode}>
+                  <div class="settings-section">dftracer_server</div>
+                  <div class="settings-row">
+                    <span>Server path</span>
+                    <input
+                      type="text"
+                      class="settings-input"
+                      placeholder="dftracer_server"
+                      value={serverPath()}
+                      onChange={(e) => {
+                        setServerPath(e.currentTarget.value);
+                        post({ type: "setServerPath", path: e.currentTarget.value });
+                      }}
+                    />
+                  </div>
+                  <div class="settings-section">Load traces</div>
+                  <div class="settings-row">
+                    <button
+                      class="ghost sm"
+                      onClick={() => post({ type: "pickTrace", mode: "file" })}
+                    >
+                      Open trace file...
+                    </button>
+                    <button
+                      class="ghost sm"
+                      onClick={() => post({ type: "pickTrace", mode: "dir" })}
+                    >
+                      Open trace directory...
+                    </button>
+                  </div>
                 </Show>
-                <Show when={anFlameTree()}>
-                  {() => {
-                    const metricOf = (n: { self: number; total: number }) =>
-                      bottomTab() === "bottomup" ? n.self : n.total;
+              </div>
+            </div>
+          </div>
+        </Show>
+
+        <Show when={NEEDS_LOAD}>
+          <div class="load-screen">
+            <div class="load-card">
+              <div class="load-title">DFTracer Trace Viewer</div>
+              <Show when={CONFIG.error}>
+                <div class="load-error">{CONFIG.error}</div>
+              </Show>
+              <div class="load-field">
+                <label>dftracer_server path (this machine)</label>
+                <input
+                  type="text"
+                  class="settings-input"
+                  placeholder="dftracer_server"
+                  value={serverPath()}
+                  onInput={(e) => setServerPath(e.currentTarget.value)}
+                  onChange={(e) => post({ type: "setServerPath", path: e.currentTarget.value })}
+                />
+                <div class="muted sm">
+                  Set the full path if it is not on PATH. When connected to a remote host, this is
+                  the path on that host.
+                </div>
+              </div>
+              <div class="load-actions">
+                <button class="primary" onClick={() => post({ type: "pickTrace", mode: "dir" })}>
+                  Open trace directory...
+                </button>
+                <button class="ghost" onClick={() => post({ type: "pickTrace", mode: "file" })}>
+                  Open trace file...
+                </button>
+                <Show when={CONFIG.error}>
+                  <button class="ghost" onClick={() => post({ type: "retry" })}>
+                    Retry
+                  </button>
+                </Show>
+              </div>
+            </div>
+          </div>
+        </Show>
+
+        <div class="workspace">
+          <Show when={sidebarOpen()}>
+            <aside class="sidebar">
+              <div class="sidebar-head">
+                <b>
+                  Analysis ·{" "}
+                  <Show when={anScope()} fallback={<span>whole trace</span>}>
+                    {(s) => <span class="scope-tag">selection {formatTime(s().t1 - s().t0)}</span>}
+                  </Show>
+                </b>
+                <div class="head-actions">
+                  <Show when={anScope()}>
+                    <button class="ghost sm" onClick={clearSelection}>
+                      analyze whole trace
+                    </button>
+                  </Show>
+                  <button class="ghost sm" onClick={() => setSidebarOpen(false)}>
+                    x
+                  </button>
+                </div>
+              </div>
+              <div class="tabs">
+                <For each={BOTTOM_TABS}>
+                  {([id, label, group]) => (
+                    <button
+                      class="ghost sm"
+                      classList={{ active: bottomTab() === id }}
+                      onClick={() => selectBottomTab(id, group)}
+                    >
+                      {label}
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div class="analyze-body">
+                <Show when={bottomTab() === "eventlog"}>
+                  <Show when={eventLogLoading() && !eventLog()}>
+                    <div class="muted">loading events...</div>
+                  </Show>
+                  <Show when={eventLog()}>
+                    <table class="kv stats analyze-table op-table evlog-table">
+                      <thead>
+                        <tr>
+                          <th class="num">time</th>
+                          <th class="num">dur</th>
+                          <th>operation</th>
+                          <th>layer</th>
+                          <th class="num">pid/tid</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <For each={eventLog()}>
+                          {(e) => {
+                            const name = String(e.name ?? "");
+                            return (
+                              <tr>
+                                <td class="num">{formatTime(Number(e.ts))}</td>
+                                <td class="num">{formatTime(Number(e.dur))}</td>
+                                <td class="op-name" style={{ color: colorFor(name) }} title={name}>
+                                  {name}
+                                </td>
+                                <td class="op-layer">{String(e.cat || layerOf(name))}</td>
+                                <td class="num">
+                                  {String(e.pid)}/{String(e.tid)}
+                                </td>
+                              </tr>
+                            );
+                          }}
+                        </For>
+                      </tbody>
+                    </table>
+                    <Show when={eventLogTruncated()}>
+                      <div class="muted">showing first 1000 events (truncated)</div>
+                    </Show>
+                  </Show>
+                </Show>
+
+                <Show when={bottomTab() === "calltree"}>
+                  <Show when={anFlameLoading() && !anFlameTree()}>
+                    <div class="muted">building call tree...</div>
+                  </Show>
+                  <div class="bottom-flame">
+                    <canvas
+                      ref={(el) => {
+                        bottomFlame?.destroy();
+                        bottomFlame = new Flamegraph(el, {
+                          onHover: (node, pct, x, y) =>
+                            setBottomFlameHover(node ? { node, pct, x, y } : null),
+                        });
+                        bottomFlame.setTheme(theme());
+                        bottomFlame.setTree(anFlameTree());
+                      }}
+                    />
+                    <Show when={bottomFlameHover()}>{(h) => <FlameTooltip hover={h()} />}</Show>
+                  </div>
+                </Show>
+
+                <Show when={isFlameTab()}>
+                  <Show when={anFlameLoading() && !anFlameTree()}>
+                    <div class="muted">building call tree...</div>
+                  </Show>
+                  <Show when={anFlameTree()}>
+                    {(_flame) => {
+                      const metricOf = (n: { self: number; total: number }) =>
+                        bottomTab() === "bottomup" ? n.self : n.total;
+                      const grand = () =>
+                        Math.max(
+                          1,
+                          bottomFns().reduce((s2, n) => s2 + metricOf(n), 0),
+                        );
+                      return (
+                        <table class="kv stats analyze-table op-table">
+                          <thead>
+                            <tr>
+                              <th {...help("operation")}>operation</th>
+                              <th {...help("layer")}>layer</th>
+                              <th class="num" {...help("self")}>
+                                self
+                              </th>
+                              <th class="num" {...help("total")}>
+                                total
+                              </th>
+                              <th class="bar-col" {...help("wall share")}>
+                                {bottomTab() === "bottomup" ? "self share" : "wall share"}
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <For each={bottomFns()}>
+                              {(n) => {
+                                const pct = (metricOf(n) / grand()) * 100;
+                                const col = colorFor(n.name);
+                                return (
+                                  <tr
+                                    classList={{ "row-click": true, active: distKey() === n.name }}
+                                    onClick={() => loadDist(n.name)}
+                                  >
+                                    <td
+                                      class="analyze-name op-name"
+                                      title={n.name}
+                                      style={{ color: col }}
+                                    >
+                                      {n.name}
+                                    </td>
+                                    <td class="op-layer">{layerOf(n.name)}</td>
+                                    <td class="num">{formatTime(n.self)}</td>
+                                    <td class="num">{formatTime(n.total)}</td>
+                                    <td class="bar-col op-share">
+                                      <span
+                                        class="bar"
+                                        style={{ width: `${pct}%`, background: col }}
+                                      />
+                                      <span class="op-pct">{pct.toFixed(0)}%</span>
+                                    </td>
+                                  </tr>
+                                );
+                              }}
+                            </For>
+                          </tbody>
+                        </table>
+                      );
+                    }}
+                  </Show>
+                </Show>
+
+                <Show when={analyzeLoading() && !analyzeStats()}>
+                  <div class="muted">aggregating...</div>
+                </Show>
+                <Show
+                  when={
+                    analyzeStats() &&
+                    bottomTab() !== "eventlog" &&
+                    bottomTab() !== "calltree" &&
+                    !isFlameTab()
+                  }
+                >
+                  {(_stats) => {
+                    const rows = () => analyzeStats()!.names;
                     const grand = () =>
-                      Math.max(1, bottomFns().reduce((s2, n) => s2 + metricOf(n), 0));
+                      Math.max(
+                        1,
+                        rows().reduce((s2, n) => s2 + n.total, 0),
+                      );
+                    const isName = () => analyzeTab() === "name" || analyzeTab() === "pid";
                     return (
                       <table class="kv stats analyze-table op-table">
                         <thead>
                           <tr>
-                            <th {...help("operation")}>operation</th>
+                            <th {...help("operation")}>
+                              {analyzeTab() === "file"
+                                ? "file"
+                                : analyzeTab() === "pid"
+                                  ? "process"
+                                  : "operation"}
+                            </th>
                             <th {...help("layer")}>layer</th>
-                            <th class="num" {...help("self")}>self</th>
-                            <th class="num" {...help("total")}>total</th>
+                            <th class="num" {...help("total")}>
+                              total
+                            </th>
                             <th class="bar-col" {...help("wall share")}>
-                              {bottomTab() === "bottomup" ? "self share" : "wall share"}
+                              wall share
                             </th>
                           </tr>
                         </thead>
                         <tbody>
-                          <For each={bottomFns()}>
+                          <For each={rows()}>
                             {(n) => {
-                              const pct = (metricOf(n) / grand()) * 100;
+                              const label = analyzeLabel(n.name);
+                              const clickable = distPredicate(analyzeTab(), n.name) !== null;
+                              const pct = (n.total / grand()) * 100;
                               const col = colorFor(n.name);
                               return (
                                 <tr
-                                  classList={{ "row-click": true, active: distKey() === n.name }}
+                                  classList={{
+                                    "row-click": clickable,
+                                    active: distKey() === n.name,
+                                  }}
                                   onClick={() => loadDist(n.name)}
                                 >
-                                  <td class="analyze-name op-name" title={n.name} style={{ color: col }}>
-                                    {n.name}
+                                  <td
+                                    class="analyze-name op-name"
+                                    classList={{ path: analyzeTab() === "file" }}
+                                    title={label}
+                                    style={{ color: isName() ? col : undefined }}
+                                  >
+                                    <Show when={analyzeTab() === "file"} fallback={label}>
+                                      <div class="path-scroll">{label}</div>
+                                    </Show>
                                   </td>
-                                  <td class="op-layer">{layerOf(n.name)}</td>
-                                  <td class="num">{formatTime(n.self)}</td>
+                                  <td class="op-layer">
+                                    {analyzeTab() === "name" ? layerOf(n.name) : "-"}
+                                  </td>
                                   <td class="num">{formatTime(n.total)}</td>
                                   <td class="bar-col op-share">
-                                    <span class="bar" style={{ width: `${pct}%`, background: col }} />
+                                    <span
+                                      class="bar"
+                                      style={{ width: `${pct}%`, background: col }}
+                                    />
                                     <span class="op-pct">{pct.toFixed(0)}%</span>
                                   </td>
                                 </tr>
@@ -1458,77 +1576,18 @@ export default function App() {
                     );
                   }}
                 </Show>
-              </Show>
-
-              <Show when={analyzeLoading() && !analyzeStats()}>
-                <div class="muted">aggregating...</div>
-              </Show>
-              <Show
-                when={
-                  analyzeStats() &&
-                  bottomTab() !== "eventlog" &&
-                  bottomTab() !== "calltree" &&
-                  !isFlameTab()
-                }
-              >
-                {() => {
-                  const rows = () => analyzeStats()!.names;
-                  const grand = () =>
-                    Math.max(1, rows().reduce((s2, n) => s2 + n.total, 0));
-                  const isName = () => analyzeTab() === "name" || analyzeTab() === "pid";
-                  return (
-                    <table class="kv stats analyze-table op-table">
-                      <thead>
-                        <tr>
-                          <th {...help("operation")}>{analyzeTab() === "file" ? "file" : analyzeTab() === "pid" ? "process" : "operation"}</th>
-                          <th {...help("layer")}>layer</th>
-                          <th class="num" {...help("total")}>total</th>
-                          <th class="bar-col" {...help("wall share")}>wall share</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <For each={rows()}>
-                          {(n) => {
-                            const label = analyzeLabel(n.name);
-                            const clickable = distPredicate(analyzeTab(), n.name) !== null;
-                            const pct = (n.total / grand()) * 100;
-                            const col = colorFor(n.name);
-                            return (
-                            <tr
-                              classList={{ "row-click": clickable, active: distKey() === n.name }}
-                              onClick={() => loadDist(n.name)}
-                            >
-                              <td
-                                class="analyze-name op-name"
-                                classList={{ path: analyzeTab() === "file" }}
-                                title={label}
-                                style={{ color: isName() ? col : undefined }}
-                              >
-                                <Show when={analyzeTab() === "file"} fallback={label}>
-                                  <div class="path-scroll">{label}</div>
-                                </Show>
-                              </td>
-                              <td class="op-layer">{analyzeTab() === "name" ? layerOf(n.name) : "-"}</td>
-                              <td class="num">{formatTime(n.total)}</td>
-                              <td class="bar-col op-share">
-                                <span class="bar" style={{ width: `${pct}%`, background: col }} />
-                                <span class="op-pct">{pct.toFixed(0)}%</span>
-                              </td>
-                            </tr>
-                            );
-                          }}
-                        </For>
-                      </tbody>
-                    </table>
-                  );
-                }}
-              </Show>
-            </div>
-            <Show when={distKey()}>
+              </div>
+              <Show when={distKey()}>
                 <div class="dist-panel">
                   <div class="dist-head">
                     <span>Duration distribution: {distKey()}</span>
-                    <button class="ghost sm" onClick={() => { setDistKey(null); setDistHist(null); }}>
+                    <button
+                      class="ghost sm"
+                      onClick={() => {
+                        setDistKey(null);
+                        setDistHist(null);
+                      }}
+                    >
                       x
                     </button>
                   </div>
@@ -1541,11 +1600,26 @@ export default function App() {
                       return (
                         <>
                           <div class="dist-stats">
-                            <div class="tile"><span>count</span><b>{h().count.toLocaleString()}</b></div>
-                            <div class="tile"><span>p50</span><b>{formatTime(h().p50 ?? 0)}</b></div>
-                            <div class="tile"><span>p95</span><b>{formatTime(h().p95 ?? 0)}</b></div>
-                            <div class="tile"><span>p99</span><b>{formatTime(h().p99 ?? 0)}</b></div>
-                            <div class="tile"><span>max</span><b>{formatTime(h().max ?? 0)}</b></div>
+                            <div class="tile">
+                              <span>count</span>
+                              <b>{h().count.toLocaleString()}</b>
+                            </div>
+                            <div class="tile">
+                              <span>p50</span>
+                              <b>{formatTime(h().p50 ?? 0)}</b>
+                            </div>
+                            <div class="tile">
+                              <span>p95</span>
+                              <b>{formatTime(h().p95 ?? 0)}</b>
+                            </div>
+                            <div class="tile">
+                              <span>p99</span>
+                              <b>{formatTime(h().p99 ?? 0)}</b>
+                            </div>
+                            <div class="tile">
+                              <span>max</span>
+                              <b>{formatTime(h().max ?? 0)}</b>
+                            </div>
                           </div>
                           <div class="dist-bars">
                             <For each={h().buckets}>
@@ -1568,325 +1642,350 @@ export default function App() {
                     }}
                   </Show>
                 </div>
-            </Show>
-          </aside>
-        </Show>
+              </Show>
+            </aside>
+          </Show>
 
-        <Show when={selected()}>
-          <aside class="inspector">
-            <div class="sidebar-head">
-              <b>SELECTION</b>
+          <Show when={selected()}>
+            <aside class="inspector">
+              <div class="sidebar-head">
+                <b>SELECTION</b>
+                <Show when={selected()}>
+                  {(ev) => (
+                    <span class="muted sm">
+                      {isAggregated(ev())
+                        ? `${Number(ev().count).toLocaleString()} EVENTS`
+                        : "1 EVENT"}
+                    </span>
+                  )}
+                </Show>
+              </div>
               <Show when={selected()}>
                 {(ev) => (
-                  <span class="muted sm">
-                    {isAggregated(ev()) ? `${Number(ev().count).toLocaleString()} EVENTS` : "1 EVENT"}
-                  </span>
-                )}
-              </Show>
-            </div>
-            <Show when={selected()}>
-              {(ev) => (
-              <div class="insp-scroll">
-                <div class="insp-title">
-                  <i style={{ background: colorFor(sliceKey(ev())) }} />
-                  {String(ev().name ?? "")}
-                  {isAggregated(ev()) ? "" : "()"}
-                </div>
-                <div class="insp-sub">
-                  {String(ev().cat ?? "-").toUpperCase()}
-                  <Show when={procRank().get(String(ev().pid))}>
-                    {(r) => <> · RANK {r()}</>}
-                  </Show>{" "}
-                  · PROC {String(ev().pid)}
-                </div>
-                <table class="kv insp-kv">
-                  <tbody>
-                    <For each={inspRows(ev())}>
-                      {([k, v]) => (
-                        <tr>
-                          <td class="k" {...help(k)}>{k}</td>
-                          <td class="v">{v}</td>
-                        </tr>
-                      )}
-                    </For>
-                  </tbody>
-                </table>
-                <Show when={resolvedRows(ev()).length > 0}>
-                  <div class="insp-resolved">
-                    <div class="detail-sub">resolved</div>
-                    <table class="kv">
+                  <div class="insp-scroll">
+                    <div class="insp-title">
+                      <i style={{ background: colorFor(sliceKey(ev())) }} />
+                      {String(ev().name ?? "")}
+                      {isAggregated(ev()) ? "" : "()"}
+                    </div>
+                    <div class="insp-sub">
+                      {String(ev().cat ?? "-").toUpperCase()}
+                      <Show when={procRank().get(String(ev().pid))}>
+                        {(r) => <> · RANK {r()}</>}
+                      </Show>{" "}
+                      · PROC {String(ev().pid)}
+                    </div>
+                    <table class="kv insp-kv">
                       <tbody>
-                        <For each={resolvedRows(ev())}>
+                        <For each={inspRows(ev())}>
                           {([k, v]) => (
                             <tr>
-                              <td class="k">{k}</td>
-                              <td class="v path" title={v}>
-                                {v}
+                              <td class="k" {...help(k)}>
+                                {k}
                               </td>
-                            </tr>
-                          )}
-                        </For>
-                      </tbody>
-                    </table>
-                  </div>
-                </Show>
-                <Show when={isAggregated(ev())}>
-                  <div class="muted sm">Merged block. Zoom in to resolve individual events.</div>
-                </Show>
-                <Show when={inspHist()}>
-                  {(h) => {
-                    const bm = Math.max(1, ...h().buckets.map((b) => b.count));
-                    return (
-                      <div class="insp-hist">
-                        <div class="detail-sub">duration · {String(ev().name)}</div>
-                        <div class="dist-bars sm">
-                          <For each={h().buckets}>
-                            {(b) => (
-                              <div
-                                class="dist-bar"
-                                style={{ height: `${(b.count / bm) * 100}%` }}
-                                title={`${formatTime(b.lo)} - ${formatTime(b.hi)}: ${b.count}`}
-                              />
-                            )}
-                          </For>
-                        </div>
-                        <div class="dist-axis">
-                          <span>{formatTime(h().min ?? 0)}</span>
-                          <span>p50 {formatTime(h().p50 ?? 0)}</span>
-                          <span>{formatTime(h().max ?? 0)}</span>
-                        </div>
-                      </div>
-                    );
-                  }}
-                </Show>
-                <Show when={inspCallersRoot() && inspCallersRoot()!.children.length > 0}>
-                  <div class="insp-sw">
-                    <div class="detail-sub">callers</div>
-                    <div class="insp-sw-flame">
-                      <canvas
-                        ref={(el) => {
-                          inspCallersFg?.destroy();
-                          inspCallersFg = new Flamegraph(el, {
-                            onHover: (node, pct, x, y) =>
-                              setInspSwHover(node ? { node, pct, x, y } : null),
-                          });
-                          inspCallersFg.setTheme(theme());
-                          inspCallersFg.setTree(inspCallersRoot());
-                        }}
-                      />
-                    </div>
-                  </div>
-                </Show>
-                <Show when={inspCalleesRoot() && inspCalleesRoot()!.children.length > 0}>
-                  <div class="insp-sw">
-                    <div class="detail-sub">callees</div>
-                    <div class="insp-sw-flame">
-                      <canvas
-                        ref={(el) => {
-                          inspCalleesFg?.destroy();
-                          inspCalleesFg = new Flamegraph(el, {
-                            onHover: (node, pct, x, y) =>
-                              setInspSwHover(node ? { node, pct, x, y } : null),
-                          });
-                          inspCalleesFg.setTheme(theme());
-                          inspCalleesFg.setTree(inspCalleesRoot());
-                        }}
-                      />
-                    </div>
-                  </div>
-                </Show>
-                <Show when={inspSwHover()}>{(h) => <FlameTooltip hover={h()} />}</Show>
-                <Show when={flattenArgs(ev()).length > 0}>
-                  <div class="insp-args">
-                    <div class="detail-sub">args</div>
-                    <table class="kv">
-                      <tbody>
-                        <For each={flattenArgs(ev())}>
-                          {([k, v]) => (
-                            <tr>
-                              <td class="k">{k}</td>
                               <td class="v">{v}</td>
                             </tr>
                           )}
                         </For>
                       </tbody>
                     </table>
+                    <Show when={resolvedRows(ev()).length > 0}>
+                      <div class="insp-resolved">
+                        <div class="detail-sub">resolved</div>
+                        <table class="kv">
+                          <tbody>
+                            <For each={resolvedRows(ev())}>
+                              {([k, v]) => (
+                                <tr>
+                                  <td class="k">{k}</td>
+                                  <td class="v path" title={v}>
+                                    {v}
+                                  </td>
+                                </tr>
+                              )}
+                            </For>
+                          </tbody>
+                        </table>
+                      </div>
+                    </Show>
+                    <Show when={isAggregated(ev())}>
+                      <div class="muted sm">
+                        Merged block. Zoom in to resolve individual events.
+                      </div>
+                    </Show>
+                    <Show when={inspHist()}>
+                      {(h) => {
+                        const bm = Math.max(1, ...h().buckets.map((b) => b.count));
+                        return (
+                          <div class="insp-hist">
+                            <div class="detail-sub">duration · {String(ev().name)}</div>
+                            <div class="dist-bars sm">
+                              <For each={h().buckets}>
+                                {(b) => (
+                                  <div
+                                    class="dist-bar"
+                                    style={{ height: `${(b.count / bm) * 100}%` }}
+                                    title={`${formatTime(b.lo)} - ${formatTime(b.hi)}: ${b.count}`}
+                                  />
+                                )}
+                              </For>
+                            </div>
+                            <div class="dist-axis">
+                              <span>{formatTime(h().min ?? 0)}</span>
+                              <span>p50 {formatTime(h().p50 ?? 0)}</span>
+                              <span>{formatTime(h().max ?? 0)}</span>
+                            </div>
+                          </div>
+                        );
+                      }}
+                    </Show>
+                    <Show when={inspCallersRoot() && inspCallersRoot()!.children.length > 0}>
+                      <div class="insp-sw">
+                        <div class="detail-sub">callers</div>
+                        <div class="insp-sw-flame">
+                          <canvas
+                            ref={(el) => {
+                              inspCallersFg?.destroy();
+                              inspCallersFg = new Flamegraph(el, {
+                                onHover: (node, pct, x, y) =>
+                                  setInspSwHover(node ? { node, pct, x, y } : null),
+                              });
+                              inspCallersFg.setTheme(theme());
+                              inspCallersFg.setTree(inspCallersRoot());
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </Show>
+                    <Show when={inspCalleesRoot() && inspCalleesRoot()!.children.length > 0}>
+                      <div class="insp-sw">
+                        <div class="detail-sub">callees</div>
+                        <div class="insp-sw-flame">
+                          <canvas
+                            ref={(el) => {
+                              inspCalleesFg?.destroy();
+                              inspCalleesFg = new Flamegraph(el, {
+                                onHover: (node, pct, x, y) =>
+                                  setInspSwHover(node ? { node, pct, x, y } : null),
+                              });
+                              inspCalleesFg.setTheme(theme());
+                              inspCalleesFg.setTree(inspCalleesRoot());
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </Show>
+                    <Show when={inspSwHover()}>{(h) => <FlameTooltip hover={h()} />}</Show>
+                    <Show when={flattenArgs(ev()).length > 0}>
+                      <div class="insp-args">
+                        <div class="detail-sub">args</div>
+                        <table class="kv">
+                          <tbody>
+                            <For each={flattenArgs(ev())}>
+                              {([k, v]) => (
+                                <tr>
+                                  <td class="k">{k}</td>
+                                  <td class="v">{v}</td>
+                                </tr>
+                              )}
+                            </For>
+                          </tbody>
+                        </table>
+                      </div>
+                    </Show>
+                  </div>
+                )}
+              </Show>
+            </aside>
+          </Show>
+
+          <div class="views">
+            <div class="body" style={{ display: view() === "timeline" ? "flex" : "none" }}>
+              <div class="minimap-wrap">
+                <canvas ref={minimap} />
+              </div>
+              <div class="counter-wrap">
+                <canvas ref={counterCanvas} />
+              </div>
+              <div class="canvas-wrap">
+                <canvas ref={canvas} />
+
+                <Show
+                  when={(() => {
+                    const m = meta() as (VizMetadata & { density_count?: number }) | null;
+                    return !loading() && m && m.count === 0 && (m.density_count ?? 0) === 0;
+                  })()}
+                >
+                  <div class="empty-state">
+                    No events {SINGLE_FILE ? "in this file" : "in this view"}
                   </div>
                 </Show>
+
+                <Show when={showLegend() && cats().length > 0}>
+                  <div class="legend-panel">
+                    <div class="panel-head">
+                      <span>Categories ({cats().length})</span>
+                      <button class="ghost sm" onClick={() => setShowLegend(false)}>
+                        x
+                      </button>
+                    </div>
+                    <div class="legend-list">
+                      <For each={cats()}>
+                        {(c) => (
+                          <button
+                            class="legend-item"
+                            title={`filter to ${c.name}`}
+                            onClick={() => filterByName(c.name)}
+                          >
+                            <i style={{ background: colorFor(c.name) }} />
+                            <span class="legend-name">{c.name}</span>
+                            <span class="legend-count">{c.count.toLocaleString()}</span>
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  </div>
+                </Show>
+
+                <Show when={showGaps() && gaps().length > 0}>
+                  <div class="legend-panel gaps-panel">
+                    <div class="panel-head">
+                      <span>Largest idle periods</span>
+                      <button
+                        class="ghost sm"
+                        onClick={() => {
+                          setShowGaps(false);
+                          timeline?.setShowGaps(false);
+                        }}
+                      >
+                        x
+                      </button>
+                    </div>
+                    <div class="legend-list">
+                      <For each={gaps()}>
+                        {(g) => (
+                          <button
+                            class="legend-item"
+                            title="zoom to gap"
+                            onClick={() => timeline?.focusRange(g.t0, g.t1)}
+                          >
+                            <span class="legend-name">{g.label}</span>
+                            <span class="legend-count">{formatTime(g.dur)}</span>
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  </div>
+                </Show>
+
+                <Show when={hover()}>
+                  {(h) => (
+                    <div
+                      class="tooltip"
+                      style={{ left: `${h().x + 14}px`, top: `${h().y + 14}px` }}
+                    >
+                      <div class="tt-name">
+                        <i style={{ background: colorFor(sliceKey(h().ev)) }} />
+                        {String(h().ev.name ?? "")}
+                        <Show when={isAggregated(h().ev)}>
+                          <span class="agg-tag">merged</span>
+                        </Show>
+                      </div>
+                      <For each={inspRows(h().ev)}>
+                        {([k, v]) => (
+                          <div class="tt-row">
+                            <span>{k}</span>
+                            <b>{v}</b>
+                          </div>
+                        )}
+                      </For>
+                      <For each={resolvedRows(h().ev)}>
+                        {([k, v]) => (
+                          <div class="tt-row">
+                            <span>{k}</span>
+                            <b>{v}</b>
+                          </div>
+                        )}
+                      </For>
+                      <Show when={isAggregated(h().ev)}>
+                        <div class="tt-row">
+                          <span class="hint2">zoom in to resolve</span>
+                        </div>
+                      </Show>
+                      <For each={flattenArgs(h().ev).slice(0, 6)}>
+                        {([k, v]) => (
+                          <div class="tt-row">
+                            <span>{k}</span>
+                            <b>{v}</b>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  )}
+                </Show>
               </div>
-              )}
+            </div>
+
+            <div
+              class="body flame-body"
+              style={{ display: view() === "flamegraph" ? "flex" : "none" }}
+            >
+              <div class="flame-wrap">
+                <canvas ref={flameCanvas} />
+                <Show when={flameLoading()}>
+                  <div class="flame-overlay muted">building call tree...</div>
+                </Show>
+                <Show when={flameHover()}>{(h) => <FlameTooltip hover={h()} />}</Show>
+              </div>
+            </div>
+
+            <Show when={view() === "sandwich"}>
+              <div class="body">
+                <Show
+                  when={flameTree()}
+                  fallback={<div class="muted flame-overlay">building call tree...</div>}
+                >
+                  {(t) => <SandwichView tree={t()} grouped={flameTreeGrouped()} mode={theme()} />}
+                </Show>
+              </div>
             </Show>
-          </aside>
-        </Show>
 
-        <div class="views">
-
-      <div class="body" style={{ display: view() === "timeline" ? "flex" : "none" }}>
-        <div class="minimap-wrap">
-          <canvas ref={minimap} />
+            <Show when={view() === "api"}>
+              <div class="body api-body">
+                <ApiExplorer />
+              </div>
+            </Show>
+          </div>
         </div>
-        <div class="counter-wrap">
-          <canvas ref={counterCanvas} />
-        </div>
-        <div class="canvas-wrap">
-          <canvas ref={canvas} />
 
-          <Show
-            when={(() => {
-              const m = meta() as (VizMetadata & { density_count?: number }) | null;
-              return !loading() && m && m.count === 0 && (m.density_count ?? 0) === 0;
-            })()}
-          >
-            <div class="empty-state">
-              No events {SINGLE_FILE ? "in this file" : "in this view"}
-            </div>
+        <footer class="status">
+          <Show when={loading()}>
+            <span class="spin">loading...</span>
           </Show>
-
-          <Show when={showLegend() && cats().length > 0}>
-            <div class="legend-panel">
-              <div class="panel-head">
-                <span>Categories ({cats().length})</span>
-                <button class="ghost sm" onClick={() => setShowLegend(false)}>
-                  x
-                </button>
-              </div>
-              <div class="legend-list">
-                <For each={cats()}>
-                  {(c) => (
-                    <button class="legend-item" title={`filter to ${c.name}`} onClick={() => filterByName(c.name)}>
-                      <i style={{ background: colorFor(c.name) }} />
-                      <span class="legend-name">{c.name}</span>
-                      <span class="legend-count">{c.count.toLocaleString()}</span>
-                    </button>
-                  )}
-                </For>
-              </div>
-            </div>
+          <Show when={error()}>
+            <span class="err">{error()}</span>
           </Show>
-
-          <Show when={showGaps() && gaps().length > 0}>
-            <div class="legend-panel gaps-panel">
-              <div class="panel-head">
-                <span>Largest idle periods</span>
-                <button class="ghost sm" onClick={() => { setShowGaps(false); timeline?.setShowGaps(false); }}>
-                  x
-                </button>
-              </div>
-              <div class="legend-list">
-                <For each={gaps()}>
-                  {(g) => (
-                    <button class="legend-item" title="zoom to gap" onClick={() => timeline?.focusRange(g.t0, g.t1)}>
-                      <span class="legend-name">{g.label}</span>
-                      <span class="legend-count">{formatTime(g.dur)}</span>
-                    </button>
-                  )}
-                </For>
-              </div>
-            </div>
-          </Show>
-
-          <Show when={hover()}>
-            {(h) => (
-              <div class="tooltip" style={{ left: `${h().x + 14}px`, top: `${h().y + 14}px` }}>
-                <div class="tt-name">
-                  <i style={{ background: colorFor(sliceKey(h().ev)) }} />
-                  {String(h().ev.name ?? "")}
-                  <Show when={isAggregated(h().ev)}>
-                    <span class="agg-tag">merged</span>
-                  </Show>
-                </div>
-                <For each={inspRows(h().ev)}>
-                  {([k, v]) => (
-                    <div class="tt-row">
-                      <span>{k}</span>
-                      <b>{v}</b>
-                    </div>
-                  )}
-                </For>
-                <For each={resolvedRows(h().ev)}>
-                  {([k, v]) => (
-                    <div class="tt-row">
-                      <span>{k}</span>
-                      <b>{v}</b>
-                    </div>
-                  )}
-                </For>
-                <Show when={isAggregated(h().ev)}>
-                  <div class="tt-row">
-                    <span class="hint2">zoom in to resolve</span>
-                  </div>
+          <Show when={meta()}>
+            {(m) => (
+              <>
+                <span>{m().count.toLocaleString()} events</span>
+                <span>summary {summary()}</span>
+                <Show when={m().truncated}>
+                  <span class="warn">truncated at {m().limit.toLocaleString()}</span>
                 </Show>
-                <For each={flattenArgs(h().ev).slice(0, 6)}>
-                  {([k, v]) => (
-                    <div class="tt-row">
-                      <span>{k}</span>
-                      <b>{v}</b>
-                    </div>
-                  )}
-                </For>
-              </div>
+              </>
             )}
           </Show>
-        </div>
-      </div>
-
-      <div class="body flame-body" style={{ display: view() === "flamegraph" ? "flex" : "none" }}>
-        <div class="flame-wrap">
-          <canvas ref={flameCanvas} />
-          <Show when={flameLoading()}>
-            <div class="flame-overlay muted">building call tree...</div>
-          </Show>
-          <Show when={flameHover()}>{(h) => <FlameTooltip hover={h()} />}</Show>
-        </div>
-      </div>
-
-      <Show when={view() === "sandwich"}>
-        <div class="body">
-          <Show
-            when={flameTree()}
-            fallback={<div class="muted flame-overlay">building call tree...</div>}
-          >
-            {(t) => <SandwichView tree={t()} grouped={flameTreeGrouped()} mode={theme()} />}
-          </Show>
-        </div>
-      </Show>
-
-      <Show when={view() === "api"}>
-        <div class="body api-body">
-          <ApiExplorer />
-        </div>
-      </Show>
-        </div>
-      </div>
-
-      <footer class="status">
-        <Show when={loading()}>
-          <span class="spin">loading...</span>
-        </Show>
-        <Show when={error()}>
-          <span class="err">{error()}</span>
-        </Show>
-        <Show when={meta()}>
-          {(m) => (
-            <>
-              <span>{m().count.toLocaleString()} events</span>
-              <span>summary {summary()}</span>
-              <Show when={m().truncated}>
-                <span class="warn">truncated at {m().limit.toLocaleString()}</span>
-              </Show>
-            </>
-          )}
-        </Show>
-        <Show when={info()}>{(i) => <span>{i().file_count} files</span>}</Show>
-        <span class="hint">
-          <Show
-            when={view() === "flamegraph"}
-            fallback="drag or two-finger swipe to pan · pinch or ctrl+wheel to zoom · W/A/S/D keys · drag ruler to measure"
-          >
-            click a frame to zoom in · click a parent frame to zoom out · width = total time
-          </Show>
-        </span>
-      </footer>
+          <Show when={info()}>{(i) => <span>{i().file_count} files</span>}</Show>
+          <span class="hint">
+            <Show
+              when={view() === "flamegraph"}
+              fallback="drag or two-finger swipe to pan · pinch or ctrl+wheel to zoom · W/A/S/D keys · drag ruler to measure"
+            >
+              click a frame to zoom in · click a parent frame to zoom out · width = total time
+            </Show>
+          </span>
+        </footer>
       </div>
     </div>
   );

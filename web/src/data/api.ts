@@ -23,7 +23,8 @@ function withFile(params: URLSearchParams): URLSearchParams {
 // Prefix with the API base (VS Code webview) and append the access token.
 export function apiUrl(url: string): string {
   let u = CONFIG.apiBase ? CONFIG.apiBase.replace(/\/$/, "") + url : url;
-  if (CONFIG.token) u += (u.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(CONFIG.token);
+  if (CONFIG.token)
+    u += (u.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(CONFIG.token);
   return u;
 }
 

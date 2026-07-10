@@ -1623,7 +1623,11 @@ button.ghost.sm {
   gap: 8px;
 }
 .api-method {
-  font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font:
+    600 10px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--accent);
   border-radius: 4px;
@@ -1631,7 +1635,11 @@ button.ghost.sm {
 }
 .api-path {
   flex: 1 1 auto;
-  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font:
+    12px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
   color: var(--text);
   word-break: break-all;
 }
@@ -1642,7 +1650,9 @@ button.ghost.sm {
   border-radius: 5px;
   background: var(--accent);
   color: var(--accent-ink);
-  font: 600 11px system-ui, sans-serif;
+  font:
+    600 11px system-ui,
+    sans-serif;
   cursor: pointer;
 }
 .api-send:disabled {
@@ -1674,14 +1684,20 @@ button.ghost.sm {
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text);
-  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font:
+    12px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
 }
 .api-resp {
   margin-top: 8px;
 }
 .api-status {
   display: inline-block;
-  font: 600 11px ui-monospace, monospace;
+  font:
+    600 11px ui-monospace,
+    monospace;
   color: var(--bg);
   background: var(--muted);
   border-radius: 4px;
@@ -1699,7 +1715,11 @@ button.ghost.sm {
   border-radius: 6px;
   overflow-x: auto;
   max-height: 320px;
-  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font:
+    12px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
   color: #a6d3a6;
 }
 .api-loading {
@@ -1721,7 +1741,11 @@ html.api-page #root {
 }
 .api-req {
   margin-top: 8px;
-  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font:
+    11px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
   color: var(--muted);
   word-break: break-all;
 }

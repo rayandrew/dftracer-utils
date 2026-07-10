@@ -11,7 +11,8 @@ type OutMsg =
 let api: { postMessage: (m: unknown) => void } | undefined;
 function host() {
   if (!CONFIG.vscode) return undefined;
-  if (!api && typeof window !== "undefined" && window.acquireVsCodeApi) api = window.acquireVsCodeApi();
+  if (!api && typeof window !== "undefined" && window.acquireVsCodeApi)
+    api = window.acquireVsCodeApi();
   return api;
 }
 

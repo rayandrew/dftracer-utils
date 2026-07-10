@@ -1,6 +1,5 @@
 import type { FlameNode } from "../data/types";
 import { colorFor } from "../timeline/color";
-import { formatTime } from "../timeline/format";
 import { vizTheme, type ThemeMode, type VizTheme } from "../timeline/theme";
 
 const ROW_H = 18;
@@ -15,12 +14,7 @@ interface Rect {
 }
 
 export interface FlameCallbacks {
-  onHover?: (
-    node: FlameNode | null,
-    pctRoot: number,
-    clientX: number,
-    clientY: number,
-  ) => void;
+  onHover?: (node: FlameNode | null, pctRoot: number, clientX: number, clientY: number) => void;
 }
 
 // Icicle-style flamegraph: the focused node spans the full width, its ancestors
@@ -42,8 +36,6 @@ export class Flamegraph {
   private rects: Rect[] = [];
   private hovered: FlameNode | null = null;
   private rootTotal = 1;
-  private mouseX = 0;
-  private mouseY = 0;
 
   constructor(canvas: HTMLCanvasElement, cb: FlameCallbacks = {}) {
     this.canvas = canvas;
@@ -181,8 +173,6 @@ export class Flamegraph {
 
   private onMove = (e: MouseEvent): void => {
     const { x, y } = this.local(e);
-    this.mouseX = x;
-    this.mouseY = y;
     const hit = this.hitTest(x, y);
     const node = hit?.node ?? null;
     if (node !== this.hovered) {
@@ -199,7 +189,7 @@ export class Flamegraph {
       this.hovered = null;
       this.render();
     }
-    this.cb.onHover?.(null, 0, 0);
+    this.cb.onHover?.(null, 0, 0, 0);
   };
 
   private onClick = (e: MouseEvent): void => {

@@ -76,8 +76,6 @@ const ROW_H = 18;
 const LANE_GAP = 6;
 const HOST_GAP = 12; // vertical separation between host groups
 const TWIST_W = 14; // twisty hit-area / indent step per tree level
-const TREE_INDENT = 11; // gutter indent per fork-hierarchy depth
-const TREE_MAX_DEPTH = 6; // cap indentation so deep trees stay in the gutter
 const MIN_SPAN = 1; // microseconds
 const EASE = 0.22;
 const RANGE_DEBOUNCE_MS = 130;
@@ -87,16 +85,7 @@ const RANGE_DEBOUNCE_MS = 130;
 const ZOOM_SENSITIVITY = 0.0025;
 const ZOOM_MAX_STEP = 90;
 const MINI_COLS = 600; // activity buckets across the whole trace
-const NAV_KEYS = new Set([
-  "w",
-  "a",
-  "s",
-  "d",
-  "arrowleft",
-  "arrowright",
-  "arrowup",
-  "arrowdown",
-]);
+const NAV_KEYS = new Set(["w", "a", "s", "d", "arrowleft", "arrowright", "arrowup", "arrowdown"]);
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
@@ -302,8 +291,7 @@ export class Timeline {
       }
     }
     const firstTs = new Map(nodes.map((n) => [n.pid, n.first_ts]));
-    const byFirst = (a: number, b: number) =>
-      (firstTs.get(a) ?? 0) - (firstTs.get(b) ?? 0);
+    const byFirst = (a: number, b: number) => (firstTs.get(a) ?? 0) - (firstTs.get(b) ?? 0);
     // When PR metadata gives ranks, order roots by rank (0, 1, 2, ...) so the
     // timeline reads rank-first instead of grouped by host.
     const rankOf = new Map<number, number>();
@@ -631,8 +619,7 @@ export class Timeline {
     }
     for (const a of tidsByPid.values()) a.sort((x, y) => Number(x) - Number(y));
 
-    const inHost = (pid: number, h: string) =>
-      pids.has(pid) && hostOf(pid) === h;
+    const inHost = (pid: number, h: string) => pids.has(pid) && hostOf(pid) === h;
     const childrenOf = new Map<number, number[]>();
     for (const pid of pids) {
       const par = parentOf(pid);
@@ -784,8 +771,7 @@ export class Timeline {
         if (lane.flatten) s.depth = 0;
         else if (s.sdepth >= 0) s.depth = s.sdepth;
         else s.depth = open.length;
-        if (!s.density && !lane.flatten && s.sdepth < 0)
-          open.push(s.ts + Math.max(s.dur, 0));
+        if (!s.density && !lane.flatten && s.sdepth < 0) open.push(s.ts + Math.max(s.dur, 0));
         lane.rows = Math.max(lane.rows, s.depth + 1);
         slices.push(s);
       }
@@ -957,8 +943,8 @@ export class Timeline {
       const dy = y - this.lastY;
       if (Math.abs(dx) + Math.abs(dy) > 2) this.moved = true;
       const span = this.target.end - this.target.begin;
-      let dt = -(dx / this.plotW()) * span;
-      let begin = clamp(this.target.begin + dt, 0, this.totalSpan - span);
+      const dt = -(dx / this.plotW()) * span;
+      const begin = clamp(this.target.begin + dt, 0, this.totalSpan - span);
       this.target = { begin, end: begin + span };
       this.scrollY -= dy;
       this.clampScroll();
@@ -982,8 +968,7 @@ export class Timeline {
     }
     this.cursorInside = x >= GUTTER && y >= RULER_H && x <= this.cssW;
     if (this.cursorInside) this.canvas.style.cursor = "crosshair";
-    else if (x < GUTTER && y > RULER_H && this.gutterRowAt(y))
-      this.canvas.style.cursor = "pointer";
+    else if (x < GUTTER && y > RULER_H && this.gutterRowAt(y)) this.canvas.style.cursor = "pointer";
     else this.canvas.style.cursor = "default";
     const hit = this.hitTest(x, y);
     const gap = hit ? null : this.gapAt(x, y);
@@ -1067,7 +1052,7 @@ export class Timeline {
     const anchor = this.timeOf(x);
     const span = this.target.end - this.target.begin;
     const newSpan = clamp(span * 0.4, MIN_SPAN, this.totalSpan);
-    let begin = clamp(anchor - newSpan / 2, 0, this.totalSpan - newSpan);
+    const begin = clamp(anchor - newSpan / 2, 0, this.totalSpan - newSpan);
     this.target = { begin, end: begin + newSpan };
     this.invalidate();
     this.emitRange(false);
@@ -1569,8 +1554,7 @@ export class Timeline {
     }
     // Anchor at the parent lane's bottom (where it "hands off") and the child
     // lane's top (its first event), so the connector reads as parent -> child.
-    const botOf = (lane: Lane) =>
-      RULER_H - this.scrollY + lane.y + lane.rows * ROW_H;
+    const botOf = (lane: Lane) => RULER_H - this.scrollY + lane.y + lane.rows * ROW_H;
     const topOf = (lane: Lane) => RULER_H - this.scrollY + lane.y;
     const selPid = this.selected ? Number(this.selected.pid) : null;
     const inLineage = (child: number) =>
@@ -1590,8 +1574,7 @@ export class Timeline {
       const first = this.procFirst.get(childPid) ?? spawn;
       const x1 = this.xOf(spawn);
       const x2 = this.xOf(first);
-      if ((x1 < GUTTER && x2 < GUTTER) || (x1 > this.cssW && x2 > this.cssW))
-        return;
+      if ((x1 < GUTTER && x2 < GUTTER) || (x1 > this.cssW && x2 > this.cssW)) return;
       const y1 = botOf(pl);
       const y2 = topOf(cl);
       ctx.strokeStyle = hot ? this.th.accent : this.th.accentSoft;
@@ -1669,8 +1652,16 @@ export class Timeline {
     if (!this.selection) return;
     const span = this.live.end - this.live.begin;
     const pw = this.plotW();
-    const x0 = clamp(GUTTER + ((this.selection.t0 - this.live.begin) / span) * pw, GUTTER, this.cssW);
-    const x1 = clamp(GUTTER + ((this.selection.t1 - this.live.begin) / span) * pw, GUTTER, this.cssW);
+    const x0 = clamp(
+      GUTTER + ((this.selection.t0 - this.live.begin) / span) * pw,
+      GUTTER,
+      this.cssW,
+    );
+    const x1 = clamp(
+      GUTTER + ((this.selection.t1 - this.live.begin) / span) * pw,
+      GUTTER,
+      this.cssW,
+    );
     ctx.fillStyle = this.th.selFill;
     ctx.fillRect(x0, RULER_H, x1 - x0, this.cssH - RULER_H);
     ctx.strokeStyle = this.th.selStroke;
@@ -1972,4 +1963,3 @@ export class Timeline {
     return null;
   }
 }
-
