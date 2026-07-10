@@ -73,6 +73,9 @@ sdist.include = [
   "python/dftracer/utils/_version.py",
   "python/dftracer/utils/py.typed",
   "cmake/tests",
+  # Built UI (git-ignored) so source installs embed the real page, not a
+  # placeholder. CI builds it before `python -m build --sdist`.
+  "web/dist/index.html",
 ]
 sdist.exclude = [
   "tests/**",
