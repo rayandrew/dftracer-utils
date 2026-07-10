@@ -1388,6 +1388,24 @@ struct StatRow {
     double max;
 };
 
+template <typename builder_type>
+void tag_invoke(simdjson::serialize_tag, builder_type& b, const StatRow& r) {
+    b.start_object();
+    b.append_key_value("name", *r.key);
+    b.append_comma();
+    b.append_key_value("count", r.count);
+    b.append_comma();
+    b.append_key_value("total", r.total);
+    b.append_comma();
+    b.append_key_value("avg",
+                       r.count ? r.total / static_cast<double>(r.count) : 0.0);
+    b.append_comma();
+    b.append_key_value("min", r.min);
+    b.append_comma();
+    b.append_key_value("max", r.max);
+    b.end_object();
+}
+
 static std::string serialize_stats_body(std::uint64_t total_count,
                                         double total_dur, double wall,
                                         bool truncated,
@@ -1402,28 +1420,7 @@ static std::string serialize_stats_body(std::uint64_t total_count,
     b.append_comma();
     b.append_key_value("truncated", truncated);
     b.append_comma();
-    b.escape_and_append_with_quotes("names");
-    b.append_colon();
-    b.start_array();
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-        if (i > 0) b.append_comma();
-        const auto& r = rows[i];
-        b.start_object();
-        b.append_key_value("name", *r.key);
-        b.append_comma();
-        b.append_key_value("count", r.count);
-        b.append_comma();
-        b.append_key_value("total", r.total);
-        b.append_comma();
-        b.append_key_value(
-            "avg", r.count ? r.total / static_cast<double>(r.count) : 0.0);
-        b.append_comma();
-        b.append_key_value("min", r.min);
-        b.append_comma();
-        b.append_key_value("max", r.max);
-        b.end_object();
-    }
-    b.end_array();
+    b.append_key_value("names", rows);
     b.end_object();
     return std::string(b);
 }
@@ -1841,6 +1838,24 @@ static coro::CoroTask<HttpResponse> handle_viz_calltree(
     co_return HttpResponse::ok(std::string(b));
 }
 
+// One log-spaced duration bucket of the histogram response.
+struct HistBucket {
+    double lo;
+    double hi;
+    std::uint64_t count;
+};
+
+template <typename builder_type>
+void tag_invoke(simdjson::serialize_tag, builder_type& b, const HistBucket& h) {
+    b.start_object();
+    b.append_key_value("lo", h.lo);
+    b.append_comma();
+    b.append_key_value("hi", h.hi);
+    b.append_comma();
+    b.append_key_value("count", h.count);
+    b.end_object();
+}
+
 // GET /api/v1/viz/histogram: the distribution of event durations matching the
 // query in [begin, end]. Collects each matching dur, then reports exact
 // percentiles and a log-spaced histogram of the shape. The caller narrows to
@@ -1975,24 +1990,53 @@ static coro::CoroTask<HttpResponse> handle_viz_histogram(
     sb.append_comma();
     sb.append_key_value("truncated", truncated);
     sb.append_comma();
-    sb.escape_and_append_with_quotes("buckets");
-    sb.append_colon();
-    sb.start_array();
+    std::vector<HistBucket> buckets;
+    buckets.reserve(static_cast<std::size_t>(nbuckets));
     for (int i = 0; i < nbuckets; ++i) {
-        if (i > 0) sb.append_comma();
-        double b_lo = lo * std::exp(lr * static_cast<double>(i) / nbuckets);
-        double b_hi = lo * std::exp(lr * static_cast<double>(i + 1) / nbuckets);
-        sb.start_object();
-        sb.append_key_value("lo", b_lo);
-        sb.append_comma();
-        sb.append_key_value("hi", b_hi);
-        sb.append_comma();
-        sb.append_key_value("count", counts[static_cast<std::size_t>(i)]);
-        sb.end_object();
+        buckets.push_back(
+            {lo * std::exp(lr * static_cast<double>(i) / nbuckets),
+             lo * std::exp(lr * static_cast<double>(i + 1) / nbuckets),
+             counts[static_cast<std::size_t>(i)]});
     }
-    sb.end_array();
+    sb.append_key_value("buckets", buckets);
     sb.end_object();
     co_return HttpResponse::ok(std::string(sb));
+}
+
+// A density block as it appears in the response: the map key/aggregate pair
+// flattened with `ts` resolved from the column index. `name` borrows the
+// aggregate's storage.
+struct DensityBlock {
+    std::string_view name;
+    std::int64_t pid;
+    std::int64_t tid;
+    double ts;
+    double dur;
+    std::uint32_t count;
+    double total;
+    std::uint32_t depth;
+};
+
+template <typename builder_type>
+void tag_invoke(simdjson::serialize_tag, builder_type& b,
+                const DensityBlock& d) {
+    b.start_object();
+    b.append_key_value("name", d.name);
+    b.append_comma();
+    b.append_key_value("pid", d.pid);
+    b.append_comma();
+    b.append_key_value("tid", d.tid);
+    b.append_comma();
+    b.append_key_value("ts", d.ts);
+    b.append_comma();
+    b.append_key_value("dur", d.dur);
+    b.append_comma();
+    b.append_key_value("count", d.count);
+    b.append_comma();
+    b.append_key_value("total", d.total);
+    b.append_comma();
+    b.append_key_value("depth", d.depth);
+    b.end_object();
 }
 
 // Serialize collected density blocks (+ optional individual events) into the
@@ -2023,36 +2067,15 @@ static std::string serialize_density_body(
     }
     b.end_array();
     b.append_comma();
-    b.escape_and_append_with_quotes("density");
-    b.append_colon();
-    b.start_array();
-    bool first = true;
-    for (const auto& kv : dens) {
-        if (!first) b.append_comma();
-        first = false;
-        const auto& k = kv.first;
-        const auto& a = kv.second;
-        double ts_norm =
-            original_begin + static_cast<double>(k.col) * threshold;
-        b.start_object();
-        b.append_key_value("name", a.name);
-        b.append_comma();
-        b.append_key_value("pid", k.pid);
-        b.append_comma();
-        b.append_key_value("tid", k.tid);
-        b.append_comma();
-        b.append_key_value("ts", ts_norm);
-        b.append_comma();
-        b.append_key_value("dur", threshold);
-        b.append_comma();
-        b.append_key_value("count", a.count);
-        b.append_comma();
-        b.append_key_value("total", a.total);
-        b.append_comma();
-        b.append_key_value("depth", a.depth);
-        b.end_object();
+    std::vector<DensityBlock> blocks;
+    blocks.reserve(dens.size());
+    for (const auto& [k, a] : dens) {
+        blocks.push_back(
+            {a.name, k.pid, k.tid,
+             original_begin + static_cast<double>(k.col) * threshold, threshold,
+             a.count, a.total, a.depth});
     }
-    b.end_array();
+    b.append_key_value("density", blocks);
     b.append_comma();
     b.escape_and_append_with_quotes("metadata");
     b.append_colon();
@@ -2432,6 +2455,46 @@ static bool is_fork_syscall(std::string_view name) {
            name.find("sys_vfork") != std::string_view::npos;
 }
 
+// One process in the proctree response. `host` borrows the hostname table;
+// `rank` is null when the trace carries no "PR" metadata for the pid, and the
+// key is then omitted.
+struct ProcNode {
+    std::int64_t pid;
+    std::int64_t parent;
+    std::uint64_t spawn_ts;
+    std::uint64_t first_ts;
+    std::string_view host;
+    std::uint64_t bytes;
+    std::uint64_t io_ops;
+    double io_busy;
+    const std::string* rank;
+};
+
+template <typename builder_type>
+void tag_invoke(simdjson::serialize_tag, builder_type& b, const ProcNode& n) {
+    b.start_object();
+    b.append_key_value("pid", n.pid);
+    b.append_comma();
+    b.append_key_value("parent", n.parent);
+    b.append_comma();
+    b.append_key_value("spawn_ts", n.spawn_ts);
+    b.append_comma();
+    b.append_key_value("first_ts", n.first_ts);
+    b.append_comma();
+    b.append_key_value("host", n.host);
+    b.append_comma();
+    b.append_key_value("bytes", n.bytes);
+    b.append_comma();
+    b.append_key_value("io_ops", n.io_ops);
+    b.append_comma();
+    b.append_key_value("io_busy", n.io_busy);
+    if (n.rank) {
+        b.append_comma();
+        b.append_key_value("rank", *n.rank);
+    }
+    b.end_object();
+}
+
 // GET /api/v1/viz/proctree: infer the process fork hierarchy. The traces record
 // the fork/clone in the parent but not the child pid, so link each process to
 // the nearest preceding clone in another process (child start follows the clone
@@ -2642,12 +2705,8 @@ static coro::CoroTask<HttpResponse> handle_viz_proctree(
     // Time-inference fallback (traces without args.ret/ppid): link a process to
     // the nearest preceding clone in another process.
     std::vector<bool> used(inf_forks.size(), false);
-    auto& sb = scratch_json_builder();
-    sb.start_object();
-    sb.escape_and_append_with_quotes("nodes");
-    sb.append_colon();
-    sb.start_array();
-    bool first = true;
+    std::vector<ProcNode> nodes;
+    nodes.reserve(procs.size());
     for (auto& [fts, pid] : procs) {
         std::int64_t parent = -1;
         std::uint64_t spawn_ts = 0;
@@ -2671,41 +2730,26 @@ static coro::CoroTask<HttpResponse> handle_viz_proctree(
                 }
             }
         }
-        if (!first) sb.append_comma();
-        first = false;
-        sb.start_object();
-        sb.append_key_value("pid", pid);
-        sb.append_comma();
-        sb.append_key_value("parent", parent);
-        sb.append_comma();
-        sb.append_key_value("spawn_ts", spawn_ts);
-        sb.append_comma();
-        sb.append_key_value("first_ts", fts - base);
-        std::string host;
+        std::string_view host;
         auto hp = pid_hhash.find(pid);
         if (hp != pid_hhash.end()) {
             auto hn = hh.find(hp->second);
             if (hn != hh.end()) host = hn->second;
         }
-        sb.append_comma();
-        sb.append_key_value("host", host);
-        sb.append_comma();
         auto bp = bytes.find(pid);
-        sb.append_key_value("bytes", bp != bytes.end() ? bp->second : 0);
-        sb.append_comma();
         auto op = io_ops.find(pid);
-        sb.append_key_value("io_ops", op != io_ops.end() ? op->second : 0);
-        sb.append_comma();
         auto ib = io_busy.find(pid);
-        sb.append_key_value("io_busy", ib != io_busy.end() ? ib->second : 0.0);
         auto rk = rank.find(pid);
-        if (rk != rank.end()) {
-            sb.append_comma();
-            sb.append_key_value("rank", rk->second);
-        }
-        sb.end_object();
+        nodes.push_back({pid, parent, spawn_ts, fts - base, host,
+                         bp != bytes.end() ? bp->second : 0,
+                         op != io_ops.end() ? op->second : 0,
+                         ib != io_busy.end() ? ib->second : 0.0,
+                         rk != rank.end() ? &rk->second : nullptr});
     }
-    sb.end_array();
+
+    auto& sb = scratch_json_builder();
+    sb.start_object();
+    sb.append_key_value("nodes", nodes);
     sb.end_object();
     co_return HttpResponse::ok(std::string(sb));
 }
