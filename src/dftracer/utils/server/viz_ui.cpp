@@ -1,5 +1,6 @@
 #include <dftracer/utils/server/http_request.h>
 #include <dftracer/utils/server/http_response.h>
+#include <dftracer/utils/server/json_builder.h>
 #include <dftracer/utils/server/router.h>
 #include <dftracer/utils/server/viz_ui.h>
 #include <simdjson.h>
@@ -20,7 +21,7 @@ namespace {
 // simdjson's builder (correct escaping; examples are inlined raw as they are
 // already valid JSON).
 std::string openapi_json(const Router& router) {
-    simdjson::builder::string_builder b;
+    auto& b = scratch_json_builder();
     b.start_object();
     b.append_key_value("openapi", "3.1.0");
     b.append_comma();

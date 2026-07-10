@@ -6,6 +6,7 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/server/http_request.h>
 #include <dftracer/utils/server/http_response.h>
+#include <dftracer/utils/server/json_builder.h>
 #include <dftracer/utils/server/router.h>
 #include <dftracer/utils/server/trace_index.h>
 #include <dftracer/utils/server/viz_api.h>
@@ -1580,23 +1581,30 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& /*req*/,
 static coro::CoroTask<HttpResponse> handle_viz_layers(
     const HttpRequest& /*req*/, const QueryParams& /*p*/, TraceIndex& index) {
     const VizSummary* s = co_await ensure_viz_summary(index);
-    std::string body = "{\"layers\":{";
+    auto& b = scratch_json_builder();
+    b.start_object();
+    b.escape_and_append_with_quotes("layers");
+    b.append_colon();
+    b.start_object();
     if (s) {
         bool first = true;
         for (const auto& kv : s->name_cats) {
-            if (!first) body += ',';
+            if (!first) b.append_comma();
             first = false;
-            append_json_string(body, kv.first);
-            body += ':';
-            append_json_string(body, kv.second);
+            b.escape_and_append_with_quotes(kv.first);
+            b.append_colon();
+            b.escape_and_append_with_quotes(kv.second);
         }
     }
-    body += "},\"total_files\":";
-    body += std::to_string(s ? s->total_files : 0);
-    body += ",\"io_files\":";
-    body += std::to_string(s ? s->io_files : 0);
-    body += '}';
-    co_return HttpResponse::ok(body);
+    b.end_object();
+    b.append_comma();
+    b.append_key_value("total_files",
+                       static_cast<std::int64_t>(s ? s->total_files : 0));
+    b.append_comma();
+    b.append_key_value("io_files",
+                       static_cast<std::int64_t>(s ? s->io_files : 0));
+    b.end_object();
+    co_return HttpResponse::ok(std::string(b));
 }
 
 // One scanned event, reduced to what the call-tree needs.
@@ -2256,34 +2264,25 @@ static std::string serialize_counters_body(const std::vector<double>& read,
                                            double original_begin,
                                            double original_end, int buckets,
                                            double bucket_us, bool truncated) {
-    auto append_array = [](std::string& body, const std::vector<double>& v) {
-        body += '[';
-        for (std::size_t i = 0; i < v.size(); ++i) {
-            if (i > 0) body += ',';
-            body += std::to_string(v[i]);
-        }
-        body += ']';
-    };
-    std::string body;
-    body.reserve(buckets * 24 + 128);
-    body += "{\"begin\":";
-    body += std::to_string(original_begin);
-    body += ",\"end\":";
-    body += std::to_string(original_end);
-    body += ",\"buckets\":";
-    body += std::to_string(buckets);
-    body += ",\"bucket_us\":";
-    body += std::to_string(bucket_us);
-    body += ",\"truncated\":";
-    body += truncated ? "true" : "false";
-    body += ",\"read_bytes\":";
-    append_array(body, read);
-    body += ",\"write_bytes\":";
-    append_array(body, write);
-    body += ",\"ops\":";
-    append_array(body, ops);
-    body += "}";
-    return body;
+    auto& b = scratch_json_builder();
+    b.start_object();
+    b.append_key_value("begin", original_begin);
+    b.append_comma();
+    b.append_key_value("end", original_end);
+    b.append_comma();
+    b.append_key_value("buckets", static_cast<std::int64_t>(buckets));
+    b.append_comma();
+    b.append_key_value("bucket_us", bucket_us);
+    b.append_comma();
+    b.append_key_value("truncated", truncated);
+    b.append_comma();
+    b.append_key_value("read_bytes", read);
+    b.append_comma();
+    b.append_key_value("write_bytes", write);
+    b.append_comma();
+    b.append_key_value("ops", ops);
+    b.end_object();
+    return std::string(b);
 }
 
 // Re-aggregate the summary's finest counter buckets into `buckets` output

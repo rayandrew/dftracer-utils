@@ -7,6 +7,7 @@
 #include <dftracer/utils/server/cursor.h>
 #include <dftracer/utils/server/http_request.h>
 #include <dftracer/utils/server/http_response.h>
+#include <dftracer/utils/server/json_builder.h>
 #include <dftracer/utils/server/router.h>
 #include <dftracer/utils/server/trace_api.h>
 #include <dftracer/utils/server/trace_index.h>
@@ -49,7 +50,7 @@ using dftracer::utils::utilities::common::query::Query;
 static coro::CoroTask<HttpResponse> handle_files(const HttpRequest& /*req*/,
                                                  const QueryParams& /*params*/,
                                                  TraceIndex& index) {
-    simdjson::builder::string_builder b;
+    auto& b = scratch_json_builder();
     b.start_object();
     b.escape_and_append_with_quotes("files");
     b.append_colon();
@@ -88,7 +89,7 @@ static coro::CoroTask<HttpResponse> handle_file_info(const HttpRequest& /*req*/,
         co_return HttpResponse::not_found();
     }
 
-    simdjson::builder::string_builder b;
+    auto& b = scratch_json_builder();
     b.start_object();
     b.append_key_value("path", info->path);
     b.append_comma();
@@ -404,7 +405,7 @@ static coro::CoroTask<HttpResponse> handle_stats(const HttpRequest& req,
         total_events += s.total_events();
     }
 
-    simdjson::builder::string_builder sb;
+    auto& sb = scratch_json_builder();
     sb.start_object();
     sb.append_key_value("file_count", static_cast<std::int64_t>(file_count));
     sb.append_comma();
@@ -439,7 +440,7 @@ static coro::CoroTask<HttpResponse> handle_info(const HttpRequest& /*req*/,
         global_max > 0 &&
         global_min != std::numeric_limits<std::uint64_t>::max();
 
-    simdjson::builder::string_builder b;
+    auto& b = scratch_json_builder();
     b.start_object();
     b.append_key_value("file_count",
                        static_cast<std::int64_t>(index.file_count()));
