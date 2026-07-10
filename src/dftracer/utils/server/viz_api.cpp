@@ -44,16 +44,6 @@ using namespace dftracer::utils::utilities::composites::dft::views;
 static const std::unordered_set<std::string> HASH_METADATA_NAMES = {"FH", "HH",
                                                                     "SH"};
 
-// Append `s` as a quoted JSON string value.
-static void append_json_string(std::string& body, std::string_view s) {
-    body += '"';
-    for (char c : s) {
-        if (c == '"' || c == '\\') body += '\\';
-        body += c;
-    }
-    body += '"';
-}
-
 /// Normalize the "ts" field in a Chrome Trace Event JSON string by
 /// subtracting an offset.  Returns the modified JSON.  Falls back to
 /// the original string on parse failure.
@@ -348,32 +338,36 @@ static std::string build_viz_events_body(std::vector<std::string>& events,
         }
     }
 
-    // Pre-compute size to avoid repeated reallocations.
-    std::size_t body_size = 256;
-    for (const auto& ev : events) body_size += ev.size() + 1;
-    std::string body;
-    body.reserve(body_size);
-    body += "{\"events\":[";
+    auto& b = scratch_json_builder();
+    b.start_object();
+    b.escape_and_append_with_quotes("events");
+    b.append_colon();
+    b.start_array();
     for (std::size_t i = 0; i < events.size(); ++i) {
-        if (i > 0) body += ',';
-        body += events[i];  // Already JSON
+        if (i > 0) b.append_comma();
+        b.append_raw(events[i]);  // Already JSON
     }
-    body += "],\"metadata\":{\"begin\":";
-    body += std::to_string(meta_begin);
-    body += ",\"end\":";
-    body += std::to_string(meta_end);
-    body += ",\"count\":";
-    body += std::to_string(events.size());
-    body += ",\"limit\":";
-    body += std::to_string(limit);
-    body += ",\"truncated\":";
-    body += truncated ? "true" : "false";
-    body += ",\"ts_normalized\":";
-    body += (global_min > 0) ? "true" : "false";
-    body += ",\"global_min_timestamp_us\":";
-    body += std::to_string(display_global_min);
-    body += "}}";
-    return body;
+    b.end_array();
+    b.append_comma();
+    b.escape_and_append_with_quotes("metadata");
+    b.append_colon();
+    b.start_object();
+    b.append_key_value("begin", meta_begin);
+    b.append_comma();
+    b.append_key_value("end", meta_end);
+    b.append_comma();
+    b.append_key_value("count", events.size());
+    b.append_comma();
+    b.append_key_value("limit", limit);
+    b.append_comma();
+    b.append_key_value("truncated", truncated);
+    b.append_comma();
+    b.append_key_value("ts_normalized", global_min > 0);
+    b.append_comma();
+    b.append_key_value("global_min_timestamp_us", display_global_min);
+    b.end_object();
+    b.end_object();
+    return std::string(b);
 }
 
 // One checkpoint byte-range to read from a specific file. Work is distributed
@@ -1398,37 +1392,40 @@ static std::string serialize_stats_body(std::uint64_t total_count,
                                         double total_dur, double wall,
                                         bool truncated,
                                         const std::vector<StatRow>& rows) {
-    std::string body;
-    body.reserve(80 * rows.size() + 128);
-    body += "{\"count\":";
-    body += std::to_string(total_count);
-    body += ",\"total_dur\":";
-    body += std::to_string(total_dur);
-    body += ",\"wall\":";
-    body += std::to_string(wall);
-    body += ",\"truncated\":";
-    body += truncated ? "true" : "false";
-    body += ",\"names\":[";
+    auto& b = scratch_json_builder();
+    b.start_object();
+    b.append_key_value("count", total_count);
+    b.append_comma();
+    b.append_key_value("total_dur", total_dur);
+    b.append_comma();
+    b.append_key_value("wall", wall);
+    b.append_comma();
+    b.append_key_value("truncated", truncated);
+    b.append_comma();
+    b.escape_and_append_with_quotes("names");
+    b.append_colon();
+    b.start_array();
     for (std::size_t i = 0; i < rows.size(); ++i) {
-        if (i > 0) body += ',';
+        if (i > 0) b.append_comma();
         const auto& r = rows[i];
-        body += "{\"name\":";
-        append_json_string(body, *r.key);
-        body += ",\"count\":";
-        body += std::to_string(r.count);
-        body += ",\"total\":";
-        body += std::to_string(r.total);
-        body += ",\"avg\":";
-        body += std::to_string(r.count ? r.total / static_cast<double>(r.count)
-                                       : 0.0);
-        body += ",\"min\":";
-        body += std::to_string(r.min);
-        body += ",\"max\":";
-        body += std::to_string(r.max);
-        body += '}';
+        b.start_object();
+        b.append_key_value("name", *r.key);
+        b.append_comma();
+        b.append_key_value("count", r.count);
+        b.append_comma();
+        b.append_key_value("total", r.total);
+        b.append_comma();
+        b.append_key_value(
+            "avg", r.count ? r.total / static_cast<double>(r.count) : 0.0);
+        b.append_comma();
+        b.append_key_value("min", r.min);
+        b.append_comma();
+        b.append_key_value("max", r.max);
+        b.end_object();
     }
-    body += "]}";
-    return body;
+    b.end_array();
+    b.end_object();
+    return std::string(b);
 }
 
 static const std::vector<VizSummary::GroupRow>& summary_group_rows(
@@ -1657,28 +1654,32 @@ static bool parse_flame_ev(std::string_view event, FlameEv& out) {
     return true;
 }
 
-static void serialize_flame_node(std::string& body,
+static void serialize_flame_node(simdjson::builder::string_builder& sb,
                                  std::vector<FlameNode>& arena,
                                  std::uint32_t idx) {
     FlameNode& n = arena[idx];
-    body += "{\"name\":";
-    append_json_string(body, n.name);
-    body += ",\"total\":";
-    body += std::to_string(n.total);
-    body += ",\"self\":";
-    body += std::to_string(n.self < 0 ? 0.0 : n.self);
-    body += ",\"count\":";
-    body += std::to_string(n.count);
+    sb.start_object();
+    sb.append_key_value("name", n.name);
+    sb.append_comma();
+    sb.append_key_value("total", n.total);
+    sb.append_comma();
+    sb.append_key_value("self", n.self < 0 ? 0.0 : n.self);
+    sb.append_comma();
+    sb.append_key_value("count", n.count);
     std::sort(n.children.begin(), n.children.end(),
               [&arena](std::uint32_t a, std::uint32_t b) {
                   return arena[a].total > arena[b].total;
               });
-    body += ",\"children\":[";
+    sb.append_comma();
+    sb.escape_and_append_with_quotes("children");
+    sb.append_colon();
+    sb.start_array();
     for (std::size_t i = 0; i < n.children.size(); ++i) {
-        if (i > 0) body += ',';
-        serialize_flame_node(body, arena, n.children[i]);
+        if (i > 0) sb.append_comma();
+        serialize_flame_node(sb, arena, n.children[i]);
     }
-    body += "]}";
+    sb.end_array();
+    sb.end_object();
 }
 
 // GET /api/v1/viz/calltree: merge events into a flamegraph tree. The hierarchy
@@ -1829,14 +1830,15 @@ static coro::CoroTask<HttpResponse> handle_viz_calltree(
     arena[0].count = root_count;
     arena[0].self = 0;
 
-    std::string body;
-    body.reserve(arena.size() * 96 + 64);
-    body += "{\"truncated\":";
-    body += truncated ? "true" : "false";
-    body += ",\"tree\":";
-    serialize_flame_node(body, arena, 0);
-    body += "}";
-    co_return HttpResponse::ok(body);
+    auto& b = scratch_json_builder();
+    b.start_object();
+    b.append_key_value("truncated", truncated);
+    b.append_comma();
+    b.escape_and_append_with_quotes("tree");
+    b.append_colon();
+    serialize_flame_node(b, arena, 0);
+    b.end_object();
+    co_return HttpResponse::ok(std::string(b));
 }
 
 // GET /api/v1/viz/histogram: the distribution of event durations matching the
@@ -1911,12 +1913,19 @@ static coro::CoroTask<HttpResponse> handle_viz_histogram(
         for (double d : p) all.push_back(d);
     std::sort(all.begin(), all.end());
 
-    std::string body;
+    auto& sb = scratch_json_builder();
     if (all.empty()) {
-        body = "{\"count\":0,\"buckets\":[],\"truncated\":";
-        body += truncated ? "true" : "false";
-        body += "}";
-        co_return HttpResponse::ok(body);
+        sb.start_object();
+        sb.append_key_value("count", 0);
+        sb.append_comma();
+        sb.escape_and_append_with_quotes("buckets");
+        sb.append_colon();
+        sb.start_array();
+        sb.end_array();
+        sb.append_comma();
+        sb.append_key_value("truncated", truncated);
+        sb.end_object();
+        co_return HttpResponse::ok(std::string(sb));
     }
 
     std::size_t n = all.size();
@@ -1947,40 +1956,43 @@ static coro::CoroTask<HttpResponse> handle_viz_histogram(
         counts[bi]++;
     }
 
-    body.reserve(static_cast<std::size_t>(nbuckets) * 48 + 256);
-    body += "{\"count\":";
-    body += std::to_string(n);
-    body += ",\"min\":";
-    body += std::to_string(vmin);
-    body += ",\"max\":";
-    body += std::to_string(vmax);
-    body += ",\"mean\":";
-    body += std::to_string(mean);
-    body += ",\"p50\":";
-    body += std::to_string(pct(0.50));
-    body += ",\"p90\":";
-    body += std::to_string(pct(0.90));
-    body += ",\"p95\":";
-    body += std::to_string(pct(0.95));
-    body += ",\"p99\":";
-    body += std::to_string(pct(0.99));
-    body += ",\"truncated\":";
-    body += truncated ? "true" : "false";
-    body += ",\"buckets\":[";
+    sb.start_object();
+    sb.append_key_value("count", n);
+    sb.append_comma();
+    sb.append_key_value("min", vmin);
+    sb.append_comma();
+    sb.append_key_value("max", vmax);
+    sb.append_comma();
+    sb.append_key_value("mean", mean);
+    sb.append_comma();
+    sb.append_key_value("p50", pct(0.50));
+    sb.append_comma();
+    sb.append_key_value("p90", pct(0.90));
+    sb.append_comma();
+    sb.append_key_value("p95", pct(0.95));
+    sb.append_comma();
+    sb.append_key_value("p99", pct(0.99));
+    sb.append_comma();
+    sb.append_key_value("truncated", truncated);
+    sb.append_comma();
+    sb.escape_and_append_with_quotes("buckets");
+    sb.append_colon();
+    sb.start_array();
     for (int i = 0; i < nbuckets; ++i) {
-        if (i > 0) body += ',';
+        if (i > 0) sb.append_comma();
         double b_lo = lo * std::exp(lr * static_cast<double>(i) / nbuckets);
         double b_hi = lo * std::exp(lr * static_cast<double>(i + 1) / nbuckets);
-        body += "{\"lo\":";
-        body += std::to_string(b_lo);
-        body += ",\"hi\":";
-        body += std::to_string(b_hi);
-        body += ",\"count\":";
-        body += std::to_string(counts[static_cast<std::size_t>(i)]);
-        body += '}';
+        sb.start_object();
+        sb.append_key_value("lo", b_lo);
+        sb.append_comma();
+        sb.append_key_value("hi", b_hi);
+        sb.append_comma();
+        sb.append_key_value("count", counts[static_cast<std::size_t>(i)]);
+        sb.end_object();
     }
-    body += "]}";
-    co_return HttpResponse::ok(body);
+    sb.end_array();
+    sb.end_object();
+    co_return HttpResponse::ok(std::string(sb));
 }
 
 // Serialize collected density blocks (+ optional individual events) into the
@@ -1990,70 +2002,81 @@ static std::string serialize_density_body(
     double original_begin, double original_end, double threshold, int limit,
     bool truncated, bool ts_normalized, std::uint64_t display_global_min,
     double max_dur, const std::vector<std::uint32_t>* big_depth = nullptr) {
-    std::string body;
-    body.reserve(big.size() * 128 + dens.size() * 96 + 128);
-    body += "{\"events\":[";
+    auto& b = scratch_json_builder();
+    b.start_object();
+    b.escape_and_append_with_quotes("events");
+    b.append_colon();
+    b.start_array();
     for (std::size_t i = 0; i < big.size(); ++i) {
-        if (i > 0) body += ',';
+        if (i > 0) b.append_comma();
         // Inject the server-computed depth as a sibling field (events end in
         // }).
         if (big_depth && i < big_depth->size() && !big[i].empty() &&
             big[i].back() == '}') {
-            body.append(big[i], 0, big[i].size() - 1);
-            body += ",\"depth\":";
-            body += std::to_string((*big_depth)[i]);
-            body += '}';
+            b.append_raw(std::string_view(big[i]).substr(0, big[i].size() - 1));
+            b.append_raw(",\"depth\":");
+            b.append(static_cast<std::uint64_t>((*big_depth)[i]));
+            b.append_raw("}");
         } else {
-            body += big[i];
+            b.append_raw(big[i]);
         }
     }
-    body += "],\"density\":[";
+    b.end_array();
+    b.append_comma();
+    b.escape_and_append_with_quotes("density");
+    b.append_colon();
+    b.start_array();
     bool first = true;
     for (const auto& kv : dens) {
-        if (!first) body += ',';
+        if (!first) b.append_comma();
         first = false;
         const auto& k = kv.first;
         const auto& a = kv.second;
         double ts_norm =
             original_begin + static_cast<double>(k.col) * threshold;
-        body += "{\"name\":";
-        append_json_string(body, a.name);
-        body += ",\"pid\":";
-        body += std::to_string(k.pid);
-        body += ",\"tid\":";
-        body += std::to_string(k.tid);
-        body += ",\"ts\":";
-        body += std::to_string(ts_norm);
-        body += ",\"dur\":";
-        body += std::to_string(threshold);
-        body += ",\"count\":";
-        body += std::to_string(a.count);
-        body += ",\"total\":";
-        body += std::to_string(a.total);
-        body += ",\"depth\":";
-        body += std::to_string(a.depth);
-        body += '}';
+        b.start_object();
+        b.append_key_value("name", a.name);
+        b.append_comma();
+        b.append_key_value("pid", k.pid);
+        b.append_comma();
+        b.append_key_value("tid", k.tid);
+        b.append_comma();
+        b.append_key_value("ts", ts_norm);
+        b.append_comma();
+        b.append_key_value("dur", threshold);
+        b.append_comma();
+        b.append_key_value("count", a.count);
+        b.append_comma();
+        b.append_key_value("total", a.total);
+        b.append_comma();
+        b.append_key_value("depth", a.depth);
+        b.end_object();
     }
-    body += "],\"metadata\":{\"begin\":";
-    body += std::to_string(original_begin);
-    body += ",\"end\":";
-    body += std::to_string(original_end);
-    body += ",\"count\":";
-    body += std::to_string(big.size());
-    body += ",\"limit\":";
-    body += std::to_string(limit);
-    body += ",\"density_count\":";
-    body += std::to_string(dens.size());
-    body += ",\"truncated\":";
-    body += truncated ? "true" : "false";
-    body += ",\"ts_normalized\":";
-    body += ts_normalized ? "true" : "false";
-    body += ",\"global_min_timestamp_us\":";
-    body += std::to_string(display_global_min);
-    body += ",\"max_dur\":";
-    body += std::to_string(max_dur);
-    body += "}}";
-    return body;
+    b.end_array();
+    b.append_comma();
+    b.escape_and_append_with_quotes("metadata");
+    b.append_colon();
+    b.start_object();
+    b.append_key_value("begin", original_begin);
+    b.append_comma();
+    b.append_key_value("end", original_end);
+    b.append_comma();
+    b.append_key_value("count", big.size());
+    b.append_comma();
+    b.append_key_value("limit", limit);
+    b.append_comma();
+    b.append_key_value("density_count", dens.size());
+    b.append_comma();
+    b.append_key_value("truncated", truncated);
+    b.append_comma();
+    b.append_key_value("ts_normalized", ts_normalized);
+    b.append_comma();
+    b.append_key_value("global_min_timestamp_us", display_global_min);
+    b.append_comma();
+    b.append_key_value("max_dur", max_dur);
+    b.end_object();
+    b.end_object();
+    return std::string(b);
 }
 
 // The summary is unfiltered, so any server-side predicate forces a live scan.
@@ -2619,7 +2642,11 @@ static coro::CoroTask<HttpResponse> handle_viz_proctree(
     // Time-inference fallback (traces without args.ret/ppid): link a process to
     // the nearest preceding clone in another process.
     std::vector<bool> used(inf_forks.size(), false);
-    std::string body = "{\"nodes\":[";
+    auto& sb = scratch_json_builder();
+    sb.start_object();
+    sb.escape_and_append_with_quotes("nodes");
+    sb.append_colon();
+    sb.start_array();
     bool first = true;
     for (auto& [fts, pid] : procs) {
         std::int64_t parent = -1;
@@ -2644,42 +2671,43 @@ static coro::CoroTask<HttpResponse> handle_viz_proctree(
                 }
             }
         }
-        if (!first) body += ',';
+        if (!first) sb.append_comma();
         first = false;
-        body += "{\"pid\":";
-        body += std::to_string(pid);
-        body += ",\"parent\":";
-        body += std::to_string(parent);
-        body += ",\"spawn_ts\":";
-        body += std::to_string(spawn_ts);
-        body += ",\"first_ts\":";
-        body += std::to_string(fts - base);
+        sb.start_object();
+        sb.append_key_value("pid", pid);
+        sb.append_comma();
+        sb.append_key_value("parent", parent);
+        sb.append_comma();
+        sb.append_key_value("spawn_ts", spawn_ts);
+        sb.append_comma();
+        sb.append_key_value("first_ts", fts - base);
         std::string host;
         auto hp = pid_hhash.find(pid);
         if (hp != pid_hhash.end()) {
             auto hn = hh.find(hp->second);
             if (hn != hh.end()) host = hn->second;
         }
-        body += ",\"host\":";
-        append_json_string(body, host);
-        body += ",\"bytes\":";
+        sb.append_comma();
+        sb.append_key_value("host", host);
+        sb.append_comma();
         auto bp = bytes.find(pid);
-        body += std::to_string(bp != bytes.end() ? bp->second : 0);
-        body += ",\"io_ops\":";
+        sb.append_key_value("bytes", bp != bytes.end() ? bp->second : 0);
+        sb.append_comma();
         auto op = io_ops.find(pid);
-        body += std::to_string(op != io_ops.end() ? op->second : 0);
-        body += ",\"io_busy\":";
+        sb.append_key_value("io_ops", op != io_ops.end() ? op->second : 0);
+        sb.append_comma();
         auto ib = io_busy.find(pid);
-        body += std::to_string(ib != io_busy.end() ? ib->second : 0.0);
+        sb.append_key_value("io_busy", ib != io_busy.end() ? ib->second : 0.0);
         auto rk = rank.find(pid);
         if (rk != rank.end()) {
-            body += ",\"rank\":";
-            append_json_string(body, rk->second);
+            sb.append_comma();
+            sb.append_key_value("rank", rk->second);
         }
-        body += '}';
+        sb.end_object();
     }
-    body += "]}";
-    co_return HttpResponse::ok(body);
+    sb.end_array();
+    sb.end_object();
+    co_return HttpResponse::ok(std::string(sb));
 }
 
 void register_viz_api(Router& router, TraceIndex& index) {
