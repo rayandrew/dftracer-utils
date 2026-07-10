@@ -575,6 +575,109 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"global_min_timestamp_us\"") != std::string::npos);
     }
 
+    // -- GET /api/v1/viz/density returns aggregated density blocks --
+    {
+        auto resp = http_request(
+            port,
+            "GET /api/v1/viz/density?begin=0&end=999999999&summary=2"
+            " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.front() == '{');
+        CHECK(body.find("\"density\"") != std::string::npos);
+    }
+
+    // -- GET /api/v1/viz/counters returns bandwidth/IOPS buckets --
+    {
+        auto resp = http_request(
+            port,
+            "GET /api/v1/viz/counters?begin=0&end=999999999&summary=1"
+            " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        CHECK(extract_body(resp).find("\"buckets\"") != std::string::npos);
+    }
+
+    // -- GET /api/v1/viz/stats returns per-name aggregation --
+    {
+        auto resp = http_request(
+            port,
+            "GET /api/v1/viz/stats?begin=0&end=999999999&summary=1"
+            " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        CHECK(extract_body(resp).find("\"names\"") != std::string::npos);
+    }
+
+    // -- GET /api/v1/viz/proctree returns the inferred process tree --
+    {
+        auto resp =
+            http_request(port,
+                         "GET /api/v1/viz/proctree HTTP/1.1\r\n"
+                         "Host: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        CHECK(extract_body(resp).find("\"nodes\"") != std::string::npos);
+    }
+
+    // -- GET /api/v1/viz/calltree returns a merged flamegraph tree --
+    {
+        auto resp = http_request(
+            port,
+            "GET /api/v1/viz/calltree?begin=0&end=999999999&summary=1"
+            " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        CHECK(extract_body(resp).find("\"children\"") != std::string::npos);
+    }
+
+    // -- GET /api/v1/viz/histogram returns a duration distribution --
+    {
+        auto resp = http_request(
+            port,
+            "GET /api/v1/viz/histogram?begin=0&end=999999999&summary=1"
+            " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        CHECK(extract_body(resp).find("\"buckets\"") != std::string::npos);
+    }
+
+    // -- GET /api/v1/viz/layers returns name->category + file counts --
+    {
+        auto resp =
+            http_request(port,
+                         "GET /api/v1/viz/layers HTTP/1.1\r\n"
+                         "Host: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.find("\"layers\"") != std::string::npos);
+        CHECK(body.find("\"total_files\"") != std::string::npos);
+        CHECK(body.find("\"io_files\"") != std::string::npos);
+    }
+
+    // -- GET / serves the embedded viewer page --
+    {
+        auto resp =
+            http_request(port,
+                         "GET / HTTP/1.1\r\n"
+                         "Host: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        CHECK(resp.find("text/html") != std::string::npos);
+    }
+
+    // -- responses carry an open CORS header (for the webview client) --
+    {
+        auto resp =
+            http_request(port,
+                         "GET /api/v1/viz/layers HTTP/1.1\r\n"
+                         "Host: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(resp.find("Access-Control-Allow-Origin: *") != std::string::npos);
+    }
+
     // -- GET unknown path returns 404 --
     {
         auto resp = http_request(port,

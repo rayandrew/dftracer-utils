@@ -113,6 +113,24 @@ coro::CoroTask<HttpResponse> Router::handle(const HttpRequest& req) {
 
     auto params = QueryParams::parse(query_str);
 
+    // Optional access token: accept ?token= or "Authorization: Bearer <token>".
+    if (!auth_token_.empty()) {
+        bool ok = params.get("token") == auth_token_;
+        if (!ok) {
+            auto h = req.header("Authorization");
+            constexpr std::string_view BEARER = "Bearer ";
+            if (h.size() > BEARER.size() &&
+                h.substr(0, BEARER.size()) == BEARER)
+                ok = h.substr(BEARER.size()) == auth_token_;
+        }
+        if (!ok) {
+            co_return HttpResponse{.status_code = 401,
+                                   .status_text = "Unauthorized",
+                                   .headers = {{"Content-Type", "text/plain"}},
+                                   .body = "Unauthorized"};
+        }
+    }
+
     // Match routes (exact prefix match).
     for (const auto& route : routes_) {
         if (req.method == route.method && path == route.path) {

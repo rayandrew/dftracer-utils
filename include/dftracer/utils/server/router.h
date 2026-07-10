@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace dftracer::utils::server {
@@ -39,6 +40,10 @@ class Router {
     void get(const std::string& path, RouteHandler handler);
     void post(const std::string& path, RouteHandler handler);
 
+    /// When non-empty, every request must present this token (via a ?token=
+    /// query param or an "Authorization: Bearer <token>" header) or gets 401.
+    void set_auth_token(std::string token) { auth_token_ = std::move(token); }
+
     /// Match request method + path, parse query params, invoke handler.
     /// Returns 404 if no route matches.
     coro::CoroTask<HttpResponse> handle(const HttpRequest& req);
@@ -50,6 +55,7 @@ class Router {
         RouteHandler handler;
     };
     std::vector<Route> routes_;
+    std::string auth_token_;
 };
 
 }  // namespace dftracer::utils::server
