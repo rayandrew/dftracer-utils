@@ -94,11 +94,19 @@ double QueryParams::get_double(std::string_view key,
 // ============================================================================
 
 void Router::get(const std::string& path, RouteHandler handler) {
-    routes_.push_back(Route{"GET", path, std::move(handler)});
+    routes_.push_back(Route{"GET", path, std::move(handler), {}});
+}
+
+void Router::get(const std::string& path, RouteHandler handler, RouteDoc doc) {
+    routes_.push_back(Route{"GET", path, std::move(handler), std::move(doc)});
 }
 
 void Router::post(const std::string& path, RouteHandler handler) {
-    routes_.push_back(Route{"POST", path, std::move(handler)});
+    routes_.push_back(Route{"POST", path, std::move(handler), {}});
+}
+
+void Router::post(const std::string& path, RouteHandler handler, RouteDoc doc) {
+    routes_.push_back(Route{"POST", path, std::move(handler), std::move(doc)});
 }
 
 coro::CoroTask<HttpResponse> Router::handle(const HttpRequest& req) {

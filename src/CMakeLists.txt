@@ -937,6 +937,9 @@ if(DFTRACER_UTILS_BUILD_BINARIES)
     set(DFTRACER_WEB_DIST ${DFTRACER_WEB_DIR}/dist/index.html)
     set(DFTRACER_WEB_GENERATED
         ${CMAKE_BINARY_DIR}/generated/dftracer_web_assets.cpp)
+    set(DFTRACER_API_DIST ${DFTRACER_WEB_DIR}/dist/api.html)
+    set(DFTRACER_API_GENERATED
+        ${CMAKE_BINARY_DIR}/generated/dftracer_api_assets.cpp)
     set(DFTRACER_EMBED_SCRIPT
         ${CMAKE_CURRENT_SOURCE_DIR}/../cmake/scripts/embed_asset.cmake)
 
@@ -977,10 +980,24 @@ if(DFTRACER_UTILS_BUILD_BINARIES)
       COMMENT "Embedding web UI into dftracer_server"
       VERBATIM)
 
+    set(_api_embed_deps ${DFTRACER_EMBED_SCRIPT})
+    if(EXISTS ${DFTRACER_API_DIST})
+      list(APPEND _api_embed_deps ${DFTRACER_API_DIST})
+    endif()
+    add_custom_command(
+      OUTPUT ${DFTRACER_API_GENERATED}
+      COMMAND
+        ${CMAKE_COMMAND} -DINPUT=${DFTRACER_API_DIST}
+        -DOUTPUT=${DFTRACER_API_GENERATED} -DFUNC=viz_api_page_html
+        -DVAR=VIZ_API_PAGE_HTML -P ${DFTRACER_EMBED_SCRIPT}
+      DEPENDS ${_api_embed_deps}
+      COMMENT "Embedding API explorer page into dftracer_server"
+      VERBATIM)
+
     target_sources(
       dftracer_server
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz_ui.cpp
-              ${DFTRACER_WEB_GENERATED})
+              ${DFTRACER_WEB_GENERATED} ${DFTRACER_API_GENERATED})
   endif()
 
   foreach(bin ${DFTRACER_MPI_BINARIES})

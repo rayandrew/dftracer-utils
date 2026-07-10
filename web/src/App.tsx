@@ -24,6 +24,7 @@ import type {
 import { CONFIG } from "./data/config";
 import { onHostMessage, post } from "./data/vscode";
 import { Timeline, type Gap } from "./timeline/timeline";
+import { ApiExplorer } from "./api/ApiExplorer";
 import { Flamegraph } from "./flame/flamegraph";
 import { SandwichView } from "./flame/SandwichView";
 import { FlameTooltip, type FlameHover } from "./flame/FlameTooltip";
@@ -51,11 +52,14 @@ const ICON_FLAME =
   '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><rect x="2" y="2.5" width="12" height="2.4" rx="1"/><rect x="2" y="6.3" width="8" height="2.4" rx="1"/><rect x="2" y="10.1" width="4" height="2.4" rx="1"/></svg>';
 const ICON_SANDWICH =
   '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><rect x="2" y="2.6" width="12" height="2.4" rx="1" opacity=".45"/><rect x="2" y="6.3" width="12" height="2.4" rx="1"/><rect x="2" y="10" width="12" height="2.4" rx="1" opacity=".45"/></svg>';
+const ICON_API =
+  '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5.5 4 2 8l3.5 4M10.5 4 14 8l-3.5 4"/></svg>';
 
 const NAV_VIEWS = [
   ["timeline", "Timeline", ICON_TIMELINE],
   ["flamegraph", "Flamegraph", ICON_FLAME],
   ["sandwich", "Sandwich", ICON_SANDWICH],
+  ["api", "API", ICON_API],
 ] as const;
 
 type AnGroup = "name" | "file" | "pid" | "cat" | null;
@@ -162,7 +166,9 @@ export default function App() {
   const [meta, setMeta] = createSignal<VizMetadata | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [view, setView] = createSignal<"timeline" | "flamegraph" | "sandwich">("timeline");
+  const [view, setView] = createSignal<"timeline" | "flamegraph" | "sandwich" | "api">(
+    "timeline",
+  );
   const [navCollapsed, setNavCollapsed] = createSignal(false);
   const [theme, setTheme] = createSignal<"dark" | "light">(initialTheme());
   const [kpis, setKpis] = createSignal<{
@@ -546,7 +552,7 @@ export default function App() {
   }
 
 
-  function showView(v: "timeline" | "flamegraph" | "sandwich") {
+  function showView(v: "timeline" | "flamegraph" | "sandwich" | "api") {
     setView(v);
     if (v === "flamegraph" || v === "sandwich") loadFlame();
   }
@@ -1842,6 +1848,12 @@ export default function App() {
           >
             {(t) => <SandwichView tree={t()} grouped={flameTreeGrouped()} mode={theme()} />}
           </Show>
+        </div>
+      </Show>
+
+      <Show when={view() === "api"}>
+        <div class="body api-body">
+          <ApiExplorer />
         </div>
       </Show>
         </div>

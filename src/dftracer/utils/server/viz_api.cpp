@@ -2685,62 +2685,118 @@ static coro::CoroTask<HttpResponse> handle_viz_proctree(
 
 void register_viz_api(Router& router, TraceIndex& index) {
     auto* index_ptr = &index;
+    const RouteParam BEGIN{"begin", "Window start (us)", true, "0"};
+    const RouteParam END{"end", "Window end (us)", true, "999999999"};
+    const RouteParam SUMMARY{"summary", "LOD level (1=full detail)", true, "1"};
 
     router.get(
         "/api/v1/viz/proctree",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_viz_proctree(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{
+            "Inferred process/fork hierarchy with host, rank, and I/O.",
+            "Visualization",
+            {{"file", "Limit to one trace file", false, ""}},
+            R"({"nodes":[{"pid":100,"parent":-1,"host":"node01","rank":"0",)"
+            R"("bytes":16384,"io_ops":4,"io_busy":600.0}]})"});
 
     router.get(
         "/api/v1/viz/counters",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_viz_counters(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Read/write bytes and I/O op counts per time bucket.",
+                 "Visualization",
+                 {BEGIN, END, SUMMARY},
+                 R"({"buckets":[{"ts":0,"read_bytes":4096,"write_bytes":0,)"
+                 R"("read_ops":1,"write_ops":0}]})"});
 
     router.get(
         "/api/v1/viz/events",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_viz_events(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Events for rendering: time-windowed, LOD-aggregated.",
+                 "Visualization",
+                 {BEGIN,
+                  END,
+                  SUMMARY,
+                  {"pid", "Filter by process id", false, ""},
+                  {"cat", "Filter by category", false, ""},
+                  {"query", "DSL predicate, e.g. dur >= 1000", false, ""}},
+                 R"({"events":[],"metadata":{"begin":0,"end":1000000,)"
+                 R"("count":42,"truncated":false,"ts_normalized":true}})"});
 
     router.get(
         "/api/v1/viz/density",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_viz_density(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Sub-pixel events bucketed into density blocks.",
+                 "Visualization",
+                 {BEGIN, END, {"summary", "LOD level", true, "2"}},
+                 R"({"events":[],"density":[{"pid":100,"tid":100,"ts":0,)"
+                 R"("dur":24457,"count":910,"total":22044,"depth":0}]})"});
 
     router.get(
         "/api/v1/viz/stats",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_viz_stats(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Per-name aggregation over a time range (Analyze).",
+                 "Visualization",
+                 {BEGIN, END, SUMMARY},
+                 R"({"count":100,"total_dur":5000,"names":[{"name":"read",)"
+                 R"("count":50,"total":2500,"avg":50,"min":10,"max":90}]})"});
 
     router.get(
         "/api/v1/viz/calltree",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_viz_calltree(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{
+            "Merged flamegraph tree from ts/dur containment.",
+            "Visualization",
+            {BEGIN,
+             END,
+             SUMMARY,
+             {"group", "Set to 'pid' to keep processes separate", false, ""}},
+            R"({"name":"root","total":5000,"self":0,"count":0,)"
+            R"("children":[{"name":"read","total":2500,"self":2500,)"
+            R"("count":50}]})"});
 
     router.get(
         "/api/v1/viz/histogram",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_viz_histogram(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Duration distribution: percentiles + log-spaced buckets.",
+                 "Visualization",
+                 {BEGIN,
+                  END,
+                  SUMMARY,
+                  {"query", "DSL predicate to narrow to one op", false, ""}},
+                 R"({"min":10,"max":900,"p50":150,"p99":880,"buckets":[]})"});
 
     router.get(
         "/api/v1/viz/layers",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_viz_layers(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Operation-name to category map; declared vs I/O files.",
+                 "Visualization",
+                 {},
+                 R"({"layers":{"read":"POSIX","write":"POSIX"},)"
+                 R"("total_files":2,"io_files":2})"});
 }
 
 }  // namespace dftracer::utils::server

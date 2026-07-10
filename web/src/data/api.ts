@@ -21,10 +21,21 @@ function withFile(params: URLSearchParams): URLSearchParams {
 }
 
 // Prefix with the API base (VS Code webview) and append the access token.
-function apiUrl(url: string): string {
+export function apiUrl(url: string): string {
   let u = CONFIG.apiBase ? CONFIG.apiBase.replace(/\/$/, "") + url : url;
   if (CONFIG.token) u += (u.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(CONFIG.token);
   return u;
+}
+
+// Raw request for the in-app API explorer: returns the status and body text
+// (never throws on a non-2xx, so the explorer can display error responses).
+export async function apiRequest(path: string): Promise<{ status: number; body: string }> {
+  try {
+    const res = await fetch(apiUrl(path));
+    return { status: res.status, body: await res.text() };
+  } catch (e) {
+    return { status: 0, body: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {

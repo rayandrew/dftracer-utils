@@ -11,8 +11,12 @@ class Router;
 /// time from web/dist/index.html by cmake/scripts/embed_asset.cmake.
 std::string_view viz_index_html();
 
-/// Register the visualization UI route: serves the embedded SPA at GET / and
-/// GET /index.html.
+/// Return the embedded API explorer page, generated from web/dist/api.html.
+std::string_view viz_api_page_html();
+
+/// Register the UI + API-docs routes: the SPA at GET / and /index.html, the
+/// API explorer page at GET /api, and the OpenAPI spec at GET
+/// /api/openapi.json.
 void register_viz_ui(Router& router);
 
 }  // namespace dftracer::utils::server

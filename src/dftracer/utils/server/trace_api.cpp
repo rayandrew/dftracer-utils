@@ -502,42 +502,70 @@ void register_trace_api(Router& router, TraceIndex& index) {
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_files(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{
+            "List the indexed trace files.",
+            "Trace data",
+            {},
+            R"({"files":[{"path":"trace-0.pfw.gz","has_bloom_data":true}],)"
+            R"("count":1})"});
 
     router.get(
         "/api/v1/files/info",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_file_info(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Metadata for one trace file.",
+                 "Trace data",
+                 {{"file", "Trace file path", true, ""}},
+                 R"({"path":"trace-0.pfw.gz","has_bloom_data":true})"});
 
     router.get(
         "/api/v1/events",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_events(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Query raw events as NDJSON (filtered, limited).",
+                 "Trace data",
+                 {{"file", "Trace file path", false, ""},
+                  {"name", "Filter by operation name", false, "read"},
+                  {"dur_min", "Minimum duration (us)", false, ""},
+                  {"limit", "Max events (0 = all)", false, "20"}},
+                 R"({"id":1,"name":"read","cat":"POSIX","pid":100,"tid":100,)"
+                 R"("ts":1000,"dur":150,"args":{"ret":4096}})"});
 
     router.get(
         "/api/v1/events/stream",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_events_stream(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Stream all matching events as NDJSON (no limit).",
+                 "Trace data",
+                 {{"name", "Filter by operation name", false, ""}},
+                 ""});
 
     router.get(
         "/api/v1/stats",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_stats(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Aggregate statistics over the index.", "Trace data", {}, ""});
 
     router.get(
         "/api/v1/info",
         [index_ptr](const HttpRequest& req,
                     const QueryParams& params) -> coro::CoroTask<HttpResponse> {
             co_return co_await handle_info(req, params, *index_ptr);
-        });
+        },
+        RouteDoc{"Global summary: file count and time bounds.",
+                 "Trace data",
+                 {},
+                 R"({"file_count":2,"global_min_timestamp_us":1000000,)"
+                 R"("global_max_timestamp_us":6999732})"});
 }
 
 }  // namespace dftracer::utils::server

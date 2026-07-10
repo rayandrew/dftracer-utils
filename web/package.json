@@ -6,7 +6,7 @@
   "description": "Self-contained Perfetto-style trace timeline for dftracer_server",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && DFT_PAGE=api vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
