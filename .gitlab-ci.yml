@@ -14,13 +14,13 @@
 # - Coveralls upload, paths-filter gating, and the web (npm) job are GitHub-only
 #   and are not replicated here (no Node module guaranteed on corona).
 
-stages: [test, deploy]
+stages: [alloc, test, deploy, cleanup]
 
-# LC corona CI via an explicit Flux allocation:
-# the job runs on the shell runner, creates ONE 1-node allocation with
-# `flux batch`, grabs its id with `flux job last`, and then runs EACH CI step
-# inside that same allocation through `flux proxy <jobid>`. The allocation is
-# cancelled in after_script, so the whole pipeline uses a single allocation.
+# LC corona CI via a single shared Flux allocation:
+#  - `allocate` creates ONE 1-node allocation and saves its Flux job id to
+#    .flux-jobid (artifact) so ALL jobs in the pipeline share it globally.
+#  - every CI job reads the id and runs its steps via `flux proxy <jobid>`.
+#  - `release-allocation` cancels it at the end (runs even on failure).
 .corona-flux:
   id_tokens:
     SITE_ID_TOKEN:
@@ -33,23 +33,36 @@ stages: [test, deploy]
     SMALL_QUEUE: pdebug
     SMALL_QUEUE_WALLTIME: 60
 
+allocate:
+  extends: .corona-flux
+  stage: alloc
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - flux batch -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-ci --wrap sleep inf
+    - JOBID=$(flux job last)
+    - echo "$JOBID" > .flux-jobid
+    - echo "Created Flux allocation $JOBID (shared by all CI jobs)"
+    # No timeout: batch queues may take long to schedule the allocation.
+    - flux job wait-event "$JOBID" start
+  artifacts:
+    paths: [.flux-jobid]
+
 # One allocation; lint + test + docs build all run on it via flux proxy.
 # (Was three .corona-batch jobs: lint, test, pages' sphinx build.)
 lint-test-docs:
   extends: .corona-flux
   stage: test
+  needs: [allocate]
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   variables:
     CMAKE_POLICY_VERSION_MINIMUM: "3.5"
   script:
-    # Create the allocation (a placeholder batch job that just sleeps).
-    - flux batch -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-ci --wrap sleep inf
-    # Get the allocation's Flux job id and wait until it starts.
-    - JOBID=$(flux job last)
-    - echo "Using Flux allocation $JOBID"
-    - flux job wait-event -t 300 "$JOBID" start
+    - JOBID=$(cat .flux-jobid)
+    - echo "Using shared Flux allocation $JOBID"
     # Lint (format-check.yaml: clang-format-19 + ruff, pip-installed to match).
     - >
       flux proxy "$JOBID" bash -lc "
@@ -84,9 +97,6 @@ lint-test-docs:
       python3 -m venv .venv-docs && source .venv-docs/bin/activate &&
       pip install --upgrade pip && pip install -r docs/requirements.txt &&
       sphinx-build -b html docs/source public"
-  after_script:
-    # Release the allocation even if a step failed.
-    - JOBID=$(flux job last) && flux cancel "$JOBID" || true
   artifacts:
     paths: [public]
 
@@ -103,7 +113,8 @@ publish-pypi:
     - flux batch -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-publish --wrap sleep inf
     - JOBID=$(flux job last)
     - echo "Using Flux allocation $JOBID"
-    - flux job wait-event -t 300 "$JOBID" start
+    # No timeout: batch queues may take long to schedule the allocation.
+    - flux job wait-event "$JOBID" start
     - >
       flux proxy "$JOBID" bash -lc "
       module load $COMPILER_MODULE $PYTHON_MODULE &&
@@ -128,3 +139,15 @@ pages:
     - echo "Publishing docs built by lint-test-docs"
   artifacts:
     paths: [public]
+
+release-allocation:
+  extends: .corona-flux
+  stage: cleanup
+  needs: [allocate, lint-test-docs]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: always
+  script:
+    - flux cancel "$(cat .flux-jobid)" || true
