@@ -40,12 +40,14 @@ allocate:
     - if: '$CI_PIPELINE_SOURCE == "push"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   script:
-    - flux batch -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-ci --wrap sleep inf
+    # flux alloc --bg submits the allocation and BLOCKS until it is granted
+    # (no timeout — batch queues may take long), then returns leaving the
+    # instance running in the background.
+    - flux alloc --bg -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-ci
     - JOBID=$(flux job last)
     - echo "$JOBID" > .flux-jobid
     - echo "Created Flux allocation $JOBID (shared by all CI jobs)"
-    # No timeout: batch queues may take long to schedule the allocation.
-    - flux job wait-event "$JOBID" start
+    - flux proxy "$JOBID" flux resource list
   artifacts:
     paths: [.flux-jobid]
 
@@ -110,11 +112,13 @@ publish-pypi:
     - if: '$CI_COMMIT_TAG'
       when: manual
   script:
-    - flux batch -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-publish --wrap sleep inf
+    # flux alloc --bg submits the allocation and BLOCKS until it is granted
+    # (no timeout — batch queues may take long), then returns leaving the
+    # instance running in the background.
+    - flux alloc --bg -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-publish
     - JOBID=$(flux job last)
     - echo "Using Flux allocation $JOBID"
-    # No timeout: batch queues may take long to schedule the allocation.
-    - flux job wait-event "$JOBID" start
+    - flux proxy "$JOBID" flux resource list
     - >
       flux proxy "$JOBID" bash -lc "
       module load $COMPILER_MODULE $PYTHON_MODULE &&
