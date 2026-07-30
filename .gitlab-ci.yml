@@ -1,4 +1,4 @@
-# GitLab CI for dftracer-utils on LC czgitlab (corona batch runner).
+# GitLab CI for dftracer-utils on LC czgitlab (corona, shell runner + Flux).
 # Converted from .github/workflows/{ci.yml,format-check.yaml,python-publish.yaml}
 # as part of the GitHub -> GitLab migration (see .migration/dftracer-utils.md).
 #
@@ -12,96 +12,119 @@
 #   (gcc + python modules below); corona has no docker, so container-based
 #   jobs (cibuildwheel) are replaced by a plain sdist/wheel build.
 # - Coveralls upload, paths-filter gating, and the web (npm) job are GitHub-only
-#   and are not replicated here (no Node module guaranteed on corona batch).
+#   and are not replicated here (no Node module guaranteed on corona).
 
-stages: [lint, test, deploy]
+stages: [test, deploy]
 
-# LC corona batch runner (1 node) — mirrors the dftracer .corona-batch convention.
-.corona-batch:
+# LC corona CI via an explicit Flux allocation:
+# the job runs on the shell runner, creates ONE 1-node allocation with
+# `flux batch`, grabs its id with `flux job last`, and then runs EACH CI step
+# inside that same allocation through `flux proxy <jobid>`. The allocation is
+# cancelled in after_script, so the whole pipeline uses a single allocation.
+.corona-flux:
   id_tokens:
     SITE_ID_TOKEN:
       aud: https://lc.llnl.gov/gitlab
-  tags: [batch, corona]
+  tags: [shell, corona]
   variables:
     PYTHON_MODULE: python/3.13.2
-    GCC_MODULE: gcc/11.2.1
+    COMPILER_MODULE: gcc/11.2.1
     MPI_MODULE: mvapich2/2.3.7
     SMALL_QUEUE: pdebug
     SMALL_QUEUE_WALLTIME: 60
-    SCHEDULER_PARAMETERS: "-N 1 -q $SMALL_QUEUE -t $SMALL_QUEUE_WALLTIME"
 
-# format-check.yaml -> lint (cpp-format-check + python-lint collapsed into one job;
-# formatter versions pip-installed to match the workflow: clang-format-19, ruff).
-lint:
-  extends: .corona-batch
-  stage: lint
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "push"'
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-  before_script:
-    - module load $PYTHON_MODULE
-    - python3 -m venv .venv-lint && source .venv-lint/bin/activate
-    - pip install --upgrade pip
-    - pip install "clang-format==19.*" ruff
-  script:
-    - ./scripts/formatting/check-formatting.sh "$(command -v clang-format)"
-    - ruff check python/ tests/python/
-    - ruff format --check python/ tests/python/
-
-# ci.yml (rocksdb prebuild + test matrix) -> single corona build/test job.
-test:
-  extends: .corona-batch
+# One allocation; lint + test + docs build all run on it via flux proxy.
+# (Was three .corona-batch jobs: lint, test, pages' sphinx build.)
+lint-test-docs:
+  extends: .corona-flux
   stage: test
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   variables:
     CMAKE_POLICY_VERSION_MINIMUM: "3.5"
-  before_script:
-    - module load $GCC_MODULE $PYTHON_MODULE $MPI_MODULE
-    - python3 -m venv .venv && source .venv/bin/activate
-    - pip install --upgrade pip
-    - pip install cmake ninja pytest
   script:
-    # GitHub CI restores a prebuilt RocksDB (scripts/ci/build_rocksdb.sh) and
-    # apt-installs toolchains; on corona we rely on modules + CMake building
-    # dependencies from source (no DFTRACER_UTILS_ROCKSDB_PREFIX).
-    - make test
-    - make test-py
+    # Create the allocation (a placeholder batch job that just sleeps).
+    - flux batch -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-ci --wrap sleep inf
+    # Get the allocation's Flux job id and wait until it starts.
+    - JOBID=$(flux job last)
+    - echo "Using Flux allocation $JOBID"
+    - flux job wait-event -t 300 "$JOBID" start
+    # Lint (format-check.yaml: clang-format-19 + ruff, pip-installed to match).
+    - >
+      flux proxy "$JOBID" bash -lc "
+      module load $PYTHON_MODULE &&
+      python3 -m venv .venv-lint && source .venv-lint/bin/activate &&
+      pip install --upgrade pip && pip install 'clang-format==19.*' ruff &&
+      ./scripts/formatting/check-formatting.sh \"\$(command -v clang-format)\" &&
+      ruff check python/ tests/python/ &&
+      ruff format --check python/ tests/python/"
+    # Build + test (ci.yml). GitHub CI restores a prebuilt RocksDB
+    # (scripts/ci/build_rocksdb.sh) and apt-installs toolchains; on corona we
+    # rely on modules + CMake building dependencies from source
+    # (no DFTRACER_UTILS_ROCKSDB_PREFIX).
+    - >
+      flux proxy "$JOBID" bash -lc "
+      module load $COMPILER_MODULE $PYTHON_MODULE $MPI_MODULE &&
+      export CMAKE_POLICY_VERSION_MINIMUM=3.5 &&
+      python3 -m venv .venv && source .venv/bin/activate &&
+      pip install --upgrade pip && pip install cmake ninja pytest &&
+      make test"
+    - >
+      flux proxy "$JOBID" bash -lc "
+      module load $COMPILER_MODULE $PYTHON_MODULE $MPI_MODULE &&
+      export CMAKE_POLICY_VERSION_MINIMUM=3.5 &&
+      source .venv/bin/activate &&
+      make test-py"
+    # Sphinx docs build (docs/source, same tree as ReadTheDocs); published by
+    # the pages job below.
+    - >
+      flux proxy "$JOBID" bash -lc "
+      module load $PYTHON_MODULE &&
+      python3 -m venv .venv-docs && source .venv-docs/bin/activate &&
+      pip install --upgrade pip && pip install -r docs/requirements.txt &&
+      sphinx-build -b html docs/source public"
+  after_script:
+    # Release the allocation even if a step failed.
+    - JOBID=$(flux job last) && flux cancel "$JOBID" || true
+  artifacts:
+    paths: [public]
 
-# python-publish.yaml -> manual publish on tags (no cibuildwheel/docker on
-# corona: builds sdist + a native wheel for the corona toolchain only).
+# python-publish.yaml -> manual publish on tags. Manual-only, so it gets its
+# own Flux allocation without adding one to normal pipelines (no cibuildwheel/
+# docker on corona: builds sdist + a native wheel for the corona toolchain).
 publish-pypi:
-  extends: .corona-batch
+  extends: .corona-flux
   stage: deploy
-  when: manual
   rules:
     - if: '$CI_COMMIT_TAG'
       when: manual
-  before_script:
-    - module load $GCC_MODULE $PYTHON_MODULE
-    - python3 -m venv .venv-publish && source .venv-publish/bin/activate
-    - pip install --upgrade pip
-    - pip install build twine cmake ninja
   script:
-    - python -m build
-    - twine upload --username __token__ --password "$PYPI_TOKEN" dist/*
+    - flux batch -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name=dftracer-utils-publish --wrap sleep inf
+    - JOBID=$(flux job last)
+    - echo "Using Flux allocation $JOBID"
+    - flux job wait-event -t 300 "$JOBID" start
+    - >
+      flux proxy "$JOBID" bash -lc "
+      module load $COMPILER_MODULE $PYTHON_MODULE &&
+      python3 -m venv .venv-publish && source .venv-publish/bin/activate &&
+      pip install --upgrade pip && pip install build twine cmake ninja &&
+      python -m build &&
+      twine upload --username __token__ --password \"\$PYPI_TOKEN\" dist/*"
+  after_script:
+    - JOBID=$(flux job last) && flux cancel "$JOBID" || true
   artifacts:
     paths: [dist]
 
-# GitLab Pages for the Sphinx docs (docs/source). Same doc tree as ReadTheDocs.
+# Publishes the artifact from lint-test-docs — shell runner, no allocation.
 pages:
-  extends: .corona-batch
+  extends: .corona-flux
   stage: deploy
+  needs: [lint-test-docs]
   rules:
     - if: '$CI_COMMIT_BRANCH == "develop"'
     - if: '$CI_COMMIT_BRANCH == "gitlab-migration"'  # temporary: remove after merge to develop
-  before_script:
-    - module load $PYTHON_MODULE
-    - python3 -m venv .venv-docs && source .venv-docs/bin/activate
-    - pip install --upgrade pip
-    - pip install -r docs/requirements.txt
   script:
-    - sphinx-build -b html docs/source public
+    - echo "Publishing docs built by lint-test-docs"
   artifacts:
     paths: [public]

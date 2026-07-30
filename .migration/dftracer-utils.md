@@ -33,3 +33,4 @@ Selected: 2026-07-30. Source: git@github.com:llnl/dftracer-utils.git (develop). 
 
 - 2026-07-30: plan created.
 - 2026-07-30: executed. `.gitlab-ci.yml` written (lint/test/publish-pypi/pages on `.corona-batch`); YAML validated; sphinx built locally (success, 37 warnings); no dep URL switches needed; committed on `gitlab-migration`; pushed develop + tags + gitlab-migration to czgitlab.
+- 2026-07-30: CI switched to corona flux-allocation flow, single allocation per pipeline; MR opened
