@@ -1,0 +1,107 @@
+# GitLab CI for dftracer-utils on LC czgitlab (corona batch runner).
+# Converted from .github/workflows/{ci.yml,format-check.yaml,python-publish.yaml}
+# as part of the GitHub -> GitLab migration (see .migration/dftracer-utils.md).
+#
+# Required CI/CD variables (set in GitLab UI, Settings > CI/CD > Variables):
+#   PYPI_TOKEN - PyPI API token for the manual publish-pypi job
+#     (was `secrets.PYPI_TOKEN` in .github/workflows/python-publish.yaml)
+#
+# Notes vs. the GitHub workflows:
+# - The GitHub os/python matrices (ubuntu-22.04/24.04/arm, macos, cp38-cp314,
+#   valgrind shards, coveralls) are collapsed to the single corona toolchain
+#   (gcc + python modules below); corona has no docker, so container-based
+#   jobs (cibuildwheel) are replaced by a plain sdist/wheel build.
+# - Coveralls upload, paths-filter gating, and the web (npm) job are GitHub-only
+#   and are not replicated here (no Node module guaranteed on corona batch).
+
+stages: [lint, test, deploy]
+
+# LC corona batch runner (1 node) — mirrors the dftracer .corona-batch convention.
+.corona-batch:
+  id_tokens:
+    SITE_ID_TOKEN:
+      aud: https://lc.llnl.gov/gitlab
+  tags: [batch, corona]
+  variables:
+    PYTHON_MODULE: python/3.13.2
+    GCC_MODULE: gcc/11.2.1
+    MPI_MODULE: mvapich2/2.3.7
+    SMALL_QUEUE: pdebug
+    SMALL_QUEUE_WALLTIME: 60
+    SCHEDULER_PARAMETERS: "-N 1 -q $SMALL_QUEUE -t $SMALL_QUEUE_WALLTIME"
+
+# format-check.yaml -> lint (cpp-format-check + python-lint collapsed into one job;
+# formatter versions pip-installed to match the workflow: clang-format-19, ruff).
+lint:
+  extends: .corona-batch
+  stage: lint
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  before_script:
+    - module load $PYTHON_MODULE
+    - python3 -m venv .venv-lint && source .venv-lint/bin/activate
+    - pip install --upgrade pip
+    - pip install "clang-format==19.*" ruff
+  script:
+    - ./scripts/formatting/check-formatting.sh "$(command -v clang-format)"
+    - ruff check python/ tests/python/
+    - ruff format --check python/ tests/python/
+
+# ci.yml (rocksdb prebuild + test matrix) -> single corona build/test job.
+test:
+  extends: .corona-batch
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  variables:
+    CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  before_script:
+    - module load $GCC_MODULE $PYTHON_MODULE $MPI_MODULE
+    - python3 -m venv .venv && source .venv/bin/activate
+    - pip install --upgrade pip
+    - pip install cmake ninja pytest
+  script:
+    # GitHub CI restores a prebuilt RocksDB (scripts/ci/build_rocksdb.sh) and
+    # apt-installs toolchains; on corona we rely on modules + CMake building
+    # dependencies from source (no DFTRACER_UTILS_ROCKSDB_PREFIX).
+    - make test
+    - make test-py
+
+# python-publish.yaml -> manual publish on tags (no cibuildwheel/docker on
+# corona: builds sdist + a native wheel for the corona toolchain only).
+publish-pypi:
+  extends: .corona-batch
+  stage: deploy
+  when: manual
+  rules:
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+  before_script:
+    - module load $GCC_MODULE $PYTHON_MODULE
+    - python3 -m venv .venv-publish && source .venv-publish/bin/activate
+    - pip install --upgrade pip
+    - pip install build twine cmake ninja
+  script:
+    - python -m build
+    - twine upload --username __token__ --password "$PYPI_TOKEN" dist/*
+  artifacts:
+    paths: [dist]
+
+# GitLab Pages for the Sphinx docs (docs/source). Same doc tree as ReadTheDocs.
+pages:
+  extends: .corona-batch
+  stage: deploy
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH == "gitlab-migration"'  # temporary: remove after merge to develop
+  before_script:
+    - module load $PYTHON_MODULE
+    - python3 -m venv .venv-docs && source .venv-docs/bin/activate
+    - pip install --upgrade pip
+    - pip install -r docs/requirements.txt
+  script:
+    - sphinx-build -b html docs/source public
+  artifacts:
+    paths: [public]
