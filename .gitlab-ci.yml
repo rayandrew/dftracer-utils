@@ -64,41 +64,9 @@ lint-test-docs:
     CMAKE_POLICY_VERSION_MINIMUM: "3.5"
   script:
     - JOBID=$(cat .flux-jobid)
-    - echo "Using shared Flux allocation $JOBID"
-    # Lint (format-check.yaml: clang-format-19 + ruff, pip-installed to match).
-    - >
-      flux proxy "$JOBID" bash -lc "
-      module load $PYTHON_MODULE &&
-      python3 -m venv .venv-lint && source .venv-lint/bin/activate &&
-      pip install --upgrade pip && pip install 'clang-format==19.*' ruff &&
-      ./scripts/formatting/check-formatting.sh \"\$(command -v clang-format)\" &&
-      ruff check python/ tests/python/ &&
-      ruff format --check python/ tests/python/"
-    # Build + test (ci.yml). GitHub CI restores a prebuilt RocksDB
-    # (scripts/ci/build_rocksdb.sh) and apt-installs toolchains; on corona we
-    # rely on modules + CMake building dependencies from source
-    # (no DFTRACER_UTILS_ROCKSDB_PREFIX).
-    - >
-      flux proxy "$JOBID" bash -lc "
-      module load $COMPILER_MODULE $PYTHON_MODULE $MPI_MODULE &&
-      export CMAKE_POLICY_VERSION_MINIMUM=3.5 &&
-      python3 -m venv .venv && source .venv/bin/activate &&
-      pip install --upgrade pip && pip install cmake ninja pytest &&
-      make test"
-    - >
-      flux proxy "$JOBID" bash -lc "
-      module load $COMPILER_MODULE $PYTHON_MODULE $MPI_MODULE &&
-      export CMAKE_POLICY_VERSION_MINIMUM=3.5 &&
-      source .venv/bin/activate &&
-      make test-py"
-    # Sphinx docs build (docs/source, same tree as ReadTheDocs); published by
-    # the pages job below.
-    - >
-      flux proxy "$JOBID" bash -lc "
-      module load $PYTHON_MODULE &&
-      python3 -m venv .venv-docs && source .venv-docs/bin/activate &&
-      pip install --upgrade pip && pip install -r docs/requirements.txt &&
-      sphinx-build -b html docs/source public"
+    # flux run -N 1 executes the script ON the allocated node; the script runs
+    # everything in podman containers (same images as the GitHub Actions CI).
+    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/lint-test-docs.sh
   artifacts:
     paths: [public]
 
@@ -119,13 +87,7 @@ publish-pypi:
     - JOBID=$(flux job last)
     - echo "Using Flux allocation $JOBID"
     - flux proxy "$JOBID" flux resource list
-    - >
-      flux proxy "$JOBID" bash -lc "
-      module load $COMPILER_MODULE $PYTHON_MODULE &&
-      python3 -m venv .venv-publish && source .venv-publish/bin/activate &&
-      pip install --upgrade pip && pip install build twine cmake ninja &&
-      python -m build &&
-      twine upload --username __token__ --password \"\$PYPI_TOKEN\" dist/*"
+    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/publish-pypi.sh
   after_script:
     - JOBID=$(flux job last) && flux cancel "$JOBID" || true
   artifacts:
@@ -147,7 +109,8 @@ pages:
 release-allocation:
   extends: .corona-flux
   stage: cleanup
-  needs: [allocate, lint-test-docs]
+  # Runs last: alloc → lint-test-docs → pages → deallocate.
+  needs: [allocate, lint-test-docs, {job: pages, optional: true}]
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
       when: always
