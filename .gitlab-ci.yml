@@ -46,6 +46,8 @@ allocate:
     # Unique per-job name: `flux job last` is user-global and races with
     # other pipelines running under the same LC account.
     - ALLOC_NAME=dftracer-utils-ci-$CI_PIPELINE_ID-$CI_JOB_ID
+    # A retried `allocate` must not leave the previous attempt running.
+    - for id in $(flux jobs -n --name="$ALLOC_NAME" -o "{id}" 2>/dev/null); do echo "cancelling stale allocation $id"; flux cancel "$id" || true; done
     - flux alloc --bg -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name="$ALLOC_NAME"
     - JOBID=$(flux jobs -n --name="$ALLOC_NAME" -o "{id}" | head -1)
     - test -n "$JOBID"
@@ -90,6 +92,8 @@ publish-pypi:
     # Unique per-job name: `flux job last` is user-global and races with
     # other pipelines running under the same LC account.
     - ALLOC_NAME=dftracer-utils-publish-$CI_PIPELINE_ID-$CI_JOB_ID
+    # A retried `allocate` must not leave the previous attempt running.
+    - for id in $(flux jobs -n --name="$ALLOC_NAME" -o "{id}" 2>/dev/null); do echo "cancelling stale allocation $id"; flux cancel "$id" || true; done
     - flux alloc --bg -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name="$ALLOC_NAME"
     - JOBID=$(flux jobs -n --name="$ALLOC_NAME" -o "{id}" | head -1)
     - test -n "$JOBID"
@@ -118,12 +122,16 @@ pages:
 release-allocation:
   extends: .corona-flux
   stage: cleanup
-  # Runs last: alloc → lint-test-docs → pages → deallocate.
-  needs: [allocate, lint-test-docs, {job: pages, optional: true}]
+  # No `needs:` on purpose: a job that declares `needs` is SKIPPED when one of
+  # them fails, which leaked the allocation on every failed pipeline. Plain
+  # stage ordering + `when: always` guarantees cleanup after success, failure,
+  # cancellation and manual reruns alike.
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
       when: always
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
   script:
-    - test -s .flux-jobid && flux cancel "$(cat .flux-jobid)" || true
+    # Cancel every allocation of this pipeline (a rerun of `allocate` can leave
+    # more than one behind).
+    - for id in $(flux jobs -n --name="$ALLOC_NAME" -o "{id}" 2>/dev/null); do echo "cancelling $id"; flux cancel "$id" || true; done
