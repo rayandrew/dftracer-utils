@@ -23,17 +23,24 @@ $PODMAN run --rm --user 0:0 -v "$PWD:/ws" -w /ws docker.io/library/python:3.11 b
   ruff format --check python/ tests/python/
 '
 
-# Build + test (ci.yml). APT::Sandbox::User=root: rootless podman has no mapped
-# _apt uid, so apts privilege drop fails with "setgroups (22: Invalid argument)".
+# Build + test (ci.yml). ubuntu:24.04 matches GitHub's ubuntu-latest: 22.04
+# ships CMake 3.22, too old for this repo's CMakePresets.json (version 6 needs
+# CMake >= 3.25) -> "Could not read presets: Unrecognized version field".
+# APT::Sandbox::User=root: rootless podman has no mapped _apt uid, so apts
+# privilege drop fails with "setgroups (22: Invalid argument)".
 $PODMAN run --rm --user 0:0 -v "$PWD:/ws" -w /ws -e CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-  docker.io/library/ubuntu:22.04 bash -ec '
+  docker.io/library/ubuntu:24.04 bash -ec '
   export DEBIAN_FRONTEND=noninteractive
   apt-get -o APT::Sandbox::User=root update -qq
   apt-get -o APT::Sandbox::User=root install -y -qq \
-    build-essential cmake ninja-build git python3 python3-pip python3-venv \
-    libmpich-dev mpich pkg-config
-  pip3 install --quiet --upgrade pip
-  pip3 install --quiet pytest
+    build-essential cmake ninja-build ccache pkg-config git \
+    zlib1g-dev libzstd-dev libsqlite3-dev \
+    libmpich-dev mpich \
+    python3 python3-pip python3-venv python3-dev
+  cmake --version
+  # Ubuntu 24.04 marks its python as externally managed (PEP 668); this is a
+  # throwaway container, so installing into it directly is fine.
+  pip3 install --quiet --break-system-packages pytest
   make test
   make test-py
 '

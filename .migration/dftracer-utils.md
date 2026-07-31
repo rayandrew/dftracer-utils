@@ -38,3 +38,4 @@ Selected: 2026-07-30. Source: git@github.com:llnl/dftracer-utils.git (develop). 
 - 2026-07-30: allocate switched to flux alloc --bg (blocks until granted); branch rebased on gitlab/develop before push.
 - 2026-07-30: CI now runs inside podman containers (python:3.11 lint/docs, ubuntu:22.04 build/test) on the allocated node via flux run; pattern validated on cpp-logger.
 - 2026-07-30: fixed allocation-id race — 'flux job last' is user-global and concurrent pipelines cancelled each other's allocations; now uses a unique per-job name (<proj>-$CI_PIPELINE_ID-$CI_JOB_ID) with 'flux jobs --name' lookup, and cleanup only cancels a non-empty .flux-jobid.
+- 2026-07-30: build/test container switched ubuntu:22.04 -> ubuntu:24.04 (CMakePresets version 6 needs CMake >=3.25; 22.04 ships 3.22) and package list aligned with the GitHub workflow; pip uses --break-system-packages (PEP 668).
