@@ -33,3 +33,11 @@ Selected: 2026-07-30. Source: git@github.com:llnl/dftracer-utils.git (develop). 
 
 - 2026-07-30: plan created.
 - 2026-07-30: executed. `.gitlab-ci.yml` written (lint/test/publish-pypi/pages on `.corona-batch`); YAML validated; sphinx built locally (success, 37 warnings); no dep URL switches needed; committed on `gitlab-migration`; pushed develop + tags + gitlab-migration to czgitlab.
+- 2026-07-30: CI switched to corona flux-allocation flow, single allocation per pipeline; MR opened
+- 2026-07-30: Flux allocation made global via allocate/.flux-jobid artifact/release-allocation jobs; wait-event timeout removed.
+- 2026-07-30: allocate switched to flux alloc --bg (blocks until granted); branch rebased on gitlab/develop before push.
+- 2026-07-30: CI now runs inside podman containers (python:3.11 lint/docs, ubuntu:22.04 build/test) on the allocated node via flux run; pattern validated on cpp-logger.
+- 2026-07-30: fixed allocation-id race — 'flux job last' is user-global and concurrent pipelines cancelled each other's allocations; now uses a unique per-job name (<proj>-$CI_PIPELINE_ID-$CI_JOB_ID) with 'flux jobs --name' lookup, and cleanup only cancels a non-empty .flux-jobid.
+- 2026-07-30: build/test container switched ubuntu:22.04 -> ubuntu:24.04 (CMakePresets version 6 needs CMake >=3.25; 22.04 ships 3.22) and package list aligned with the GitHub workflow; pip uses --break-system-packages (PEP 668).
+- 2026-07-30: fixed the 15 package-discovery test failures: GNUInstallDirs resolves CMAKE_INSTALL_LIBDIR to Debian multiarch (lib/x86_64-linux-gnu) but the tests only search <prefix>/lib and lib64. Pinning -DCMAKE_INSTALL_LIBDIR=lib does not stick (a subproject re-includes GNUInstallDirs after a prefix change and FORCE-overwrites it), so CI pre-creates the install tree and symlinks lib/{cmake,pkgconfig} to the multiarch dirs. Verified locally in podman: 157/157 tests pass, docs build.
+- 2026-07-30: release-allocation no longer declares needs — a job with needs is SKIPPED when a needed job fails, so failed pipelines leaked the allocation. Now stage ordering + when: always, cancelling every job matching $ALLOC_NAME; allocate also cancels stale allocations from a retried attempt.
