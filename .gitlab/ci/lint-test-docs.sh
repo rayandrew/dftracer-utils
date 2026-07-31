@@ -41,7 +41,24 @@ $PODMAN run --rm --user 0:0 -v "$PWD:/ws" -w /ws -e CMAKE_POLICY_VERSION_MINIMUM
   # Ubuntu 24.04 marks its python as externally managed (PEP 668); this is a
   # throwaway container, so installing into it directly is fine.
   pip3 install --quiet --break-system-packages pytest
-  make test
+  # "make test" == these three commands. On Debian/Ubuntu GNUInstallDirs
+  # resolves CMAKE_INSTALL_LIBDIR to the multiarch lib/x86_64-linux-gnu, but
+  # the package-discovery tests only look in <prefix>/lib and <prefix>/lib64,
+  # so all 15 fail with "...Config.cmake not found". Pinning the variable does
+  # not work: a subproject re-includes GNUInstallDirs after changing the
+  # prefix, which FORCE-overwrites it back to multiarch. Instead, pre-create
+  # the install tree and point lib/{cmake,pkgconfig} at the multiarch dirs.
+  cmake --preset tests
+  cmake --build --preset tests
+  LIBDIR=$(sed -n "s/^CMAKE_INSTALL_LIBDIR:PATH=//p" build/build-tests/CMakeCache.txt)
+  PFX=$PWD/build/build-tests/test_install
+  echo "install libdir: $LIBDIR"
+  if [ "$LIBDIR" != "lib" ] && [ "$LIBDIR" != "lib64" ]; then
+    mkdir -p "$PFX/$LIBDIR/cmake" "$PFX/$LIBDIR/pkgconfig" "$PFX/lib"
+    ln -sfn "$PFX/$LIBDIR/cmake" "$PFX/lib/cmake"
+    ln -sfn "$PFX/$LIBDIR/pkgconfig" "$PFX/lib/pkgconfig"
+  fi
+  ctest --preset tests
   make test-py
 '
 
