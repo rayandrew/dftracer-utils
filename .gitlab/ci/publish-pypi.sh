@@ -8,7 +8,10 @@ PODMAN_RUNROOT=/var/tmp/$USER/podman-run
 mkdir -p "$PODMAN_STORE" "$PODMAN_RUNROOT"
 PODMAN="podman --root $PODMAN_STORE --runroot $PODMAN_RUNROOT"
 
-$PODMAN run --rm -v "$PWD:/ws" -w /ws -e PYPI_TOKEN docker.io/library/python:3.11 bash -ec '
+# --user 0:0: container root maps to the host user under rootless podman, so
+# the bind-mounted checkout stays readable even for images with a non-root USER.
+
+$PODMAN run --rm --user 0:0 -v "$PWD:/ws" -w /ws -e PYPI_TOKEN docker.io/library/python:3.11 bash -ec '
   pip install --quiet --upgrade pip
   pip install --quiet build twine cmake ninja
   python -m build

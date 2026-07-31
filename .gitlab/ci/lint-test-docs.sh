@@ -11,8 +11,11 @@ PODMAN_RUNROOT=/var/tmp/$USER/podman-run
 mkdir -p "$PODMAN_STORE" "$PODMAN_RUNROOT"
 PODMAN="podman --root $PODMAN_STORE --runroot $PODMAN_RUNROOT"
 
+# --user 0:0: container root maps to the host user under rootless podman, so
+# the bind-mounted checkout stays readable even for images with a non-root USER.
+
 # Lint: clang-format 19 + ruff (format-check.yaml).
-$PODMAN run --rm -v "$PWD:/ws" -w /ws docker.io/library/python:3.11 bash -ec '
+$PODMAN run --rm --user 0:0 -v "$PWD:/ws" -w /ws docker.io/library/python:3.11 bash -ec '
   pip install --quiet --upgrade pip
   pip install --quiet "clang-format==19.*" ruff
   ./scripts/formatting/check-formatting.sh "$(command -v clang-format)"
@@ -22,7 +25,7 @@ $PODMAN run --rm -v "$PWD:/ws" -w /ws docker.io/library/python:3.11 bash -ec '
 
 # Build + test (ci.yml). APT::Sandbox::User=root: rootless podman has no mapped
 # _apt uid, so apts privilege drop fails with "setgroups (22: Invalid argument)".
-$PODMAN run --rm -v "$PWD:/ws" -w /ws -e CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+$PODMAN run --rm --user 0:0 -v "$PWD:/ws" -w /ws -e CMAKE_POLICY_VERSION_MINIMUM=3.5 \
   docker.io/library/ubuntu:22.04 bash -ec '
   export DEBIAN_FRONTEND=noninteractive
   apt-get -o APT::Sandbox::User=root update -qq
@@ -36,7 +39,7 @@ $PODMAN run --rm -v "$PWD:/ws" -w /ws -e CMAKE_POLICY_VERSION_MINIMUM=3.5 \
 '
 
 # Docs (sphinx source lives in docs/source).
-$PODMAN run --rm -v "$PWD:/ws" -w /ws docker.io/library/python:3.11 bash -ec '
+$PODMAN run --rm --user 0:0 -v "$PWD:/ws" -w /ws docker.io/library/python:3.11 bash -ec '
   pip install --quiet --upgrade pip
   pip install --quiet -r docs/requirements.txt
   sphinx-build -b html docs/source public
