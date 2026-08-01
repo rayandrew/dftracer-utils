@@ -12,10 +12,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # Must match the default in scripts/ci/build_rocksdb.sh.
-  ROCKSDB_VERSION: "10.10.1"
-
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -23,8 +19,12 @@ jobs:
       code: ${{ steps.filter.outputs.code }}
       coverage: ${{ steps.filter.outputs.coverage }}
       web: ${{ steps.filter.outputs.web }}
+      rocksdb_version: ${{ steps.rocksdb.outputs.version }}
     steps:
       - uses: actions/checkout@v6
+      - name: Resolve the pinned RocksDB version
+        id: rocksdb
+        run: echo "version=$(./scripts/ci/rocksdb_version.sh)" >> "$GITHUB_OUTPUT"
       - uses: dorny/paths-filter@v3.0.2
         id: filter
         with:
@@ -54,6 +54,8 @@ jobs:
     if: needs.changes.outputs.code == 'true' || needs.changes.outputs.coverage == 'true'
     name: RocksDB prebuild (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      ROCKSDB_VERSION: ${{ needs.changes.outputs.rocksdb_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +104,7 @@ jobs:
     needs: [changes, rocksdb]
     if: needs.changes.outputs.code == 'true' || needs.changes.outputs.coverage == 'true'
     env:
+      ROCKSDB_VERSION: ${{ needs.changes.outputs.rocksdb_version }}
       CMAKE_POLICY_VERSION_MINIMUM: 3.5
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
@@ -295,6 +298,7 @@ jobs:
         shard: [1, 2, 3, 4]
     env:
       VALGRIND_SHARD: ${{ matrix.shard }}/4
+      ROCKSDB_VERSION: ${{ needs.changes.outputs.rocksdb_version }}
       CMAKE_POLICY_VERSION_MINIMUM: 3.5
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
@@ -388,6 +392,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
+      ROCKSDB_VERSION: ${{ needs.changes.outputs.rocksdb_version }}
       CMAKE_POLICY_VERSION_MINIMUM: 3.5
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
@@ -481,6 +486,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     env:
+      ROCKSDB_VERSION: ${{ needs.changes.outputs.rocksdb_version }}
       CMAKE_POLICY_VERSION_MINIMUM: 3.5
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_BASEDIR: ${{ github.workspace }}
@@ -614,6 +620,20 @@ jobs:
           restore-keys: |
             cpmsource-full-v1-
 
+      - name: Resolve the pre-release version
+        # scikit-build-core never runs setup.py, so the .postN.dev0 scheme the
+        # sibling repos set there cannot be expressed in pyproject: a custom
+        # version_scheme needs a registered entry point. Hand it over instead.
+        run: |
+          described=$(git describe --tags --long --match 'v*')
+          tag=${described%-*-g*}
+          distance=${described#"$tag"-}
+          distance=${distance%-g*}
+          tag=${tag#v}
+          if [ "$distance" = "0" ]; then v="$tag"; else v="$tag.post$distance.dev0"; fi
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS=$v" >> "$GITHUB_ENV"
+          echo "building version $v"
+
       - name: Build and test wheel
         uses: pypa/cibuildwheel@v3.3.0
         env:
@@ -625,11 +645,11 @@ jobs:
           CIBW_BEFORE_BUILD: "ccache -s || echo 'WARNING: ccache unavailable - build is uncached'"
           CIBW_CONTAINER_ENGINE: "docker; create_args: --volume=${{ github.workspace }}/.ccache:/ccache"
           CIBW_ENVIRONMENT_LINUX: >-
-            CCACHE_DIR=/ccache CCACHE_BASEDIR=/project
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS=$SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS CCACHE_DIR=/ccache CCACHE_BASEDIR=/project
             CCACHE_COMPILERCHECK=content CCACHE_NOHASHDIR=true CCACHE_MAXSIZE=900M
             CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
           CIBW_ENVIRONMENT_MACOS: >-
-            CCACHE_DIR=$GITHUB_WORKSPACE/.ccache CCACHE_BASEDIR=$GITHUB_WORKSPACE
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS=$SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS CCACHE_DIR=$GITHUB_WORKSPACE/.ccache CCACHE_BASEDIR=$GITHUB_WORKSPACE
             CCACHE_COMPILERCHECK=content CCACHE_NOHASHDIR=true CCACHE_MAXSIZE=900M
             CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
 

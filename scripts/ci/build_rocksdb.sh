@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-VERSION="${ROCKSDB_VERSION:-10.10.1}"
+VERSION="${ROCKSDB_VERSION:-$("$(dirname "${BASH_SOURCE[0]}")/rocksdb_version.sh")}"
 PREFIX="${ROCKSDB_PREFIX:-/opt/dftracer-deps/rocksdb-${VERSION}}"
 SRC_CACHE="${ROCKSDB_SRC_CACHE:-${TMPDIR:-/tmp}/rocksdb-src}"
 BUILD_DIR="${ROCKSDB_BUILD_DIR:-${TMPDIR:-/tmp}/rocksdb-build}"
@@ -37,8 +37,15 @@ fi
 if [ ! -d "${SRC_CACHE}/rocksdb-${VERSION}" ]; then
 	mkdir -p "${SRC_CACHE}"
 	echo "Fetching RocksDB ${VERSION}"
+	# Extract to a staging dir and rename: a truncated download must not leave a
+	# half-tree that the -d test above would then accept as a cache hit.
+	stage="${SRC_CACHE}/.stage-${VERSION}"
+	rm -rf "$stage"
+	mkdir -p "$stage"
 	curl -fsSL "https://github.com/facebook/rocksdb/archive/refs/tags/v${VERSION}.tar.gz" |
-		tar -xz -C "${SRC_CACHE}"
+		tar -xz -C "$stage"
+	mv "$stage/rocksdb-${VERSION}" "${SRC_CACHE}/rocksdb-${VERSION}"
+	rmdir "$stage"
 fi
 
 # RelWithDebInfo, not Release: the Valgrind jobs need DWARF in RocksDB frames,

@@ -59,6 +59,20 @@ jobs:
           npm ci
           npm run build
 
+      - name: Resolve the pre-release version
+        # scikit-build-core never runs setup.py, so the .postN.dev0 scheme the
+        # sibling repos set there cannot be expressed in pyproject: a custom
+        # version_scheme needs a registered entry point. Hand it over instead.
+        run: |
+          described=$(git describe --tags --long --match 'v*')
+          tag=${described%-*-g*}
+          distance=${described#"$tag"-}
+          distance=${distance%-g*}
+          tag=${tag#v}
+          if [ "$distance" = "0" ]; then v="$tag"; else v="$tag.post$distance.dev0"; fi
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS=$v" >> "$GITHUB_ENV"
+          echo "building version $v"
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.3.0
         env:
@@ -69,11 +83,11 @@ jobs:
           CIBW_BEFORE_ALL_MACOS: "brew install ccache || true"
           CIBW_CONTAINER_ENGINE: "docker; create_args: --volume=${{ github.workspace }}/.ccache:/ccache"
           CIBW_ENVIRONMENT_LINUX: >-
-            CCACHE_DIR=/ccache CCACHE_BASEDIR=/project
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS=$SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS CCACHE_DIR=/ccache CCACHE_BASEDIR=/project
             CCACHE_COMPILERCHECK=content CCACHE_NOHASHDIR=true CCACHE_MAXSIZE=900M
             CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
           CIBW_ENVIRONMENT_MACOS: >-
-            CCACHE_DIR=$GITHUB_WORKSPACE/.ccache CCACHE_BASEDIR=$GITHUB_WORKSPACE
+            SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS=$SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS CCACHE_DIR=$GITHUB_WORKSPACE/.ccache CCACHE_BASEDIR=$GITHUB_WORKSPACE
             CCACHE_COMPILERCHECK=content CCACHE_NOHASHDIR=true CCACHE_MAXSIZE=900M
             CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
 
@@ -119,6 +133,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install build
+
+      - name: Resolve the pre-release version
+        run: |
+          described=$(git describe --tags --long --match 'v*')
+          tag=${described%-*-g*}
+          distance=${described#"$tag"-}
+          distance=${distance%-g*}
+          tag=${tag#v}
+          if [ "$distance" = "0" ]; then v="$tag"; else v="$tag.post$distance.dev0"; fi
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DFTRACER_UTILS=$v" >> "$GITHUB_ENV"
+          echo "building version $v"
 
       - name: Build sdist
         run: python -m build --sdist
