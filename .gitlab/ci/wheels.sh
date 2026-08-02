@@ -50,7 +50,48 @@ CIBW_VERSION="${CIBW_VERSION:-$(grep -oE 'pypa/cibuildwheel@v[0-9]+\.[0-9]+\.[0-
 echo "using cibuildwheel $CIBW_VERSION"
 
 rm -rf wheelhouse
+mkdir -p wheelhouse
 python3 -m venv "$STATE/venv"
 "$STATE/venv/bin/pip" install -q --upgrade pip "cibuildwheel==$CIBW_VERSION"
-"$STATE/venv/bin/cibuildwheel" --output-dir wheelhouse
+
+# cibuildwheel builds the interpreters one after another. The C++ sources are
+# identical across ABIs, so running them concurrently against the shared ccache
+# costs little more than the first build and saves the rest of the serial time.
+read -ra _tags <<<"$CIBW_BUILD"
+SHARDS="${WHEEL_SHARDS:-4}"
+JOBS_PER_SHARD=$(( $(nproc) / SHARDS ))
+[ "$JOBS_PER_SHARD" -lt 1 ] && JOBS_PER_SHARD=1
+export CIBW_ENVIRONMENT_LINUX="$CIBW_ENVIRONMENT_LINUX CMAKE_BUILD_PARALLEL_LEVEL=$JOBS_PER_SHARD"
+
+# Pull once up front: concurrent shards would otherwise race to pull the same
+# manylinux image into one podman store.
+image=$("$STATE/venv/bin/python" - <<'PYEOF' 2>/dev/null || true
+import configparser, pathlib, cibuildwheel
+cfg = pathlib.Path(cibuildwheel.__file__).parent / "resources" / "pinned_docker_images.cfg"
+c = configparser.ConfigParser(); c.read(cfg)
+print(c["x86_64"]["manylinux_2_28"])
+PYEOF
+)
+if [ -n "$image" ]; then
+  echo "pre-pulling $image"
+  podman pull -q "$image"
+fi
+
+echo "building ${#_tags[@]} interpreters, ${SHARDS} at a time, ${JOBS_PER_SHARD} jobs each"
+rc=0
+pids=()
+for tag in "${_tags[@]}"; do
+  while [ "$(jobs -rp | wc -l)" -ge "$SHARDS" ]; do wait -n || rc=1; done
+  (
+    CIBW_BUILD="$tag" "$STATE/venv/bin/cibuildwheel" \
+      --output-dir "wheelhouse/.shard-${tag%%-*}" 2>&1 |
+      stdbuf -oL sed -u "s/^/[${tag%%-*}] /"
+  ) &
+  pids+=("$!")
+done
+for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+[ "$rc" -eq 0 ] || { echo "ERROR: one or more interpreters failed"; exit 1; }
+
+find wheelhouse -mindepth 2 -name '*.whl' -exec mv -t wheelhouse {} +
+rm -rf wheelhouse/.shard-*
 ls -1 wheelhouse

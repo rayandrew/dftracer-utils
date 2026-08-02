@@ -18,6 +18,13 @@ mkdir -p "$PODMAN_STORE" "$PODMAN_RUNROOT"
 DEPS_DIR=/var/tmp/$USER/dftracer-deps
 mkdir -p "$DEPS_DIR"
 
+# CMakeLists sets ccache as the compiler launcher, but without CCACHE_DIR each
+# container caches into its own $HOME and --rm discards it: every phase, and
+# every pipeline, compiled from cold. Node-local so it survives both.
+# BASEDIR+NOHASHDIR are what let the per-phase build dirs share entries.
+CCACHE_HOST=/var/tmp/$USER/dftracer-utils-ccache
+mkdir -p "$CCACHE_HOST"
+
 # Mounted at the same path so --find-links reads the same inside and out.
 DFTRACER_DIST="${DFTRACER_DIST:-/usr/workspace/dldl/dftracer/distributions}"
 DIST_MOUNT=()
@@ -31,9 +38,18 @@ podman --root "$PODMAN_STORE" --runroot "$PODMAN_RUNROOT" run --rm \
   --user 0:0 \
   -v "$PWD:/ws" -w /ws \
   -v "$DEPS_DIR:/opt/dftracer-deps" \
+  -v "$CCACHE_HOST:/ccache" \
   "${DIST_MOUNT[@]}" \
   -e CI_PROJECT_DIR=/ws \
   -e DFTRACER_DIST \
   -e CMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -e ROCKSDB_VERSION \
+  -e PHASE_COUNT \
+  -e CCACHE_DIR=/ccache \
+  -e CCACHE_BASEDIR=/ws \
+  -e CCACHE_COMPILERCHECK=content \
+  -e CCACHE_NOHASHDIR=true \
+  -e CCACHE_MAXSIZE=5G \
+  -e CCACHE_SLOPPINESS=time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale \
+  -e VALGRIND_SHARD \
   "$IMAGE" bash "$@"

@@ -5,4 +5,5 @@
 set -eo pipefail
 cd "$CI_PROJECT_DIR"
 source .gitlab/ci/toolchain.sh
+echo ">>> building rocksdb (skipped entirely if this node already has it)"
 ./scripts/ci/build_rocksdb.sh
