@@ -99,3 +99,4 @@ profiling-results*/
 
 # ccache dir created by CI and the valgrind docker runner
 .ccache/
+wheelhouse/

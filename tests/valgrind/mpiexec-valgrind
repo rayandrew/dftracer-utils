@@ -48,6 +48,15 @@ if [[ $inserted -eq 0 ]]; then
     exit 2
 fi
 
-# --allow-run-as-root: the container runs as root.
-# --oversubscribe: tests may request more ranks than detected slots.
-exec "$REAL_MPIEXEC" --allow-run-as-root --oversubscribe "${out[@]}"
+# Both remaining flags are OpenMPI-only: hydra rejects --allow-run-as-root
+# outright, and MPICH has no slot count to oversubscribe. Run-as-root is
+# requested via the env vars run_mpi() in testing_utilities.h already uses,
+# which MPICH ignores.
+export OMPI_ALLOW_RUN_AS_ROOT=1 OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+
+launcher_opts=()
+if "$REAL_MPIEXEC" --version 2>&1 | grep -qiE 'open[ -]?mpi|openrte'; then
+    launcher_opts+=(--oversubscribe)
+fi
+
+exec "$REAL_MPIEXEC" "${launcher_opts[@]}" "${out[@]}"

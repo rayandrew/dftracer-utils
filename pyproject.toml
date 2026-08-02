@@ -150,7 +150,10 @@ unresolved-attribute = "ignore"
 unused-ignore-comment = "ignore"
 
 [tool.setuptools_scm]
-version_scheme = "post-release"
+version_scheme = "no-guess-dev"
+# no-guess-dev = {tag}.post1.dev{distance}: after the tag, but a pre-release,
+# so `pip install` resolves to the last tag and only --pre reaches a develop
+# build. A bare .postN is a final release and would be installed by default.
 local_scheme = "no-local-version"
 version_file = "python/dftracer/utils/_version.py"
 fallback_version = "0.0.0"

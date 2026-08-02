@@ -1,137 +1,164 @@
-# GitLab CI for dftracer-utils on LC czgitlab (corona, shell runner + Flux).
-# Converted from .github/workflows/{ci.yml,format-check.yaml,python-publish.yaml}
-# as part of the GitHub -> GitLab migration (see .migration/dftracer-utils.md).
+# Converted from .github/workflows/{ci.yml,format-check.yaml}, which stay
+# authoritative for GitHub. One 1-node Flux allocation per pipeline, found by
+# job name; every phase runs in podman through `flux proxy`.
 #
-# Required CI/CD variables (set in GitLab UI, Settings > CI/CD > Variables):
-#   PYPI_TOKEN - PyPI API token for the manual publish-pypi job
-#     (was `secrets.PYPI_TOKEN` in .github/workflows/python-publish.yaml)
+#   changes -> .code-paths      test      -> ci (os x python collapsed)
+#   format-check.yaml           valgrind-* -> ci (one phase, one build)
+#   wheel   -> wheels           coveralls, web, python-publish -> GitHub only
 #
-# Notes vs. the GitHub workflows:
-# - The GitHub os/python matrices (ubuntu-22.04/24.04/arm, macos, cp38-cp314,
-#   valgrind shards, coveralls) are collapsed to the single corona toolchain
-#   (gcc + python modules below); corona has no docker, so container-based
-#   jobs (cibuildwheel) are replaced by a plain sdist/wheel build.
-# - Coveralls upload, paths-filter gating, and the web (npm) job are GitHub-only
-#   and are not replicated here (no Node module guaranteed on corona).
+# develop and tags publish into the shared dldl distribution tree.
 
-stages: [alloc, test, deploy, cleanup]
+# A branch push pipelines alongside the merge request's, taking the
+# allocation twice.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - when: never
 
-# LC corona CI via a single shared Flux allocation:
-#  - `allocate` creates ONE 1-node allocation and saves its Flux job id to
-#    .flux-jobid (artifact) so ALL jobs in the pipeline share it globally.
-#  - every CI job reads the id and runs its steps via `flux proxy <jobid>`.
-#  - `release-allocation` cancels it at the end (runs even on failure).
+variables:
+  # Keeps the checkout, and so the wheels built in it, on the workspace
+  # filesystem. $USER is not expanded in `variables:`; $GITLAB_USER_LOGIN is.
+  CUSTOM_CI_BUILDS_DIR: "/usr/workspace/$GITLAB_USER_LOGIN/gitlab-runner-builds"
+  CUSTOM_CI_ENV_DIR: "/usr/workspace/$GITLAB_USER_LOGIN/gitlab-runner-envs"
+
+stages: [alloc, test, publish, deploy, cleanup]
+
+# Mirrors the `code` filter in .github/workflows/ci.yml.
+.code-paths: &code-paths
+  - CMakeLists.txt
+  - CMakePresets.json
+  - pyproject.toml
+  - Makefile
+  - include/**/*
+  - src/**/*
+  - tests/**/*
+  - python/**/*
+  - cmake/**/*
+  - scripts/**/*
+  - .gitlab-ci.yml
+  - .gitlab/**/*
+
 .corona-flux:
   id_tokens:
     SITE_ID_TOKEN:
       aud: https://lc.llnl.gov/gitlab
   tags: [shell, corona]
   variables:
-    PYTHON_MODULE: python/3.13.2
-    COMPILER_MODULE: gcc/11.2.1
-    MPI_MODULE: mvapich2/2.3.7
-    SMALL_QUEUE: pdebug
-    SMALL_QUEUE_WALLTIME: 60
+    # A job variable, not a shell one: release-allocation must see it too, or
+    # the allocation leaks. Distinct per pipeline, so no state file.
+    ALLOC_NAME: "dftracer-utils-ci-$CI_PIPELINE_ID"
+    # pbatch, not pdebug: the wheel job builds seven cpython versions and the
+    # whole pipeline shares one allocation, which does not fit 60m.
+    LARGE_QUEUE: pbatch
+    LARGE_QUEUE_WALLTIME: 480
+
+.always-rules: &always-rules
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+.code-rules: &code-rules
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *code-paths
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
+      changes: *code-paths
 
 allocate:
   extends: .corona-flux
   stage: alloc
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "push"'
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  <<: *always-rules
   script:
-    # flux alloc --bg submits the allocation and BLOCKS until it is granted
-    # (no timeout — batch queues may take long), then returns leaving the
-    # instance running in the background.
-    # Unique per-job name: `flux job last` is user-global and races with
-    # other pipelines running under the same LC account.
-    - ALLOC_NAME=dftracer-utils-ci-$CI_PIPELINE_ID-$CI_JOB_ID
-    # A retried `allocate` must not leave the previous attempt running.
+    # A retry must not leave the previous attempt running.
     - for id in $(flux jobs -n --name="$ALLOC_NAME" -o "{id}" 2>/dev/null); do echo "cancelling stale allocation $id"; flux cancel "$id" || true; done
-    - flux alloc --bg -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name="$ALLOC_NAME"
+    - flux alloc --bg -N 1 -q "$LARGE_QUEUE" -t "${LARGE_QUEUE_WALLTIME}m" --job-name="$ALLOC_NAME"
     - JOBID=$(flux jobs -n --name="$ALLOC_NAME" -o "{id}" | head -1)
     - test -n "$JOBID"
-    - echo "$JOBID" > .flux-jobid
     - echo "Created Flux allocation $JOBID (shared by all CI jobs)"
-    - flux proxy "$JOBID" flux resource list
-  artifacts:
-    paths: [.flux-jobid]
 
-# One allocation; lint + test + docs build all run on it via flux proxy.
-# (Was three .corona-batch jobs: lint, test, pages' sphinx build.)
-lint-test-docs:
+format-check:
   extends: .corona-flux
   stage: test
   needs: [allocate]
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "push"'
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-  variables:
-    CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+  <<: *always-rules
   script:
-    - JOBID=$(cat .flux-jobid)
-    # flux run -N 1 executes the script ON the allocated node; the script runs
-    # everything in podman containers (same images as the GitHub Actions CI).
-    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/lint-test-docs.sh
-  artifacts:
-    paths: [public]
-
-# python-publish.yaml -> manual publish on tags. Manual-only, so it gets its
-# own Flux allocation without adding one to normal pipelines (no cibuildwheel/
-# docker on corona: builds sdist + a native wheel for the corona toolchain).
-publish-pypi:
-  extends: .corona-flux
-  stage: deploy
-  rules:
-    - if: '$CI_COMMIT_TAG'
-      when: manual
-  script:
-    # flux alloc --bg submits the allocation and BLOCKS until it is granted
-    # (no timeout — batch queues may take long), then returns leaving the
-    # instance running in the background.
-    # Unique per-job name: `flux job last` is user-global and races with
-    # other pipelines running under the same LC account.
-    - ALLOC_NAME=dftracer-utils-publish-$CI_PIPELINE_ID-$CI_JOB_ID
-    # A retried `allocate` must not leave the previous attempt running.
-    - for id in $(flux jobs -n --name="$ALLOC_NAME" -o "{id}" 2>/dev/null); do echo "cancelling stale allocation $id"; flux cancel "$id" || true; done
-    - flux alloc --bg -N 1 -q "$SMALL_QUEUE" -t "${SMALL_QUEUE_WALLTIME}m" --job-name="$ALLOC_NAME"
     - JOBID=$(flux jobs -n --name="$ALLOC_NAME" -o "{id}" | head -1)
     - test -n "$JOBID"
-    - echo "$JOBID" > .flux-jobid
-    - echo "Using Flux allocation $JOBID"
-    - flux proxy "$JOBID" flux resource list
-    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/publish-pypi.sh
-  after_script:
-    - test -s .flux-jobid && flux cancel "$(cat .flux-jobid)" || true
-  artifacts:
-    paths: [dist]
+    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/run-in-podman.sh docker.io/library/python:3.11 .gitlab/ci/format-check.sh
 
-# Publishes the artifact from lint-test-docs — shell runner, no allocation.
-pages:
+ci:
   extends: .corona-flux
-  stage: deploy
-  needs: [lint-test-docs]
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "develop"'
-    - if: '$CI_COMMIT_BRANCH == "gitlab-migration"'  # temporary: remove after merge to develop
+  stage: test
+  needs: [allocate]
+  <<: *code-rules
+  timeout: 3h
   script:
-    - echo "Publishing docs built by lint-test-docs"
+    - JOBID=$(flux jobs -n --name="$ALLOC_NAME" -o "{id}" | head -1)
+    - test -n "$JOBID"
+    # RocksDB first and alone: the five phases below would otherwise each build
+    # their own copy, five times over, in parallel.
+    # ubuntu:24.04, not 22.04: presets v6 needs CMake >= 3.25, 22.04 ships 3.22.
+    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/run-in-podman.sh docker.io/library/ubuntu:24.04 .gitlab/ci/rocksdb.sh
+    # One container per phase, run concurrently in the single allocation.
+    - bash .gitlab/ci/parallel-phases.sh test-cpp test-py valgrind-cpp valgrind-py valgrind-mpi
+
+docs:
+  extends: .corona-flux
+  stage: test
+  needs: [allocate]
+  <<: *always-rules
+  script:
+    - JOBID=$(flux jobs -n --name="$ALLOC_NAME" -o "{id}" | head -1)
+    - test -n "$JOBID"
+    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/run-in-podman.sh docker.io/library/python:3.11 .gitlab/ci/docs.sh
   artifacts:
     paths: [public]
+
+wheels:
+  extends: .corona-flux
+  stage: publish
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *code-paths
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: never
+    # No changes filter: whatever develop publishes has to be a matched set,
+    # or the docs would carry a version with no wheels behind it.
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
+  timeout: 3h
+  script:
+    - JOBID=$(flux jobs -n --name="$ALLOC_NAME" -o "{id}" | head -1)
+    - test -n "$JOBID"
+    # Not run-in-podman.sh: cibuildwheel drives podman itself.
+    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/wheels.sh
+  artifacts:
+    paths: [wheelhouse/*]
+
+# Shares dftracer's wheels directory, so one --find-links resolves both.
+distribute:
+  extends: .corona-flux
+  stage: deploy
+  needs: [docs, wheels, {job: ci, optional: true}]
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
+  script:
+    - bash .gitlab/ci/distribute.sh
 
 release-allocation:
   extends: .corona-flux
   stage: cleanup
-  # No `needs:` on purpose: a job that declares `needs` is SKIPPED when one of
-  # them fails, which leaked the allocation on every failed pipeline. Plain
-  # stage ordering + `when: always` guarantees cleanup after success, failure,
-  # cancellation and manual reruns alike.
+  # No `needs:`: a job declaring them is skipped when one fails, leaking the
+  # allocation. `when` belongs in the rules, or it is overridden by them.
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push"'
-      when: always
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: always
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: always
   script:
-    # Cancel every allocation of this pipeline (a rerun of `allocate` can leave
-    # more than one behind).
     - for id in $(flux jobs -n --name="$ALLOC_NAME" -o "{id}" 2>/dev/null); do echo "cancelling $id"; flux cancel "$id" || true; done
