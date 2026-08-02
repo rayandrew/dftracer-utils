@@ -11,7 +11,7 @@ test -n "$JOBID"
 pids=()
 for phase in "$@"; do
   (
-    flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/run-in-podman.sh \
+    flux proxy "$JOBID" flux run -N 1 --env=PHASE_COUNT="$#" bash .gitlab/ci/run-in-podman.sh \
       docker.io/library/ubuntu:24.04 ".gitlab/ci/${phase}.sh" 2>&1 |
       stdbuf -oL sed -u "s/^/[${phase}] /"
   ) &
