@@ -42,8 +42,8 @@ template <typename T>
 int runtime_backed_init(T *self, PyObject *args, PyObject *kwds) {
     static const char *kwlist[] = {"runtime", NULL};
     PyObject *runtime_arg = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|O", (char **)kwlist,
-                                     &runtime_arg)) {
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "|O", const_cast<char **>(kwlist), &runtime_arg)) {
         return -1;
     }
     if (runtime_arg && runtime_arg != Py_None) {

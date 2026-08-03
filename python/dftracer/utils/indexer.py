@@ -22,12 +22,17 @@ class AggregationConfig:
         group_keys: Extra grouping dimensions (default None).
         custom_metric_fields: Extra numeric args fields to aggregate (default None).
         compute_percentiles: Enable percentile sketch collection (default False).
+        group_by_file: Keep the file hash in the aggregation key (default True).
+            A trace touching millions of files makes that key nearly as fine as
+            the events themselves; turning it off collapses the rows and counts
+            distinct files with a sketch instead (`file_nunique`).
     """
 
     time_interval_ms: float = 5000.0
     group_keys: Optional[List[str]] = None
     custom_metric_fields: Optional[List[str]] = None
     compute_percentiles: bool = False
+    group_by_file: bool = True
 
 
 @dataclass
@@ -66,7 +71,7 @@ class Indexer:
 
     Supports tiered indexing:
     - Tier 1: Checkpoints (for random access)
-    - Tier 2: Bloom filters and manifests (for fast filtering)
+    - Tier 2: Bloom filters (for fast filtering)
     - Tier 3: Aggregation data (config-dependent)
 
     At least one of 'directory' or 'files' must be provided.
@@ -77,7 +82,8 @@ class Indexer:
         index_dir: Directory for .dftindex stores (default: next to files).
         require_checkpoint: Build checkpoint tier (default True).
         require_bloom: Build bloom filter tier (default True).
-        require_manifest: Build manifest tier (default True).
+        build_bloom: Build the bloom/stats/dimension tier (default True). Off
+            for aggregation-only consumers that never read it.
         require_aggregation: Aggregation config or True for defaults (default None).
         parallelism: Number of parallel workers (0 = all cores).
         force_rebuild: Force rebuild even if index exists.
@@ -85,7 +91,7 @@ class Indexer:
 
     Example:
         >>> indexer = Indexer("/path/to/traces")
-        >>> indexer.ensure_indexed()  # builds checkpoint, bloom, manifest
+        >>> indexer.ensure_indexed()  # builds checkpoint, bloom
 
         >>> # With explicit file list
         >>> indexer = Indexer(files=["/path/to/trace1.pfw.gz", "/path/to/trace2.pfw.gz"])
@@ -106,7 +112,7 @@ class Indexer:
         index_dir: str = "",
         require_checkpoint: bool = True,
         require_bloom: bool = True,
-        require_manifest: bool = True,
+        build_bloom: bool = True,
         require_aggregation: Optional[Union[bool, AggregationConfig]] = None,
         checkpoint_size: int = DEFAULT_CHECKPOINT_SIZE,
         parallelism: int = 0,
@@ -129,12 +135,13 @@ class Indexer:
             index_dir=index_dir,
             require_checkpoint=require_checkpoint,
             require_bloom=require_bloom,
-            require_manifest=require_manifest,
+            build_bloom=build_bloom,
             require_aggregation=agg_config is not None,
             time_interval_ms=agg_config.time_interval_ms if agg_config else 5000.0,
             group_keys=agg_config.group_keys if agg_config else None,
             custom_metric_fields=agg_config.custom_metric_fields if agg_config else None,
             compute_percentiles=agg_config.compute_percentiles if agg_config else False,
+            group_by_file=agg_config.group_by_file if agg_config else True,
             checkpoint_size=checkpoint_size,
             parallelism=parallelism,
             force_rebuild=force_rebuild,
@@ -258,123 +265,6 @@ class Indexer:
             self._file_info_cache = self._native.query_file_info()
         return self._file_info_cache
 
-    def iter_aggregation(self, type: str = "events", batch_size: int = 10000):
-        """Iterate over aggregation data as Arrow batches.
-
-        Requires that the index was built with require_aggregation=True.
-        Returns Arrow batches that can be converted to pandas or pyarrow.
-
-        Args:
-            type: Type of aggregation data - 'events', 'profiles', or 'system'
-            batch_size: Number of entries per Arrow batch (default 10000)
-
-        Yields:
-            Arrow batch capsules implementing __arrow_c_array__
-
-        Example:
-            >>> import pyarrow as pa
-            >>> indexer = Indexer("/traces", require_aggregation=True)
-            >>> indexer.ensure_indexed()
-            >>> batches = [pa.record_batch(b) for b in indexer.iter_aggregation("events")]
-            >>> table = pa.concat_tables([pa.Table.from_batches([b]) for b in batches])
-        """
-        return self._native.iter_aggregation(type, batch_size)
-
-    def iter_arrow_dfanalyzer(
-        self,
-        type: str = "events",
-        batch_size: int = 10000,
-        time_granularity: float = 1.0,
-        time_resolution: float = 1e6,
-        query: Optional[str] = None,
-    ):
-        """Iterate over aggregation data as dfanalyzer-compatible Arrow batches.
-
-        Returns Arrow batches with columns matching dfanalyzer schema:
-
-        - Events/Profiles: cat, func_name, pid, tid, file_hash, host_hash,
-          file_name, host_name, proc_name, io_cat, acc_pat, count, time, size,
-          time_min, time_max, size_min, size_max, time_range, time_start, time_end
-        - System: host_hash, time_range, ``sys_cpu_*``, ``sys_mem_*``
-
-        Hash resolution, time normalization, and computed columns (proc_name,
-        io_cat) are done in C++ for performance.
-
-        Args:
-            type: Type of aggregation data - 'events', 'profiles', or 'system'
-            batch_size: Number of entries per Arrow batch (default 10000)
-            time_granularity: Bucket width in seconds (default 1.0)
-            time_resolution: Microseconds per output time unit (default 1e6)
-            query: Optional query filter string (e.g., "pid == 1234 or pid == 5678")
-
-        Yields:
-            Arrow batch capsules implementing __arrow_c_array__
-
-        Example:
-            >>> import pyarrow as pa
-            >>> indexer = Indexer("/traces", require_aggregation=True)
-            >>> indexer.ensure_indexed()
-            >>> batches = list(indexer.iter_arrow_dfanalyzer("events"))
-            >>> table = pa.concat_tables([pa.Table.from_batches([pa.record_batch(b)]) for b in batches])
-        """
-        if query is not None:
-            return self._native.iter_arrow_dfanalyzer(
-                type, batch_size, time_granularity, time_resolution, query
-            )
-        return self._native.iter_arrow_dfanalyzer(
-            type, batch_size, time_granularity, time_resolution
-        )
-
-    def iter_arrow_dfanalyzer_all(
-        self,
-        batch_size: int = 10000,
-        time_granularity: float = 1.0,
-        time_resolution: float = 1e6,
-        query: Optional[str] = None,
-        group_by: Optional[List[str]] = None,
-    ):
-        """Iterate over all aggregation types in a single scan.
-
-        This is ~3x faster than calling iter_arrow_dfanalyzer separately for
-        events, profiles, and system because it scans the index only once.
-
-        When ``group_by`` is provided, aggregation collapses dimensions during
-        the scan and emits a reduced schema containing only the requested
-        group columns plus aggregated metrics (``count``, ``time``, ``size``,
-        ``time_sq``, ``size_sq``, ``time_min``, ``time_max``, ``size_min``,
-        ``size_max``, ``time_call_min``, ``time_call_max``, ``size_call_min``,
-        ``size_call_max``, ``time_start``, ``time_end``).
-
-        Args:
-            batch_size: Number of entries per Arrow batch (default 10000)
-            time_granularity: Bucket width in seconds (default 1.0)
-            time_resolution: Microseconds per output time unit (default 1e6)
-            query: Optional query filter string (e.g., "pid == 1234 or pid == 5678")
-            group_by: Optional list of columns to group by for coarse in-scan
-                aggregation. Supported: ``cat``, ``func_name``, ``pid``,
-                ``tid``, ``file_hash``, ``host_hash``, ``file_name``,
-                ``host_name``, ``proc_name``, ``io_cat``, ``acc_pat``,
-                ``time_range``.
-
-        Returns:
-            Dict with 'events', 'profiles', 'system' keys, each containing
-            a list of Arrow batch capsules.
-
-        Example:
-            >>> import pyarrow as pa
-            >>> indexer = Indexer("/traces", require_aggregation=True)
-            >>> indexer.ensure_indexed()
-            >>> all_batches = indexer.iter_arrow_dfanalyzer_all()
-            >>> events = [pa.record_batch(b) for b in all_batches["events"]]
-        """
-        return self._native.iter_arrow_dfanalyzer_all(
-            batch_size,
-            time_granularity,
-            time_resolution,
-            query,
-            group_by,
-        )
-
 
 def _open_readonly_indexer(files, index_path: str) -> "Indexer":
     """Open an Indexer that only reads existing index tiers (never builds).
@@ -387,7 +277,6 @@ def _open_readonly_indexer(files, index_path: str) -> "Indexer":
         index_dir=os.path.dirname(index_path) if index_path else "",
         require_checkpoint=False,
         require_bloom=False,
-        require_manifest=False,
         require_aggregation=False,
         force_rebuild=False,
     )

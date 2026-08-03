@@ -2,14 +2,16 @@
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/python/py_errors.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
+#include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
 #include <dftracer/utils/python/sst_distribution.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_config.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_key.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_visitor.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/association_tracker.h>
+#include <dftracer/utils/utilities/composites/dft/views/aggregation_fold.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/file_partition.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
@@ -76,12 +78,24 @@ namespace {
 // consumed by SstArtifactRegistry.append. Must match the field names on
 // IndexDatabaseSstWriterContext::Artifacts.
 constexpr const char *ARTIFACT_FIELDS[] = {
-    "metadata_sst",        "checkpoints_sst",         "manifest_sst",
-    "chunk_bloom_sst",     "file_bloom_sst",          "chunk_stats_sst",
-    "chunk_dim_stats_sst", "dimensions_sst",          "file_scalar_stats_sst",
-    "file_cat_counts_sst", "file_pid_tid_counts_sst", "file_name_counts_sst",
-    "name_dictionary_sst", "name_file_postings_sst",  "name_chunk_postings_sst",
-    "hash_tables_sst",     "aggregation_sst",         "system_metrics_sst",
+    "metadata_sst",
+    "members_sst",
+    "manifest_sst",
+    "chunk_bloom_sst",
+    "file_bloom_sst",
+    "chunk_stats_sst",
+    "chunk_dim_stats_sst",
+    "dimensions_sst",
+    "file_scalar_stats_sst",
+    "file_cat_counts_sst",
+    "file_pid_tid_counts_sst",
+    "file_name_counts_sst",
+    "name_dictionary_sst",
+    "name_file_postings_sst",
+    "name_chunk_postings_sst",
+    "hash_tables_sst",
+    "aggregation_sst",
+    "system_metrics_sst",
 };
 
 /// Map a slot name to the matching Artifacts member. Kept in one place so
@@ -90,7 +104,7 @@ constexpr const char *ARTIFACT_FIELDS[] = {
 std::optional<std::string> *artifacts_slot(
     IndexDatabaseSstWriterContext::Artifacts &a, std::string_view name) {
     if (name == "metadata_sst") return &a.metadata_sst;
-    if (name == "checkpoints_sst") return &a.checkpoints_sst;
+    if (name == "members_sst") return &a.members_sst;
     if (name == "manifest_sst") return &a.manifest_sst;
     if (name == "chunk_bloom_sst") return &a.chunk_bloom_sst;
     if (name == "file_bloom_sst") return &a.file_bloom_sst;
@@ -127,7 +141,7 @@ bool artifacts_from_dict(PyObject *dict,
                          field);
             return false;
         }
-        const char *s = PyUnicode_AsUTF8(val);
+        const char *s = as_utf8(val);
         if (!s) return false;
         if (s[0] == '\0') continue;
         auto *slot = artifacts_slot(*out, field);
@@ -149,7 +163,7 @@ PyObject *artifacts_to_dict(const IndexDatabaseSstWriterContext::Artifacts &a) {
         return rc == 0;
     };
     if (!set_field("metadata_sst", a.metadata_sst) ||
-        !set_field("checkpoints_sst", a.checkpoints_sst) ||
+        !set_field("members_sst", a.members_sst) ||
         !set_field("manifest_sst", a.manifest_sst) ||
         !set_field("chunk_bloom_sst", a.chunk_bloom_sst) ||
         !set_field("file_bloom_sst", a.file_bloom_sst) ||
@@ -185,7 +199,7 @@ static PyObject *SstArtifactRegistry_append(SstArtifactRegistryObject *self,
 }
 
 static PyMethodDef SstArtifactRegistry_methods[] = {
-    {"append", (PyCFunction)SstArtifactRegistry_append, METH_VARARGS,
+    {"append", DFT_PYCFUNCTION(SstArtifactRegistry_append), METH_VARARGS,
      "append(artifacts_dict) -> None\n"
      "Add a per-batch Artifacts dict (as returned by build_sst_batch or "
      "IndexDatabaseSstWriterContext.commit) to the registry."},
@@ -248,9 +262,9 @@ static PyObject *scan_files_fn(PyObject * /*self*/, PyObject *args,
     PyObject *patterns_obj = NULL;
     int recursive = 0;
     PyObject *runtime_arg = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|OpO", (char **)kwlist,
-                                     &directory, &patterns_obj, &recursive,
-                                     &runtime_arg)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|OpO",
+                                     const_cast<char **>(kwlist), &directory,
+                                     &patterns_obj, &recursive, &runtime_arg)) {
         return NULL;
     }
 
@@ -262,7 +276,7 @@ static PyObject *scan_files_fn(PyObject * /*self*/, PyObject *args,
         Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
         patterns.reserve(n);
         for (Py_ssize_t i = 0; i < n; ++i) {
-            const char *s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
+            const char *s = as_utf8(PySequence_Fast_GET_ITEM(seq, i));
             if (!s) {
                 Py_DECREF(seq);
                 return NULL;
@@ -397,14 +411,15 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
                                    "batch_id",
                                    "index_dir",
                                    "checkpoint_size",
-                                   "build_manifest",
                                    "force_rebuild",
+                                   "build_bloom",
                                    "bloom_dimensions",
                                    "parallelism",
                                    "flush_every_files",
                                    "runtime",
                                    "aggregation_config",
                                    "file_slices",
+                                   "progress",
                                    NULL};
     PyObject *files_obj;
     PyObject *file_ids_obj;
@@ -413,21 +428,22 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
     const char *index_dir = "";
     Py_ssize_t checkpoint_size = static_cast<Py_ssize_t>(
         dftracer::utils::constants::indexer::DEFAULT_CHECKPOINT_SIZE);
-    int build_manifest = 0;
     int force_rebuild = 0;
+    int build_bloom = 1;
     PyObject *bloom_dims_obj = NULL;
     Py_ssize_t parallelism = 0;
     Py_ssize_t flush_every_files = 0;
     PyObject *runtime_arg = NULL;
     PyObject *aggregation_config_obj = NULL;
     PyObject *file_slices_obj = NULL;
+    PyObject *progress_obj = NULL;
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "OOss|snppOnnOOO", (char **)kwlist, &files_obj,
-            &file_ids_obj, &staging_dir, &batch_id, &index_dir,
-            &checkpoint_size, &build_manifest, &force_rebuild, &bloom_dims_obj,
+            args, kwds, "OOss|snppOnnOOOO", const_cast<char **>(kwlist),
+            &files_obj, &file_ids_obj, &staging_dir, &batch_id, &index_dir,
+            &checkpoint_size, &force_rebuild, &build_bloom, &bloom_dims_obj,
             &parallelism, &flush_every_files, &runtime_arg,
-            &aggregation_config_obj, &file_slices_obj)) {
+            &aggregation_config_obj, &file_slices_obj, &progress_obj)) {
         return NULL;
     }
 
@@ -439,7 +455,7 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
         Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
         files.reserve(n);
         for (Py_ssize_t i = 0; i < n; ++i) {
-            const char *s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
+            const char *s = as_utf8(PySequence_Fast_GET_ITEM(seq, i));
             if (!s) {
                 Py_DECREF(seq);
                 return NULL;
@@ -486,7 +502,7 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
         Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
         bloom_dims.reserve(n);
         for (Py_ssize_t i = 0; i < n; ++i) {
-            const char *s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
+            const char *s = as_utf8(PySequence_Fast_GET_ITEM(seq, i));
             if (!s) {
                 Py_DECREF(seq);
                 return NULL;
@@ -574,8 +590,7 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
             Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
             out.reserve(n);
             for (Py_ssize_t i = 0; i < n; ++i) {
-                const char *s =
-                    PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
+                const char *s = as_utf8(PySequence_Fast_GET_ITEM(seq, i));
                 if (s) out.emplace_back(s);
             }
             Py_DECREF(seq);
@@ -611,11 +626,11 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
             if (entry == Py_None) {
                 continue;  // leave slice default-constructed (members=null)
             }
-            Py_ssize_t mb = 0, me = 0, ckpt_base = 0;
+            Py_ssize_t mb = 0, me = 0;
             int skip_scoped = 0;
             PyObject *members_obj = nullptr;
-            if (!PyArg_ParseTuple(entry, "nnnpO", &mb, &me, &ckpt_base,
-                                  &skip_scoped, &members_obj)) {
+            if (!PyArg_ParseTuple(entry, "nnpO", &mb, &me, &skip_scoped,
+                                  &members_obj)) {
                 Py_DECREF(seq);
                 return NULL;
             }
@@ -643,8 +658,6 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
             parsed_slices[i].members = &mv;
             parsed_slices[i].member_begin = static_cast<std::size_t>(mb);
             parsed_slices[i].member_end = static_cast<std::size_t>(me);
-            parsed_slices[i].checkpoint_idx_base =
-                static_cast<std::uint64_t>(ckpt_base);
             parsed_slices[i].skip_file_scoped_writes = skip_scoped != 0;
         }
         Py_DECREF(seq);
@@ -657,8 +670,8 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
         batch_config->file_slices = parsed_slices;
     }
     batch_config->index_dir = index_dir;
+    batch_config->build_bloom = build_bloom != 0;
     batch_config->checkpoint_size = static_cast<std::size_t>(checkpoint_size);
-    batch_config->build_manifest = build_manifest != 0;
     batch_config->force_rebuild = force_rebuild != 0;
     batch_config->bloom_dimensions = std::move(bloom_dims);
     batch_config->parallelism =
@@ -668,28 +681,44 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
         static_cast<std::size_t>(flush_every_files);
     batch_config->rebuild_root_summaries = false;
 
+    // The build runs with the GIL released; re-acquire it per call. The
+    // GIL-holding deleter drops the ref safely after the build.
+    if (progress_obj && progress_obj != Py_None) {
+        Py_INCREF(progress_obj);
+        std::shared_ptr<PyObject> cb(progress_obj, [](PyObject *p) {
+            PyGILState_STATE g = PyGILState_Ensure();
+            Py_DECREF(p);
+            PyGILState_Release(g);
+        });
+        batch_config->progress = [cb](std::size_t done, std::size_t total) {
+            PyGILState_STATE g = PyGILState_Ensure();
+            PyObject *r = PyObject_CallFunction(cb.get(), "nn",
+                                                static_cast<Py_ssize_t>(done),
+                                                static_cast<Py_ssize_t>(total));
+            if (r) {
+                Py_DECREF(r);
+            } else {
+                // A failing progress callback must not abort the build.
+                PyErr_Clear();
+            }
+            PyGILState_Release(g);
+        };
+    }
+
     if (agg_config_ptr) {
-        auto agg_staging = staging;
-        auto agg_prefix = batch + "_agg";
-        // Counter keeps per-file SST dirs unique across duplicate file_paths
-        // when one worker owns multiple slices of the same file.
-        auto visitor_counter = std::make_shared<std::atomic<std::size_t>>(0);
-        batch_config->dft_visitor_factory =
-            [agg_staging, agg_prefix, agg_config_ptr,
-             visitor_counter](const std::string &file_path)
-            -> std::vector<std::unique_ptr<
-                dftracer::utils::utilities::composites::dft::DftEventVisitor>> {
-            using dftracer::utils::utilities::composites::dft::DftEventVisitor;
-            using dftracer::utils::utilities::composites::dft::aggregators::
-                AggregationVisitor;
-            const std::size_t idx =
-                visitor_counter->fetch_add(1, std::memory_order_relaxed);
-            std::string prefix = agg_prefix + "_" + std::to_string(idx);
-            std::vector<std::unique_ptr<DftEventVisitor>> visitors;
-            visitors.push_back(std::make_unique<AggregationVisitor>(
-                agg_staging, prefix, /*config_hash=*/0, *agg_config_ptr,
-                file_path));
-            return visitors;
+        auto agg_intern = dftracer::utils::utilities::composites::dft::
+            aggregators::intern_for_index(index_dir);
+        // The fold writes aggregation SSTs through the batch build's own SST
+        // sink (routed to aggregation.sst / system_metrics.sst), so they land
+        // in `artifacts->list` with bloom/dict - no separate per-file sink.
+        batch_config->agg_fold_factory =
+            [agg_config_ptr,
+             agg_intern](dftracer::utils::StringIntern &build_intern)
+            -> std::unique_ptr<dftracer::utils::utilities::composites::dft::
+                                   views::detail::AggregationFold> {
+            return std::make_unique<dftracer::utils::utilities::composites::
+                                        dft::views::detail::AggregationFold>(
+                build_intern, agg_intern, *agg_config_ptr, /*config_hash=*/0);
         };
     }
 
@@ -756,46 +785,17 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
             Py_DECREF(main_dict);
         }
     }
-    // Harvest per-file aggregation SSTs from extra visitors. Each visitor
-    // holds a vector of Artifacts (one per FLUSH_THRESHOLD flush + the
-    // file-complete flush) because SstFileWriter requires strictly
-    // ascending keys per SST and cross-flush merge operands would collide.
-    //
-    // `extra_visitors` is indexed per input file, but a single
-    // AggregationVisitor instance is typically shared across every file in
-    // the batch (one flush at end-of-batch). Without dedup we would emit
-    // that visitor's artifact dict N_files times, producing a manifest with
-    // N copies of the same SST path. Dedup by visitor pointer so each
-    // unique flush-sequence is emitted exactly once.
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        AggregationVisitor;
+    // The fold wrote its aggregation SSTs through the batch build's sink, so
+    // they are already in `artifacts->list` above (no separate per-visitor
+    // harvest). Combine the per-file trackers the folds produced out-of-band.
     using dftracer::utils::utilities::composites::dft::aggregators::
         AssociationTracker;
-    std::unordered_set<AggregationVisitor *> seen_visitors;
-    for (auto &file_visitors : result.extra_visitors) {
-        for (auto &visitor : file_visitors) {
-            auto *agg = dynamic_cast<AggregationVisitor *>(visitor.get());
-            if (!agg) continue;
-            if (!seen_visitors.insert(agg).second) continue;
-            for (auto &a : agg->aggregation_artifacts()) {
-                if (a.empty()) continue;
-                PyObject *agg_dict = artifacts_to_dict(a);
-                if (!agg_dict || PyList_Append(out_list, agg_dict) < 0) {
-                    Py_XDECREF(agg_dict);
-                    Py_DECREF(out_list);
-                    return NULL;
-                }
-                Py_DECREF(agg_dict);
-            }
-        }
-    }
-
     AssociationTracker combined;
     bool any_tracker = false;
-    for (auto *agg : seen_visitors) {
-        auto out = agg->take_output();
-        if (out.local_tracker) {
-            combined.merge(*out.local_tracker);
+    for (auto &ao : result.agg_outputs) {
+        if (ao.tracker) {
+            ao.tracker->finalize();
+            combined.merge(*ao.tracker);
             any_tracker = true;
         }
     }
@@ -821,8 +821,7 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
 static PyObject *enable_aggregation_deterministic_ids_fn(PyObject * /*self*/,
                                                          PyObject * /*args*/) {
     dftracer::utils::utilities::composites::dft::aggregators::
-        aggregation_intern()
-            .enable_deterministic_ids();
+        enable_deterministic_intern_ids();
     Py_RETURN_NONE;
 }
 
@@ -831,8 +830,8 @@ static PyObject *move_artifacts_fn(PyObject * /*self*/, PyObject *args,
     static const char *kwlist[] = {"artifacts", "dest_dir", NULL};
     PyObject *dict = NULL;
     const char *dest_dir = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "Os", (char **)kwlist, &dict,
-                                     &dest_dir)) {
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "Os", const_cast<char **>(kwlist), &dict, &dest_dir)) {
         return NULL;
     }
     IndexDatabaseSstWriterContext::Artifacts a;
@@ -865,8 +864,9 @@ static PyObject *enumerate_gzip_members_fn(PyObject * /*self*/, PyObject *args,
     static const char *kwlist[] = {"files", "runtime", NULL};
     PyObject *files_obj = NULL;
     PyObject *runtime_arg = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O", (char **)kwlist,
-                                     &files_obj, &runtime_arg)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O",
+                                     const_cast<char **>(kwlist), &files_obj,
+                                     &runtime_arg)) {
         return NULL;
     }
 
@@ -877,7 +877,7 @@ static PyObject *enumerate_gzip_members_fn(PyObject * /*self*/, PyObject *args,
         Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
         files.reserve(n);
         for (Py_ssize_t i = 0; i < n; ++i) {
-            const char *s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
+            const char *s = as_utf8(PySequence_Fast_GET_ITEM(seq, i));
             if (!s) {
                 Py_DECREF(seq);
                 return NULL;
@@ -967,7 +967,7 @@ static PyObject *enumerate_gzip_members_fn(PyObject * /*self*/, PyObject *args,
     return out_list;
 }
 
-// Mirrors build_work_units + lpt_assign_units in dftracer_aggregator_mpi.cpp
+// LPT (longest-processing-time) work assignment for balanced SST distribution.
 // so the Dask backend produces identical work distribution to MPI.
 static PyObject *plan_work_units_fn(PyObject * /*self*/, PyObject *args,
                                     PyObject *kwds) {
@@ -976,8 +976,9 @@ static PyObject *plan_work_units_fn(PyObject * /*self*/, PyObject *args,
     PyObject *map_obj = NULL;
     Py_ssize_t num_workers = 0;
     unsigned long long target_c_size = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "On|K", (char **)kwlist,
-                                     &map_obj, &num_workers, &target_c_size)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "On|K",
+                                     const_cast<char **>(kwlist), &map_obj,
+                                     &num_workers, &target_c_size)) {
         return NULL;
     }
     if (num_workers <= 0) num_workers = 1;
@@ -1110,7 +1111,7 @@ static PyObject *plan_work_units_fn(PyObject * /*self*/, PyObject *args,
 // ---------------------------------------------------------------------------
 
 static PyMethodDef SstDistributionMethods[] = {
-    {"build_sst_batch", (PyCFunction)build_sst_batch_fn,
+    {"build_sst_batch", DFT_PYCFUNCTION(build_sst_batch_fn),
      METH_VARARGS | METH_KEYWORDS,
      "build_sst_batch(files, file_ids, staging_dir, batch_id, ...) "
      "-> (list[dict], bytes)\n"
@@ -1118,37 +1119,37 @@ static PyMethodDef SstDistributionMethods[] = {
      "(artifact_dicts, tracker_blob). The tracker blob is the serialized "
      "merged AssociationTracker from this batch's aggregation visitors "
      "(empty bytes when no aggregation_config was passed)."},
-    {"plan_lpt_partition", (PyCFunction)plan_lpt_partition_fn, METH_VARARGS,
+    {"plan_lpt_partition", DFT_PYCFUNCTION(plan_lpt_partition_fn), METH_VARARGS,
      "plan_lpt_partition(entries, num_workers) -> list[list[(path, size)]]\n"
      "Greedy Longest-Processing-Time-first bin-packing of (path, size) "
      "tuples across num_workers buckets. Minimises the maximum per-worker "
      "total size."},
-    {"scan_files", (PyCFunction)scan_files_fn, METH_VARARGS | METH_KEYWORDS,
+    {"scan_files", DFT_PYCFUNCTION(scan_files_fn), METH_VARARGS | METH_KEYWORDS,
      "scan_files(directory, patterns=None, recursive=False, runtime=None) "
      "-> list[(path, size)]\n"
      "Parallel directory scan returning (path, size) tuples for regular "
      "files matching the patterns."},
     {"enable_aggregation_deterministic_ids",
-     (PyCFunction)enable_aggregation_deterministic_ids_fn, METH_NOARGS,
+     DFT_PYCFUNCTION(enable_aggregation_deterministic_ids_fn), METH_NOARGS,
      "enable_aggregation_deterministic_ids() -> None\n"
      "Flip the global aggregation StringIntern into deterministic-id mode "
      "so the same string maps to the same 32-bit id in every worker "
      "process. Call once at worker startup BEFORE any aggregation work."},
-    {"move_artifacts", (PyCFunction)move_artifacts_fn,
+    {"move_artifacts", DFT_PYCFUNCTION(move_artifacts_fn),
      METH_VARARGS | METH_KEYWORDS,
      "move_artifacts(artifacts, dest_dir) -> dict\n"
      "Move every populated SST in `artifacts` (as returned by "
      "`build_sst_batch`) into `dest_dir` via the C++ rename/copy helper, "
      "returning a fresh dict with the new paths. Single GIL release, no "
      "per-file Python shutil.move overhead."},
-    {"enumerate_gzip_members", (PyCFunction)enumerate_gzip_members_fn,
+    {"enumerate_gzip_members", DFT_PYCFUNCTION(enumerate_gzip_members_fn),
      METH_VARARGS | METH_KEYWORDS,
      "enumerate_gzip_members(files, runtime=None) -> list[list[(c_offset, "
      "c_size)]]\n"
      "Cooperative async scan of gzip member offsets across `files`. "
      "Returns lists of (c_offset, c_size) parallel to `files`; empty for "
      "non-gzip / unreadable files."},
-    {"plan_work_units", (PyCFunction)plan_work_units_fn,
+    {"plan_work_units", DFT_PYCFUNCTION(plan_work_units_fn),
      METH_VARARGS | METH_KEYWORDS,
      "plan_work_units(member_map, num_workers, target_c_size=0) "
      "-> list[list[(file_idx, member_begin, member_end, c_size)]]\n"

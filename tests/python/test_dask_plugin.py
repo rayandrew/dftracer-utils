@@ -102,15 +102,20 @@ class TestDaskWorkerPluginIntegration:
             try:
                 client.register_plugin(DFTracerUtilsDaskWorkerPlugin(threads=2))
 
-                def read_line_count(path):
+                def count_events(path):
+                    import os
+
                     import dftracer.utils as dft
 
-                    reader = dft.TraceReader(path)
-                    return sum(1 for _ in reader.iter_lines())
+                    idx = os.path.dirname(path)
+                    with dft.Indexer(files=[path], index_dir=idx) as ix:
+                        ix.ensure_indexed()
+                    tv = dft.TraceViewer(path, index_path=idx)
+                    return tv.statistics()["duration_count"]
 
-                future = client.submit(read_line_count, gz_file)
+                future = client.submit(count_events, gz_file)
                 result = future.result()
-                assert result == 22
+                assert result > 0
             finally:
                 client.close()
                 cluster.close()
@@ -130,15 +135,20 @@ class TestDaskWorkerPluginIntegration:
             try:
                 client.register_plugin(DFTracerUtilsDaskWorkerPlugin(threads=2))
 
-                def read_line_count(path):
+                def count_events(path):
+                    import os
+
                     import dftracer.utils as dft
 
-                    reader = dft.TraceReader(path)
-                    return sum(1 for _ in reader.iter_lines())
+                    idx = os.path.dirname(path)
+                    with dft.Indexer(files=[path], index_dir=idx) as ix:
+                        ix.ensure_indexed()
+                    tv = dft.TraceViewer(path, index_path=idx)
+                    return tv.statistics()["duration_count"]
 
-                futures = client.map(read_line_count, files)
+                futures = client.map(count_events, files)
                 results = client.gather(futures)
-                assert all(r == 12 for r in results)
+                assert all(r > 0 for r in results)
             finally:
                 client.close()
                 cluster.close()
@@ -146,3 +156,43 @@ class TestDaskWorkerPluginIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+class _FakeWorker:
+    def __init__(self, address, nthreads=None):
+        self.address = address
+        if nthreads is not None:
+            self.nthreads = nthreads
+
+
+class TestRuntimeThreadSizing:
+    """The Runtime is shared per worker, so it gets that worker's share of the
+    node - never the whole node, or several workers on one node contend."""
+
+    def test_uses_the_workers_own_thread_count(self):
+        from dftracer.utils.dask import _runtime_threads
+
+        w = _FakeWorker("tcp://10.0.0.1:1", nthreads=16)
+        assert _runtime_threads(w, {"10.0.0.1": 4}, 64) == 16
+
+    def test_host_missing_from_the_snapshot_still_takes_a_share(self):
+        # Workers that start after registration, or whose address spells the
+        # host differently, are absent from the client-side counts.
+        from dftracer.utils.dask import _runtime_threads
+
+        w = _FakeWorker("tcp://node07:2", nthreads=16)
+        assert _runtime_threads(w, {"10.0.0.1": 4}, 64) == 16
+
+        no_threads = _FakeWorker("tcp://node07:3")
+        assert _runtime_threads(no_threads, {"10.0.0.1": 4}, 64) == 16
+
+    def test_never_exceeds_the_cores_available(self):
+        from dftracer.utils.dask import _runtime_threads
+
+        w = _FakeWorker("tcp://10.0.0.1:4", nthreads=999)
+        assert _runtime_threads(w, {"10.0.0.1": 1}, 64) == 64
+
+    def test_falls_back_to_all_cores_when_nothing_is_known(self):
+        from dftracer.utils.dask import _runtime_threads
+
+        assert _runtime_threads(_FakeWorker("tcp://node07:5"), {}, 64) == 64

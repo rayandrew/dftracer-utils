@@ -9,7 +9,8 @@ from __future__ import annotations
 import glob
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypedDict
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,12 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from .arrow import decode_dictionary_columns, ipc_to_table
-from .dask import distributed_index, register_auto_thread_plugin, resolve_local_staging
+from .dask import (
+    DaskAggregatedTraceViewer,
+    distributed_index,
+    register_auto_thread_plugin,
+    resolve_local_staging,
+)
 from .indexer import AggregationConfig, _open_readonly_indexer
 
 try:
@@ -26,59 +32,411 @@ except ImportError:
     get_client = None  # ty: ignore[invalid-assignment]
 
 __all__ = [
-    "batches_to_ipc",
+    "DFAnalyzerAggregatedTraceViewer",
+    "HLMConfig",
+    "build_read_frames",
     "build_final_meta",
     "build_index_distributed",
     "build_partial_meta",
+    "count_index_files",
     "coerce_arrow_numerics_to_pandas_native",
-    "coerce_profile_dtypes",
-    "distributed_hlm",
     "ensure_index",
+    "typed_group_keys",
     "finalize_view_partials",
     "index_path_for",
-    "ipc_to_pandas",
-    "make_empty_hlm",
     "normalize_arrow_dtypes",
     "partial_arrow_view_groupby",
     "resolve_trace_inputs",
-    "scan_to_ipc",
-    "worker_hlm_partial",
+    "view_typed_frames",
 ]
 
-_TRACE_SUFFIXES = (".pfw", ".pfw.gz")
+_TRACE_SUFFIXES = (".pfw.gz",)
 
 
-def ipc_to_pandas(ipc_bytes: bytes):
+def _capsule_to_pandas(table):
+    """Arrow table/capsule to pandas; empty DataFrame when None."""
+    return pa.table(table).to_pandas() if table is not None else pd.DataFrame()
+
+
+def _ipc_to_pandas(ipc_bytes: bytes):
     """Decode Arrow IPC bytes to pandas, casting dictionary columns to string."""
     return decode_dictionary_columns(ipc_to_table(ipc_bytes)).to_pandas()
 
 
-def batches_to_ipc(batches_by_type: Dict[str, Any]) -> Dict[str, Optional[bytes]]:
-    """Convert {type: [capsule, ...]} from the C extension into {type: IPC bytes}."""
-    result: Dict[str, Optional[bytes]] = {}
-    for data_type in ("events", "profiles", "system"):
-        batches = [pa.record_batch(b) for b in batches_by_type.get(data_type, [])]
-        if batches:
-            sink = pa.BufferOutputStream()
-            writer = pa.ipc.new_stream(sink, batches[0].schema)
-            for batch in batches:
-                writer.write_batch(batch)
-            writer.close()
-            result[data_type] = sink.getvalue().to_pybytes()
-        else:
-            result[data_type] = None
-    return result
+# View group_by + agg that produces every dfanalyzer metric column below.
+_VIEW_METRIC_AGGS = (
+    "count",
+    "sum:dur",
+    "sum:size",
+    "sumsq:dur",
+    "sumsq:size",
+    "min:dur",
+    "max:dur",
+    "min:size",
+    "max:size",
+    "min:ts",
+    "max:te",  # te = ts + dur, so max:te is the group's end time
+)
 
 
-def scan_to_ipc(files, index_path, time_granularity, time_resolution, query):
-    """Dask worker task: full-scan the aggregation CF for `files`, return IPC bytes."""
-    indexer = _open_readonly_indexer(files, index_path)
-    all_batches = indexer.iter_arrow_dfanalyzer_all(
-        time_granularity=time_granularity,
-        time_resolution=time_resolution,
-        query=query,
+# Full-grain group_by for the typed read: the dims the HLM groups/derives on.
+# Resolved file_name/host_name (not raw hashes) since the HLM uses names for the
+# POSIX-category rules and proc_name.
+# file_path (full resolved path), not file_name (basename): dfanalyzer's
+# file_name column is the full path and its POSIX cat rules match path
+# substrings like "/data".
+_TYPED_GROUP_KEYS = (
+    "cat",
+    "name",
+    "pid",
+    "tid",
+    "fhash",
+    "hhash",
+    "file_path",
+    "host_name",
+    "io_cat",
+)
+_FILE_GROUP_KEYS = ("fhash", "file_path")
+_TYPED_AGGS = _VIEW_METRIC_AGGS + ("min:offset", "max:offset")
+
+
+def typed_group_keys(file_buckets: Tuple[str, ...] = ()) -> Tuple[str, ...]:
+    """Group keys for the typed read.
+
+    With no `file_buckets` this is the per-file grain. Given substrings,
+    `file_path` folds to whichever one it contains (and the redundant `fhash`
+    key drops out), which collapses per-file rows while leaving the caller's
+    file-name substring rules matchable on the folded row.
+    """
+    if not file_buckets:
+        return _TYPED_GROUP_KEYS
+    args = ", ".join("'%s'" % b.replace("'", "") for b in file_buckets)
+    return tuple(
+        "bucket(file_path, %s)" % args if k == "file_path" else k
+        for k in _TYPED_GROUP_KEYS
+        if k != "fhash"
     )
-    return batches_to_ipc(all_batches)
+
+
+class TypedFrames(TypedDict):
+    """The three dfanalyzer frames from one collect_typed() pass."""
+
+    events: pd.DataFrame
+    profiles: pd.DataFrame
+    system: pd.DataFrame
+
+
+def _typed_event_frame(
+    df: pd.DataFrame,
+    time_resolution: float,
+    time_origin: int = 0,
+    bucket_us: int = 0,
+    is_profile: bool = False,
+) -> pd.DataFrame:
+    """Map one collect_typed table (regular or aggregated) to the dfanalyzer
+    event/profile schema, scaling durations by `time_resolution`.
+
+    Time columns are made origin-relative to match the C++ scan: time_range is
+    the bucket index (time_bucket - origin)//bucket_us; events keep their precise
+    (ts-origin, te-origin) span, while profile rows align to the bucket grid
+    (start = bucket - origin, end = start + bucket_us)."""
+    if "count" not in df.columns:  # no aggregation tier / empty result
+        return pd.DataFrame()
+    out = pd.DataFrame(index=df.index)
+    out["cat"] = df["cat"].str.lower() if "cat" in df else pd.Series("", index=df.index)
+    out["func_name"] = df["name"] if "name" in df else pd.NA
+    for c in ("pid", "tid", "io_cat"):
+        if c in df.columns:
+            out[c] = pd.to_numeric(df[c]).astype("int64")
+    # Keep empty strings (not NA) for unresolved names, matching the C++ scan;
+    # downstream string ops (posix category, proc_name split) are not NA-safe.
+    # dfanalyzer's file_name is the full path (grouped as file_path).
+    # file_name/file_hash are emitted even when folded away: dfanalyzer's dask
+    # meta declares them, and a missing column is a metadata mismatch.
+    if "file_path" in df.columns:
+        out["file_name"] = df["file_path"].astype("string").fillna("")
+    else:
+        out["file_name"] = pd.Series("", index=df.index, dtype="string")
+    if "host_name" in df.columns:
+        out["host_name"] = df["host_name"].astype("string").fillna("")
+    if "fhash" in df.columns:
+        out["file_hash"] = df["fhash"].astype("string")
+    else:
+        out["file_hash"] = pd.Series("", index=df.index, dtype="string")
+    if "hhash" in df.columns:
+        out["host_hash"] = df["hhash"].astype("string")
+    if {"pid", "tid"}.issubset(df.columns):
+        host = df["host_name"].astype("string") if "host_name" in df.columns else pd.NA
+        if "hhash" in df.columns:
+            host = host.mask(host.isna() | (host == ""), df["hhash"].astype("string"))
+        host = host.fillna("unknown").replace("", "unknown")
+        out["proc_name"] = "app#" + host + "#" + df["pid"].astype(str) + "#" + df["tid"].astype(str)
+    # epoch/step (or any aggregated extra key) ride through as-is.
+    for c in df.columns:
+        if c.startswith("arg_"):
+            out[c[len("arg_") :]] = df[c]
+    tr = float(time_resolution)
+    out["count"] = df["count"].astype("int64")
+    out["time"] = df["sum_dur"] / tr
+    out["size"] = df["sum_size"].astype("int64")
+    out["time_sq"] = df["sumsq_dur"] / (tr * tr)
+    # float64: sum-of-squared-sizes overflows int53 for large transfers, which
+    # breaks the checkpoint parquet round-trip (and it is a float metric).
+    out["size_sq"] = df["sumsq_size"].astype("float64")
+    out["time_min"] = df["min_dur"] / tr
+    out["time_max"] = df["max_dur"] / tr
+    out["size_min"] = df["min_size"].astype("int64")
+    out["size_max"] = df["max_size"].astype("int64")
+    # Folded-shape per-call columns the distributed HLM combines (min/max across
+    # keys) instead of deriving; the derive path seeds them from the group total.
+    out["time_call_min"] = out["time"]
+    out["time_call_max"] = out["time"]
+    out["size_call_min"] = out["size"]
+    out["size_call_max"] = out["size"]
+    if "min_offset" in df.columns:
+        out["offset_min"] = df["min_offset"].astype("int64")
+        out["offset_max"] = df["max_offset"].astype("int64")
+    out["acc_pat"] = 0  # constant placeholder, matching the C++ scan
+    out["file_nunique"] = 0  # declared by the scan meta; unused downstream
+    origin = int(time_origin)
+    if "time_bucket" in df.columns:
+        bucket = pd.to_numeric(df["time_bucket"]).astype("int64")
+        out["time_bucket"] = bucket
+        out["time_range"] = ((bucket - origin) // bucket_us) if bucket_us else 0
+        if is_profile:
+            start = bucket - origin
+            out["time_start"] = start.astype("int64")
+            out["time_end"] = (start + int(bucket_us)).astype("int64")
+        else:
+            out["time_start"] = (df["min_ts"].astype("int64") - origin).astype("int64")
+            out["time_end"] = (df["max_te"].astype("int64") - origin).astype("int64")
+    else:
+        out["time_range"] = 0
+        out["time_start"] = (df["min_ts"].astype("int64") - origin).astype("int64")
+        out["time_end"] = (df["max_te"].astype("int64") - origin).astype("int64")
+    return out
+
+
+def view_typed_frames(
+    files: List[str],
+    index_path: str,
+    time_granularity: float = 1.0,
+    time_resolution: float = 1e6,
+    query: Optional[str] = None,
+    client: Optional[Any] = None,
+    group_keys: Optional[Tuple[str, ...]] = None,
+) -> TypedFrames:
+    """One-pass read of the aggregation index's three record families, each
+    mapped to the dfanalyzer frame schema.
+
+    Returns ``{"events", "profiles", "system"}`` of pandas DataFrames (events
+    and profiles share the event schema; profiles additionally carry their
+    extra-key dims; system carries one column per metric). Bucketed at
+    ``time_granularity * time_resolution`` us. A Dask `client` delegates the read
+    to DaskTraceViewer.collect_typed (shard-range fan-out across workers); the
+    distribution lives there, not here.
+
+    `group_keys` defaults to the per-file grain; pass `typed_group_keys(...)`
+    to coarsen it. Coarsening is one-way, so a caller that needs per-file rows
+    must not fold them away.
+    """
+    bucket_us = int(time_granularity * time_resolution)
+    keys = group_keys or _TYPED_GROUP_KEYS
+    if client is None:
+        from dftracer.utils import TraceViewer
+
+        tv: Any = TraceViewer(files, index_path=index_path or None)
+    else:
+        from .dask import DaskTraceViewer
+
+        tv = DaskTraceViewer(files, index_path or "", client=client)
+    if query:
+        tv = tv.filter(query)
+    typed = tv.group_by(*keys).time_bucket(bucket_us).agg(*_TYPED_AGGS).collect_typed()
+
+    reg_pd, agg_pd = _capsule_to_pandas(typed["regular"]), _capsule_to_pandas(typed["aggregated"])
+    # origin = global min time_bucket over events+profiles, matching the C++
+    # scan's query_time_bounds().min_time_bucket (computed after any distributed
+    # concat, so it is global regardless of shard fan-out).
+    buckets = [
+        f["time_bucket"].min()
+        for f in (reg_pd, agg_pd)
+        if "time_bucket" in f.columns and not f.empty
+    ]
+    origin = int(min(buckets)) if buckets else 0
+
+    return {
+        "events": _typed_event_frame(reg_pd, time_resolution, origin, bucket_us, is_profile=False),
+        "profiles": _typed_event_frame(agg_pd, time_resolution, origin, bucket_us, is_profile=True),
+        "system": _capsule_to_pandas(typed["counters"]),
+    }
+
+
+def _drop_ignored_files(
+    df: "pd.DataFrame", ignored_file_patterns: Tuple[str, ...] = ()
+) -> "pd.DataFrame":
+    """Drop rows whose `file_name` contains one of `ignored_file_patterns`.
+
+    Pass the patterns as bucket() arguments ahead of any other bucket, so a
+    file that matches one folds to the pattern itself and stays matchable here.
+    """
+    if df.empty or not ignored_file_patterns or "file_name" not in df.columns:
+        return df
+    pattern = "|".join(ignored_file_patterns)
+    return df[~df["file_name"].fillna("").str.contains(pattern, regex=True, na=False)]
+
+
+def _frame_to_ipc(df: "pd.DataFrame") -> Optional[bytes]:
+    """Serialize one pandas frame to Arrow IPC-stream bytes (None if empty)."""
+    if df is None or getattr(df, "empty", True):
+        return None
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    sink = pa.BufferOutputStream()
+    writer = pa.ipc.new_stream(sink, table.schema)
+    writer.write_table(table)
+    writer.close()
+    return sink.getvalue().to_pybytes()
+
+
+def _typed_read_to_ipc(
+    files: List[str],
+    index_path: str,
+    time_granularity: float,
+    time_resolution: float,
+    query: Optional[str] = None,
+    shard_begin: int = 0,
+    shard_end: int = 0,
+    group_keys: Optional[Tuple[str, ...]] = None,
+    drop_file_patterns: Tuple[str, ...] = (),
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> Dict[str, Optional[bytes]]:
+    """One-pass typed read of the aggregation index mapped to the dfanalyzer
+    {events, profiles, system} frames, as Arrow IPC bytes.
+
+    Time is absolute (origin 0); build_read_frames derives the global origin and
+    rebuckets time_range. This one body backs both
+    the single-node budget scan and the per-worker distributed task,
+    so the two read paths never diverge. `shard_end <= 0` reads all shards.
+    """
+    from dftracer.utils import TraceViewer
+
+    bucket_us = int(time_granularity * time_resolution)
+    tv: Any = TraceViewer(files, index_path=index_path or None)
+    if query:
+        tv = tv.filter(query)
+    kw: Dict[str, Any] = {"shard_begin": shard_begin, "shard_end": shard_end}
+    if progress is not None:
+        kw["progress"] = progress
+    typed = (
+        tv.group_by(*(group_keys or _TYPED_GROUP_KEYS))
+        .time_bucket(bucket_us)
+        .agg(*_TYPED_AGGS)
+        .collect_typed(**kw)
+    )
+
+    events = _typed_event_frame(
+        _capsule_to_pandas(typed["regular"]), time_resolution, 0, bucket_us, False
+    )
+    if drop_file_patterns:
+        events = _drop_ignored_files(events, drop_file_patterns)
+    frames = {
+        "events": events,
+        "profiles": _typed_event_frame(
+            _capsule_to_pandas(typed["aggregated"]), time_resolution, 0, bucket_us, True
+        ),
+        "system": _capsule_to_pandas(typed["counters"]),
+    }
+    return {k: _frame_to_ipc(v) for k, v in frames.items()}
+
+
+class ReadFrames(TypedDict):
+    """Decoded read-path frames: traces (always present), profiles/system (or
+    None), and the origins the caller needs to build a ReadTraceResult."""
+
+    traces: "pd.DataFrame"
+    profiles: Optional["pd.DataFrame"]
+    system: Optional["pd.DataFrame"]
+    time_origin: Optional[int]
+    system_time_origin: Optional[int]
+
+
+def build_read_frames(
+    results: List[Dict[str, Optional[bytes]]],
+    profile_output_columns: Dict[str, str],
+    time_granularity: float,
+    time_resolution: float,
+    profile_time_granularity: float,
+) -> ReadFrames:
+    """Decode per-shard ``{events, profiles, system}`` IPC (from the View typed
+    read) into the dfanalyzer pandas frames.
+
+    The View emits absolute time; the returned frames are relativized to the
+    global minimum ``time_bucket`` (``time_origin``), matching the old scan and
+    keeping values small for the checkpoint parquet round-trip. ``traces`` is a
+    typed-empty frame when there are no events, so downstream arithmetic works.
+    """
+    results = [r for r in results if r]
+
+    def _decode(key: str) -> List["pd.DataFrame"]:
+        out = []
+        for r in results:
+            b = r.get(key) if isinstance(r, dict) else None
+            if b is not None:
+                df = _ipc_to_pandas(b)
+                if not df.empty:
+                    out.append(df)
+        return out
+
+    ev, prof = _decode("events"), _decode("profiles")
+    events_pd = pd.concat(ev, ignore_index=True) if ev else None
+    raw_prof = pd.concat(prof, ignore_index=True) if prof else None
+
+    buckets = [
+        int(f["time_bucket"].min())
+        for f in (events_pd, raw_prof)
+        if f is not None and "time_bucket" in f.columns and not f.empty
+    ]
+    origin = min(buckets) if buckets else None
+    bucket_us = int(time_granularity * time_resolution)
+
+    def _relativize(f: "pd.DataFrame") -> None:
+        if origin is None:
+            return
+        f["time_start"] = f["time_start"].astype("int64") - origin
+        f["time_end"] = f["time_end"].astype("int64") - origin
+        if bucket_us and "time_bucket" in f.columns:
+            f["time_range"] = ((f["time_bucket"].astype("int64") - origin) // bucket_us).astype(
+                "int64"
+            )
+
+    if events_pd is not None:
+        _relativize(events_pd)
+        traces = events_pd
+    else:
+        traces = pd.DataFrame({c: pd.Series(dtype=dt) for c, dt in profile_output_columns.items()})
+
+    profiles: Optional["pd.DataFrame"] = None
+    if raw_prof is not None:
+        _relativize(raw_prof)
+        window = int(profile_time_granularity * time_resolution)
+        raw_prof = raw_prof.drop(columns=["time_end"], errors="ignore")
+        profiles = _coerce_profile_dtypes(raw_prof, profile_output_columns, profile_window=window)
+
+    sys = _decode("system")
+    system_pd: Optional["pd.DataFrame"] = None
+    sys_origin: Optional[int] = None
+    if sys:
+        system_pd = pd.concat(sys, ignore_index=True)
+        system_pd["ts"] = system_pd["time_bucket"].astype("int64")
+        sys_origin = int(system_pd["ts"].min())
+
+    return {
+        "traces": traces,
+        "profiles": profiles,
+        "system": system_pd,
+        "time_origin": origin,
+        "system_time_origin": sys_origin,
+    }
 
 
 def resolve_trace_inputs(
@@ -87,9 +445,9 @@ def resolve_trace_inputs(
 ) -> Tuple[str, Optional[List[str]]]:
     """Resolve a trace path into (directory, files) for the Indexer.
 
-    If trace_path is a directory containing manifest.json (dftracer_organize
-    output) and trace_groups is set, glob only the subdirs for the requested
-    groups. Otherwise return (directory, None) or ("", files).
+    If trace_path is a directory containing manifest.json and trace_groups is
+    set, glob only the subdirs for the requested groups. Otherwise return
+    (directory, None) or ("", files).
     """
     if not os.path.isdir(trace_path):
         matched = glob.glob(trace_path) if "*" in trace_path else [trace_path]
@@ -101,7 +459,7 @@ def resolve_trace_inputs(
         if trace_groups:
             raise FileNotFoundError(
                 f"trace_groups={trace_groups} requested but no manifest.json at "
-                f"{manifest_path}. Run dftracer_organize to produce it, or unset "
+                f"{manifest_path}. Provide a manifest.json, or unset "
                 "trace_groups."
             )
         return trace_path, None
@@ -121,233 +479,31 @@ def resolve_trace_inputs(
     files: List[str] = []
     for g in selected:
         subdir = os.path.join(trace_path, group_map[g])
-        files.extend(glob.glob(os.path.join(subdir, "*.pfw.gz")))
-        files.extend(glob.glob(os.path.join(subdir, "*.pfw")))
+        for suffix in _TRACE_SUFFIXES:
+            files.extend(glob.glob(os.path.join(subdir, "*" + suffix)))
     return "", files
 
 
-def make_empty_hlm(hlm_groupby, hlm_agg, bin_cols, int_index_cols, float_metric_cols):
-    """Empty DataFrame matching the HLM meta schema.
-
-    `int_index_cols` are groupby columns typed as Int64 (others are string);
-    `float_metric_cols` are metric columns typed as Float64 (others Int64).
-    """
-    bin_set = set(bin_cols)
-    int_index_cols = set(int_index_cols)
-    float_metric_cols = set(float_metric_cols)
-    data_cols = {}
-    for col in hlm_agg:
-        if col in hlm_groupby or col in bin_set:
-            continue
-        dtype = "Float64" if col in float_metric_cols else "Int64"
-        data_cols[col] = pd.Series(dtype=dtype)
-    meta = pd.DataFrame(data_cols)
-    idx_arrays = []
-    for col in hlm_groupby:
-        dtype = "Int64" if col in int_index_cols else "string"
-        idx_arrays.append(pd.array([], dtype=dtype))
-    if idx_arrays:
-        meta.index = pd.MultiIndex.from_arrays(idx_arrays, names=list(hlm_groupby))
-    return meta
-
-
-def _augment_posix_cat(table, rules):
-    """Encode file purpose/filesystem into ``cat`` before the HLM group-by.
-
-    ``rules`` is an ordered list of ``(file_path_substring, cat_suffix)``: a
-    POSIX/STDIO row whose ``file_name`` contains the substring gets the suffix
-    appended to ``cat`` (e.g. ``/data`` -> ``_reader`` => ``posix_reader``),
-    applied cumulatively in order. This mirrors the analyzer's
-    ``_fix_file_posix_category``; the caller supplies the (preset-specific)
-    rules so this helper stays generic.
-
-    The distributed HLM aggregates straight from the IPC table, bypassing the
-    trace-view path that applies this, so without it the ``reader_posix`` /
-    ``checkpoint_posix`` layer filters (``cat.str.contains("_reader")``) match
-    nothing and POSIX collapses into a single ``POSIX - All`` layer.
-    """
-    if not rules:
-        return table
-    names = table.column_names
-    if "cat" not in names or "file_name" not in names:
-        return table
-    cat = table.column("cat")
-    if not (pa.types.is_string(cat.type) or pa.types.is_large_string(cat.type)):
-        return table
-    if pa.types.is_large_string(cat.type):
-        cat = pc.cast(cat, pa.string())
-    fn = table.column("file_name")
-    if pa.types.is_large_string(fn.type):
-        fn = pc.cast(fn, pa.string())
-    # base condition is fixed on the original cat (matches the pandas version)
-    base = pc.and_(pc.match_substring_regex(cat, "posix|stdio"), pc.is_valid(fn))  # ty: ignore[unresolved-attribute]
-    fn = pc.if_else(pc.is_valid(fn), fn, pa.scalar("", pa.string()))  # ty: ignore[unresolved-attribute]
-    empty = pa.scalar("", pa.string())
-    for substr, suffix in rules:
-        mask = pc.and_(base, pc.match_substring(fn, substr))  # ty: ignore[unresolved-attribute]
-        joined = pc.binary_join_element_wise(cat, pa.scalar(suffix, pa.string()), empty)  # ty: ignore[unresolved-attribute]
-        cat = pc.if_else(mask, joined, cat)  # ty: ignore[unresolved-attribute]
-    return table.set_column(table.schema.get_field_index("cat"), "cat", cat)
-
-
-def _apply_hlm_filters(table, ignored_file_patterns, ignored_func_names, ignored_func_patterns):
-    """Drop rows the analyzer's ``postread_trace`` would filter out.
-
-    The distributed HLM reads raw IPC and bypasses ``postread_trace``, so
-    without this it counts ignored functions/files (e.g. ``Reader.next``,
-    ``DataLoader.__init__``) that the trace-view path excludes, inflating the
-    per-layer counts/times. ``ignored_func_names`` is an exact match;
-    ``ignored_func_patterns`` and ``ignored_file_patterns`` are regex
-    alternations (matched as substrings, like pandas ``str.contains``).
-    """
-    names = table.column_names
-    if ignored_file_patterns and "file_name" in names:
-        fn = table.column("file_name")
-        if pa.types.is_large_string(fn.type):
-            fn = pc.cast(fn, pa.string())
-        # Kleene OR so a null file_name (is_null=True) is kept even though the
-        # regex match on null is null — matches pandas `isna() | ~contains`.
-        not_ignored = pc.invert(pc.match_substring_regex(fn, "|".join(ignored_file_patterns)))  # ty: ignore[unresolved-attribute]
-        keep = pc.or_kleene(pc.is_null(fn), not_ignored)  # ty: ignore[unresolved-attribute]
-        table = table.filter(keep)
-    if "func_name" in names and (ignored_func_names or ignored_func_patterns):
-        func = table.column("func_name")
-        if pa.types.is_large_string(func.type):
-            func = pc.cast(func, pa.string())
-        drop = None
-        if ignored_func_names:
-            drop = pc.is_in(func, value_set=pa.array(list(ignored_func_names), pa.string()))  # ty: ignore[unresolved-attribute]
-        if ignored_func_patterns:
-            pat = pc.match_substring_regex(func, "|".join(ignored_func_patterns))  # ty: ignore[unresolved-attribute]
-            drop = pat if drop is None else pc.or_(drop, pat)  # ty: ignore[unresolved-attribute]
-        if drop is not None:
-            table = table.filter(pc.invert(pc.fill_null(drop, False)))  # ty: ignore[unresolved-attribute]
-    return table
-
-
-def _rebucket_time_range(table, time_origin, bucket_width_us):
-    """Re-bucket ``time_range`` relative to the trace's first event.
-
-    The C++ aggregation buckets on absolute time (``floor(ts / interval)``); the
-    legacy per-event path bucketed relative to the global minimum timestamp. The
-    unoverlapped-time/overlap metrics are summed per time bucket, so the boundary
-    alignment must match the legacy origin to reproduce its values (the shift is
-    tiny for short events but grows for events spanning multiple buckets).
-    """
-    if time_origin is None or not bucket_width_us:
-        return table
-    names = table.column_names
-    if "time_range" not in names or "time_start" not in names:
-        return table
-    ts = pc.cast(table.column("time_start"), pa.int64())
-    rel = pc.subtract(ts, pa.scalar(int(time_origin), pa.int64()))  # ty: ignore[unresolved-attribute]
-    # integer division == floor for rel >= 0 (origin is the global min ts)
-    tr = pc.divide(rel, pa.scalar(int(bucket_width_us), pa.int64()))  # ty: ignore[unresolved-attribute]
-    return table.set_column(
-        table.schema.get_field_index("time_range"), "time_range", pc.cast(tr, pa.int64())
-    )
-
-
-def worker_hlm_partial(
-    ipc_result,
-    data_type,
-    hlm_groupby,
-    hlm_agg,
-    bin_cols,
-    int_index_cols,
-    float_metric_cols,
-    postread_config=None,
-):
-    """Per-worker partial HLM from already-resident IPC bytes.
-
-    Workers own disjoint PID sets and proc_name is always in hlm_groupby, so
-    per-worker partials have disjoint keys and need no cross-worker merge.
-    """
-    empty = lambda: make_empty_hlm(  # noqa: E731
-        hlm_groupby, hlm_agg, bin_cols, int_index_cols, float_metric_cols
-    )
-
-    ipc_bytes = ipc_result[data_type] if isinstance(ipc_result, dict) else None
-    if ipc_bytes is None:
-        return empty()
-    table = ipc_to_table(ipc_bytes)
-    if table.num_rows == 0:
-        return empty()
-
-    table = decode_dictionary_columns(table)
-
-    # Apply the analyzer's postread_trace transformations that the distributed
-    # HLM would otherwise skip: drop ignored functions/files, then encode file
-    # purpose/filesystem into `cat` for the POSIX sub-layer filters.
-    if postread_config:
-        table = _apply_hlm_filters(
-            table,
-            postread_config.get("ignored_file_patterns"),
-            postread_config.get("ignored_func_names"),
-            postread_config.get("ignored_func_patterns"),
-        )
-        table = _augment_posix_cat(table, postread_config.get("posix_cat_rules"))
-        table = _rebucket_time_range(
-            table, postread_config.get("time_origin"), postread_config.get("bucket_width_us")
-        )
-        if table.num_rows == 0:
-            return empty()
-
-    time_col = table.column("time")
-    size_col = table.column("size")
-    table = table.append_column("time_sq", pc.multiply(time_col, time_col))  # ty: ignore[unresolved-attribute]
-    size_filled = pc.if_else(pc.is_null(size_col), pa.scalar(0, pa.int64()), size_col)  # ty: ignore[unresolved-attribute]
-    table = table.append_column("size_sq", pc.multiply(size_filled, size_filled))  # ty: ignore[unresolved-attribute]
-    table = table.append_column("time_call_min", time_col)
-    table = table.append_column("time_call_max", time_col)
-    table = table.append_column("size_call_min", size_col)
-    table = table.append_column("size_call_max", size_col)
-
-    available_groupby = [c for c in hlm_groupby if c in table.column_names]
-    if not available_groupby:
-        return empty()
-
-    agg_specs = []
-    for col, agg_fn in hlm_agg.items():
-        if col in table.column_names and agg_fn in ("sum", "min", "max"):
-            agg_specs.append((col, agg_fn))
-
-    result = table.group_by(available_groupby).aggregate(agg_specs)
-
-    rename = {f"{col}_{agg_fn}": col for col, agg_fn in agg_specs}
-    result = result.rename_columns([rename.get(c, c) for c in result.column_names])
-
-    cat_idx = result.schema.get_field_index("cat")
-    if cat_idx >= 0:
-        cat_col = result.column(cat_idx)
-        if pa.types.is_string(cat_col.type) or pa.types.is_large_string(cat_col.type):
-            result = result.set_column(cat_idx, "cat", pc.utf8_lower(cat_col))  # ty: ignore[unresolved-attribute]
-
-    groupby_set = set(available_groupby)
-    for i, field in enumerate(result.schema):
-        if field.name in groupby_set:
-            continue
-        t_ = field.type
-        if pa.types.is_integer(t_) or pa.types.is_floating(t_):
-            col = result.column(i)
-            zero = pa.scalar(0 if pa.types.is_integer(t_) else 0.0, t_)
-            null = pa.scalar(None, t_)
-            result = result.set_column(i, field.name, pc.if_else(pc.equal(col, zero), null, col))  # ty: ignore[unresolved-attribute]
-
-    # Materialize to pandas with native nullable dtypes. ArrowDtype numeric
-    # columns trip a pandas masked-arithmetic bug in downstream metrics.py.
-    pdf = result.to_pandas(types_mapper=pd.ArrowDtype)
-    for c in pdf.columns:
-        if c in available_groupby:
-            continue
-        dt = pdf[c].dtype
-        if isinstance(dt, pd.ArrowDtype):
-            pa_type = dt.pyarrow_dtype
-            if pa.types.is_floating(pa_type):
-                pdf[c] = pdf[c].astype("Float64")
-            elif pa.types.is_integer(pa_type):
-                pdf[c] = pdf[c].astype("Int64")
-    return pdf.set_index(available_groupby)
+def _partial_agg_columns(full_cols, sum_cols, min_cols, max_cols, set_cols_items, dtype_of):
+    """Metric column -> dtype map for a partial view aggregation, in the exact
+    order Arrow's group_by+aggregate emits. `dtype_of(col)` resolves a metric
+    column's dtype from the caller's source (a live frame or the dask meta)."""
+    cols = {}
+    for c in full_cols:
+        cols[f"{c}_sum"] = dtype_of(c)
+        cols[f"{c}_count"] = pd.ArrowDtype(pa.int64())
+        cols[f"{c}_min"] = dtype_of(c)
+        cols[f"{c}_max"] = dtype_of(c)
+        cols[f"{c}_sumsq"] = pd.ArrowDtype(pa.float64())
+    for c in sum_cols:
+        cols[f"{c}_sum"] = dtype_of(c)
+    for c in min_cols:
+        cols[f"{c}_min"] = dtype_of(c)
+    for c in max_cols:
+        cols[f"{c}_max"] = dtype_of(c)
+    for c, _ in set_cols_items:
+        cols[f"{c}_unique"] = "object"
+    return cols
 
 
 def partial_arrow_view_groupby(
@@ -377,22 +533,10 @@ def partial_arrow_view_groupby(
                 return work[col].dtype
             return default
 
-        empty_cols = {}
-        for c in full_cols:
-            empty_cols[f"{c}_sum"] = pd.Series(dtype=_col_dtype(c))
-            empty_cols[f"{c}_count"] = pd.Series(dtype=pd.ArrowDtype(pa.int64()))
-            empty_cols[f"{c}_min"] = pd.Series(dtype=_col_dtype(c))
-            empty_cols[f"{c}_max"] = pd.Series(dtype=_col_dtype(c))
-            empty_cols[f"{c}_sumsq"] = pd.Series(dtype=pd.ArrowDtype(pa.float64()))
-        for c in sum_cols:
-            empty_cols[f"{c}_sum"] = pd.Series(dtype=_col_dtype(c))
-        for c in min_cols:
-            empty_cols[f"{c}_min"] = pd.Series(dtype=_col_dtype(c))
-        for c in max_cols:
-            empty_cols[f"{c}_max"] = pd.Series(dtype=_col_dtype(c))
-        for c, _ in set_cols_items:
-            empty_cols[f"{c}_unique"] = pd.Series(dtype="object")
-        out = pd.DataFrame(empty_cols)
+        cols = _partial_agg_columns(
+            full_cols, sum_cols, min_cols, max_cols, set_cols_items, _col_dtype
+        )
+        out = pd.DataFrame({name: pd.Series(dtype=dt) for name, dt in cols.items()})
         out.index = pd.Index(
             [],
             name=view_type,
@@ -495,23 +639,7 @@ def build_partial_meta(records, view_type, full_cols, sum_cols, min_cols, max_co
             return in_meta.index.get_level_values(col).dtype
         return default
 
-    # Column order must exactly match what Arrow's group_by+aggregate emits.
-    cols = {}
-    for c in full_cols:
-        cols[f"{c}_sum"] = _dtype_of(c)
-        cols[f"{c}_count"] = pd.ArrowDtype(pa.int64())
-        cols[f"{c}_min"] = _dtype_of(c)
-        cols[f"{c}_max"] = _dtype_of(c)
-        cols[f"{c}_sumsq"] = pd.ArrowDtype(pa.float64())
-    for c in sum_cols:
-        cols[f"{c}_sum"] = _dtype_of(c)
-    for c in min_cols:
-        cols[f"{c}_min"] = _dtype_of(c)
-    for c in max_cols:
-        cols[f"{c}_max"] = _dtype_of(c)
-    for c, _ in set_cols_items:
-        cols[f"{c}_unique"] = "object"
-
+    cols = _partial_agg_columns(full_cols, sum_cols, min_cols, max_cols, set_cols_items, _dtype_of)
     meta = pd.DataFrame({name: pd.Series(dtype=dt) for name, dt in cols.items()})
     idx_dtype = _dtype_of(view_type, default=pd.ArrowDtype(pa.int64()))
     meta.index = pd.Index([], name=view_type, dtype=idx_dtype)
@@ -540,6 +668,23 @@ def normalize_arrow_dtypes(df):
     for col in df.select_dtypes(include=["category"]).columns:
         df[col] = df[col].astype("object")
     return df
+
+
+def count_index_files(
+    files: List[str], index_path: str, ignored_patterns: Tuple[str, ...] = ()
+) -> int:
+    """Distinct data files in the index, skipping paths containing any of
+    `ignored_patterns`.
+
+    Counts from the index's hash table rather than the read, so it stays exact
+    when the read is folded to a grain with no per-file rows. Callers that
+    filter files out of the analysis must pass the same patterns here, or the
+    count reports files the analysis never used.
+    """
+    table = _open_readonly_indexer(files, index_path).get_hash_table("file")
+    if not ignored_patterns:
+        return len(table)
+    return sum(1 for name in table.values() if not any(p in name for p in ignored_patterns))
 
 
 def index_path_for(trace_path: str) -> str:
@@ -572,7 +717,7 @@ def coerce_arrow_numerics_to_pandas_native(df):
     return df
 
 
-def coerce_profile_dtypes(df, output_columns, profile_window=None):
+def _coerce_profile_dtypes(df, output_columns, profile_window=None):
     """Normalize C++ aggregator profile output to the `output_columns` schema.
 
     `output_columns` maps column name -> pandas dtype. When `profile_window` is
@@ -588,6 +733,11 @@ def coerce_profile_dtypes(df, output_columns, profile_window=None):
             df[col] = df[col].astype("string").replace("", pd.NA)
         else:
             df[col] = df[col].astype(dtype)
+    # A profile with no transfer size aggregates to 0; dfanalyzer treats absent
+    # size as NA (a 0 would skew bandwidth), matching the old scan's null.
+    for col in ("size", "size_min", "size_max"):
+        if col in df.columns:
+            df[col] = df[col].replace(0, pd.NA)
     if profile_window is not None:
         df["time_end"] = df["time_start"] + int(profile_window)
     return df
@@ -601,6 +751,7 @@ def build_index_distributed(
     shared_staging="",
     client=None,
     aggregation=None,
+    progress: Optional[Callable[[int, int, str], None]] = None,
 ):
     """Build the dftracer index across a Dask cluster.
 
@@ -610,6 +761,9 @@ def build_index_distributed(
 
     If `client` is None the active Dask client is looked up; if none exists
     (or `dask.distributed` is not installed), tasks run inline serially.
+
+    `progress`, if given, is called with (files_done, total_files) as the
+    parse fans out across workers.
     """
     if client is None and get_client is not None:
         try:
@@ -626,15 +780,28 @@ def build_index_distributed(
         shared_staging=shared_staging,
         client=client,
         aggregation_config=aggregation,
+        progress=progress,
     )
 
 
-def ensure_index(trace_path, trace_groups, time_interval_ms, client=None):
+def ensure_index(
+    trace_path,
+    trace_groups,
+    time_interval_ms,
+    client=None,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+    group_by_file: bool = True,
+):
     """Build (or refresh) the dftracer index for `trace_path` via Dask.
 
     Idempotent: dftracer-utils skips files whose tiers already exist, so repeat
     calls on the same path are cheap no-ops. With no active Dask client (or no
     `dask.distributed`), the build runs inline serially.
+
+    `group_by_file=False` keeps the file hash out of the aggregation key, which
+    is far smaller on traces touching many files but makes per-file queries
+    impossible without re-reading the trace. It is part of the index identity,
+    so changing it invalidates an existing aggregation.
     """
     if client is None and get_client is not None:
         try:
@@ -655,99 +822,254 @@ def ensure_index(trace_path, trace_groups, time_interval_ms, client=None):
         local_staging=local_staging,
         shared_staging=os.path.dirname(index_path),
         client=client,
-        aggregation=AggregationConfig(time_interval_ms=time_interval_ms),
+        aggregation=AggregationConfig(
+            time_interval_ms=time_interval_ms, group_by_file=group_by_file
+        ),
+        progress=progress,
     )
 
 
-def _worker_min_time_start(ipc_result):
-    """Minimum events ``time_start`` in one worker's IPC result (or None)."""
-    b = ipc_result.get("events") if isinstance(ipc_result, dict) else None
-    if b is None:
-        return None
-    table = ipc_to_table(b)
-    if table.num_rows == 0 or "time_start" not in table.column_names:
-        return None
-    return pc.min(table.column("time_start")).as_py()  # ty: ignore[unresolved-attribute]
+# Columns the in-scan fold can produce, so a caller can only ask for what the
+# scan knows how to group on.
+_SCAN_GROUP_COLUMNS = frozenset(
+    {
+        "cat",
+        "func_name",
+        "pid",
+        "tid",
+        "file_hash",
+        "host_hash",
+        "file_name",
+        "host_name",
+        "proc_name",
+        "io_cat",
+        "acc_pat",
+        "time_range",
+    }
+)
 
 
-def distributed_time_origin(event_futures, dask_client):
-    """Global minimum event ``time_start`` across all per-worker IPC futures.
+# dfanalyzer view_type / HLM dim -> View group-key token. proc_name is composed
+# post-agg; file_name is dfanalyzer's full path, so file_path.
+_HLM_DIM_TO_KEY = {
+    "file_name": "file_path",
+    "host_name": "host_name",
+    "cat": "cat",
+    "func_name": "name",
+    "io_cat": "io_cat",
+    "pid": "pid",
+    "tid": "tid",
+}
+_HLM_METRIC_AGGS = ("count", "sum:dur", "sum:size", "sumsq:dur", "sumsq:size")
 
-    The legacy path bucketed ``time_range`` relative to the first event, so the
-    distributed HLM uses this as the origin for ``_rebucket_time_range`` (the
-    C++ aggregation buckets on absolute time). Returns None when there are no
-    events or no client.
+
+@dataclass(frozen=True)
+class HLMConfig:
+    """The dfanalyzer HLM domain rules, supplied by the analyzer preset."""
+
+    posix_cat_rules: Tuple[Tuple[str, str], ...] = ()
+    ignored_file_patterns: Tuple[str, ...] = ()
+    ignored_func_names: Tuple[str, ...] = ()
+    ignored_func_patterns: Tuple[str, ...] = ()
+    time_granularity: float = 1.0
+    time_resolution: float = 1e6
+
+    def ignored_func_predicate(self) -> Optional[str]:
+        clauses: List[str] = []
+        if self.ignored_func_names:
+            names = ", ".join(f'"{n.replace(chr(34), "")}"' for n in self.ignored_func_names)
+            clauses.append(f"name not in [{names}]")
+        if self.ignored_func_patterns:
+            pat = "|".join(self.ignored_func_patterns).replace('"', "")
+            clauses.append(f'name !~ "{pat}"')
+        return " and ".join(clauses) if clauses else None
+
+
+class DFAnalyzerAggregatedTraceViewer(DaskAggregatedTraceViewer):
+    """The dfanalyzer HLM expressed as one View aggregation.
+
+    A DaskAggregatedTraceViewer subclass holding the HLM domain rules (ignored
+    funcs/files, posix cat-suffix), so the read+aggregate is one View chain.
     """
-    if not event_futures or dask_client is None:
-        return None
-    mins = dask_client.gather(
-        [dask_client.submit(_worker_min_time_start, f, pure=False) for f in event_futures]
-    )
-    mins = [m for m in mins if m is not None]
-    return min(mins) if mins else None
 
-
-def distributed_hlm(
-    data_type,
-    view_types,
-    traces,
-    worker_ipc_futures,
-    worker_scan_args,
-    dask_client,
-    hlm_agg_base,
-    hlm_extra_cols,
-    int_index_cols,
-    float_metric_cols,
-    postread_config=None,
-):
-    """Distributed high-level-metrics aggregation over per-worker IPC bytes.
-
-    Submits one `worker_hlm_partial` task per worker, pinned to the worker that
-    already holds the IPC bytes, and assembles a Dask DataFrame. Returns None
-    when no worker IPC futures exist.
-    """
-    import dask
-    import dask.dataframe as dd
-
-    if not worker_ipc_futures:
-        return None
-
-    hlm_groupby = list(dict.fromkeys(list(view_types) + list(hlm_extra_cols)))
-    bin_cols = [col for col in traces.columns if "_bin_" in col]
-
-    hlm_agg = dict(hlm_agg_base)
-    hlm_agg.update({col: "sum" for col in bin_cols})
-    hlm_agg["time_sq"] = "sum"
-    hlm_agg["size_sq"] = "sum"
-    hlm_agg["time_call_min"] = "min"
-    hlm_agg["time_call_max"] = "max"
-    hlm_agg["size_call_min"] = "min"
-    hlm_agg["size_call_max"] = "max"
-
-    worker_addrs = [a for (a, _, _) in (worker_scan_args or [])]
-    if len(worker_addrs) < len(worker_ipc_futures):
-        worker_addrs += [None] * (len(worker_ipc_futures) - len(worker_addrs))
-
-    partial_futures = []
-    for addr, ipc_future in zip(worker_addrs, worker_ipc_futures):
-        fut = dask_client.submit(
-            worker_hlm_partial,
-            ipc_future,
-            data_type,
-            list(hlm_groupby),
-            dict(hlm_agg),
-            list(bin_cols),
-            int_index_cols,
-            float_metric_cols,
-            postread_config,
-            workers=[addr] if addr else None,
-            pure=False,
+    def __init__(
+        self,
+        files,
+        index_dir: str = "",
+        *,
+        client=None,
+        files_per_task: int = 1,
+        _plan=None,
+        hlm_config: Optional[HLMConfig] = None,
+    ):
+        super().__init__(
+            files, index_dir, client=client, files_per_task=files_per_task, _plan=_plan
         )
-        partial_futures.append(fut)
+        self._hlm_config = hlm_config or HLMConfig()
 
-    meta = make_empty_hlm(hlm_groupby, hlm_agg, bin_cols, int_index_cols, float_metric_cols)
-    parts = dask_client.gather(partial_futures)
-    parts = [p for p in parts if p is not None and not getattr(p, "empty", False)]
-    if not parts:
-        parts = [meta]
-    return dd.from_delayed([dask.delayed(p) for p in parts], meta=meta)
+    # Both clone paths thread hlm_config: the base _agg_clone hardcodes
+    # DaskAggregatedTraceViewer, so group_by()/agg() would otherwise drop it.
+    def _clone(self, plan):
+        return type(self)(
+            self._files,
+            self._index_dir,
+            client=self._client,
+            files_per_task=self._files_per_task,
+            _plan=plan,
+            hlm_config=self._hlm_config,
+        )
+
+    def _agg_clone(self, plan):
+        return type(self)(
+            self._files,
+            self._index_dir,
+            client=self._client,
+            files_per_task=self._files_per_task,
+            _plan=plan,
+            hlm_config=self._hlm_config,
+        )
+
+    def hlm(self, view_types: Sequence[str]) -> "pd.DataFrame":
+        df, vts = self._hlm_frame(view_types, "regular")
+        return self._to_hlm(df, vts)
+
+    def profile_hlm(self, view_types: Sequence[str]) -> "pd.DataFrame":
+        df, vts = self._hlm_frame(view_types, "aggregated")
+        return self._to_hlm(df, vts)
+
+    def _hlm_frame(self, view_types, family):
+        cfg = self._hlm_config
+        vts = list(view_types)
+        temporal = "time_range" in vts
+        bucket_us = int(cfg.time_granularity * cfg.time_resolution)
+
+        keys = [_HLM_DIM_TO_KEY[v] for v in vts if v in _HLM_DIM_TO_KEY]
+        if "proc_name" in vts:
+            keys += ["pid", "tid", "host_name", "hhash"]
+        keys += ["cat", "io_cat", "name"]
+        has_path = "file_path" in keys
+        if not has_path:
+            # Ignore patterns first so an ignored file folds to its pattern (dropped
+            # below); cat rules follow so a kept file folds to its suffix substring.
+            subs = list(cfg.ignored_file_patterns) + [p for p, _ in cfg.posix_cat_rules]
+            if subs:
+                args = ", ".join(f"'{s.replace(chr(39), '')}'" for s in subs)
+                keys.append(f"bucket(file_path, {args})")
+
+        aggs: List[str] = list(_HLM_METRIC_AGGS)
+        if temporal:
+            aggs.append("min:ts")
+
+        v = self.phase("events") if family == "regular" else self
+        pred = cfg.ignored_func_predicate()
+        if pred:
+            v = v.filter(pred)
+        agg_view = v.group_by(*keys)
+        if temporal:
+            agg_view = agg_view.time_bucket(bucket_us)
+        if family == "regular":
+            tbl = agg_view.agg(*aggs).collect()
+        else:
+            tbl = agg_view.agg(*aggs).collect_typed().get(family)
+
+        df = _capsule_to_pandas(tbl)
+        # File-ignore is post-agg: file_path is null to a scan-time predicate
+        # (resolved only after aggregation). An ignored file folds to its own
+        # pattern, so this drop works whether file_path is the full path or a fold.
+        if cfg.ignored_file_patterns and not df.empty and "file_path" in df.columns:
+            pat = "|".join(cfg.ignored_file_patterns)
+            keep = ~df["file_path"].fillna("").astype("string").str.contains(
+                pat, regex=True, na=False
+            )
+            df = df[keep]
+        return df, vts
+
+    _METRIC_COLS = (
+        "time",
+        "count",
+        "size",
+        "time_sq",
+        "size_sq",
+        "time_call_min",
+        "time_call_max",
+        "size_call_min",
+        "size_call_max",
+    )
+    _INT_COLS = frozenset({"count", "size", "size_call_min", "size_call_max"})
+
+    def _to_hlm(self, df, vts) -> "pd.DataFrame":
+        cfg = self._hlm_config
+        idx_names = list(vts) + ["cat", "io_cat", "acc_pat", "func_name"]
+        if df.empty or "count" not in df.columns:
+            empty = pd.DataFrame(
+                {
+                    c: pd.Series(dtype="Int64" if c in self._INT_COLS else "Float64")
+                    for c in self._METRIC_COLS
+                }
+            )
+            empty.index = pd.MultiIndex.from_arrays([[]] * len(idx_names), names=idx_names)
+            return empty
+        tr = float(cfg.time_resolution)
+        out = pd.DataFrame(index=df.index)
+
+        for v in vts:
+            if v == "proc_name":
+                out[v] = self._compose_proc_name(df)
+            elif v == "time_range":
+                # time_range is the bucket index of min:ts relative to the global minimum.
+                bucket_us = int(cfg.time_granularity * cfg.time_resolution)
+                min_ts = df["min_ts"].astype("int64")
+                out[v] = ((min_ts - min_ts.min()) // bucket_us).astype("int64")
+            else:
+                out[v] = df[_HLM_DIM_TO_KEY[v]]
+
+        path = (
+            df["file_path"]
+            if "file_path" in df.columns
+            else pd.Series([""] * len(df), index=df.index)
+        )
+        out["cat"] = self._apply_cat_suffix(df["cat"].astype("string"), path.astype("string"))
+        out["io_cat"] = df["io_cat"].astype("int64")
+        out["func_name"] = df["name"]
+        out["acc_pat"] = 0
+
+        # 0 -> NA (a 0-size open must not skew bandwidth); nullable Int64/Float64.
+        # The _call_min/max columns seed from the group total, not per-event extremes.
+        metrics = pd.DataFrame(index=df.index)
+        metrics["time"] = df["sum_dur"] / tr
+        metrics["count"] = df["count"]
+        metrics["size"] = df["sum_size"]
+        metrics["time_sq"] = df["sumsq_dur"] / (tr * tr)
+        metrics["size_sq"] = df["sumsq_size"]
+        metrics["time_call_min"] = metrics["time"]
+        metrics["time_call_max"] = metrics["time"]
+        metrics["size_call_min"] = metrics["size"]
+        metrics["size_call_max"] = metrics["size"]
+        metrics = metrics.replace(0, pd.NA)
+        for c in metrics.columns:
+            metrics[c] = metrics[c].astype("Int64" if c in self._INT_COLS else "Float64")
+            out[c] = metrics[c]
+
+        return out.set_index(idx_names)
+
+    @staticmethod
+    def _compose_proc_name(df: "pd.DataFrame") -> "pd.Series":
+        if "host_name" in df.columns:
+            host = df["host_name"].astype("string")
+        else:
+            host = pd.Series(pd.NA, index=df.index, dtype="string")
+        if "hhash" in df.columns:
+            host = host.mask(host.isna() | (host == ""), df["hhash"].astype("string"))
+        host = host.fillna("unknown").replace("", "unknown")
+        return "app#" + host + "#" + df["pid"].astype(str) + "#" + df["tid"].astype(str)
+
+    def _apply_cat_suffix(self, cat: "pd.Series", path: "pd.Series") -> "pd.Series":
+        rules = self._hlm_config.posix_cat_rules
+        if not rules:
+            return cat
+        base = cat.str.contains("posix|stdio", na=False) & path.notna()
+        out = cat.copy()
+        p = path.fillna("")
+        for sub, suffix in rules:
+            out = out.mask(base & p.str.contains(sub, regex=False, na=False), out + suffix)
+        return out

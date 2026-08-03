@@ -1,6 +1,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <dftracer/utils/python/py_errors.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/task_handle.h>
@@ -88,13 +89,13 @@ static PyObject *TaskHandle_get_task_id(TaskHandleObject *self, void *) {
 }
 
 static PyMethodDef TaskHandle_methods[] = {
-    {"get", (PyCFunction)TaskHandle_get, METH_NOARGS,
+    {"get", DFT_PYCFUNCTION(TaskHandle_get), METH_NOARGS,
      "Block until task completes and return result.\n"
      "Raises RuntimeError if the task failed."},
-    {"wait", (PyCFunction)TaskHandle_wait, METH_NOARGS,
+    {"wait", DFT_PYCFUNCTION(TaskHandle_wait), METH_NOARGS,
      "Block until task completes.\n"
      "Raises RuntimeError if the task failed."},
-    {"done", (PyCFunction)TaskHandle_done, METH_NOARGS,
+    {"done", DFT_PYCFUNCTION(TaskHandle_done), METH_NOARGS,
      "Return True if task has completed."},
     {NULL}};
 
@@ -142,34 +143,6 @@ PyTypeObject TaskHandleType = {
     0,                                              /* tp_alloc */
     TaskHandle_new,                                 /* tp_new */
 };
-
-PyObject *create_task_handle(dftracer::utils::TaskHandle handle) {
-    TaskHandleObject *obj =
-        (TaskHandleObject *)TaskHandleType.tp_alloc(&TaskHandleType, 0);
-    if (!obj) return NULL;
-    new (&obj->future) std::shared_future<void>(std::move(handle.future));
-    new (&obj->typed_future) std::shared_future<std::any>();
-    new (&obj->name) std::string(std::move(handle.name));
-    obj->has_typed_future = false;
-    obj->task_id = handle.id;
-    return (PyObject *)obj;
-}
-
-PyObject *create_typed_task_handle(std::shared_future<void> void_future,
-                                   std::shared_future<std::any> typed_future,
-                                   dftracer::utils::TaskIndex id,
-                                   std::string name) {
-    TaskHandleObject *obj =
-        (TaskHandleObject *)TaskHandleType.tp_alloc(&TaskHandleType, 0);
-    if (!obj) return NULL;
-    new (&obj->future) std::shared_future<void>(std::move(void_future));
-    new (&obj->typed_future)
-        std::shared_future<std::any>(std::move(typed_future));
-    new (&obj->name) std::string(std::move(name));
-    obj->has_typed_future = true;
-    obj->task_id = id;
-    return (PyObject *)obj;
-}
 
 int init_task_handle(PyObject *m) {
     if (register_type(m, &TaskHandleType, "TaskHandle") < 0) return -1;

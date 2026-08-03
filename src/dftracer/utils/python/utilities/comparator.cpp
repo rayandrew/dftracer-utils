@@ -11,6 +11,7 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/python/arrow_helpers.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
@@ -100,8 +101,8 @@ static int parse_comparator_args(PyObject *args, PyObject *kwds,
     const char *config = "";
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "ss|sssddnssps", (char **)kwlist, &baseline, &variant,
-            &query, &group_by, &format, &time_interval_ms, &threshold,
+            args, kwds, "ss|sssddnssps", const_cast<char **>(kwlist), &baseline,
+            &variant, &query, &group_by, &format, &time_interval_ms, &threshold,
             &executor_threads, &baseline_index_dir, &variant_index_dir,
             &force_rebuild, &config))
         return -1;
@@ -159,7 +160,8 @@ CoroTask<EventAggregatorOutput> run_aggregation(
                     auto *global_chunk_idx_ptr = &global_chunk_idx;
                     scope.spawn([file_path, ch = chunk_chan->producer(),
                                  index_dir, checkpoint_size, force_rebuild,
-                                 agg_config, query, global_chunk_idx_ptr](
+                                 agg_config, query, global_chunk_idx_ptr,
+                                 intern = merger.intern_table()](
                                     CoroScope & /*fctx*/) mutable
                                     -> CoroTask<void> {
                         [[maybe_unused]] auto producer_guard = ch.guard();
@@ -186,6 +188,7 @@ CoroTask<EventAggregatorOutput> run_aggregation(
                         auto mapper_input =
                             FileChunkMapperInput::from_metadata(metadata)
                                 .with_config(agg_config)
+                                .with_intern(intern)
                                 .with_checkpoint_size(checkpoint_size)
                                 .with_target_chunk_size(CHUNK_SIZE_MB)
                                 .with_batch_size(BATCH_SIZE_MB * 1024 * 1024);
@@ -302,7 +305,7 @@ static bool run_comparison_pipeline(ComparatorObject *self,
         config.resolve();
 
         if (config.executor_threads == 0) {
-            config.executor_threads = dftracer_utils_hardware_concurrency();
+            config.executor_threads = hardware_concurrency();
         }
         if (config.checkpoint_size == 0) {
             config.checkpoint_size =
@@ -356,7 +359,6 @@ static bool run_comparison_pipeline(ComparatorObject *self,
                 batch_cfg->checkpoint_size = config.checkpoint_size;
                 batch_cfg->parallelism = config.executor_threads;
                 batch_cfg->force_rebuild = config.force_rebuild;
-                batch_cfg->use_batch_write = true;
                 batch_cfg->rebuild_root_summaries = true;
 
                 co_await IndexBatchBuilderUtility::process(
@@ -464,9 +466,11 @@ static bool run_comparison_pipeline(ComparatorObject *self,
                         output_ptr->baseline_file_count = b_files_actual;
                         output_ptr->variant_file_count = v_files_actual;
                         output_ptr->baseline_meta = extract_metadata(
-                            base_result.aggregations, b_files_actual);
+                            base_result.strings(), base_result.aggregations,
+                            b_files_actual);
                         output_ptr->variant_meta = extract_metadata(
-                            var_result.aggregations, v_files_actual);
+                            var_result.strings(), var_result.aggregations,
+                            v_files_actual);
                         metadata_set = true;
                     }
 
@@ -686,11 +690,11 @@ static const char *COMPARE_TABLE_DOC =
     "    str: Formatted ASCII table of comparison results.\n";
 
 static PyMethodDef Comparator_methods[] = {
-    {"compare", (PyCFunction)Comparator_compare, METH_VARARGS | METH_KEYWORDS,
-     COMPARE_DOC},
-    {"compare_json", (PyCFunction)Comparator_compare_json,
+    {"compare", DFT_PYCFUNCTION(Comparator_compare),
+     METH_VARARGS | METH_KEYWORDS, COMPARE_DOC},
+    {"compare_json", DFT_PYCFUNCTION(Comparator_compare_json),
      METH_VARARGS | METH_KEYWORDS, COMPARE_JSON_DOC},
-    {"compare_table", (PyCFunction)Comparator_compare_table,
+    {"compare_table", DFT_PYCFUNCTION(Comparator_compare_table),
      METH_VARARGS | METH_KEYWORDS, COMPARE_TABLE_DOC},
     {NULL}};
 

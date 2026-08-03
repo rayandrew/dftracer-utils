@@ -6,6 +6,7 @@
 #include <Python.h>
 #include <dftracer/utils/python/arrow_stream_capsule.h>
 #include <dftracer/utils/python/batch_byte_size.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/schema_reconcile.h>
 #include <nanoarrow/nanoarrow.h>
 
@@ -255,7 +256,7 @@ static void ArrowBatchStream_dealloc(ArrowBatchStreamObject *self) {
 }
 
 static PyMethodDef ArrowBatchStream_methods[] = {
-    {"__arrow_c_stream__", (PyCFunction)ArrowBatchStream_arrow_c_stream,
+    {"__arrow_c_stream__", DFT_PYCFUNCTION(ArrowBatchStream_arrow_c_stream),
      METH_VARARGS, "Export as Arrow C Data Interface stream PyCapsule"},
     {NULL}};
 

@@ -4,6 +4,7 @@
 #include <dftracer/utils/python/batch_byte_size.h>
 #include <dftracer/utils/python/json.h>
 #include <dftracer/utils/python/py_errors.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/trace_reader_iterator.h>
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
@@ -91,7 +92,7 @@ static void ArrowBatchCapsule_dealloc(ArrowBatchCapsuleObject *self) {
 }
 
 static PyMethodDef ArrowBatchCapsule_methods[] = {
-    {"__arrow_c_array__", (PyCFunction)ArrowBatchCapsule_arrow_c_array,
+    {"__arrow_c_array__", DFT_PYCFUNCTION(ArrowBatchCapsule_arrow_c_array),
      METH_VARARGS,
      "Export as Arrow C Data Interface PyCapsule pair (schema, array)"},
     {NULL}};

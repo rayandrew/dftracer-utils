@@ -1,8 +1,18 @@
 """Dask distributed integration for dftracer-utils."""
 
 import os
-from collections import defaultdict
-from typing import Any, Dict, List, Optional, Union
+from collections import defaultdict, namedtuple
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+
+# pyarrow's stubs are well-behaved, so type-checkers get the real module.
+if TYPE_CHECKING:
+    import pyarrow as pa
+else:
+    try:
+        import pyarrow as pa
+    except ImportError:
+        pa = None
 
 try:
     from dask.distributed import Client, WorkerPlugin, get_client
@@ -18,19 +28,12 @@ except ImportError:
     dask = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
     dd = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
 
-try:
-    import pyarrow as pa
-except ImportError:
-    pa = None  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-
-from dftracer.utils import Runtime, TraceReader, get_default_runtime, set_default_runtime
-from dftracer.utils.arrow import (
-    batch_to_ipc,
-    decode_dictionary_columns,
-    empty_write_result,
-    fold_write_results,
+from dftracer.utils import (
+    Runtime,
+    peek_default_runtime,
+    set_default_runtime,
 )
-from dftracer.utils.indexer import AggregationConfig, Indexer, _open_readonly_indexer
+from dftracer.utils.dftracer_utils_ext import AggregatedTraceViewer, TraceViewer
 
 if WorkerPlugin is not None:
 
@@ -42,7 +45,9 @@ if WorkerPlugin is not None:
             self.io_threads = io_threads
 
         def setup(self, worker):
-            worker._dftracer_prev_runtime = get_default_runtime()
+            # peek (do not create): forcing get_default_runtime here would
+            # spin up an unused hardware_concurrency-thread runtime per worker.
+            worker._dftracer_prev_runtime = peek_default_runtime()
             rt = Runtime(threads=self.threads, io_threads=self.io_threads)
             worker.dftracer_utils_runtime = rt
             set_default_runtime(rt)
@@ -62,10 +67,78 @@ if WorkerPlugin is not None:
                 del worker.dftracer_utils_runtime
 
 else:
-    DFTracerUtilsDaskWorkerPlugin = None
+    DFTracerUtilsDaskWorkerPlugin = None  # type: ignore[assignment]
 
 
 _plugin_registered_schedulers: set = set()
+
+# All worker-side progress (parse, scan, ...) is published to one topic with a
+# `phase` label; the coordinator aggregates per (phase, batch).
+_PROGRESS_TOPIC = "dft-progress"
+
+
+def _worker_progress_forwarder(phase: str, batch: Any) -> Callable[[int, int], None]:
+    """Callback that publishes (done, total) progress for `phase`/`batch` to the
+    coordinator. Runs on a Dask worker; no-op off-worker (inline mode)."""
+    try:
+        from distributed import get_worker
+
+        worker = get_worker()
+    except (ImportError, ValueError):
+        worker = None
+
+    def _cb(done: int, total: int) -> None:
+        if worker is None:
+            return
+        msg = {"phase": phase, "batch": batch, "done": int(done), "total": int(total)}
+        # Called from a C++ worker thread; hop to the IOLoop so the event is
+        # sent on the worker's own loop rather than a foreign thread.
+        try:
+            worker.loop.add_callback(worker.log_event, _PROGRESS_TOPIC, msg)
+        except Exception:
+            try:
+                worker.log_event(_PROGRESS_TOPIC, msg)
+            except Exception:
+                pass
+
+    return _cb
+
+
+class ProgressAggregator:
+    """Subscribe to the progress topic and forward aggregated
+    (done, total, phase) to `callback`, summing per (phase, batch)."""
+
+    def __init__(self, client, callback: Optional[Callable[[int, int, str], None]]):
+        self._client = client
+        self._callback = callback
+        self._state: Dict[tuple, tuple] = {}
+
+    def _handler(self, event) -> None:
+        if self._callback is None:
+            return
+        try:
+            _, msg = event
+            phase = msg["phase"]
+            self._state[(phase, msg["batch"])] = (int(msg["done"]), int(msg["total"]))
+            done = sum(d for (p, _), (d, _t) in self._state.items() if p == phase)
+            total = sum(t for (p, _), (_d, t) in self._state.items() if p == phase)
+            self._callback(done, total, phase)
+        except Exception:
+            pass
+
+    def __enter__(self):
+        # NullClient (in-process) has no pub/sub topic; skip quietly.
+        if self._callback is not None and hasattr(self._client, "subscribe_topic"):
+            self._client.subscribe_topic(_PROGRESS_TOPIC, self._handler)
+        return self
+
+    def __exit__(self, *exc):
+        if self._callback is not None and hasattr(self._client, "unsubscribe_topic"):
+            try:
+                self._client.unsubscribe_topic(_PROGRESS_TOPIC)
+            except Exception:
+                pass
+        return False
 
 
 def resolve_local_staging(client) -> str:
@@ -83,11 +156,32 @@ def resolve_local_staging(client) -> str:
     return os.path.join(worker_local_dir, "dftracer-sst-staging")
 
 
+def _runtime_threads(worker, host_worker_counts, total_cpus):
+    """C++ Runtime thread count for one Dask worker.
+
+    Dask already divided the node between its workers and the Runtime is shared
+    by every task on this worker, so the worker's own thread count is the share
+    to match. `host_worker_counts` is a client-side snapshot and only a
+    fallback: a worker that started later, or whose address spells the host
+    differently, is missing from it, and assuming it is alone on the node
+    oversubscribes by however many workers the node really has.
+    """
+    own = getattr(worker, "nthreads", None) or getattr(
+        getattr(worker, "state", None), "nthreads", None
+    )
+    if own:
+        return max(1, min(int(own), total_cpus))
+    host = worker.address.split("://")[-1].rsplit(":", 1)[0]
+    n_local = host_worker_counts.get(host) or max(host_worker_counts.values(), default=1)
+    return max(1, total_cpus // n_local)
+
+
 def register_auto_thread_plugin() -> None:
     """Register the DFTracer worker plugin on the active distributed client.
 
-    Sizes each worker's C++ Runtime threads as hardware_concurrency /
-    n_workers_on_node so the Runtime uses all cores without oversubscription.
+    Sizes each worker's C++ Runtime, compute and I/O threads alike, to the
+    worker's own Dask thread count, so several workers on one node do not each
+    claim every core.
 
     Idempotent: re-registering the same plugin on the same scheduler triggers a
     teardown+setup round-trip on every worker, which deadlocks if the previous
@@ -101,7 +195,7 @@ def register_auto_thread_plugin() -> None:
         import time
         from collections import Counter
 
-        client = get_client()  # ty: ignore[call-non-callable]
+        client = get_client()  # pyright: ignore[reportOptionalCall]  # ty: ignore[call-non-callable]
         sched_addr = getattr(client.scheduler, "address", None) or ""
         if sched_addr in _plugin_registered_schedulers:
             return
@@ -132,21 +226,21 @@ def register_auto_thread_plugin() -> None:
                 self._host_worker_counts = host_worker_counts
 
             def setup(self, worker):
-                total_cpus = (
-                    len(os.sched_getaffinity(0))
-                    if hasattr(os, "sched_getaffinity")
-                    else os.cpu_count() or 1
-                )
+                affinity = getattr(os, "sched_getaffinity", None)  # Linux only
+                total_cpus = len(affinity(0)) if affinity else (os.cpu_count() or 1)
                 my_host = worker.address.split("://")[-1].rsplit(":", 1)[0]
-                n_local = self._host_worker_counts.get(my_host, 1)
-                self.threads = max(1, total_cpus // n_local)
+                self.threads = _runtime_threads(worker, self._host_worker_counts, total_cpus)
+                # The I/O pool needs the same treatment: left at 0 it defaults
+                # to one thread per core in every worker on the node.
+                self.io_threads = self.threads
                 logging.getLogger("distributed.worker").info(
-                    "DFTracer Runtime: host=%s cpus=%d workers_on_host=%d cpp_threads=%d dict_keys=%s",
+                    "DFTracer Runtime: host=%s cpus=%d worker_nthreads=%s "
+                    "cpp_threads=%d io_threads=%d",
                     my_host,
                     total_cpus,
-                    n_local,
+                    getattr(worker, "nthreads", None),
                     self.threads,
-                    list(self._host_worker_counts.keys()),
+                    self.io_threads,
                 )
                 super().setup(worker)
 
@@ -161,126 +255,520 @@ def register_auto_thread_plugin() -> None:
         pass
 
 
-def _write_arrow_task(
-    file_path: str,
-    output_dir: str,
-    view: Optional[Union[str, Dict]],
-    index_dir: str,
-    checkpoint_size: int,
-    compression: str,
-    batch_size: int,
-    chunks: List[Dict],
-) -> Dict:
-    """Task function for writing chunks on a Dask worker."""
-    from dftracer.utils.arrow import write_arrow
+QueryPage = namedtuple("QueryPage", ["table", "next_cursor"])
 
-    return write_arrow(
-        file_path=file_path,
-        output_dir=output_dir,
-        view=view,
-        index_dir=index_dir,
-        checkpoint_size=checkpoint_size,
-        compression=compression,
-        batch_size=batch_size,
-        chunks=chunks,
-        parallel=True,
+
+@dataclass(frozen=True)
+class _Plan:
+    """Typed, immutable DaskTraceViewer plan. Builder ops evolve it with
+    dataclasses.replace, so field names are checked, not string dict keys."""
+
+    filters: Tuple[str, ...] = ()
+    phase: Optional[str] = None
+    time_range: Optional[Tuple[float, float]] = None
+    time_unit: Optional[str] = None
+    time_scale: Optional[float] = None
+    time_bucket: Optional[int] = None
+    group_by: Tuple[str, ...] = ()
+    agg: Tuple[str, ...] = ()
+    select: Tuple[str, ...] = ()
+    auto_numeric: bool = False
+    memory_budget: Optional[int] = None
+    auto_spill: bool = False
+    limit: Optional[int] = None
+    offset: Optional[int] = None
+    rollup_root: Optional[str] = None
+    views_root: Optional[str] = None
+
+
+def _apply_plan(tv: TraceViewer, plan: _Plan) -> TraceViewer:
+    """Apply a DaskTraceViewer plan to a per-shard TraceViewer. group_by/agg
+    return the AggregatedTraceViewer subclass, still a TraceViewer."""
+    for dsl in plan.filters:
+        tv = tv.filter(dsl)
+    if plan.phase:
+        tv = tv.phase(plan.phase)
+    if plan.time_range:
+        tv = tv.time_range(float(plan.time_range[0]), float(plan.time_range[1]))
+    if plan.time_unit:
+        tv = tv.time_unit(plan.time_unit)
+    if plan.time_scale is not None:
+        tv = tv.time_scale(plan.time_scale)
+    if plan.time_bucket is not None:
+        tv = tv.time_bucket(plan.time_bucket)
+    if plan.group_by:
+        tv = tv.group_by(*plan.group_by)
+    if plan.agg:
+        tv = tv.agg(*plan.agg)
+    if plan.select:
+        tv = tv.select(*plan.select)
+    if plan.auto_numeric:
+        tv = tv.agg_numeric_args()
+    if plan.memory_budget is not None:
+        tv = tv.memory_budget(plan.memory_budget)
+    elif plan.auto_spill:
+        tv = tv.auto_spill()
+    if plan.limit is not None:
+        tv = tv.limit(plan.limit)
+    if plan.offset is not None:
+        tv = tv.offset(plan.offset)
+    if plan.rollup_root:
+        tv = tv.rollup_root(plan.rollup_root)
+    if plan.views_root:
+        tv = tv.views_root(plan.views_root)
+    return tv
+
+
+def _make_viewer(files, index_dir, plan: _Plan) -> TraceViewer:
+    return _apply_plan(TraceViewer(files, index_path=index_dir or None), plan)
+
+
+def _dv_partial_task(files, index_dir, plan):
+    """Worker: combinable aggregation partial for this shard (bytes)."""
+    return _make_viewer(files, index_dir, plan).aggregate_partial()
+
+
+def _dv_events_task(files, index_dir, plan, cursor, page_size):
+    """Worker: this shard's matching events at ts >= cursor, up to page_size."""
+    import pyarrow as pa
+
+    tv = _make_viewer(files, index_dir, plan)
+    if cursor is not None:
+        # Per-event predicate (time_range only prunes chunks, so it would leak
+        # earlier events sharing a boundary chunk); chunk ts-stats still prune.
+        tv = tv.filter(f"ts >= {int(cursor)}")
+    tv = tv.limit(page_size)
+    batches = [pa.record_batch(c) for c in tv.stream()]
+    return pa.Table.from_batches(batches) if batches else None
+
+
+def _dv_write_task(files, index_dir, plan, output_path, build_index):
+    """Worker: export this shard to one re-indexable .pfw.gz."""
+    _make_viewer(files, index_dir, plan).export_trace(output_path, compress=True, index=build_index)
+    return {"path": output_path}
+
+
+def _dv_materialize_shard_task(files, index_dir, plan, subdir, checkpoint_size, part_size):
+    """Worker: materialize this shard's filtered events into its own MV subdir
+    (a self-contained part + index), for a distributed row-MV build."""
+    os.makedirs(subdir, exist_ok=True)
+    _make_viewer(files, index_dir, plan).export_trace(
+        os.path.join(subdir, "part.pfw.gz"),
+        compress=True,
+        index=True,
+        member_size=checkpoint_size,
+        part_size=part_size,
+    )
+    return subdir
+
+
+def _dv_collect_typed_task(files, index_dir, plan, shard_begin, shard_end):
+    """Worker: one CF shard range of the typed read. The tier is index-wide, so
+    every worker sees all files but a distinct shard range of the aggregation
+    CF - returns {regular, aggregated, counters} pyarrow Tables.
+
+    The C++ terminal yields ext ArrowTable capsules, which are not picklable;
+    adopt each into a pyarrow Table here so a process cluster can ship them."""
+    import pyarrow as pa
+
+    typed = _make_viewer(files, index_dir, plan).collect_typed(
+        shard_begin=shard_begin, shard_end=shard_end
+    )
+    return {
+        k: (pa.table(typed[k]) if typed.get(k) is not None else None)
+        for k in ("regular", "aggregated", "counters")
+    }
+
+
+def _dv_typed_ipc_task(
+    files: List[str],
+    index_dir: str,
+    time_granularity: float,
+    time_resolution: float,
+    query: Optional[str],
+    shard_begin: int,
+    shard_end: int,
+    group_keys: Optional[Tuple[str, ...]] = None,
+    drop_file_patterns: Tuple[str, ...] = (),
+) -> Dict[str, Optional[bytes]]:
+    """Worker: one CF shard range read + mapped to the dfanalyzer frame schema,
+    returned as ``{events, profiles, system}`` Arrow IPC bytes. Time columns are
+    absolute (origin 0); the HLM derives the global origin and rebuckets
+    ``time_range``. The read + schema mapping lives in the dialect module so this
+    stays the viewer's one distributed typed-read path."""
+    from .dfanalyzer import _typed_read_to_ipc
+    from .dftracer_utils_ext import NUM_SHARDS
+
+    if not shard_end or shard_end <= 0:
+        shard_end = NUM_SHARDS
+    # Per-shard progress from the C++ scan, tagged with the "Reading traces"
+    # phase so the coordinator's ProgressAggregator can drive the read bar.
+    forward = _worker_progress_forwarder("Reading traces", f"{shard_begin}_{shard_end}")
+    return _typed_read_to_ipc(
+        files,
+        index_dir,
+        time_granularity,
+        time_resolution,
+        query,
+        shard_begin=shard_begin,
+        shard_end=shard_end,
+        group_keys=group_keys,
+        drop_file_patterns=drop_file_patterns,
+        progress=forward,
     )
 
 
-def distributed_write_arrow(
-    file_path: str,
-    output_dir: str,
-    view: Optional[Union[str, Dict]] = None,
-    index_dir: str = "",
-    checkpoint_size: int = 32 * 1024 * 1024,
-    compression: str = "zstd",
-    batch_size: int = 10000,
-    chunks_per_task: int = 0,
-) -> Dict:
-    """Write trace data to Arrow IPC files using Dask distributed.
+class DaskTraceViewer:
+    """Distributed, arrow-native TraceViewer over a Dask cluster.
 
-    This function:
-    1. Gets candidate chunks after bloom filter pruning (coordinator)
-    2. Distributes chunk processing to Dask workers
-    3. Each worker writes its chunks to Arrow IPC files
-    4. Returns paths to all written files for pyarrow reading
-
-    Args:
-        file_path: Path to the trace file.
-        output_dir: Directory for output Arrow IPC files.
-        view: View definition - string ('io', 'compute', 'dlio') or
-              dict with 'name' and optional 'query'.
-        index_dir: Directory for index files.
-        checkpoint_size: Checkpoint size for indexing.
-        compression: 'zstd' or 'none'.
-        batch_size: Events per batch.
-        chunks_per_task: Number of chunks per Dask task. If 0, uses 1 chunk
-            per task. Higher values batch chunks per worker, processing
-            them in parallel on the worker's Runtime thread pool.
-
-    Returns:
-        dict with:
-            - files: List of written Arrow IPC file paths
-            - total_chunks: Number of chunks processed
-            - skipped_chunks: Number of chunks skipped by bloom filter
-            - total_rows: Total rows written
-            - total_events_matched: Total events matched
-
-    Example:
-        >>> import pyarrow.ipc as ipc
-        >>> import pyarrow as pa
-        >>> from dftracer.utils.dask import distributed_write_arrow
-        >>>
-        >>> result = distributed_write_arrow(
-        ...     "trace.pfw.gz",
-        ...     "/output/io_view",
-        ...     view="io",
-        ...     chunks_per_task=8,  # batch 8 chunks per worker
-        ... )
-        >>> # Read back with pyarrow
-        >>> tables = [ipc.open_file(f).read_all() for f in result["files"]]
-        >>> combined = pa.concat_tables(tables)
+    Mirrors TraceViewer's lazy builder API (filter/phase/time_range/group_by/
+    agg/select/agg_numeric_args), but each terminal fans file shards across
+    Dask workers - each worker runs a TraceViewer over its shard on that
+    worker's C++ runtime (already parallel intra-shard). Results are pyarrow;
+    Dask ships them (buffer-shared for threaded workers, Arrow-serialized across
+    processes). Single-node callers should use TraceViewer directly - Dask only
+    distributes across workers/nodes.
     """
-    if dask is None:
-        raise ImportError("dask is required for distributed_write_arrow")
 
-    os.makedirs(output_dir, exist_ok=True)
+    def __init__(self, files, index_dir="", *, client=None, files_per_task=1, _plan=None):
+        if dask is None:
+            raise ImportError("dask is required for DaskTraceViewer")
+        self._files = list(files)
+        self._index_dir = index_dir
+        self._client = client
+        self._files_per_task = files_per_task
+        self._plan: _Plan = _plan if _plan is not None else _Plan()
 
-    reader = TraceReader(file_path, index_dir=index_dir, checkpoint_size=checkpoint_size)
-    chunks_result = reader.get_view_chunks(view=view)
-
-    if not chunks_result["file_may_match"]:
-        return empty_write_result(chunks_result["skipped_checkpoints"])
-
-    chunks = chunks_result["chunks"]
-    if not chunks:
-        return empty_write_result(chunks_result["skipped_checkpoints"])
-
-    if chunks_per_task <= 0:
-        chunks_per_task = 1
-
-    batches = [chunks[i : i + chunks_per_task] for i in range(0, len(chunks), chunks_per_task)]
-
-    delayed_tasks = [
-        dask.delayed(_write_arrow_task)(
-            file_path,
-            output_dir,
-            view,
-            index_dir,
-            checkpoint_size,
-            compression,
-            batch_size,
-            batch,
+    def _clone(self, plan: _Plan) -> "DaskTraceViewer":
+        # type(self) keeps a DaskAggregatedTraceViewer aggregated across a chain.
+        return type(self)(
+            self._files,
+            self._index_dir,
+            client=self._client,
+            files_per_task=self._files_per_task,
+            _plan=plan,
         )
-        for batch in batches
-    ]
 
-    batch_results = dask.compute(*delayed_tasks)
+    def _agg_clone(self, plan: _Plan) -> "DaskAggregatedTraceViewer":
+        # group_by/agg promote a plain viewer to the aggregation type that alone
+        # exposes the cache terminals (persist/reconstruct/collect(cache=...)).
+        return DaskAggregatedTraceViewer(
+            self._files,
+            self._index_dir,
+            client=self._client,
+            files_per_task=self._files_per_task,
+            _plan=plan,
+        )
 
-    return fold_write_results(batch_results, len(chunks), chunks_result["skipped_checkpoints"])
+    # ---- builder ops (lazy) ----
+    def filter(self, dsl: str) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, filters=self._plan.filters + (dsl,)))
+
+    def query(self, dsl: str) -> "DaskTraceViewer":
+        return self.filter(dsl)
+
+    def phase(self, phase: str) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, phase=phase))
+
+    def time_range(self, begin: float, end: float) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, time_range=(begin, end)))
+
+    def time_unit(self, unit: str) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, time_unit=unit))
+
+    def time_scale(self, ns_ratio: float) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, time_scale=float(ns_ratio)))
+
+    def time_bucket(self, interval_us: int) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, time_bucket=int(interval_us)))
+
+    def group_by(self, *keys: str) -> "DaskAggregatedTraceViewer":
+        return self._agg_clone(replace(self._plan, group_by=tuple(keys)))
+
+    def agg(self, *specs: str) -> "DaskAggregatedTraceViewer":
+        return self._agg_clone(replace(self._plan, agg=tuple(specs)))
+
+    def select(self, *cols: str) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, select=tuple(cols)))
+
+    def memory_budget(self, nbytes: int) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, memory_budget=int(nbytes)))
+
+    def auto_spill(self) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, auto_spill=True))
+
+    def limit(self, n: int) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, limit=int(n)))
+
+    def offset(self, n: int) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, offset=int(n)))
+
+    def rollup_root(self, path: str) -> "DaskTraceViewer":
+        """Override the aggregation-cache root (default: derive from index)."""
+        return self._clone(replace(self._plan, rollup_root=path))
+
+    def views_root(self, path: str) -> "DaskTraceViewer":
+        """Override the materialized-view root (default: derive from index)."""
+        return self._clone(replace(self._plan, views_root=path))
+
+    def agg_numeric_args(self) -> "DaskAggregatedTraceViewer":
+        return self._agg_clone(replace(self._plan, auto_numeric=True))
+
+    # ---- internals ----
+    def _shards(self):
+        step = max(1, self._files_per_task)
+        return [self._files[i : i + step] for i in range(0, len(self._files), step)]
+
+    def _resolve_client(self):
+        return self._client or get_client()  # pyright: ignore[reportOptionalCall]  # ty: ignore[call-non-callable]
+
+    # ---- terminals ----
+    def collect(self):
+        """Distributed group_by+agg -> one pyarrow Table.
+
+        Each file shard returns a combinable partial (aggregate_partial),
+        merged on the client via merge_partials_to_table so mean/std/percentiles are
+        correct.
+        """
+        client = self._resolve_client()
+        partials = self._gather_partials(client)
+        merger = _make_viewer(self._files, self._index_dir, self._plan)
+        return merger.merge_partials_to_table(partials)
+
+    def collect_typed(self):
+        """Distributed one-pass typed read -> {regular, aggregated, counters}
+        pyarrow Tables, fanning disjoint aggregation-CF shard ranges across
+        workers (the index-wide tier can't be file-sharded)."""
+        import pyarrow as pa
+
+        from .dftracer_utils_ext import NUM_SHARDS
+
+        client = self._resolve_client()
+        n = max(1, len(client.scheduler_info().get("workers") or {}))
+        span = (NUM_SHARDS + n - 1) // n
+        futures = []
+        for i in range(n):
+            sb, se = min(NUM_SHARDS, i * span), min(NUM_SHARDS, (i + 1) * span)
+            if sb >= se:
+                continue
+            futures.append(
+                client.submit(
+                    _dv_collect_typed_task,
+                    self._files,
+                    self._index_dir,
+                    self._plan,
+                    sb,
+                    se,
+                    pure=False,
+                )
+            )
+        parts = client.gather(futures)
+
+        def cat(key):
+            # Workers already adopted the capsules into pyarrow Tables; permissive
+            # promotion unifies system's dynamic per-metric columns across shards.
+            tables = [p[key] for p in parts if p is not None and p.get(key) is not None]
+            return pa.concat_tables(tables, promote_options="permissive") if tables else None
+
+        return {k: cat(k) for k in ("regular", "aggregated", "counters")}
+
+    def collect_typed_ipc_futures(
+        self,
+        time_granularity: float,
+        time_resolution: float,
+        group_keys: Optional[Tuple[str, ...]] = None,
+        drop_file_patterns: Tuple[str, ...] = (),
+    ) -> Tuple[List[Any], List[Optional[str]]]:
+        """Distributed typed read as per-worker IPC futures.
+
+        Fans the CF shard space across the cluster (the index-wide tier can't be
+        file-sharded); each worker produces ``{events, profiles, system}`` Arrow
+        IPC bytes in the dfanalyzer schema for its shard range. Returns
+        ``(futures, worker_addrs)`` - ungathered and worker-pinned - for a
+        distributed reducer to consume. This is the View's one distributed
+        typed-read path.
+        """
+        from .dftracer_utils_ext import NUM_SHARDS
+
+        client = self._resolve_client()
+        # nthreads() works for both a real Client and the in-process NullClient
+        # (scheduler_info is Client-only), giving one addr per worker.
+        workers = list((client.nthreads() or {}).keys())
+        n = max(1, len(workers))
+        span = (NUM_SHARDS + n - 1) // n
+        query = " and ".join(self._plan.filters) if self._plan.filters else None
+        futures, addrs = [], []
+        for i in range(n):
+            sb = min(NUM_SHARDS, i * span)
+            se = min(NUM_SHARDS, (i + 1) * span)
+            if sb >= se:
+                continue
+            addr = workers[i % len(workers)] if workers else None
+            futures.append(
+                client.submit(
+                    _dv_typed_ipc_task,
+                    self._files,
+                    self._index_dir,
+                    time_granularity,
+                    time_resolution,
+                    query,
+                    sb,
+                    se,
+                    group_keys,
+                    drop_file_patterns,
+                    workers=[addr] if addr else None,
+                    pure=False,
+                )
+            )
+            addrs.append(addr)
+        return futures, addrs
+
+    def _gather_partials(self, client):
+        """Fan the aggregation across shards, gather combinable partials."""
+        futures = [
+            client.submit(_dv_partial_task, s, self._index_dir, self._plan, pure=False)
+            for s in self._shards()
+        ]
+        return [p for p in client.gather(futures) if p]
+
+    def page(self, page_size: int = 100_000, cursor: Optional[int] = None) -> QueryPage:
+        """One page of matching events as a pyarrow Table, cursored by ts.
+
+        `cursor` is a ts; the page holds the next `page_size` events at ts >=
+        cursor across all shards, and `next_cursor` is where to resume (None at
+        the end). Assumes page_size exceeds the events sharing any single ts.
+        """
+        import pyarrow as pa
+
+        client = self._resolve_client()
+        futures = [
+            client.submit(
+                _dv_events_task, s, self._index_dir, self._plan, cursor, page_size, pure=False
+            )
+            for s in self._shards()
+        ]
+        tables = [t for t in client.gather(futures) if t is not None and t.num_rows]
+        if not tables:
+            return QueryPage(None, None)
+        combined = pa.concat_tables(tables).sort_by("ts")
+        page = combined.slice(0, page_size)
+        next_cursor = None
+        if combined.num_rows > page.num_rows:
+            next_cursor = int(page.column("ts")[-1].as_py()) + 1
+        return QueryPage(page, next_cursor)
+
+    def pages(self, page_size: int = 100_000):
+        """Iterate all matching events page by page (cursored by ts)."""
+        cursor = None
+        while True:
+            pg = self.page(page_size=page_size, cursor=cursor)
+            if pg.table is None or pg.table.num_rows == 0:
+                break
+            yield pg.table
+            if pg.next_cursor is None:
+                break
+            cursor = pg.next_cursor
+
+    def export_trace(self, output_dir: str, *, build_index: bool = False) -> Dict[str, Any]:
+        """Export per-shard re-indexable ``<output_dir>/part-<n>.pfw.gz`` files."""
+        client = self._resolve_client()
+        os.makedirs(output_dir, exist_ok=True)
+        futures = [
+            client.submit(
+                _dv_write_task,
+                s,
+                self._index_dir,
+                self._plan,
+                os.path.join(output_dir, f"part-{n}.pfw.gz"),
+                build_index,
+                pure=False,
+            )
+            for n, s in enumerate(self._shards())
+        ]
+        results = client.gather(futures)
+        return {"files": [r["path"] for r in results if r["path"]]}
+
+    def materialize(self, *, checkpoint_size: int = 0, part_size: int = 0) -> "DaskTraceViewer":
+        """Distributed row-MV materialize: each shard writes its filtered events
+        into its own subdir of the shared MV directory (a self-contained part +
+        index), then the coordinator writes one manifest over the full base set.
+        A later matching read reuses it. Needs a views anchor - a shared index
+        location or views_root()."""
+        client = self._resolve_client()
+        coord = _make_viewer(self._files, self._index_dir, self._plan)
+        mv_dir = coord.materialize_dir()
+        if not mv_dir:
+            raise RuntimeError("no materialized-view anchor; set views_root(...)")
+        futures = [
+            client.submit(
+                _dv_materialize_shard_task,
+                s,
+                self._index_dir,
+                self._plan,
+                os.path.join(mv_dir, f"shard-{n}"),
+                checkpoint_size,
+                part_size,
+                pure=False,
+            )
+            for n, s in enumerate(self._shards())
+        ]
+        client.gather(futures)
+        coord.register_materialized(mv_dir)
+        return self
 
 
-def _assign_files_by_pid(
+class DaskAggregatedTraceViewer(DaskTraceViewer):
+    """A DaskTraceViewer with a group_by/agg set. Only this type exposes the
+    rollup materialized view (materialize()/reconstruct_if_cached() and
+    collect(cache=True)); a raw-event viewer cannot, mirroring the C++
+    AggregatedView gate. The rollup dir is derived from the plan (files + index
+    location + aggregation-grain signature), so callers never pass a path -
+    rollup_root() overrides the root.
+    """
+
+    def _coordinator(self) -> AggregatedTraceViewer:
+        # Single-node viewer over the same files/plan; derives the same rollup
+        # dir. merge/reconstruct/materialize_partials never re-scan. The plan
+        # always carries a group_by/agg here, so it is aggregated.
+        v = _make_viewer(self._files, self._index_dir, self._plan)
+        assert isinstance(v, AggregatedTraceViewer)
+        return v
+
+    def materialize(
+        self, *, checkpoint_size: int = 0, part_size: int = 0
+    ) -> "DaskAggregatedTraceViewer":
+        """Distributed materialize of the rollup: ingest the MV from per-shard
+        partials, no re-scan. A later collect() reads it back."""
+        # checkpoint_size/part_size are row-MV knobs; accepted only to match the
+        # base signature.
+        del checkpoint_size, part_size
+        client = self._resolve_client()
+        self._coordinator().materialize_partials(self._gather_partials(client))
+        return self
+
+    def reconstruct_if_cached(self):
+        """The materialized aggregation as a pyarrow.Table, or None on a miss."""
+        return self._coordinator().reconstruct_if_cached()
+
+
+def distributed_write_trace(
+    files: List[str],
+    output_dir: str,
+    *,
+    index_dir: str = "",
+    view: Optional[str] = None,
+    files_per_task: int = 1,
+    build_index: bool = False,
+    client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Thin wrapper over ``DaskTraceViewer(...).filter(view).export_trace(...)``."""
+    dv = DaskTraceViewer(files, index_dir, client=client, files_per_task=files_per_task)
+    if view:
+        dv = dv.filter(view)
+    return dv.export_trace(output_dir, build_index=build_index)
+
+
+def assign_files_by_pid(
     file_pids: Dict[int, set],
     n_workers: int,
 ) -> Dict[int, List[int]]:
@@ -316,453 +804,6 @@ def _assign_files_by_pid(
     return dict(worker_assignments)
 
 
-def _aggregate_files_task(
-    files: List[str],
-    index_path: str,
-    time_granularity: float,
-    time_resolution: float,
-    data_type: str,
-) -> List[bytes]:
-    """Worker task: read pre-indexed data and return Arrow IPC buffers.
-
-    This runs on a Dask worker. It reads from an already-indexed database
-    and returns Arrow IPC buffers for the specified files.
-
-    Args:
-        files: List of trace file paths (used for filtering, not re-indexing).
-        index_path: Path to the .dftindex store (already built by coordinator).
-        time_granularity: Output time bucket width in seconds.
-        time_resolution: Microseconds per output time unit.
-        data_type: 'events', 'profiles', or 'system'.
-
-    Returns:
-        List of Arrow IPC buffer bytes.
-    """
-    if not files:
-        return []
-
-    # Use existing index (read-only) - coordinator already built it
-    indexer = _open_readonly_indexer(files, index_path)
-
-    # Collect Arrow batches as IPC buffers
-    ipc_buffers = []
-    for batch_capsule in indexer.iter_arrow_dfanalyzer(
-        data_type,
-        time_granularity=time_granularity,
-        time_resolution=time_resolution,
-    ):
-        ipc_buffers.append(batch_to_ipc(pa.record_batch(batch_capsule)))
-
-    return ipc_buffers
-
-
-def _aggregate_files_task_all(
-    files: List[str],
-    index_path: str,
-    time_granularity: float,
-    time_resolution: float,
-    query: Optional[str] = None,
-) -> Dict[str, List[bytes]]:
-    """Worker task: read all aggregation types and return Arrow IPC buffers.
-
-    This runs on a Dask worker. It reads from an already-indexed database
-    and returns Arrow IPC buffers for all types in a single scan.
-
-    Args:
-        files: List of trace file paths (used for filtering, not re-indexing).
-        index_path: Path to the .dftindex store (already built by coordinator).
-        time_granularity: Output time bucket width in seconds.
-        time_resolution: Microseconds per output time unit.
-        query: Optional query filter string (e.g., "pid == 1234 or pid == 5678").
-
-    Returns:
-        Dict with 'events', 'profiles', 'system' keys, each containing
-        a list of Arrow IPC buffer bytes.
-    """
-    if not files:
-        return {"events": [], "profiles": [], "system": []}
-
-    indexer = _open_readonly_indexer(files, index_path)
-
-    all_batches = indexer.iter_arrow_dfanalyzer_all(
-        time_granularity=time_granularity,
-        time_resolution=time_resolution,
-        query=query,
-    )
-
-    # Convert to IPC buffers for each type
-    result = {}
-    for data_type in ("events", "profiles", "system"):
-        ipc_buffers = []
-        for batch_capsule in all_batches.get(data_type, []):
-            ipc_buffers.append(batch_to_ipc(pa.record_batch(batch_capsule)))
-        result[data_type] = ipc_buffers
-
-    return result
-
-
-def _merge_welford(group):
-    """Merge mean/variance using parallel Welford algorithm.
-
-    Used for re-aggregating overlapping keys across workers.
-    """
-    n_total = group["count"].sum()
-    if n_total == 0:
-        return {
-            "count": 0,
-            "time": 0.0,
-            "size": 0,
-            "time_min": 0.0,
-            "time_max": 0.0,
-            "size_min": 0,
-            "size_max": 0,
-        }
-
-    # Sum aggregation for count, time, size
-    result = {
-        "count": n_total,
-        "time": group["time"].sum(),
-        "size": group["size"].sum(),
-        "time_min": group["time_min"].min(),
-        "time_max": group["time_max"].max(),
-        "size_min": group["size_min"].min(),
-        "size_max": group["size_max"].max(),
-    }
-    return result
-
-
-def _plan_worker_files(indexer, status, client):
-    """Assign trace files to Dask workers by PID affinity.
-
-    Closes the indexer (releasing the RocksDB lock) before returning, then
-    returns ``(worker_files, worker_pids, index_path, worker_list)``.
-    """
-    file_id_to_path, file_pids = indexer.query_file_info()
-    index_path = status.index_path
-
-    # Close indexer before distributing (release RocksDB lock)
-    indexer.close()
-
-    worker_nthreads = client.nthreads()
-    n_workers = len(worker_nthreads) or 1
-    worker_list = list(worker_nthreads.keys())
-
-    full_file_pids = {fid: file_pids.get(fid, set()) for fid in file_id_to_path}
-    worker_file_ids = _assign_files_by_pid(full_file_pids, n_workers)
-
-    worker_files: Dict[int, List[str]] = {}
-    worker_pids: Dict[int, set] = {}
-    for worker_id, fids in worker_file_ids.items():
-        worker_files[worker_id] = [file_id_to_path[fid] for fid in fids if fid in file_id_to_path]
-        pids: set = set()
-        for fid in fids:
-            pids.update(file_pids.get(fid, set()))
-        worker_pids[worker_id] = pids
-
-    return worker_files, worker_pids, index_path, worker_list
-
-
-def distributed_aggregate(
-    directory: str = "",
-    files: Optional[List[str]] = None,
-    client: Optional["Client"] = None,
-    time_interval_ms: float = 5000.0,
-    time_granularity: float = 1.0,
-    time_resolution: float = 1e6,
-    index_dir: str = "",
-    data_type: str = "events",
-) -> "pa.Table":
-    """Aggregate trace data using Dask distributed workers.
-
-    This function:
-    1. Indexes all files on coordinator to get PID manifests
-    2. Assigns files to workers by PID affinity (minimize cross-worker overlap)
-    3. Each worker aggregates its files using iter_arrow_dfanalyzer
-    4. Gathers partial Arrow tables from workers
-    5. Re-aggregates overlapping keys (same PID/time_range across files)
-
-    Args:
-        directory: Directory containing trace files (.pfw/.pfw.gz).
-        files: Explicit list of files (alternative to directory).
-        client: Dask distributed Client. If None, uses dask.delayed locally.
-        time_interval_ms: Aggregation time bucket in milliseconds.
-        time_granularity: Output time bucket width in seconds.
-        time_resolution: Microseconds per output time unit.
-        index_dir: Directory for index storage.
-        data_type: Type of data to aggregate - 'events', 'profiles', or 'system'.
-
-    Returns:
-        PyArrow Table with aggregated data.
-
-    Example:
-        >>> from dask.distributed import Client
-        >>> from dftracer.utils.dask import distributed_aggregate
-        >>>
-        >>> client = Client("scheduler:8786")
-        >>> client.register_plugin(DFTracerUtilsDaskWorkerPlugin(threads=48))
-        >>>
-        >>> table = distributed_aggregate(
-        ...     directory="/traces",
-        ...     client=client,
-        ...     time_interval_ms=5000,
-        ... )
-        >>> df = table.to_pandas()
-    """
-    if dask is None:
-        raise ImportError("dask is required for distributed_aggregate")
-    if pa is None:
-        raise ImportError("pyarrow is required for distributed_aggregate")
-
-    # Step 1: Index on coordinator
-    indexer = Indexer(
-        directory=directory,
-        files=files,
-        index_dir=index_dir,
-        require_checkpoint=True,
-        require_bloom=True,
-        require_manifest=True,
-        require_aggregation=AggregationConfig(
-            time_interval_ms=time_interval_ms,
-            compute_percentiles=False,
-        ),
-        force_rebuild=False,
-    )
-    status = indexer.ensure_indexed()
-
-    if status.total_files == 0:
-        return pa.table({})
-
-    # For local execution (no client), just use iter_arrow_dfanalyzer directly
-    # This avoids RocksDB locking issues when running in a single process
-    if client is None:
-        all_batches = []
-        for batch_capsule in indexer.iter_arrow_dfanalyzer(
-            data_type,
-            time_granularity=time_granularity,
-            time_resolution=time_resolution,
-        ):
-            all_batches.append(pa.record_batch(batch_capsule))
-
-        if not all_batches:
-            return pa.table({})
-
-        return pa.Table.from_batches(all_batches)
-
-    # Distributed execution: assign files to workers by PID affinity
-    all_files = status.ready + status.needs_work
-    worker_files, _, index_path, worker_list = _plan_worker_files(indexer, status, client)
-
-    futures = []
-    for worker_id, wfiles in worker_files.items():
-        if not wfiles:
-            continue
-        worker_addr = worker_list[worker_id % len(worker_list)] if worker_list else None
-        future = client.submit(
-            _aggregate_files_task,
-            wfiles,
-            index_path,
-            time_granularity,
-            time_resolution,
-            data_type,
-            workers=[worker_addr] if worker_addr else None,
-            pure=False,
-        )
-        futures.append(future)
-
-    # Gather results
-    all_ipc_buffers = client.gather(futures)
-
-    # Deserialize IPC buffers and combine
-    all_batches = []
-    for ipc_buffers in all_ipc_buffers:
-        for buf_bytes in ipc_buffers:
-            reader = pa.ipc.open_stream(pa.BufferReader(buf_bytes))
-            for batch in reader:
-                all_batches.append(batch)
-
-    if not all_batches:
-        return pa.table({})
-
-    combined_table = pa.Table.from_batches(all_batches)
-
-    # Step 6: Re-aggregate overlapping keys using Dask DataFrame
-    # This handles cases where the same (pid, tid, time_range, func_name) appears
-    # across multiple files assigned to different workers
-    if data_type == "system":
-        # System metrics: group by host_hash, time_range
-        group_cols = ["host_hash", "time_range"]
-        agg_dict = {
-            "sys_cpu_iowait_pct": "mean",
-            "sys_cpu_user_pct": "mean",
-            "sys_cpu_system_pct": "mean",
-            "sys_cpu_idle_pct": "mean",
-            "sys_core_iowait_pct_max": "max",
-            "sys_core_iowait_pct_p95": "max",
-            "sys_mem_dirty": "mean",
-            "sys_mem_cached": "mean",
-            "sys_mem_available": "mean",
-        }
-    else:
-        # Events/Profiles: group by all key columns
-        group_cols = [
-            "cat",
-            "func_name",
-            "pid",
-            "tid",
-            "file_hash",
-            "host_hash",
-            "time_range",
-        ]
-        agg_dict = {
-            "count": "sum",
-            "time": "sum",
-            "size": "sum",
-            "time_min": "min",
-            "time_max": "max",
-            "size_min": "min",
-            "size_max": "max",
-        }
-
-    # Check if re-aggregation is needed (more than one file)
-    if len(all_files) > 1:
-        df = combined_table.to_pandas()
-
-        # Preserve non-aggregated columns
-        first_cols = {}
-        for col in df.columns:
-            if col not in group_cols and col not in agg_dict:
-                first_cols[col] = "first"
-
-        agg_dict.update(first_cols)
-
-        # Group and aggregate
-        result_df = df.groupby(group_cols, as_index=False).agg(agg_dict)
-        return pa.Table.from_pandas(result_df, preserve_index=False)
-
-    return combined_table
-
-
-def distributed_aggregate_all(
-    directory: str = "",
-    files: Optional[List[str]] = None,
-    client: Optional["Client"] = None,
-    time_interval_ms: float = 5000.0,
-    time_granularity: float = 1.0,
-    time_resolution: float = 1e6,
-    index_dir: str = "",
-) -> Dict[str, "pa.Table"]:
-    """Aggregate all trace data types in a single scan.
-
-    This is ~3x faster than calling distributed_aggregate separately for
-    events, profiles, and system because it scans the index only once.
-
-    Args:
-        directory: Directory containing trace files (.pfw/.pfw.gz).
-        files: Explicit list of files (alternative to directory).
-        client: Dask distributed Client. If None, uses local execution.
-        time_interval_ms: Aggregation time bucket in milliseconds.
-        time_granularity: Output time bucket width in seconds.
-        time_resolution: Microseconds per output time unit.
-        index_dir: Directory for index storage.
-
-    Returns:
-        Dict with 'events', 'profiles', 'system' keys, each containing a
-        PyArrow Table with aggregated data.
-
-    Example:
-        >>> from dftracer.utils.dask import distributed_aggregate_all
-        >>> tables = distributed_aggregate_all("/traces")
-        >>> events_df = tables["events"].to_pandas()
-        >>> profiles_df = tables["profiles"].to_pandas()
-    """
-    if dask is None:
-        raise ImportError("dask is required for distributed_aggregate_all")
-    if pa is None:
-        raise ImportError("pyarrow is required for distributed_aggregate_all")
-
-    # Index on coordinator
-    indexer = Indexer(
-        directory=directory,
-        files=files,
-        index_dir=index_dir,
-        require_checkpoint=True,
-        require_bloom=True,
-        require_manifest=True,
-        require_aggregation=AggregationConfig(
-            time_interval_ms=time_interval_ms,
-            compute_percentiles=False,
-        ),
-        force_rebuild=False,
-    )
-    status = indexer.ensure_indexed()
-
-    if status.total_files == 0:
-        return {"events": pa.table({}), "profiles": pa.table({}), "system": pa.table({})}
-
-    # Use fused API for local execution
-    if client is None:
-        result = indexer.iter_arrow_dfanalyzer_all(
-            time_granularity=time_granularity,
-            time_resolution=time_resolution,
-        )
-
-        tables = {}
-        for key in ("events", "profiles", "system"):
-            batches = [pa.record_batch(cap) for cap in result.get(key, [])]
-            tables[key] = pa.Table.from_batches(batches) if batches else pa.table({})
-
-        return tables
-
-    # Distributed execution: assign files to workers by PID affinity
-    worker_files, worker_pids, index_path, worker_list = _plan_worker_files(indexer, status, client)
-
-    futures = []
-    for worker_id, wfiles in worker_files.items():
-        if not wfiles:
-            continue
-        # Build query filter for this worker's PIDs
-        pids = worker_pids.get(worker_id, set())
-        query = None
-        if pids:
-            pid_conditions = " or ".join(f"pid == {pid}" for pid in sorted(pids))
-            query = f"({pid_conditions})"
-        worker_addr = worker_list[worker_id % len(worker_list)] if worker_list else None
-        future = client.submit(
-            _aggregate_files_task_all,
-            wfiles,
-            index_path,
-            time_granularity,
-            time_resolution,
-            query,
-            workers=[worker_addr] if worker_addr else None,
-            pure=False,
-        )
-        futures.append(future)
-
-    # Gather results (each is a dict with events/profiles/system)
-    all_results = client.gather(futures)
-
-    # Collect batches by type
-    batches_by_type: Dict[str, List] = {"events": [], "profiles": [], "system": []}
-    for result_dict in all_results:
-        for data_type in ("events", "profiles", "system"):
-            for buf_bytes in result_dict.get(data_type, []):
-                reader = pa.ipc.open_stream(pa.BufferReader(buf_bytes))
-                for batch in reader:
-                    batches_by_type[data_type].append(batch)
-
-    tables = {}
-    for data_type in ("events", "profiles", "system"):
-        batches = batches_by_type[data_type]
-        if not batches:
-            tables[data_type] = pa.table({})
-            continue
-        table = decode_dictionary_columns(pa.Table.from_batches(batches))
-        tables[data_type] = table
-
-    return tables
-
-
 # ---------------------------------------------------------------------------
 # Distributed index build (SST sink path)
 # ---------------------------------------------------------------------------
@@ -778,10 +819,10 @@ def _build_sst_task(
     index_dir: str,
     checkpoint_size: int,
     bloom_dimensions: Optional[List[str]],
-    build_manifest: bool,
     force_rebuild: bool,
     parallelism: int,
     flush_every_files: int,
+    build_bloom: bool = True,
     aggregation_config: Optional[Any] = None,
     enable_det_ids: bool = False,
 ) -> tuple:
@@ -797,6 +838,8 @@ def _build_sst_task(
     _log = _logging.getLogger("dftracer.utils.dask._build_sst_task")
     _host = _socket.gethostname()
 
+    _progress_cb = _worker_progress_forwarder("Indexing", batch_id)
+
     t0 = _time.monotonic()
     if enable_det_ids:
         from .dftracer_utils_ext import enable_aggregation_deterministic_ids
@@ -810,14 +853,15 @@ def _build_sst_task(
         batch_id,
         index_dir,
         checkpoint_size,
-        build_manifest,
         force_rebuild,
+        build_bloom,
         bloom_dimensions,
         parallelism,
         flush_every_files,
         None,
         aggregation_config,
         file_slices,
+        progress=_progress_cb,
     )
     t_build = _time.monotonic()
 
@@ -861,16 +905,17 @@ def distributed_index(
     index_path: str = "",
     local_staging: str = "",
     shared_staging: str = "",
-    client: Optional["Client"] = None,
+    client: Optional[Any] = None,
     checkpoint_size: int = 32 * 1024 * 1024,
     bloom_dimensions: Optional[List[str]] = None,
-    build_manifest: bool = True,
     force_rebuild: bool = False,
+    build_bloom: bool = True,
     partition: str = "lpt",
     rebuild_root_summaries: bool = True,
     parallelism_per_worker: int = 0,
     flush_every_files: int = 0,
     aggregation_config: Optional[Any] = None,
+    progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> Dict[str, Any]:
     """Index a set of trace files using Dask workers writing SSTs in parallel.
 
@@ -961,10 +1006,6 @@ def distributed_index(
     all_paths = [p for (p, _) in entries]
     n_total_files = len(all_paths)
 
-    # Idempotency: drop files whose required tiers already exist so warm calls
-    # skip the register + gzip-scan + parse fan-out entirely. The coordinator
-    # read path short-circuits this way; the distributed path did not, so it
-    # re-parsed every file on every call.
     if not force_rebuild:
         from .indexer import Indexer
 
@@ -973,7 +1014,6 @@ def distributed_index(
             index_dir=index_path,
             require_checkpoint=True,
             require_bloom=True,
-            require_manifest=build_manifest,
             require_aggregation=aggregation_config,
             force_rebuild=False,
         ) as _resolver:
@@ -1001,7 +1041,7 @@ def distributed_index(
     _log.info("distributed_index: opening IndexDatabase at %s", index_path)
     db = _IndexDatabase(index_path)
     db.init_schema()
-    all_file_ids = db.register_files(all_paths, build_manifest)
+    all_file_ids = db.register_files(all_paths)
     _log.info(
         "distributed_index: register_files done (%d files, %.1fs)",
         len(all_paths),
@@ -1067,7 +1107,6 @@ def distributed_index(
     worker_file_lists: List[List[str]] = []
     worker_file_ids: List[List[int]] = []
     worker_slices: List[List[Any]] = []
-    CKPT_STRIDE = 1 << 20
     for w, units in enumerate(per_worker_units):
         paths_w: List[str] = []
         ids_w: List[int] = []
@@ -1087,7 +1126,6 @@ def distributed_index(
                 (
                     int(mb),
                     int(me),
-                    int(mb) * CKPT_STRIDE,
                     bool(mb != 0),
                     [(int(mo), int(ms)) for (mo, ms) in members],
                 )
@@ -1118,47 +1156,48 @@ def distributed_index(
                     index_dir,
                     checkpoint_size,
                     bloom_dimensions,
-                    build_manifest,
                     force_rebuild,
                     parallelism_per_worker,
                     flush_every_files,
+                    build_bloom,
                     aggregation_config,
                     False,
                 )
             )
     else:
         worker_addrs = list(client.nthreads().keys())
-        futures = []
-        for w, (paths_w, ids_w, slices_w) in enumerate(
-            zip(worker_file_lists, worker_file_ids, worker_slices)
-        ):
-            if not paths_w:
-                continue
-            target = [worker_addrs[w % len(worker_addrs)]] if worker_addrs else None
-            worker_ids.append(w)
-            futures.append(
-                client.submit(
-                    _build_sst_task,
-                    paths_w,
-                    ids_w,
-                    slices_w,
-                    local_staging,
-                    shared_staging,
-                    f"worker_{w}",
-                    index_dir,
-                    checkpoint_size,
-                    bloom_dimensions,
-                    build_manifest,
-                    force_rebuild,
-                    parallelism_per_worker,
-                    flush_every_files,
-                    aggregation_config,
-                    True,
-                    workers=target,
-                    pure=False,
+        with ProgressAggregator(client, progress):
+            futures = []
+            for w, (paths_w, ids_w, slices_w) in enumerate(
+                zip(worker_file_lists, worker_file_ids, worker_slices)
+            ):
+                if not paths_w:
+                    continue
+                target = [worker_addrs[w % len(worker_addrs)]] if worker_addrs else None
+                worker_ids.append(w)
+                futures.append(
+                    client.submit(
+                        _build_sst_task,
+                        paths_w,
+                        ids_w,
+                        slices_w,
+                        local_staging,
+                        shared_staging,
+                        f"worker_{w}",
+                        index_dir,
+                        checkpoint_size,
+                        bloom_dimensions,
+                        force_rebuild,
+                        parallelism_per_worker,
+                        flush_every_files,
+                        build_bloom,
+                        aggregation_config,
+                        True,
+                        workers=target,
+                        pure=False,
+                    )
                 )
-            )
-        worker_results = client.gather(futures)
+            worker_results = client.gather(futures)
     _log.info(
         "distributed_index: build dispatch+gather done in %.1fs (%d workers)",
         _time.monotonic() - _t_build,
@@ -1189,8 +1228,14 @@ def distributed_index(
         _time.monotonic() - _t_collect,
     )
 
+    # bulk_ingest and rebuild_root_summaries are single coordinator calls with
+    # no granular counter yet, so report them as indeterminate labelled phases.
     _t_ingest = _time.monotonic()
+    if progress is not None:
+        progress(0, 0, "Ingesting SSTs")
     db.bulk_ingest(registry)
+    if progress is not None:
+        progress(1, 1, "Ingesting SSTs")
     _log.info(
         "distributed_index: bulk_ingest done in %.1fs (%d artifacts)",
         _time.monotonic() - _t_ingest,
@@ -1198,7 +1243,11 @@ def distributed_index(
     )
     if rebuild_root_summaries:
         _t_root = _time.monotonic()
+        if progress is not None:
+            progress(0, 0, "Building summaries")
         db.rebuild_root_summaries()
+        if progress is not None:
+            progress(1, 1, "Building summaries")
         _log.info(
             "distributed_index: rebuild_root_summaries done in %.1fs",
             _time.monotonic() - _t_root,
@@ -1208,7 +1257,10 @@ def distributed_index(
         _t_meta = _time.monotonic()
         time_interval_ms = getattr(aggregation_config, "time_interval_ms", 0) or 0
         time_interval_us = int(round(time_interval_ms * 1000.0))
-        db.write_agg_global_config(time_interval_us=time_interval_us)
+        db.write_agg_global_config(
+            time_interval_us=time_interval_us,
+            group_by_file=getattr(aggregation_config, "group_by_file", True),
+        )
         if all_file_ids:
             db.write_agg_file_markers(list(all_file_ids))
         if tracker_blobs:

@@ -2,7 +2,6 @@ import atexit
 from importlib.metadata import PackageNotFoundError, version
 from typing import Optional
 
-from .arrow import read_arrow, write_arrow  # noqa: F401
 from .dftracer_utils_ext import (  # noqa: F401
     CheckpointIndexer,  # noqa: F401
     DFTUtilsAggregationError,
@@ -16,8 +15,8 @@ from .dftracer_utils_ext import (  # noqa: F401
     DFTUtilsQueryError,
     DFTUtilsReaderError,
     DFTUtilsValueError,
-    IndexerCheckpoint,  # noqa: F401
     JsonDictValue,  # noqa: F401
+    TraceViewer,  # noqa: F401
     get_log_level,
     set_log_color,
     set_log_level,
@@ -26,16 +25,20 @@ from .dftracer_utils_ext import (
     get_default_runtime as _get_default_native_runtime,
 )
 from .dftracer_utils_ext import (
+    peek_default_runtime as _peek_default_native_runtime,
+)
+from .dftracer_utils_ext import (
     set_default_runtime as _set_default_native_runtime,
 )
+from .enums import AggOp, GroupKey, Phase  # noqa: F401
 from .indexer import (  # noqa: F401
     AggregationConfig,
     Indexer,
     IndexStatus,
 )
-from .query import Expr, Field  # noqa: F401
+from .query import Expr, Field, resolved  # noqa: F401
 from .runtime import Runtime, TaskHandle  # noqa: F401
-from .trace_reader import TraceReader  # noqa: F401
+from .time_unit import TimeUnit  # noqa: F401
 
 _default_wrapper: Optional["Runtime"] = None
 
@@ -46,6 +49,22 @@ def get_default_runtime() -> "Runtime":
     if _default_wrapper is None:
         native = _get_default_native_runtime()
         _default_wrapper = Runtime._from_native(native)
+    return _default_wrapper
+
+
+def peek_default_runtime() -> Optional["Runtime"]:
+    """Return the current default Runtime, or None if none exists yet.
+
+    Never creates one, so saving/restoring the default (e.g. in a Dask worker
+    plugin) does not spin up an unused full-machine-sized runtime.
+    """
+    global _default_wrapper
+    if _default_wrapper is not None:
+        return _default_wrapper
+    native = _peek_default_native_runtime()
+    if native is None:
+        return None
+    _default_wrapper = Runtime._from_native(native)
     return _default_wrapper
 
 
@@ -86,18 +105,21 @@ __all__ = [
     "CheckpointIndexer",
     "Expr",
     "Field",
+    "resolved",
     "Indexer",
-    "IndexerCheckpoint",
     "IndexStatus",
+    "AggOp",
+    "GroupKey",
     "JsonDictValue",
-    "TraceReader",
+    "Phase",
+    "TimeUnit",
+    "TraceViewer",
     "Runtime",
     "TaskHandle",
     "get_default_runtime",
+    "peek_default_runtime",
     "get_log_level",
-    "read_arrow",
     "set_default_runtime",
     "set_log_color",
     "set_log_level",
-    "write_arrow",
 ]

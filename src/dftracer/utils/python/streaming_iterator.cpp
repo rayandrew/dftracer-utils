@@ -6,6 +6,7 @@
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/streaming_iterator.h>
 #include <dftracer/utils/python/trace_reader_iterator.h>
 
@@ -90,7 +91,7 @@ static PyObject* ArrowStreamingIterator_cancel(
 }
 
 static PyMethodDef ArrowStreamingIterator_methods[] = {
-    {"cancel", (PyCFunction)ArrowStreamingIterator_cancel, METH_NOARGS,
+    {"cancel", DFT_PYCFUNCTION(ArrowStreamingIterator_cancel), METH_NOARGS,
      "Cancel the streaming iterator."},
     {NULL}};
 

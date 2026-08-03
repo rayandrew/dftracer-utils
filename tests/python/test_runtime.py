@@ -92,63 +92,50 @@ class TestRuntimeProgress:
             assert "queue_depth" in w
         rt.shutdown()
 
-    def test_progress_after_read_lines(self):
+    def _indexed(self, env):
+        gz = env.create_test_gzip_file()
+        with dft_utils.Indexer(files=[gz], index_dir=env.temp_dir) as ix:
+            ix.ensure_indexed()
+        return gz
+
+    def test_progress_after_stream(self):
         from .common import Environment
 
         with Environment(lines=10) as env:
-            gz_file = env.create_test_gzip_file()
+            gz = self._indexed(env)
             rt = dft_utils.Runtime(threads=2)
-            reader = dft_utils.TraceReader(gz_file, runtime=rt)
-            reader.read_lines()
-            rt.shutdown()
-            p = rt.get_progress()
-            assert p["total"] >= 1
-            assert p["completed"] >= 1
-
-    def test_progress_after_iter_lines(self):
-        from .common import Environment
-
-        with Environment(lines=10) as env:
-            gz_file = env.create_test_gzip_file()
-            rt = dft_utils.Runtime(threads=2)
-            reader = dft_utils.TraceReader(gz_file, runtime=rt)
-            list(reader.iter_lines())
+            list(dft_utils.TraceViewer(gz, index_path=env.temp_dir, runtime=rt).stream())
             rt.shutdown()
             p = rt.get_progress()
             assert p["total"] >= 1
             assert p["completed"] >= 1
 
     def test_progress_task_details(self):
-        """Completed tasks appear in the tasks list with timing."""
         from .common import Environment
 
         with Environment(lines=10) as env:
-            gz_file = env.create_test_gzip_file()
+            gz = self._indexed(env)
             rt = dft_utils.Runtime(threads=2)
-            reader = dft_utils.TraceReader(gz_file, runtime=rt)
-            reader.read_lines()
+            list(dft_utils.TraceViewer(gz, index_path=env.temp_dir, runtime=rt).stream())
             rt.shutdown()
             p = rt.get_progress()
             assert len(p["tasks"]) >= 1
             task = p["tasks"][0]
-            assert "name" in task
-            assert "state" in task
+            assert "name" in task and "state" in task
             assert task["state"] == "completed"
-            assert "execution_duration_ms" in task
             assert task["execution_duration_ms"] >= 0
-            assert "queued_duration_ms" in task
             assert task["queued_duration_ms"] >= 0
 
-    def test_progress_after_multiple_reads(self):
+    def test_progress_after_multiple_ops(self):
         from .common import Environment
 
         with Environment(lines=10) as env:
-            gz_file = env.create_test_gzip_file()
+            gz = self._indexed(env)
             rt = dft_utils.Runtime(threads=2)
-            reader = dft_utils.TraceReader(gz_file, runtime=rt)
-            reader.read_lines()
-            reader.read_lines()
-            reader.read_raw()
+            tv = dft_utils.TraceViewer(gz, index_path=env.temp_dir, runtime=rt)
+            list(tv.stream())
+            list(tv.stream())
+            tv.statistics()
             rt.shutdown()
             p = rt.get_progress()
             assert p["total"] >= 3
@@ -159,10 +146,9 @@ class TestRuntimeProgress:
         from .common import Environment
 
         with Environment(lines=10) as env:
-            gz_file = env.create_test_gzip_file()
+            gz = self._indexed(env)
             rt = dft_utils.Runtime(threads=2)
-            reader = dft_utils.TraceReader(gz_file, runtime=rt)
-            reader.read_lines()
+            list(dft_utils.TraceViewer(gz, index_path=env.temp_dir, runtime=rt).stream())
             rt.shutdown()
             p = rt.get_progress()
             assert p["failed"] == 0
