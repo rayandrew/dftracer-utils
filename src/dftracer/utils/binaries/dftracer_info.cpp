@@ -96,7 +96,7 @@ static coro::CoroTask<std::shared_ptr<RootInfoSummary>> load_root_info_summary(
     {
         IndexDatabase db(
             index_path,
-            dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+            dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
         root = db.query_root_scalar_stats();
     }
 
@@ -125,7 +125,7 @@ static coro::CoroTask<std::shared_ptr<FileRegistry>> load_file_registry(
     std::string index_path) {
     IndexDatabase db(
         index_path,
-        dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+        dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
     co_return std::make_shared<FileRegistry>(db.query_all_file_registry());
 }
 
@@ -140,7 +140,7 @@ process_index_group_info_sync(std::string index_path,
 
     IndexDatabase db(
         index_path,
-        dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+        dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
     auto metadata_rows = db.query_file_metadata_batch(file_ids);
     auto merged_stats = db.query_merged_statistics_batch(file_ids);
 
@@ -282,12 +282,6 @@ static coro::CoroTask<void> auto_index_and_resolve(
         files_needing_index.front().file_path, index_dir);
     dftracer::utils::rocksdb::RocksDBManager::instance().reset(index_path);
 
-    const bool all_gzip =
-        std::all_of(files_needing_index.begin(), files_needing_index.end(),
-                    [](const FileWorkItem& item) {
-                        return item.file_path.ends_with(".gz");
-                    });
-
     {
         auto batch_config = std::make_shared<IndexBuildBatchConfig>();
         batch_config->file_paths.reserve(files_needing_index.size());
@@ -297,8 +291,7 @@ static coro::CoroTask<void> auto_index_and_resolve(
         batch_config->index_dir = index_dir;
         batch_config->checkpoint_size = checkpoint_size;
         batch_config->parallelism = executor_threads;
-        batch_config->use_batch_write = all_gzip;
-        batch_config->rebuild_root_summaries = all_gzip;
+        batch_config->rebuild_root_summaries = true;
 
         auto batch_result = co_await IndexBatchBuilderUtility::process(
             &ctx, std::move(batch_config));

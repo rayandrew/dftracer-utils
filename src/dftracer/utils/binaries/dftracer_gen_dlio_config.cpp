@@ -203,8 +203,8 @@ int main(int argc, char** argv) {
     return cli::cli_main<GenDlioConfigArgParse>(
         argc, argv, "dftracer_gen_dlio_config",
         "Generate a DLIO YAML configuration from raw DFTracer logs. Indexes "
-        "and aggregates the input directory automatically; users do not need "
-        "to run dftracer_aggregator separately.",
+        "and aggregates the input directory automatically; no separate "
+        "aggregation step is required.",
         [](GenDlioConfigArgParse& cli) -> int {
             // --- Aggregation phase: produce / reuse the AGGREGATION CF
             // ---------------

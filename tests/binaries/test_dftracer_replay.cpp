@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/filesystem.h>
 #include <doctest/doctest.h>
+#include <spawn.h>
 #include <sys/wait.h>
 #include <testing_utilities.h>
 #include <unistd.h>
@@ -8,8 +9,40 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
+
+extern char** environ;
+
+namespace {
+/// Traces must be gzip. Drop-in for the std::ofstream these fixtures used:
+/// same `<<` and close(), but the bytes land compressed.
+class GzTraceWriter {
+   public:
+    explicit GzTraceWriter(const std::string& path) : path_(path) {}
+    ~GzTraceWriter() { close(); }
+
+    template <typename T>
+    GzTraceWriter& operator<<(const T& value) {
+        buffer_ << value;
+        return *this;
+    }
+
+    bool is_open() const { return true; }
+
+    void close() {
+        if (closed_) return;
+        closed_ = true;
+        dft_utils_test::write_gz_trace(path_, buffer_.str());
+    }
+
+   private:
+    std::string path_;
+    std::ostringstream buffer_;
+    bool closed_ = false;
+};
+}  // namespace
 
 // ============================================================================
 // Helpers
@@ -40,49 +73,55 @@ std::string find_replay_binary() {
     return "";
 }
 
-int run_replay(const std::string& binary,
-               const std::vector<std::string>& args) {
-    pid_t pid = ::fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        std::vector<const char*> argv;
-        argv.push_back(binary.c_str());
-        for (const auto& arg : args) argv.push_back(arg.c_str());
-        argv.push_back(nullptr);
-        ::execv(binary.c_str(), const_cast<char* const*>(argv.data()));
-        ::_exit(127);
-    }
-    int status = 0;
-    ::waitpid(pid, &status, 0);
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    return -1;
+// This test process links a threaded runtime, so a hand-rolled fork+exec is
+// unsafe (the child may run only async-signal-safe code before exec). Use
+// posix_spawn, which is built to launch a process safely from a multithreaded
+// parent, for every replay invocation.
+std::vector<char*> make_argv(const std::string& binary,
+                             const std::vector<std::string>& args) {
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(binary.c_str()));
+    for (const auto& arg : args) argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+    return argv;
 }
 
 std::string run_replay_capture(const std::string& binary,
                                const std::vector<std::string>& args,
-                               int* exit_code = nullptr) {
+                               int* exit_code);
+
+int run_replay(const std::string& binary,
+               const std::vector<std::string>& args) {
+    int rc = -1;
+    run_replay_capture(binary, args, &rc);
+    return rc;
+}
+
+std::string run_replay_capture(const std::string& binary,
+                               const std::vector<std::string>& args,
+                               int* exit_code) {
     int pipefd[2];
     if (::pipe(pipefd) < 0) return "";
 
-    pid_t pid = ::fork();
-    if (pid < 0) {
+    auto argv = make_argv(binary, args);
+
+    posix_spawn_file_actions_t fa;
+    ::posix_spawn_file_actions_init(&fa);
+    ::posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDOUT_FILENO);
+    ::posix_spawn_file_actions_adddup2(&fa, pipefd[1], STDERR_FILENO);
+    ::posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+    ::posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+
+    pid_t pid = 0;
+    int spawn_rc =
+        ::posix_spawn(&pid, binary.c_str(), &fa, nullptr, argv.data(), environ);
+    ::posix_spawn_file_actions_destroy(&fa);
+    ::close(pipefd[1]);
+    if (spawn_rc != 0) {
         ::close(pipefd[0]);
-        ::close(pipefd[1]);
+        if (exit_code) *exit_code = -1;
         return "";
     }
-    if (pid == 0) {
-        ::close(pipefd[0]);
-        ::dup2(pipefd[1], STDOUT_FILENO);
-        ::dup2(pipefd[1], STDERR_FILENO);
-        ::close(pipefd[1]);
-        std::vector<const char*> argv;
-        argv.push_back(binary.c_str());
-        for (const auto& arg : args) argv.push_back(arg.c_str());
-        argv.push_back(nullptr);
-        ::execv(binary.c_str(), const_cast<char* const*>(argv.data()));
-        ::_exit(127);
-    }
-    ::close(pipefd[1]);
     std::string output;
     char buf[4096];
     ssize_t n;
@@ -98,7 +137,7 @@ std::string run_replay_capture(const std::string& binary,
 // Create a plain .pfw trace file with sample events.
 // The replay binary handles uncompressed .pfw without needing an index.
 void create_sample_trace(const std::string& path, int num_events = 10) {
-    std::ofstream file(path);
+    GzTraceWriter file(path);
     file << "[\n";
     for (int i = 0; i < num_events; i++) {
         file << R"({"id":)" << i
@@ -116,7 +155,7 @@ void create_sample_trace(const std::string& path, int num_events = 10) {
 }
 
 void create_multi_category_trace(const std::string& path) {
-    std::ofstream file(path);
+    GzTraceWriter file(path);
     file << "[\n";
     file
         << R"({"id":1,"name":"read","cat":"POSIX","pid":12345,"tid":12345,"ts":1000000,"dur":1500,"ph":"X","args":{"size":1024}})"
@@ -192,7 +231,7 @@ TEST_SUITE("DFTracerReplay") {
 
         fs::path temp_dir = dft_utils_test::make_unique_test_path("replay_dry");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "test_trace.pfw").string();
+        std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 5);
 
         int rc = 0;
@@ -216,7 +255,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_nosleep");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "test_trace.pfw").string();
+        std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 5);
 
         int rc = 0;
@@ -239,7 +278,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_notiming");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "test_trace.pfw").string();
+        std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 5);
 
         int rc = 0;
@@ -262,7 +301,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_filter_cat");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "multi_category.pfw").string();
+        std::string trace_file = (temp_dir / "multi_category.pfw.gz").string();
         create_multi_category_trace(trace_file);
 
         int rc = 0;
@@ -287,7 +326,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_filter_multi");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "multi_category.pfw").string();
+        std::string trace_file = (temp_dir / "multi_category.pfw.gz").string();
         create_multi_category_trace(trace_file);
 
         // Exit code may vary but should run.
@@ -308,7 +347,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_filter_func");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "multi_category.pfw").string();
+        std::string trace_file = (temp_dir / "multi_category.pfw.gz").string();
         create_multi_category_trace(trace_file);
 
         int rc = 0;
@@ -331,7 +370,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_max_events");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "test_trace.pfw").string();
+        std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 20);
 
         int rc = 0;
@@ -354,7 +393,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_sample50");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "large_trace.pfw").string();
+        std::string trace_file = (temp_dir / "large_trace.pfw.gz").string();
         create_sample_trace(trace_file, 100);
 
         int rc = 0;
@@ -379,7 +418,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_sample25");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "large_trace.pfw").string();
+        std::string trace_file = (temp_dir / "large_trace.pfw.gz").string();
         create_sample_trace(trace_file, 100);
 
         int rc = 0;
@@ -403,7 +442,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_sample_bad");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "test_trace.pfw").string();
+        std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 10);
 
         // Should handle gracefully or fail with error.
@@ -424,7 +463,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_timing");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "perf_trace.pfw").string();
+        std::string trace_file = (temp_dir / "perf_trace.pfw.gz").string();
         create_sample_trace(trace_file, 10);
 
         int rc =
@@ -445,7 +484,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_bench");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "perf_trace.pfw").string();
+        std::string trace_file = (temp_dir / "perf_trace.pfw.gz").string();
         create_sample_trace(trace_file, 50);
 
         auto start = std::chrono::steady_clock::now();
@@ -473,7 +512,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_verbose");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "stats_trace.pfw").string();
+        std::string trace_file = (temp_dir / "stats_trace.pfw.gz").string();
         create_sample_trace(trace_file, 5);
 
         int rc = 0;
@@ -496,7 +535,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_stats");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "stats_trace.pfw").string();
+        std::string trace_file = (temp_dir / "stats_trace.pfw.gz").string();
         create_multi_category_trace(trace_file);
 
         int rc = 0;
@@ -519,7 +558,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_perfunc");
         fs::create_directories(temp_dir);
-        std::string trace_file = (temp_dir / "stats_trace.pfw").string();
+        std::string trace_file = (temp_dir / "stats_trace.pfw.gz").string();
         create_multi_category_trace(trace_file);
 
         int rc = 0;
@@ -553,7 +592,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_bad_fmt");
         fs::create_directories(temp_dir);
-        std::string bad_trace = (temp_dir / "bad_trace.pfw").string();
+        std::string bad_trace = (temp_dir / "bad_trace.pfw.gz").string();
 
         std::ofstream file(bad_trace);
         file << "this is not valid JSON";
@@ -577,9 +616,10 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_empty");
         fs::create_directories(temp_dir);
-        std::string empty_trace = (temp_dir / "empty_trace.pfw").string();
+        std::string empty_trace = (temp_dir / "empty_trace.pfw.gz").string();
 
-        std::ofstream file(empty_trace);
+        // Must be a valid (empty) gzip, not plain text in a .gz name.
+        GzTraceWriter file(empty_trace);
         file << "[]";
         file.close();
 
@@ -751,7 +791,7 @@ TEST_SUITE("DFTracerReplay") {
         fs::path temp_dir =
             dft_utils_test::make_unique_test_path("replay_stress");
         fs::create_directories(temp_dir);
-        std::string large_trace = (temp_dir / "large_trace.pfw").string();
+        std::string large_trace = (temp_dir / "large_trace.pfw.gz").string();
         create_sample_trace(large_trace, 1000);
 
         auto start = std::chrono::steady_clock::now();

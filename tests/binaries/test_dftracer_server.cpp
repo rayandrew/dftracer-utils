@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <testing_utilities.h>
 #include <unistd.h>
+#include <zlib.h>
 
 #include <cerrno>
 #include <chrono>
@@ -43,6 +44,35 @@ std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
         env.get_dir() + "/trace_" + std::to_string(id) + ".pfw.gz";
     fs::rename(trace_gz, pfw_path);
     return pfw_path;
+}
+
+/// Write a gzipped .pfw trace declaring time_metric=NS into `dir`. Events span
+/// ts 5000100000..5020000000 ns (=> 5000100..5020000 us) with durations
+/// 50000..250000 ns (=> 50..250 us), so scaling is observable in the response.
+std::string create_ns_pfw_gz(const std::string& dir) {
+    std::string path = dir + "/ns_trace.pfw.gz";
+    gzFile f = gzopen(path.c_str(), "wb");
+    if (f == nullptr) return "";
+    gzputs(f, "[\n");
+    gzputs(
+        f,
+        "{\"id\":0,\"name\":\"CM\",\"cat\":\"dft\",\"pid\":0,\"tid\":0,"
+        "\"ph\":\"M\",\"args\":{\"name\":\"time_metric\",\"value\":\"NS\"}}\n");
+    for (int i = 1; i <= 200; ++i) {
+        unsigned long long ts =
+            5000000000ULL + static_cast<unsigned long long>(i) * 100000ULL;
+        unsigned long long dur =
+            50000ULL * static_cast<unsigned long long>(1 + (i % 5));
+        char buf[256];
+        std::snprintf(
+            buf, sizeof(buf),
+            "{\"id\":%d,\"name\":\"read\",\"cat\":\"posix\",\"pid\":1,"
+            "\"tid\":%d,\"ts\":%llu,\"dur\":%llu,\"ph\":\"X\"}\n",
+            i, 1000 + i % 3, ts, dur);
+        gzputs(f, buf);
+    }
+    gzclose(f);
+    return path;
 }
 
 /// Find the dftracer_server binary. Checks DFTRACER_SERVER_PATH env first,
@@ -119,10 +149,21 @@ bool wait_for_port(int port, int timeout_s = 10) {
 }
 
 /// Send a raw HTTP request and receive the response.
+/// Send `request` to the local server and return the raw response, or an
+/// empty string on failure.
+///
+/// The timeout is generous because the whole suite runs in parallel and
+/// several of these endpoints do real work; it bounds a hang, it is not a
+/// latency assertion. Failures say which way they failed, since an empty
+/// response otherwise cannot distinguish a server that never came up from
+/// one that was too slow.
 std::string http_request(int port, const std::string& request,
-                         int recv_timeout_s = 15) {
+                         int recv_timeout_s = 60) {
     int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return "";
+    if (sock < 0) {
+        MESSAGE("http_request: socket() failed");
+        return "";
+    }
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -132,12 +173,14 @@ std::string http_request(int port, const std::string& request,
     if (::connect(sock, reinterpret_cast<struct sockaddr*>(&addr),
                   sizeof(addr)) < 0) {
         ::close(sock);
+        MESSAGE("http_request: connect to port " << port << " failed");
         return "";
     }
 
     ssize_t sent = ::send(sock, request.data(), request.size(), 0);
     if (sent < 0) {
         ::close(sock);
+        MESSAGE("http_request: send failed");
         return "";
     }
 
@@ -170,6 +213,9 @@ std::string http_request(int port, const std::string& request,
     }
 
     ::close(sock);
+    if (response.empty()) {
+        MESSAGE("http_request: no response within " << recv_timeout_s << "s");
+    }
     return response;
 }
 
@@ -217,7 +263,7 @@ bool wait_for_http(int port, int timeout_s = 30) {
                     std::chrono::seconds(timeout_s * valgrind_timeout_scale());
     while (std::chrono::steady_clock::now() < deadline) {
         auto probe = http_request(port,
-                                  "GET /api/v1/files HTTP/1.1\r\n"
+                                  "GET /api/files HTTP/1.1\r\n"
                                   "Host: localhost\r\n"
                                   "Connection: close\r\n"
                                   "\r\n",
@@ -228,8 +274,33 @@ bool wait_for_http(int port, int timeout_s = 30) {
     return false;
 }
 
-/// Pick a random port in the ephemeral range.
-int pick_port() { return 10000 + (::getpid() % 50000); }
+/// Ask the OS for a free loopback port, one per call.
+///
+/// Deriving it from the pid collides across concurrently running test
+/// processes - pids of processes started together are adjacent, and the
+/// cases here used pick_port()+1..+4 - so a request could be answered by
+/// another test's server, which serves a different trace directory.
+int pick_port() {
+    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return 0;
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+
+    int port = 0;
+    if (::bind(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) ==
+        0) {
+        socklen_t len = sizeof(addr);
+        if (::getsockname(sock, reinterpret_cast<struct sockaddr*>(&addr),
+                          &len) == 0) {
+            port = ntohs(addr.sin_port);
+        }
+    }
+    ::close(sock);
+    return port;
+}
 
 /// RAII server process manager.
 struct ServerProcess {
@@ -240,11 +311,13 @@ struct ServerProcess {
 
     bool start(const std::string& binary, const std::string& data_dir, int p) {
         port = p;
+        // Build before fork: the child may only call async-signal-safe
+        // functions until execl, and std::to_string allocates.
+        auto port_str = std::to_string(port);
         pid = ::fork();
         if (pid < 0) return false;
 
         if (pid == 0) {
-            auto port_str = std::to_string(port);
             ::execl(binary.c_str(), binary.c_str(), "-d", data_dir.c_str(),
                     "-p", port_str.c_str(), "--bind", "127.0.0.1",
                     "--executor-threads", "2", nullptr);
@@ -316,10 +389,10 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
     ServerProcess server;
     REQUIRE(server.start(binary, env.get_dir(), port));
 
-    // -- GET /api/v1/files returns 200 with JSON object --
+    // -- GET /api/files returns 200 with JSON object --
     {
         auto resp = http_request(port,
-                                 "GET /api/v1/files HTTP/1.1\r\n"
+                                 "GET /api/files HTTP/1.1\r\n"
                                  "Host: localhost\r\n"
                                  "Connection: close\r\n"
                                  "\r\n");
@@ -334,11 +407,11 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"count\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/files/info returns file metadata --
+    // -- GET /api/files/info returns file metadata --
     {
         // First get the file list to find a valid path
         auto list_resp = http_request(port,
-                                      "GET /api/v1/files HTTP/1.1\r\n"
+                                      "GET /api/files HTTP/1.1\r\n"
                                       "Host: localhost\r\n"
                                       "Connection: close\r\n"
                                       "\r\n");
@@ -355,12 +428,11 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         auto file_path = list_body.substr(path_start, path_end - path_start);
 
         // Now query file info
-        auto resp =
-            http_request(port, "GET /api/v1/files/info?file=" + file_path +
-                                   " HTTP/1.1\r\n"
-                                   "Host: localhost\r\n"
-                                   "Connection: close\r\n"
-                                   "\r\n");
+        auto resp = http_request(port, "GET /api/files/info?file=" + file_path +
+                                           " HTTP/1.1\r\n"
+                                           "Host: localhost\r\n"
+                                           "Connection: close\r\n"
+                                           "\r\n");
 
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
@@ -372,10 +444,10 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"has_bloom_data\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/files/info returns 400 without file param --
+    // -- GET /api/files/info returns 400 without file param --
     {
         auto resp = http_request(port,
-                                 "GET /api/v1/files/info HTTP/1.1\r\n"
+                                 "GET /api/files/info HTTP/1.1\r\n"
                                  "Host: localhost\r\n"
                                  "Connection: close\r\n"
                                  "\r\n");
@@ -384,56 +456,15 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(extract_status_code(resp) == 400);
     }
 
-    // -- GET /api/v1/events returns 200 with NDJSON --
+    // -- GET /api/viz/events returns viz data --
     {
-        auto resp = http_request(port,
-                                 "GET /api/v1/events?limit=10 HTTP/1.1\r\n"
-                                 "Host: localhost\r\n"
-                                 "Connection: close\r\n"
-                                 "\r\n");
-
-        REQUIRE(!resp.empty());
-        CHECK(extract_status_code(resp) == 200);
-
-        auto body = extract_body(resp);
-        CHECK(!body.empty());
-        CHECK(body.front() == '{');
-    }
-
-    // -- GET /api/v1/events/stream returns NDJSON --
-    {
-        auto resp = http_request(port,
-                                 "GET /api/v1/events/stream HTTP/1.1\r\n"
-                                 "Host: localhost\r\n"
-                                 "Connection: close\r\n"
-                                 "\r\n");
-
-        REQUIRE(!resp.empty());
-        CHECK(extract_status_code(resp) == 200);
-        CHECK(resp.find("application/x-ndjson") != std::string::npos);
-    }
-
-    // -- GET /api/v1/stats returns 200 --
-    {
-        auto resp = http_request(port,
-                                 "GET /api/v1/stats HTTP/1.1\r\n"
-                                 "Host: localhost\r\n"
-                                 "Connection: close\r\n"
-                                 "\r\n");
-
-        REQUIRE(!resp.empty());
-        CHECK(extract_status_code(resp) == 200);
-    }
-
-    // -- GET /api/v1/viz/events returns viz data --
-    {
-        auto resp = http_request(
-            port,
-            "GET /api/v1/viz/events?begin=0&end=999999999&summary=1"
-            " HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Connection: close\r\n"
-            "\r\n");
+        auto resp =
+            http_request(port,
+                         "GET /api/viz/events?begin=0&end=999999999&summary=1"
+                         " HTTP/1.1\r\n"
+                         "Host: localhost\r\n"
+                         "Connection: close\r\n"
+                         "\r\n");
 
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
@@ -445,11 +476,11 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"metadata\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/events with lanes param (JSON array) --
+    // -- GET /api/viz/events with lanes param (JSON array) --
     {
         auto resp = http_request(
             port,
-            "GET /api/v1/viz/events?begin=0&end=999999999&summary=1"
+            "GET /api/viz/events?begin=0&end=999999999&summary=1"
             "&lanes=%5B%7B%22field%22%3A%22pid%22%2C%22value%22%3A%221%22%7D%5D"
             " HTTP/1.1\r\n"
             "Host: localhost\r\n"
@@ -465,12 +496,12 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"events\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/events with filters param (JSON array) --
+    // -- GET /api/viz/events with filters param (JSON array) --
     {
         // filters=[{"field":"pid","op":"=","value":1}]
         auto resp = http_request(
             port,
-            "GET /api/v1/viz/events?begin=0&end=999999999&summary=1"
+            "GET /api/viz/events?begin=0&end=999999999&summary=1"
             "&filters=%5B%7B%22field%22%3A%22pid%22%2C%22op%22%3A%22%3D"
             "%22%2C%22value%22%3A1%7D%5D"
             " HTTP/1.1\r\n"
@@ -487,12 +518,12 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"events\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/events with duration filter --
+    // -- GET /api/viz/events with duration filter --
     {
         // filters=[{"field":"dur","op":">=","value":0}]
         auto resp = http_request(
             port,
-            "GET /api/v1/viz/events?begin=0&end=999999999&summary=1"
+            "GET /api/viz/events?begin=0&end=999999999&summary=1"
             "&filters=%5B%7B%22field%22%3A%22dur%22%2C%22op%22%3A%22%3E%3D"
             "%22%2C%22value%22%3A0%7D%5D"
             " HTTP/1.1\r\n"
@@ -504,10 +535,10 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(extract_status_code(resp) == 200);
     }
 
-    // -- GET /api/v1/viz/events returns 400 without required params --
+    // -- GET /api/viz/events returns 400 without required params --
     {
         auto resp = http_request(port,
-                                 "GET /api/v1/viz/events HTTP/1.1\r\n"
+                                 "GET /api/viz/events HTTP/1.1\r\n"
                                  "Host: localhost\r\n"
                                  "Connection: close\r\n"
                                  "\r\n");
@@ -516,10 +547,10 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(extract_status_code(resp) == 400);
     }
 
-    // -- GET /api/v1/info returns global time bounds --
+    // -- GET /api/info returns global time bounds --
     {
         auto resp = http_request(port,
-                                 "GET /api/v1/info HTTP/1.1\r\n"
+                                 "GET /api/info HTTP/1.1\r\n"
                                  "Host: localhost\r\n"
                                  "Connection: close\r\n"
                                  "\r\n");
@@ -534,10 +565,10 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"files\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/breaks reports idle gaps + multi-run detection --
+    // -- GET /api/viz/breaks reports idle gaps + multi-run detection --
     {
         auto resp = http_request(port,
-                                 "GET /api/v1/viz/breaks HTTP/1.1\r\n"
+                                 "GET /api/viz/breaks HTTP/1.1\r\n"
                                  "Host: localhost\r\n"
                                  "Connection: close\r\n"
                                  "\r\n");
@@ -551,15 +582,15 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"multi_run\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/events returns normalized ts by default --
+    // -- GET /api/viz/events returns normalized ts by default --
     {
-        auto resp = http_request(
-            port,
-            "GET /api/v1/viz/events?begin=0&end=999999999&summary=1"
-            " HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Connection: close\r\n"
-            "\r\n");
+        auto resp =
+            http_request(port,
+                         "GET /api/viz/events?begin=0&end=999999999&summary=1"
+                         " HTTP/1.1\r\n"
+                         "Host: localhost\r\n"
+                         "Connection: close\r\n"
+                         "\r\n");
 
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
@@ -571,16 +602,16 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"global_min_timestamp_us\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/events?ts_normalize=0 returns raw timestamps --
+    // -- GET /api/viz/events?ts_normalize=0 returns raw timestamps --
     {
-        auto resp = http_request(
-            port,
-            "GET /api/v1/viz/events?begin=0&end=999999999&summary=1"
-            "&ts_normalize=0"
-            " HTTP/1.1\r\n"
-            "Host: localhost\r\n"
-            "Connection: close\r\n"
-            "\r\n");
+        auto resp =
+            http_request(port,
+                         "GET /api/viz/events?begin=0&end=999999999&summary=1"
+                         "&ts_normalize=0"
+                         " HTTP/1.1\r\n"
+                         "Host: localhost\r\n"
+                         "Connection: close\r\n"
+                         "\r\n");
 
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
@@ -592,11 +623,11 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"global_min_timestamp_us\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/density returns aggregated density blocks --
+    // -- GET /api/viz/density returns aggregated density blocks --
     {
         auto resp = http_request(
             port,
-            "GET /api/v1/viz/density?begin=0&end=999999999&summary=2"
+            "GET /api/viz/density?begin=0&end=999999999&summary=2"
             " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
@@ -605,66 +636,81 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         CHECK(body.find("\"density\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/counters returns bandwidth/IOPS buckets --
+    // -- GET /api/viz/counters returns bandwidth/IOPS buckets --
     {
         auto resp = http_request(
             port,
-            "GET /api/v1/viz/counters?begin=0&end=999999999&summary=1"
+            "GET /api/viz/counters?begin=0&end=999999999&summary=1"
             " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
         CHECK(extract_body(resp).find("\"buckets\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/stats returns per-name aggregation --
+    // -- /viz/counters live path (a cat filter makes it summary-ineligible, so
+    // the request folds counters over the View scan) --
     {
         auto resp = http_request(
             port,
-            "GET /api/v1/viz/stats?begin=0&end=999999999&summary=1"
+            "GET /api/viz/counters?begin=0&end=999999999&cat=POSIX"
+            " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.find("\"read_bytes\"") != std::string::npos);
+        CHECK(body.find("\"write_bytes\"") != std::string::npos);
+        CHECK(body.find("\"ops\"") != std::string::npos);
+    }
+
+    // -- GET /api/viz/stats returns per-name aggregation --
+    {
+        auto resp = http_request(
+            port,
+            "GET /api/viz/stats?begin=0&end=999999999&summary=1"
             " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
         CHECK(extract_body(resp).find("\"names\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/proctree returns the inferred process tree --
+    // -- GET /api/viz/proctree returns the inferred process tree --
     {
         auto resp =
             http_request(port,
-                         "GET /api/v1/viz/proctree HTTP/1.1\r\n"
+                         "GET /api/viz/proctree HTTP/1.1\r\n"
                          "Host: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
         CHECK(extract_body(resp).find("\"nodes\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/calltree returns a merged flamegraph tree --
+    // -- GET /api/viz/calltree returns a merged flamegraph tree --
     {
         auto resp = http_request(
             port,
-            "GET /api/v1/viz/calltree?begin=0&end=999999999&summary=1"
+            "GET /api/viz/calltree?begin=0&end=999999999&summary=1"
             " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
         CHECK(extract_body(resp).find("\"children\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/histogram returns a duration distribution --
+    // -- GET /api/viz/histogram returns a duration distribution --
     {
         auto resp = http_request(
             port,
-            "GET /api/v1/viz/histogram?begin=0&end=999999999&summary=1"
+            "GET /api/viz/histogram?begin=0&end=999999999&summary=1"
             " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
         CHECK(extract_body(resp).find("\"buckets\"") != std::string::npos);
     }
 
-    // -- GET /api/v1/viz/layers returns name->category + file counts --
+    // -- GET /api/viz/layers returns name->category + file counts --
     {
         auto resp =
             http_request(port,
-                         "GET /api/v1/viz/layers HTTP/1.1\r\n"
+                         "GET /api/viz/layers HTTP/1.1\r\n"
                          "Host: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
         CHECK(extract_status_code(resp) == 200);
@@ -689,7 +735,7 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
     {
         auto resp =
             http_request(port,
-                         "GET /api/v1/viz/layers HTTP/1.1\r\n"
+                         "GET /api/viz/layers HTTP/1.1\r\n"
                          "Host: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
         CHECK(resp.find("Access-Control-Allow-Origin: *") != std::string::npos);
@@ -698,7 +744,7 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
     // -- CORS preflight is answered (browsers omit Authorization from it) --
     {
         auto resp = http_request(port,
-                                 "OPTIONS /api/v1/info HTTP/1.1\r\n"
+                                 "OPTIONS /api/info HTTP/1.1\r\n"
                                  "Host: localhost\r\n"
                                  "Origin: vscode-webview://x\r\n"
                                  "Access-Control-Request-Method: GET\r\n"
@@ -713,7 +759,7 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
     {
         auto resp =
             http_request(port,
-                         "GET /api/v1/viz/density?begin=0&end="
+                         "GET /api/viz/density?begin=0&end="
                          "999999999&summary=1&width=8192&limit=3 HTTP/1.1\r\n"
                          "Host: localhost\r\nConnection: close\r\n\r\n");
         REQUIRE(!resp.empty());
@@ -788,44 +834,6 @@ TEST_CASE("DFTracer Server - graceful shutdown via SIGTERM") {
     CHECK_FALSE(port_is_listening(port));
 }
 
-// A chunk carries two iovec entries per event, so past ~511 events a single
-// writev exceeds IOV_MAX and used to fail, yielding 200 with an empty body.
-TEST_CASE("DFTracer Server - streams chunks larger than IOV_MAX") {
-    auto binary = find_server_binary();
-    if (binary.empty()) {
-        MESSAGE("dftracer_server binary not found, skipping.");
-        return;
-    }
-    if (!can_bind_local_tcp_socket()) {
-        MESSAGE("local TCP bind is unavailable in this environment, skipping.");
-        return;
-    }
-
-    constexpr int NUM_EVENTS = 2000;
-    dft_utils_test::TestEnvironment env(100);
-    REQUIRE(env.is_valid());
-    auto file = create_pfw_gz(env, NUM_EVENTS, 1);
-    REQUIRE(!file.empty());
-
-    int port = pick_port();
-    ServerProcess server;
-    REQUIRE(server.start(binary, env.get_dir(), port));
-    REQUIRE(wait_for_http(port));
-
-    auto resp = http_request(port,
-                             "GET /api/v1/events/stream HTTP/1.1\r\n"
-                             "Host: localhost\r\nConnection: close\r\n\r\n");
-    REQUIRE(!resp.empty());
-    CHECK(extract_status_code(resp) == 200);
-
-    auto body = extract_body(resp);
-    CHECK(!body.empty());
-    std::size_t lines = 0;
-    for (char c : body)
-        if (c == '\n') ++lines;
-    CHECK(lines >= static_cast<std::size_t>(NUM_EVENTS));
-}
-
 // Inter-run gaps must break at exact app-span boundaries even when far smaller
 // than the old 2%-of-span threshold that used to drop them.
 TEST_CASE("DFTracer Server - multi-run break detection") {
@@ -854,7 +862,7 @@ TEST_CASE("DFTracer Server - multi-run break detection") {
     REQUIRE(wait_for_http(port));
 
     auto resp = http_request(port,
-                             "GET /api/v1/viz/breaks HTTP/1.1\r\n"
+                             "GET /api/viz/breaks HTTP/1.1\r\n"
                              "Host: localhost\r\nConnection: close\r\n\r\n");
     REQUIRE(!resp.empty());
     CHECK(extract_status_code(resp) == 200);
@@ -893,7 +901,7 @@ TEST_CASE("DFTracer Server - rebuilds stale index on changed source") {
         REQUIRE(wait_for_http(port));
         auto body = extract_body(
             http_request(port,
-                         "GET /api/v1/viz/breaks HTTP/1.1\r\n"
+                         "GET /api/viz/breaks HTTP/1.1\r\n"
                          "Host: localhost\r\nConnection: close\r\n\r\n"));
         CHECK(body.find("\"begin\":1000000,\"end\":1010000") !=
               std::string::npos);
@@ -906,17 +914,357 @@ TEST_CASE("DFTracer Server - rebuilds stale index on changed source") {
     fs::remove(pfw);
     fs::rename(v2, pfw);
     {
-        int port = pick_port() + 1;
+        int port = pick_port();
         ServerProcess server;
         REQUIRE(server.start(binary, env.get_dir(), port));
         REQUIRE(wait_for_http(port));
         auto body = extract_body(
             http_request(port,
-                         "GET /api/v1/viz/breaks HTTP/1.1\r\n"
+                         "GET /api/viz/breaks HTTP/1.1\r\n"
                          "Host: localhost\r\nConnection: close\r\n\r\n"));
         CHECK(body.find("\"begin\":1000000,\"end\":1010000") !=
               std::string::npos);
         CHECK(body.find("\"begin\":2010000,\"end\":2020000") !=
               std::string::npos);
+    }
+}
+
+// /viz/density folds real ph="C" counter events into a counter_series section
+// alongside the ph="X" density blocks - both from one scan. group_by forces the
+// live path (the summary path carries no counters) without filtering ph="C".
+TEST_CASE("DFTracer Server - density surfaces ph=C counters as blocks") {
+    auto binary = find_server_binary();
+    if (binary.empty()) {
+        MESSAGE("dftracer_server binary not found, skipping.");
+        return;
+    }
+    if (!can_bind_local_tcp_socket()) {
+        MESSAGE("local TCP bind is unavailable in this environment, skipping.");
+        return;
+    }
+
+    dft_utils_test::TestEnvironment env(1);
+    REQUIRE(env.is_valid());
+    std::string path = env.get_dir() + "/ctr.pfw.gz";
+    gzFile f = gzopen(path.c_str(), "wb");
+    REQUIRE(f != nullptr);
+    gzputs(f, "[\n");
+    for (int i = 0; i < 10; ++i) {
+        std::string ev =
+            "{\"name\":\"read\",\"cat\":\"POSIX\",\"pid\":1,\"tid\":1,\"ts\":" +
+            std::to_string(1000 + i * 1000) +
+            ",\"dur\":10,\"ph\":\"X\",\"args\":{}}\n";
+        gzputs(f, ev.c_str());
+    }
+    // Counter events: cpu utilization with two numeric args -> two series.
+    for (int i = 0; i < 5; ++i) {
+        std::string ev =
+            "{\"name\":\"cpu\",\"cat\":\"sys\",\"pid\":0,\"tid\":0,\"ts\":" +
+            std::to_string(1000 + i * 2000) +
+            ",\"ph\":\"C\",\"args\":{"
+            "\"user_pct\":" +
+            std::to_string(40 + i) + ",\"idle_pct\":" + std::to_string(60 - i) +
+            "}}\n";
+        gzputs(f, ev.c_str());
+    }
+    gzputs(f, "]\n");
+    gzclose(f);
+
+    int port = pick_port();
+    ServerProcess server;
+    REQUIRE(server.start(binary, env.get_dir(), port));
+    REQUIRE(wait_for_http(port));
+
+    auto resp = http_request(
+        port,
+        "GET /api/viz/density?begin=0&end=100000&summary=1&group_by=name"
+        " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    REQUIRE(!resp.empty());
+    CHECK(extract_status_code(resp) == 200);
+    auto body = extract_body(resp);
+    // ph="C" counters are aggregated into ordinary density blocks: one series
+    // per (name.arg), flagged counter with the mean reading as value.
+    CHECK(body.find("\"cpu.user_pct\"") != std::string::npos);
+    CHECK(body.find("\"cpu.idle_pct\"") != std::string::npos);
+    CHECK(body.find("\"counter\":true") != std::string::npos);
+    CHECK(body.find("\"value\":") != std::string::npos);
+}
+
+// The viz summary is cached to disk so a restart skips the full rescan, and the
+// cache must invalidate when the source changes rather than serve stale data.
+TEST_CASE("DFTracer Server - viz summary cache persists and invalidates") {
+    auto binary = find_server_binary();
+    if (binary.empty()) {
+        MESSAGE("dftracer_server binary not found, skipping.");
+        return;
+    }
+    if (!can_bind_local_tcp_socket()) {
+        MESSAGE("local TCP bind is unavailable in this environment, skipping.");
+        return;
+    }
+
+    dft_utils_test::TestEnvironment env(1);
+    REQUIRE(env.is_valid());
+    std::string pfw = env.get_dir() + "/mr.pfw.gz";
+    std::string cache = env.get_dir() + "/.dftviz_summary";
+    const std::string breaks_req =
+        "GET /api/viz/breaks HTTP/1.1\r\n"
+        "Host: localhost\r\nConnection: close\r\n\r\n";
+
+    auto v1 = env.create_dft_multirun_gzip_file(2, 1000000, 10000);
+    REQUIRE(!v1.empty());
+    fs::rename(v1, pfw);
+
+    // First run builds the summary (a /viz request) and writes the cache.
+    {
+        int port = pick_port();
+        ServerProcess server;
+        REQUIRE(server.start(binary, env.get_dir(), port));
+        REQUIRE(wait_for_http(port));
+        auto body = extract_body(http_request(port, breaks_req));
+        CHECK(body.find("\"begin\":1000000,\"end\":1010000") !=
+              std::string::npos);
+    }
+    CHECK(fs::exists(cache));
+
+    // Second run reuses the cache; the result is unchanged.
+    {
+        int port = pick_port();
+        ServerProcess server;
+        REQUIRE(server.start(binary, env.get_dir(), port));
+        REQUIRE(wait_for_http(port));
+        auto body = extract_body(http_request(port, breaks_req));
+        CHECK(body.find("\"begin\":1000000,\"end\":1010000") !=
+              std::string::npos);
+        CHECK(body.find("\"begin\":2010000") == std::string::npos);
+    }
+
+    // A changed source invalidates the cache: the new run's gap must appear.
+    auto v2 = env.create_dft_multirun_gzip_file(3, 1000000, 10000);
+    REQUIRE(!v2.empty());
+    fs::remove(pfw);
+    fs::rename(v2, pfw);
+    {
+        int port = pick_port();
+        ServerProcess server;
+        REQUIRE(server.start(binary, env.get_dir(), port));
+        REQUIRE(wait_for_http(port));
+        auto body = extract_body(http_request(port, breaks_req));
+        CHECK(body.find("\"begin\":2010000,\"end\":2020000") !=
+              std::string::npos);
+    }
+}
+
+// The calltree endpoint builds its tree with streaming per-file workers merged
+// into one tree; two files (with overlapping pids) exercise the worker fan-out,
+// the merge, and the grouped P-node dedup. Grouped and flat trees must report
+// the same totals.
+TEST_CASE("DFTracer Server - calltree endpoint") {
+    auto binary = find_server_binary();
+    if (binary.empty()) {
+        MESSAGE("dftracer_server binary not found, skipping.");
+        return;
+    }
+    if (!can_bind_local_tcp_socket()) {
+        MESSAGE("local TCP bind is unavailable in this environment, skipping.");
+        return;
+    }
+
+    dft_utils_test::TestEnvironment env(1);
+    REQUIRE(env.is_valid());
+    REQUIRE(!create_pfw_gz(env, 40, 1).empty());
+    REQUIRE(!create_pfw_gz(env, 30, 2).empty());
+
+    int port = pick_port();
+    ServerProcess server;
+    REQUIRE(server.start(binary, env.get_dir(), port));
+    REQUIRE(wait_for_http(port));
+
+    // Root fields come right after `"tree":{` in serialization order.
+    auto root_field = [](const std::string& body, const char* key) -> double {
+        auto tpos = body.find("\"tree\":{");
+        REQUIRE(tpos != std::string::npos);
+        auto kpos = body.find("\"" + std::string(key) + "\":", tpos);
+        REQUIRE(kpos != std::string::npos);
+        return std::strtod(body.c_str() + kpos + std::strlen(key) + 3, nullptr);
+    };
+
+    auto flat = http_request(port,
+                             "GET /api/viz/calltree?begin=0&end=999999999"
+                             " HTTP/1.1\r\n"
+                             "Host: localhost\r\n"
+                             "X-Request-Id: e2e-calltree\r\n"
+                             "Connection: close\r\n"
+                             "\r\n");
+    REQUIRE(!flat.empty());
+    CHECK(extract_status_code(flat) == 200);
+    auto fbody = extract_body(flat);
+    CHECK(fbody.find("\"truncated\":false") != std::string::npos);
+    CHECK(fbody.find("\"name\":\"all\"") != std::string::npos);
+    double f_total = root_field(fbody, "total");
+    double f_count = root_field(fbody, "count");
+    CHECK(f_total > 0);
+    CHECK(f_count == 70);  // 40 + 30 events, one frame each
+
+    auto grouped =
+        http_request(port,
+                     "GET /api/viz/calltree?begin=0&end=999999999&group=pid"
+                     " HTTP/1.1\r\n"
+                     "Host: localhost\r\n"
+                     "Connection: close\r\n"
+                     "\r\n");
+    REQUIRE(!grouped.empty());
+    CHECK(extract_status_code(grouped) == 200);
+    auto gbody = extract_body(grouped);
+    CHECK(gbody.find("\"name\":\"P") != std::string::npos);
+    CHECK(root_field(gbody, "total") == doctest::Approx(f_total));
+    CHECK(root_field(gbody, "count") == doctest::Approx(f_count));
+
+    // -- POST /api/cancel: unknown id is a no-op, route is wired --
+    auto cancel = http_request(port,
+                               "POST /api/cancel?id=nope HTTP/1.1\r\n"
+                               "Host: localhost\r\n"
+                               "Connection: close\r\n"
+                               "\r\n");
+    REQUIRE(!cancel.empty());
+    CHECK(extract_status_code(cancel) == 200);
+    CHECK(extract_body(cancel).find("\"cancelled\":false") !=
+          std::string::npos);
+
+    // -- GET /api/viz/columns lists groupable columns (incl. args keys) --
+    {
+        auto resp = http_request(port,
+                                 "GET /api/viz/columns HTTP/1.1\r\n"
+                                 "Host: localhost\r\n"
+                                 "Connection: close\r\n"
+                                 "\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.find("\"columns\"") != std::string::npos);
+        CHECK(body.find("\"ready\":true") != std::string::npos);
+        // The test events carry cat/name and an args.ret key.
+        CHECK(body.find("\"cat\"") != std::string::npos);
+        CHECK(body.find("\"ret\"") != std::string::npos);
+        // Lane-level / bookkeeping fields are not offered as columns.
+        CHECK(body.find("\"pid\"") == std::string::npos);
+    }
+
+    // -- GET /api/viz/density with group_by --
+    {
+        // summary=64 forces sub-pixel folding so density blocks exist.
+        auto resp =
+            http_request(port,
+                         "GET /api/viz/density?begin=0&end=999999999&summary=64"
+                         "&group_by=cat HTTP/1.1\r\n"
+                         "Host: localhost\r\n"
+                         "Connection: close\r\n"
+                         "\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.find("\"density\"") != std::string::npos);
+        // Every test event has a cat, so grouped blocks echo it.
+        CHECK(body.find("\"group\":\"") != std::string::npos);
+    }
+    {
+        // A column no event has: still 200, blocks just carry no group (the
+        // client renders them under "(none)").
+        auto resp =
+            http_request(port,
+                         "GET /api/viz/density?begin=0&end=999999999&summary=64"
+                         "&group_by=no_such_column HTTP/1.1\r\n"
+                         "Host: localhost\r\n"
+                         "Connection: close\r\n"
+                         "\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.find("\"density\"") != std::string::npos);
+        CHECK(body.find("\"group\":\"") == std::string::npos);
+    }
+    {
+        // Malformed column names are rejected.
+        auto resp =
+            http_request(port,
+                         "GET /api/viz/density?begin=0&end=999999999&summary=64"
+                         "&group_by=bad%20name! HTTP/1.1\r\n"
+                         "Host: localhost\r\n"
+                         "Connection: close\r\n"
+                         "\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 400);
+    }
+}
+
+// A trace declaring time_metric=NS must be presented in microseconds by the
+// viz/info APIs (native ns values divided by 1000), not the raw ns magnitudes.
+TEST_CASE("DFTracer Server - CM time_metric scales viz to microseconds") {
+    auto binary = find_server_binary();
+    if (binary.empty()) {
+        MESSAGE("dftracer_server binary not found, skipping.");
+        return;
+    }
+    if (!can_bind_local_tcp_socket()) {
+        MESSAGE("local TCP bind is unavailable in this environment, skipping.");
+        return;
+    }
+
+    dft_utils_test::TestEnvironment env(1);
+    REQUIRE(env.is_valid());
+    auto ns_file = create_ns_pfw_gz(env.get_dir());
+    REQUIRE(!ns_file.empty());
+
+    int port = pick_port();
+    ServerProcess server;
+    REQUIRE(server.start(binary, env.get_dir(), port));
+
+    // /info bounds are microseconds (5000100..5020000), not native ns.
+    {
+        auto resp = http_request(port,
+                                 "GET /api/info HTTP/1.1\r\n"
+                                 "Host: localhost\r\n"
+                                 "Connection: close\r\n"
+                                 "\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.find("\"min_timestamp_us\":5000100") != std::string::npos);
+        // Max is max(ts+dur): event 199 ends at 5020150000 ns => 5020150 us.
+        CHECK(body.find("\"max_timestamp_us\":5020150") != std::string::npos);
+        // The unscaled native magnitude must not leak through.
+        CHECK(body.find("5000100000") == std::string::npos);
+    }
+
+    // /viz/events durations are microseconds (50..250), not native ns.
+    {
+        auto resp = http_request(
+            port,
+            "GET /api/viz/events?begin=0&end=25000&summary=1 HTTP/1.1\r\n"
+            "Host: localhost\r\n"
+            "Connection: close\r\n"
+            "\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.find("\"dur\":250,") != std::string::npos);
+        CHECK(body.find("\"dur\":250000") == std::string::npos);
+        CHECK(body.find("\"global_min_timestamp_us\":5000100") !=
+              std::string::npos);
+    }
+
+    // /viz/stats aggregates durations in microseconds.
+    {
+        auto resp =
+            http_request(port,
+                         "GET /api/viz/stats?begin=0&end=25000 HTTP/1.1\r\n"
+                         "Host: localhost\r\n"
+                         "Connection: close\r\n"
+                         "\r\n");
+        REQUIRE(!resp.empty());
+        CHECK(extract_status_code(resp) == 200);
+        auto body = extract_body(resp);
+        CHECK(body.find("\"max\":250") != std::string::npos);
+        CHECK(body.find("\"max\":250000") == std::string::npos);
     }
 }

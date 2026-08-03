@@ -21,7 +21,7 @@
 #include <dftracer/utils/utilities/composites/dft/statistics/shared_index_statistics_reader.h>
 #include <dftracer/utils/utilities/composites/dft/statistics/statistics_aggregator_utility.h>
 #include <dftracer/utils/utilities/composites/dft/statistics/statistics_query_utility.h>
-#include <dftracer/utils/utilities/composites/dft/visitors/bloom_visitor.h>
+#include <dftracer/utils/utilities/composites/dft/visitors/bloom_core.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
@@ -31,7 +31,6 @@
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
 #include <dftracer/utils/utilities/indexer/internal/index_batch_writer.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer.h>
-#include <dftracer/utils/utilities/indexer/internal/transaction_scope.h>
 
 #include <algorithm>
 #include <array>
@@ -305,7 +304,7 @@ process_index_group_root_summary(std::string index_path,
                                  StatisticsQueryType report_type) {
     IndexDatabase idx_db(
         index_path,
-        dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+        dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
     auto scalar_stats = idx_db.query_root_scalar_stats();
 
     if (!scalar_stats || scalar_stats->num_files != expected_indexed_files) {
@@ -1073,7 +1072,7 @@ static std::unique_ptr<IndexedRootSnapshot> load_index_root_snapshot_impl(
     auto snapshot = std::make_unique<IndexedRootSnapshot>();
     IndexDatabase db(
         index_path,
-        dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+        dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
 
     auto registry = db.query_all_file_registry();
 
@@ -1110,7 +1109,7 @@ static std::unique_ptr<AggregateStatsResult> load_root_aggregate_impl(
     const std::string& index_path, StatisticsQueryType report_type) {
     IndexDatabase idx_db(
         index_path,
-        dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+        dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
     auto scalar_stats = idx_db.query_root_scalar_stats();
     if (!scalar_stats) {
         return nullptr;
@@ -1198,12 +1197,6 @@ static coro::CoroTask<void> auto_index_files(CoroScope& ctx,
     std::printf("Auto-building index for %zu file(s)...\n",
                 partition.files_needing_index.size());
 
-    const bool all_gzip = std::all_of(
-        partition.files_needing_index.begin(),
-        partition.files_needing_index.end(), [](const FileWorkItem& item) {
-            return item.file_path.ends_with(".gz");
-        });
-
     {
         auto batch_config = std::make_shared<indexer::IndexBuildBatchConfig>();
         batch_config->file_paths.reserve(partition.files_needing_index.size());
@@ -1214,8 +1207,7 @@ static coro::CoroTask<void> auto_index_files(CoroScope& ctx,
         batch_config->checkpoint_size = checkpoint_size;
         batch_config->parallelism = executor_threads;
 
-        batch_config->use_batch_write = all_gzip;
-        batch_config->rebuild_root_summaries = all_gzip;
+        batch_config->rebuild_root_summaries = true;
 
         auto batch_result =
             co_await run_batch_build(&ctx, std::move(batch_config));

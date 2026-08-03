@@ -52,14 +52,14 @@ std::string find_index_binary() {
 }
 
 int run_index(const std::string& binary, const std::vector<std::string>& args) {
+    std::vector<const char*> argv;
+    argv.push_back(binary.c_str());
+    for (const auto& arg : args) argv.push_back(arg.c_str());
+    argv.push_back(nullptr);
     pid_t pid = ::fork();
     if (pid < 0) return -1;
     if (pid == 0) {
         set_test_library_path(binary);
-        std::vector<const char*> argv;
-        argv.push_back(binary.c_str());
-        for (const auto& arg : args) argv.push_back(arg.c_str());
-        argv.push_back(nullptr);
         ::execv(binary.c_str(), const_cast<char* const*>(argv.data()));
         ::_exit(127);
     }
@@ -130,27 +130,6 @@ TEST_SUITE("DFTracerIndex") {
 
         CHECK(fs::exists(dftracer::utils::utilities::composites::dft::internal::
                              determine_index_path(f, idx_dir)));
-    }
-
-    TEST_CASE("build with manifest creates idx") {
-        auto binary = find_index_binary();
-        if (binary.empty()) {
-            MESSAGE("dftracer_index binary not found, skipping.");
-            return;
-        }
-
-        dft_utils_test::TestEnvironment env(100);
-        REQUIRE(env.is_valid());
-
-        auto f = create_pfw_gz(env, 100, 0);
-        REQUIRE(!f.empty());
-
-        int rc =
-            run_index(binary, {"-d", env.get_dir(), "--force", "--manifest"});
-        CHECK(rc == 0);
-
-        CHECK(fs::exists(dftracer::utils::utilities::composites::dft::internal::
-                             determine_index_path(f, "")));
     }
 
     TEST_CASE("force rebuild runs twice without error") {

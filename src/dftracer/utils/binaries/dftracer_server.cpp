@@ -1,4 +1,5 @@
 #include <dftracer/utils/core/common/config.h>
+#include <dftracer/utils/core/common/constants.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/io/io_backend.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
@@ -12,7 +13,9 @@
 #include <dftracer/utils/server/trace_index.h>
 #include <dftracer/utils/server/viz_api.h>
 #include <dftracer/utils/server/viz_ui.h>
+#include <dftracer/utils/utilities/reader/internal/member_decode_cache.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -31,6 +34,8 @@ class ServerArgParse : public cli::ArgParse {
     std::string bind_addr = "127.0.0.1";
     std::string auth_token;
     uint16_t port = 8080;
+    std::size_t checkpoint_size = constants::indexer::DEFAULT_CHECKPOINT_SIZE;
+    std::size_t member_cache_size = 1024ull * 1024 * 1024;  // 1 GB
 
     explicit ServerArgParse(argparse::ArgumentParser& p) : ArgParse(p) {
         schema(directory, pipeline);
@@ -62,6 +67,26 @@ class ServerArgParse : public cli::ArgParse {
                 "Optional access token; when set, every request must supply it "
                 "via ?token= or an 'Authorization: Bearer <token>' header")
             .default_value<std::string>("");
+
+        parser()
+            .add_argument("--checkpoint-size")
+            .help(
+                "Decompression checkpoint interval in bytes for auto-indexing "
+                "(default: " +
+                std::to_string(constants::indexer::DEFAULT_CHECKPOINT_SIZE) +
+                "). Smaller = finer zoom-in seeks, larger index")
+            .scan<'d', std::size_t>()
+            .default_value(static_cast<std::size_t>(
+                constants::indexer::DEFAULT_CHECKPOINT_SIZE));
+
+        parser()
+            .add_argument("--member-cache-size")
+            .help(
+                "Bytes of decoded gzip members retained to share across "
+                "concurrent queries (0 disables retention but still coalesces "
+                "in-flight decodes; default: 1 GB)")
+            .scan<'d', std::size_t>()
+            .default_value(static_cast<std::size_t>(1024ull * 1024 * 1024));
     }
 
     void post_parse() override {
@@ -69,6 +94,8 @@ class ServerArgParse : public cli::ArgParse {
         bind_addr = parser().get<std::string>("--bind");
         auth_token = parser().get<std::string>("--token");
         port = parser().get<uint16_t>("--port");
+        checkpoint_size = parser().get<std::size_t>("--checkpoint-size");
+        member_cache_size = parser().get<std::size_t>("--member-cache-size");
     }
 };
 
@@ -87,6 +114,13 @@ static coro::CoroTask<int> run_server(const ServerArgParse* cli) {
         fs::create_directories(index_dir);
     }
 
+    // Share decoded gzip members across concurrent queries (single-flight +
+    // LRU), so overlapping requests over the same member decode it once.
+    utilities::reader::internal::configure_global_member_decode_cache(
+        cli->member_cache_size);
+    std::fprintf(stderr, "Member decode cache: %zu bytes\n",
+                 cli->member_cache_size);
+
     auto pipeline_config =
         cli::build_pipeline_config("DFTracer Server", cli->pipeline);
     pipeline_config.with_io_backend(io::IoBackendType::THREADPOOL)
@@ -97,7 +131,13 @@ static coro::CoroTask<int> run_server(const ServerArgParse* cli) {
 
     Pipeline pipeline(pipeline_config);
 
-    TraceIndex trace_index(dir, index_dir, executor_threads);
+    std::fprintf(stderr,
+                 "Using %zu worker threads; auto-index checkpoint size %zu "
+                 "bytes\n",
+                 executor_threads, cli->checkpoint_size);
+
+    TraceIndex trace_index(dir, index_dir, executor_threads,
+                           cli->checkpoint_size);
     co_await trace_index.initialize();
 
     Router router;
@@ -125,6 +165,18 @@ static coro::CoroTask<int> run_server(const ServerArgParse* cli) {
     auto server_task = make_task(
         [&](CoroScope& ctx) -> coro::CoroTask<void> {
             auto* router_ptr = &router;
+            auto* index_ptr = &trace_index;
+#ifndef DFTRACER_UTILS_VALGRIND_MODE
+            // Eager prewarm is a full pass over every file (gzip decompress +
+            // scan). Skip it under Valgrind - the summary still builds lazily
+            // on the first viz request, so the instrumented server test does
+            // not pay this cost up front and blow its time budget.
+            ctx.spawn([index_ptr](CoroScope&) -> coro::CoroTask<void> {
+                co_await prewarm_viz_summary(*index_ptr);
+            });
+#else
+            (void)index_ptr;
+#endif
             co_await listener.accept_loop(
                 ctx,
                 [router_ptr](int client_fd,

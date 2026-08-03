@@ -317,36 +317,6 @@ bool TraceReader::read_multiple(const std::vector<std::string>& trace_files,
     return all_success;
 }
 
-bool TraceReader::read_directory(const std::string& directory,
-                                 const std::string& pattern, CallTree& graph) {
-    if (!fs::exists(directory) || !fs::is_directory(directory)) {
-        DFTRACER_UTILS_LOG_ERROR("directory does not exist: %s",
-                                 directory.c_str());
-        return false;
-    }
-
-    std::vector<std::string> trace_files;
-    for (const auto& entry : fs::directory_iterator(directory)) {
-        if (!entry.is_regular_file()) continue;
-        std::string filename = entry.path().filename().string();
-        if (pattern == "*" ||
-            filename.find(pattern.substr(1)) != std::string::npos) {
-            trace_files.push_back(entry.path().string());
-        }
-    }
-
-    if (trace_files.empty()) {
-        DFTRACER_UTILS_LOG_ERROR("no trace files found in %s matching %s",
-                                 directory.c_str(), pattern.c_str());
-        return false;
-    }
-
-    std::sort(trace_files.begin(), trace_files.end());
-    DFTRACER_UTILS_LOG_INFO("found %zu trace files in %s", trace_files.size(),
-                            directory.c_str());
-    return read_multiple(trace_files, graph);
-}
-
 bool TraceReader::process_trace_line(JsonParser& parser, CallTree& graph) {
     auto res = ingest_event(parser, graph, nullptr);
     return res.parsed;

@@ -42,7 +42,6 @@ class CallTreeNode {
     int get_level() const { return level_; }
     std::uint64_t get_parent_id() const { return parent_id_; }
     const ArgsMap& get_args() const { return args_; }
-    ArgsMap& mut_args() { return args_; }
     const std::vector<std::uint64_t>& get_children() const { return children_; }
 
     void set_parent_id(std::uint64_t parent_id) { parent_id_ = parent_id; }

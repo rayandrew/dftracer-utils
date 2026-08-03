@@ -6,10 +6,40 @@
 
 #include <chrono>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "testing_utilities.h"
+
+namespace {
+/// Traces must be gzip. Drop-in for the std::ofstream these fixtures used:
+/// same `<<` and close(), but the bytes land compressed.
+class GzTraceWriter {
+   public:
+    explicit GzTraceWriter(const std::string& path) : path_(path) {}
+    ~GzTraceWriter() { close(); }
+
+    template <typename T>
+    GzTraceWriter& operator<<(const T& value) {
+        buffer_ << value;
+        return *this;
+    }
+
+    bool is_open() const { return true; }
+
+    void close() {
+        if (closed_) return;
+        closed_ = true;
+        dft_utils_test::write_gz_trace(path_, buffer_.str());
+    }
+
+   private:
+    std::string path_;
+    std::ostringstream buffer_;
+    bool closed_ = false;
+};
+}  // namespace
 
 using namespace dftracer::utils::utilities::replay;
 
@@ -20,10 +50,10 @@ TEST_CASE("DFTracer Replay - Basic functionality") {
     fs::path temp_dir = fs::temp_directory_path() / "dftracer_replay_test";
     fs::create_directories(temp_dir);
 
-    std::string trace_file = (temp_dir / "test_trace.pfw").string();
+    std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
 
     SUBCASE("Create sample trace file") {
-        std::ofstream file(trace_file);
+        GzTraceWriter file(trace_file);
         REQUIRE(file.is_open());
 
         // Write sample trace entries based on the DFTracer format
@@ -49,7 +79,7 @@ TEST_CASE("DFTracer Replay - Basic functionality") {
     SUBCASE("Test DFTracer sleep-based replay mode") {
         // First create the trace file
         {
-            std::ofstream file(trace_file);
+            GzTraceWriter file(trace_file);
             file << "[\n";
             file
                 << R"({"id":1,"name":"read","cat":"POSIX","pid":12345,"tid":12345,"ts":1000000,"dur":1500,"ph":"X","args":{"fhash":"abc123","size":1024}})"
@@ -86,7 +116,7 @@ TEST_CASE("DFTracer Replay - Basic functionality") {
     SUBCASE("Test dry run mode") {
         // First create the trace file
         {
-            std::ofstream file(trace_file);
+            GzTraceWriter file(trace_file);
             file << "[\n";
             file
                 << R"({"id":1,"name":"read","cat":"POSIX","pid":12345,"tid":12345,"ts":1000000,"dur":1500,"ph":"X","args":{"fhash":"abc123","size":1024}})"
@@ -114,7 +144,7 @@ TEST_CASE("DFTracer Replay - Basic functionality") {
     SUBCASE("Test filter by category") {
         // First create the trace file with multiple categories
         {
-            std::ofstream file(trace_file);
+            GzTraceWriter file(trace_file);
             file << "[\n";
             file
                 << R"({"id":1,"name":"read","cat":"POSIX","pid":12345,"tid":12345,"ts":1000000,"dur":1500,"ph":"X","args":{}})"
@@ -149,7 +179,7 @@ TEST_CASE("DFTracer Replay - Basic functionality") {
     SUBCASE("Test filter by function") {
         // First create the trace file
         {
-            std::ofstream file(trace_file);
+            GzTraceWriter file(trace_file);
             file << "[\n";
             file
                 << R"({"id":1,"name":"read","cat":"POSIX","pid":12345,"tid":12345,"ts":1000000,"dur":1500,"ph":"X","args":{}})"
@@ -184,7 +214,7 @@ TEST_CASE("DFTracer Replay - Basic functionality") {
     SUBCASE("Test max events limit") {
         // First create the trace file with many events
         {
-            std::ofstream file(trace_file);
+            GzTraceWriter file(trace_file);
             file << "[\n";
             for (int i = 0; i < 10; i++) {
                 file
@@ -216,7 +246,7 @@ TEST_CASE("DFTracer Replay - Basic functionality") {
     SUBCASE("Test sampling") {
         // First create the trace file with many events
         {
-            std::ofstream file(trace_file);
+            GzTraceWriter file(trace_file);
             file << "[\n";
             for (int i = 0; i < 100; i++) {
                 file
