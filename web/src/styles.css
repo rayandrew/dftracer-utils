@@ -1153,6 +1153,21 @@ canvas {
   animation: spin-pulse 1.1s ease-in-out infinite;
 }
 
+.status .cancel-btn {
+  padding: 1px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.status .cancel-btn:hover {
+  color: #ff7b72;
+  border-color: #ff7b72;
+}
+
 @keyframes spin-pulse {
   0%,
   100% {
@@ -1209,6 +1224,56 @@ button.ghost.sm {
   border-bottom: 1px solid var(--border);
   color: var(--muted);
   font-size: 12px;
+}
+
+.export-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.export-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+}
+
+.export-menu button {
+  text-align: left;
+}
+
+.legend-colorby {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.legend-colorby select {
+  flex: 1;
+  min-width: 0;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.legend-item:disabled {
+  cursor: default;
 }
 
 .legend-list {
@@ -1348,7 +1413,9 @@ button.ghost.sm {
 .sw-proc > span,
 .drawer-title,
 .toolbar .toggle,
-.toolbar > .ghost {
+.toolbar > .ghost,
+.toolbar .lane-zoom > .ghost,
+.toolbar .export-wrap > .ghost {
   text-transform: uppercase;
   letter-spacing: 0.07em;
 }
@@ -1757,4 +1824,94 @@ html.api-page #root {
 .api-req b {
   color: var(--text);
   font-weight: 500;
+}
+
+.lanes-panel {
+  width: 220px;
+}
+
+.lane-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+}
+
+.lane-group-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.lane-group-row.off .lane-group-name {
+  color: var(--muted);
+}
+
+.lane-group-name {
+  flex: 1;
+}
+
+.lane-group-row button[disabled] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.lane-group-reset {
+  margin-top: 4px;
+  align-self: flex-start;
+}
+
+.lane-group-col {
+  flex: 1 1 60px;
+  min-width: 0;
+  background: var(--panel-2, #10131a);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font: inherit;
+  font-size: 11px;
+}
+
+.lane-config {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 2px;
+}
+
+.lane-sec-title {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.lane-cands {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.lane-cand.active {
+  background: var(--accent-dim);
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.lane-custom {
+  flex-basis: 100%;
+  margin-top: 4px;
+}
+
+.lane-custom .lane-group-col {
+  width: 100%;
+}
+
+.lane-config {
+  padding: 8px 12px;
 }

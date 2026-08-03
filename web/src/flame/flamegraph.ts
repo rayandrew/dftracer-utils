@@ -97,7 +97,6 @@ export class Flamegraph {
     this.rects = [];
     if (!this.focus || !this.root) return;
     const baseDepth = this.path.length - 1;
-    // Ancestor frames above the focus, each full width.
     for (let d = 0; d < baseDepth; d++) {
       this.rects.push({
         node: this.path[d],
@@ -197,20 +196,17 @@ export class Flamegraph {
     const hit = this.hitTest(x, y);
     if (!hit || !this.root) return;
     if (hit.ancestor) {
-      // Zoom out to the clicked ancestor (its index in the current path).
       const idx = this.path.indexOf(hit.node);
       if (idx >= 0) this.setFocus(hit.node, this.path.slice(0, idx + 1));
       return;
     }
     if (hit.node === this.focus) {
-      // Clicking the focused frame zooms out one level.
       if (this.path.length > 1) {
         const p = this.path.slice(0, -1);
         this.setFocus(p[p.length - 1], p);
       }
       return;
     }
-    // Zoom into a descendant: find its path from the current focus.
     const sub = findPath(this.focus as FlameNode, hit.node);
     if (sub) this.setFocus(hit.node, [...this.path.slice(0, -1), ...sub]);
   };

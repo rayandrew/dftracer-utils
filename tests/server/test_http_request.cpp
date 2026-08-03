@@ -12,7 +12,7 @@ using namespace dftracer::utils::server;
 
 TEST_CASE("HttpRequest - parse valid GET") {
     std::string raw =
-        "GET /api/v1/files HTTP/1.1\r\n"
+        "GET /api/files HTTP/1.1\r\n"
         "Host: localhost:8080\r\n"
         "Accept: application/json\r\n"
         "\r\n";
@@ -22,7 +22,7 @@ TEST_CASE("HttpRequest - parse valid GET") {
 
     REQUIRE(consumed > 0);
     CHECK(req.method == "GET");
-    CHECK(req.path == "/api/v1/files");
+    CHECK(req.path == "/api/files");
     CHECK(req.minor_version == 1);
     REQUIRE(req.headers.size() == 2);
 }

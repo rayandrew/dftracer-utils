@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/pipeline/executor.h>
 #include <dftracer/utils/core/pipeline/scheduler.h>
+#include <dftracer/utils/core/pipeline/thread_pool_executor.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/server/trace_index.h>
 #include <doctest/doctest.h>
@@ -41,7 +42,7 @@ TEST_CASE("TraceIndex - discovers .pfw.gz files") {
     REQUIRE(!file1.empty());
     REQUIRE(!file2.empty());
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -75,7 +76,7 @@ TEST_CASE("TraceIndex - find_file by path") {
     auto file = create_pfw_gz(env, 50, 1);
     REQUIRE(!file.empty());
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> found{false};
@@ -110,7 +111,7 @@ TEST_CASE("TraceIndex - find_file returns nullptr for missing file") {
     auto file = create_pfw_gz(env, 50, 1);
     REQUIRE(!file.empty());
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> is_null{false};
@@ -142,7 +143,7 @@ TEST_CASE("TraceIndex - file_at by index") {
     auto file = create_pfw_gz(env, 50, 1);
     REQUIRE(!file.empty());
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -176,7 +177,7 @@ TEST_CASE("TraceIndex - empty directory") {
     auto dir = dft_utils_test::make_unique_test_path("trace_index_empty");
     fs::create_directories(dir);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<std::size_t> count{999};
