@@ -1,8 +1,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/bloom_filter.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_builder_utility.h>
 #include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
+#include <dftracer/utils/utilities/composites/dft/views/view_planner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/index_database_writer_context.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
@@ -85,8 +85,8 @@ static void populate_test_idx(const std::string& index_path,
     writer->commit();
 }
 
-TEST_SUITE("ViewBuilderUtility") {
-    TEST_CASE("ViewBuilder - IO view filters to POSIX chunks") {
+TEST_SUITE("ViewPlannerUtility") {
+    TEST_CASE("ViewPlanner - IO view filters to POSIX chunks") {
         std::string test_dir =
             dft_utils_test::make_unique_test_path("test_view_builder_io")
                 .string();
@@ -96,14 +96,14 @@ TEST_SUITE("ViewBuilderUtility") {
         std::string file_path = "/fake/test.pfw.gz";
         populate_test_idx(index_path, file_path);
 
-        ViewBuilderInput input;
+        ViewPlannerInput input;
         input.with_view(ViewDefinition::io_view())
             .with_file_path(file_path)
             .with_index_path(index_path)
             .with_uncompressed_size(40000)
             .with_num_checkpoints(4);
 
-        ViewBuilderUtility builder;
+        ViewPlannerUtility builder;
         auto output = builder.process(input).get();
 
         CHECK(output);
@@ -122,7 +122,7 @@ TEST_SUITE("ViewBuilderUtility") {
         fs::remove_all(test_dir);
     }
 
-    TEST_CASE("ViewBuilder - Compute view filters to compute chunks") {
+    TEST_CASE("ViewPlanner - Compute view filters to compute chunks") {
         std::string test_dir =
             dft_utils_test::make_unique_test_path("test_view_builder_compute")
                 .string();
@@ -132,14 +132,14 @@ TEST_SUITE("ViewBuilderUtility") {
         std::string file_path = "/fake/test.pfw.gz";
         populate_test_idx(index_path, file_path);
 
-        ViewBuilderInput input;
+        ViewPlannerInput input;
         input.with_view(ViewDefinition::compute_view())
             .with_file_path(file_path)
             .with_index_path(index_path)
             .with_uncompressed_size(40000)
             .with_num_checkpoints(4);
 
-        ViewBuilderUtility builder;
+        ViewPlannerUtility builder;
         auto output = builder.process(input).get();
 
         CHECK(output);
@@ -152,7 +152,7 @@ TEST_SUITE("ViewBuilderUtility") {
         fs::remove_all(test_dir);
     }
 
-    TEST_CASE("ViewBuilder - File-level skip for absent values") {
+    TEST_CASE("ViewPlanner - File-level skip for absent values") {
         std::string test_dir =
             dft_utils_test::make_unique_test_path("test_view_builder_skip")
                 .string();
@@ -165,14 +165,14 @@ TEST_SUITE("ViewBuilderUtility") {
         ViewDefinition view;
         view.with_name("nonexistent").with_query(R"(cat == "NONEXISTENT")");
 
-        ViewBuilderInput input;
+        ViewPlannerInput input;
         input.with_view(view)
             .with_file_path(file_path)
             .with_index_path(index_path)
             .with_uncompressed_size(40000)
             .with_num_checkpoints(4);
 
-        ViewBuilderUtility builder;
+        ViewPlannerUtility builder;
         auto output = builder.process(input).get();
 
         CHECK(output);
@@ -183,7 +183,7 @@ TEST_SUITE("ViewBuilderUtility") {
         fs::remove_all(test_dir);
     }
 
-    TEST_CASE("ViewBuilder - No bloom predicates returns all chunks") {
+    TEST_CASE("ViewPlanner - No bloom predicates returns all chunks") {
         std::string test_dir =
             dft_utils_test::make_unique_test_path("test_view_builder_nobl")
                 .string();
@@ -196,14 +196,14 @@ TEST_SUITE("ViewBuilderUtility") {
         ViewDefinition view;
         view.with_name("time_only").with_query(R"(ts >= 0 and ts <= 100000)");
 
-        ViewBuilderInput input;
+        ViewPlannerInput input;
         input.with_view(view)
             .with_file_path(file_path)
             .with_index_path(index_path)
             .with_uncompressed_size(40000)
             .with_num_checkpoints(4);
 
-        ViewBuilderUtility builder;
+        ViewPlannerUtility builder;
         auto output = builder.process(input).get();
 
         CHECK(output);
@@ -214,18 +214,18 @@ TEST_SUITE("ViewBuilderUtility") {
         fs::remove_all(test_dir);
     }
 
-    TEST_CASE("ViewBuilder - No bidx path returns all chunks") {
+    TEST_CASE("ViewPlanner - No bidx path returns all chunks") {
         ViewDefinition view;
         view.with_name("no_bidx");
 
-        ViewBuilderInput input;
+        ViewPlannerInput input;
         input.with_view(view)
             .with_file_path("/fake/file.pfw.gz")
             .with_index_path("")  // No bloom index
             .with_uncompressed_size(30000)
             .with_num_checkpoints(3);
 
-        ViewBuilderUtility builder;
+        ViewPlannerUtility builder;
         auto output = builder.process(input).get();
 
         CHECK(output);
@@ -234,19 +234,19 @@ TEST_SUITE("ViewBuilderUtility") {
         CHECK(output->skipped_checkpoints == 0);
     }
 
-    TEST_CASE("ViewBuilder - Byte range computation") {
+    TEST_CASE("ViewPlanner - Byte range computation") {
         // No bidx so all chunks are returned -- verify byte ranges
         ViewDefinition view;
         view.with_name("byte_range_test");
 
-        ViewBuilderInput input;
+        ViewPlannerInput input;
         input.with_view(view)
             .with_file_path("/fake/file.pfw.gz")
             .with_index_path("")
             .with_uncompressed_size(12000)
             .with_num_checkpoints(3);
 
-        ViewBuilderUtility builder;
+        ViewPlannerUtility builder;
         auto output = builder.process(input).get();
 
         CHECK(output);
@@ -267,18 +267,18 @@ TEST_SUITE("ViewBuilderUtility") {
         CHECK(output->candidates[2].end_byte == 12000);
     }
 
-    TEST_CASE("ViewBuilder - Zero checkpoints defaults to 1") {
+    TEST_CASE("ViewPlanner - Zero checkpoints defaults to 1") {
         ViewDefinition view;
         view.with_name("zero_ckpt");
 
-        ViewBuilderInput input;
+        ViewPlannerInput input;
         input.with_view(view)
             .with_file_path("/fake/file.pfw.gz")
             .with_index_path("")
             .with_uncompressed_size(10000)
             .with_num_checkpoints(0);
 
-        ViewBuilderUtility builder;
+        ViewPlannerUtility builder;
         auto output = builder.process(input).get();
 
         CHECK(output);
@@ -288,7 +288,7 @@ TEST_SUITE("ViewBuilderUtility") {
         CHECK(output->candidates[0].end_byte == 10000);
     }
 
-    TEST_CASE("ViewBuilder - Dimension alias resolution") {
+    TEST_CASE("ViewPlanner - Dimension alias resolution") {
         std::string test_dir =
             dft_utils_test::make_unique_test_path("test_view_builder_alias")
                 .string();
@@ -323,14 +323,14 @@ TEST_SUITE("ViewBuilderUtility") {
         ViewDefinition view;
         view.with_name("alias_test");
 
-        ViewBuilderInput input;
+        ViewPlannerInput input;
         input.with_view(view)
             .with_file_path(file_path)
             .with_index_path(index_path)
             .with_uncompressed_size(10000)
             .with_num_checkpoints(1);
 
-        ViewBuilderUtility builder;
+        ViewPlannerUtility builder;
         auto output = builder.process(input).get();
 
         CHECK(output);

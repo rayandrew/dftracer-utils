@@ -2,10 +2,13 @@
 #include <dftracer/utils/core/common/transparent_string_hash.h>
 #include <dftracer/utils/utilities/common/json/json.h>
 #include <dftracer/utils/utilities/common/query/evaluator.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/resolved_field_rewriter.h>
+#include <dftracer/utils/utilities/composites/dft/schema.h>
 #include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_reader_utility.h>
+#include <dftracer/utils/utilities/composites/dft/views/view_scanner_utility.h>
 #include <dftracer/utils/utilities/composites/indexed_file_reader_utility.h>
 #include <dftracer/utils/utilities/composites/types.h>
+#include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/reader/internal/stream_config.h>
 #include <simdjson.h>
 
@@ -18,44 +21,44 @@ namespace dftracer::utils::utilities::composites::dft::views {
 
 using dftracer::utils::utilities::common::json::JsonValue;
 
-ViewReaderInput& ViewReaderInput::with_file_path(const std::string& path) {
+ViewScannerInput& ViewScannerInput::with_file_path(const std::string& path) {
     file_path = path;
     return *this;
 }
 
-ViewReaderInput& ViewReaderInput::with_index_path(const std::string& path) {
+ViewScannerInput& ViewScannerInput::with_index_path(const std::string& path) {
     index_path = path;
     return *this;
 }
 
-ViewReaderInput& ViewReaderInput::with_checkpoint_size(std::size_t sz) {
+ViewScannerInput& ViewScannerInput::with_checkpoint_size(std::size_t sz) {
     checkpoint_size = sz;
     return *this;
 }
 
-ViewReaderInput& ViewReaderInput::with_byte_range(std::size_t start,
-                                                  std::size_t end) {
+ViewScannerInput& ViewScannerInput::with_byte_range(std::size_t start,
+                                                    std::size_t end) {
     start_byte = start;
     end_byte = end;
     return *this;
 }
 
-ViewReaderInput& ViewReaderInput::with_checkpoint_idx(std::uint64_t idx) {
+ViewScannerInput& ViewScannerInput::with_checkpoint_idx(std::uint64_t idx) {
     checkpoint_idx = idx;
     return *this;
 }
 
-ViewReaderInput& ViewReaderInput::with_batch_size(std::size_t sz) {
+ViewScannerInput& ViewScannerInput::with_batch_size(std::size_t sz) {
     batch_size = sz;
     return *this;
 }
 
-ViewReaderInput& ViewReaderInput::with_event_batch_size(std::size_t sz) {
+ViewScannerInput& ViewScannerInput::with_event_batch_size(std::size_t sz) {
     event_batch_size = sz;
     return *this;
 }
 
-ViewReaderInput& ViewReaderInput::with_view(const ViewDefinition& v) {
+ViewScannerInput& ViewScannerInput::with_view(const ViewDefinition& v) {
     view = v;
     return *this;
 }
@@ -74,7 +77,7 @@ static void collect_referenced_hashes_batch(
         dftracer::utils::TransparentStringEqual>& pending_metadata,
     std::unordered_set<std::string, dftracer::utils::TransparentStringHash,
                        dftracer::utils::TransparentStringEqual>& emitted_hashes,
-    ViewReaderBatch& batch) {
+    ViewScannerBatch& batch) {
     auto args = json["args"];
     if (!args.exists()) return;
 
@@ -100,10 +103,51 @@ static void collect_referenced_hashes_batch(
     }
 }
 
-coro::AsyncGenerator<ViewReaderBatch> ViewReaderUtility::process(
-    const ViewReaderInput& input) {
+// The top-level "ph" phase, or Unknown if absent. Uses simdjson On-Demand: SIMD
+// structural indexing without building the full DOM the reader would otherwise
+// pay for on every event, so the no-query/no-metadata path can drop metadata
+// records cheaply. The padded buffer is required by On-Demand and reused across
+// calls.
+static RecordPhase event_phase(const char* data, std::size_t n) {
+    thread_local simdjson::ondemand::parser parser;
+    thread_local std::string padbuf;
+    padbuf.assign(data, n);
+    padbuf.resize(n + simdjson::SIMDJSON_PADDING);
+    simdjson::ondemand::document doc;
+    if (parser.iterate(padbuf.data(), n, padbuf.size()).get(doc))
+        return RecordPhase::UNKNOWN;
+    auto f = doc.find_field_unordered("ph");
+    if (f.error()) return RecordPhase::UNKNOWN;
+    auto v = f.value_unsafe();
+    return read_phase(v);
+}
+
+coro::AsyncGenerator<ViewScannerBatch> ViewScannerUtility::process(
+    const ViewScannerInput& input) {
     DFTRACER_UTILS_TRACE_SCOPE("read view");
-    const auto& query = input.query ? input.query : input.view.query;
+    const std::optional<common::query::Query>* query_src =
+        input.query ? &input.query : &input.view.query;
+
+    // Resolve virtual fields (resolved.*/r.*) to concrete hash in-clauses via
+    // the index before per-event evaluation. Holds the rewrite for its
+    // lifetime.
+    std::optional<common::query::Query> rewritten;
+    if (*query_src && !input.index_path.empty() &&
+        dft::indexing::has_resolved_fields(**query_src)) {
+        try {
+            indexer::IndexDatabase db(
+                input.index_path,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
+            if (auto rw =
+                    dft::indexing::rewrite_resolved_fields(**query_src, db)) {
+                rewritten = std::move(rw);
+                query_src = &rewritten;
+            }
+        } catch (...) {
+        }
+    }
+
+    const auto& query = *query_src;
     bool use_query = query.has_value();
 
     // Smart metadata buffering:
@@ -126,15 +170,23 @@ coro::AsyncGenerator<ViewReaderBatch> ViewReaderUtility::process(
     composites::IndexedFileReaderUtility reader_utility;
     auto reader = co_await reader_utility.process(reader_input);
 
+    // Candidates are gzip-member-aligned byte ranges. A member's last event has
+    // its content in this member but its terminating '\n' as the first byte of
+    // the next member, and member-anchored seeking cannot look back past the
+    // member start to reclaim it. Extend each range to the next newline so the
+    // straddling event is read here; the next member then opens on that '\n'
+    // and skips the resulting empty leading line, so nothing is dropped or
+    // doubled.
     auto stream = reader->stream(
         reader::internal::StreamConfig()
             .stream_type(reader::internal::StreamType::MULTI_LINES_BYTES)
             .range_type(reader::internal::RangeType::BYTE_RANGE)
             .buffer_size(input.batch_size)
+            .extend_to_line_boundary(true)
             .from(input.start_byte)
             .to(input.end_byte));
 
-    ViewReaderBatch batch;
+    ViewScannerBatch batch;
 
     simdjson::dom::parser parser;
 
@@ -153,20 +205,41 @@ coro::AsyncGenerator<ViewReaderBatch> ViewReaderUtility::process(
             if (!newline) break;
             std::size_t line_len = newline - line_start;
 
+            // Fast path: with no query and no metadata harvesting, the only
+            // decision is to drop "ph":"M" records and emit the rest, so a
+            // targeted phase probe replaces the full DOM parse. Fold mode needs
+            // the full parse to build the FoldEvent, so it skips this.
+            if (line_len > 0 && !use_query && !input.view.include_metadata &&
+                input.fold_intern == nullptr) {
+                const char* s = line_start;
+                const char* e = line_start + line_len;
+                while (s < e && (*s == ' ' || *s == '\t')) ++s;
+                if (s < e && *s == '{' &&
+                    event_phase(line_start, line_len) !=
+                        RecordPhase::METADATA) {
+                    batch.events_scanned++;
+                    batch.events.emplace_back(line_start, line_len);
+                    batch.events_matched++;
+                }
+                pos = (newline - data) + 1;
+                continue;
+            }
+
             if (line_len > 0) {
                 auto result = parser.parse(line_start, line_len);
                 if (!result.error()) {
                     auto root = result.value_unsafe();
                     if (root.is_object()) {
                         JsonValue json(root);
-                        std::string_view ph =
-                            json["ph"].get<std::string_view>();
+                        RecordPhase phase = read_phase(json["ph"]);
 
-                        if (ph == "M" && input.view.include_metadata) {
+                        if (phase == RecordPhase::METADATA &&
+                            input.view.include_metadata) {
                             std::string_view name_sv =
                                 json["name"].get<std::string_view>();
 
-                            if (HASH_METADATA_NAMES.count(name_sv)) {
+                            if (HASH_METADATA_NAMES.count(name_sv) &&
+                                !input.view.emit_all_metadata) {
                                 auto args = json["args"];
                                 if (args.exists()) {
                                     auto val = args["value"];
@@ -181,12 +254,21 @@ coro::AsyncGenerator<ViewReaderBatch> ViewReaderUtility::process(
                                         }
                                     }
                                 }
+                            } else if (input.fold_intern) {
+                                // Fold mode: parse-once metadata for a
+                                // dictionary/bloom fold, no re-parse
+                                // downstream.
+                                batch.fold_events.push_back(
+                                    detail::extract_fold_event(
+                                        root, *input.fold_intern,
+                                        input.fold_needs_args));
+                                batch.events_matched++;
                             } else {
                                 // Non-hash metadata: string_view into chunk
                                 batch.events.emplace_back(line_start, line_len);
                                 batch.events_matched++;
                             }
-                        } else if (ph != "M") {
+                        } else if (phase != RecordPhase::METADATA) {
                             batch.events_scanned++;
                             bool event_match =
                                 !use_query || query->evaluate(json);
@@ -196,8 +278,18 @@ coro::AsyncGenerator<ViewReaderBatch> ViewReaderUtility::process(
                                         json, pending_metadata, emitted_hashes,
                                         batch);
                                 }
-                                // Zero-copy: string_view into chunk data
-                                batch.events.emplace_back(line_start, line_len);
+                                if (input.fold_intern) {
+                                    // Parse-once: extract the owned event here
+                                    // so the fold consumer never re-parses.
+                                    batch.fold_events.push_back(
+                                        detail::extract_fold_event(
+                                            root, *input.fold_intern,
+                                            input.fold_needs_args));
+                                } else {
+                                    // Zero-copy: string_view into chunk data
+                                    batch.events.emplace_back(line_start,
+                                                              line_len);
+                                }
                                 batch.events_matched++;
                             }
                         }
@@ -210,14 +302,14 @@ coro::AsyncGenerator<ViewReaderBatch> ViewReaderUtility::process(
 
         // Yield at end of each chunk, string_view events point into
         // chunk data which is valid until the next co_await read_async().
-        if (!batch.events.empty()) {
+        if (!batch.events.empty() || !batch.fold_events.empty()) {
             co_yield std::move(batch);
-            batch = ViewReaderBatch{};
+            batch = ViewScannerBatch{};
         }
     }
 
     // Final batch (shouldn't normally have leftovers since we yield per-chunk)
-    if (!batch.events.empty()) {
+    if (!batch.events.empty() || !batch.fold_events.empty()) {
         co_yield std::move(batch);
     }
 }
@@ -234,12 +326,13 @@ using common::arrow::ArrowExportResult;
 using common::arrow::ColumnType;
 using common::arrow::RecordBatchBuilder;
 
-ArrowExportResult ViewReaderBatch::to_arrow() const {
+ArrowExportResult ViewScannerBatch::to_arrow() const {
     RecordBatchBuilder builder;
     return to_arrow(builder);
 }
 
-ArrowExportResult ViewReaderBatch::to_arrow(RecordBatchBuilder& builder) const {
+ArrowExportResult ViewScannerBatch::to_arrow(
+    RecordBatchBuilder& builder) const {
     builder.reserve(events.size());
     std::vector<std::string> held_serialized;
     simdjson::dom::parser parser;

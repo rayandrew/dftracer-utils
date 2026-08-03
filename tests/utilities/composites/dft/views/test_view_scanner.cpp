@@ -5,7 +5,7 @@
 #include <dftracer/utils/utilities/common/query/query.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
 #include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_reader_utility.h>
+#include <dftracer/utils/utilities/composites/dft/views/view_scanner_utility.h>
 #include <doctest/doctest.h>
 #include <testing_utilities.h>
 
@@ -70,7 +70,7 @@ struct CollectedViewOutput {
 };
 
 static coro::CoroTask<CollectedViewOutput> collect_view_coro(
-    ViewReaderUtility* reader, ViewReaderInput input) {
+    ViewScannerUtility* reader, ViewScannerInput input) {
     CollectedViewOutput output;
     auto gen = reader->process(input);
     while (auto batch = co_await gen.next()) {
@@ -81,26 +81,26 @@ static coro::CoroTask<CollectedViewOutput> collect_view_coro(
     co_return output;
 }
 
-static CollectedViewOutput collect_view_output(ViewReaderUtility& reader,
-                                               ViewReaderInput input) {
+static CollectedViewOutput collect_view_output(ViewScannerUtility& reader,
+                                               ViewScannerInput input) {
     return collect_view_coro(&reader, std::move(input)).get();
 }
 
-TEST_SUITE("ViewReader") {
-    TEST_CASE("ViewReader - No query matches all events") {
+TEST_SUITE("ViewScanner") {
+    TEST_CASE("ViewScanner - No query matches all events") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
         std::string gz = create_pfw_gz(env, 50);
         std::string db_root = determine_index_path(gz, "");
 
-        ViewReaderInput input;
+        ViewScannerInput input;
         input.with_file_path(gz)
             .with_index_path(db_root)
             .with_checkpoint_size(1024)
             .with_byte_range(0, std::numeric_limits<std::size_t>::max());
         input.view.with_include_metadata(false);
 
-        ViewReaderUtility reader;
+        ViewScannerUtility reader;
         auto output = collect_view_output(reader, input);
 
         CHECK(output.events_scanned > 0);
@@ -108,13 +108,13 @@ TEST_SUITE("ViewReader") {
         CHECK(output.events_matched == output.events_scanned);
     }
 
-    TEST_CASE("ViewReader - Query filters events") {
+    TEST_CASE("ViewScanner - Query filters events") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
         std::string gz = create_pfw_gz(env, 50);
         std::string db_root = determine_index_path(gz, "");
 
-        ViewReaderInput input;
+        ViewScannerInput input;
         input.with_file_path(gz)
             .with_index_path(db_root)
             .with_checkpoint_size(1024)
@@ -125,20 +125,20 @@ TEST_SUITE("ViewReader") {
         REQUIRE(q.has_value());
         input.query = std::move(*q);
 
-        ViewReaderUtility reader;
+        ViewScannerUtility reader;
         auto output = collect_view_output(reader, input);
 
         CHECK(output.events_scanned > 0);
         CHECK(output.events_matched > 0);
     }
 
-    TEST_CASE("ViewReader - Non-matching query returns empty") {
+    TEST_CASE("ViewScanner - Non-matching query returns empty") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
         std::string gz = create_pfw_gz(env, 50);
         std::string db_root = determine_index_path(gz, "");
 
-        ViewReaderInput input;
+        ViewScannerInput input;
         input.with_file_path(gz)
             .with_index_path(db_root)
             .with_checkpoint_size(1024)
@@ -149,20 +149,20 @@ TEST_SUITE("ViewReader") {
         REQUIRE(q.has_value());
         input.query = std::move(*q);
 
-        ViewReaderUtility reader;
+        ViewScannerUtility reader;
         auto output = collect_view_output(reader, input);
 
         CHECK(output.events_matched == 0);
     }
 
     TEST_CASE(
-        "ViewReader - re-emits SH/FH referenced by exec_hash/cmd_hash/cwd") {
+        "ViewScanner - re-emits SH/FH referenced by exec_hash/cmd_hash/cwd") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
         std::string gz = create_metadata_pfw_gz(env);
         std::string db_root = determine_index_path(gz, "");
 
-        ViewReaderInput input;
+        ViewScannerInput input;
         input.with_file_path(gz)
             .with_index_path(db_root)
             .with_checkpoint_size(1024)
@@ -173,7 +173,7 @@ TEST_SUITE("ViewReader") {
         REQUIRE(q.has_value());
         input.query = std::move(*q);
 
-        ViewReaderUtility reader;
+        ViewScannerUtility reader;
         auto output = collect_view_output(reader, input);
 
         auto has = [&](const std::string& needle) {
