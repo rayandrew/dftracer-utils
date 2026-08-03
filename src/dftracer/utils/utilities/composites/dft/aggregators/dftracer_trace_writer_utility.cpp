@@ -8,9 +8,10 @@
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_config.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/association_tracker.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/dftracer_trace_writer_utility.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/event_aggregator.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/perfetto_trace_writer_utility.h>
-#include <dftracer/utils/utilities/compression/zlib/streaming_compressor_utility.h>
+#include <dftracer/utils/utilities/composites/dft/schema.h>
+#include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/fileio/parallel/layout.h>
 #include <dftracer/utils/utilities/fileio/parallel/merge.h>
 #include <dftracer/utils/utilities/fileio/parallel/parallel_writer.h>
@@ -231,30 +232,17 @@ inline void skip_metric_stats(BinaryReader& r) {
 // at any offset in a concatenated-gzip file.
 coro::CoroTask<bool> compress_to_gzip_member(int level, ByteView data,
                                              std::vector<unsigned char>& out) {
-    out.clear();
-    compression::zlib::ManualStreamingCompressorUtility comp(
-        level, compression::zlib::CompressionFormat::GZIP);
-    if (data.size() > 0) {
-        auto gen = comp.compress(data);
-        while (auto view = co_await gen.next()) {
-            const auto* p =
-                reinterpret_cast<const unsigned char*>(view->data());
-            out.insert(out.end(), p, p + view->size());
-        }
-    }
-    auto fin = comp.finalize_stream();
-    while (auto view = co_await fin.next()) {
-        const auto* p = reinterpret_cast<const unsigned char*>(view->data());
-        out.insert(out.end(), p, p + view->size());
-    }
-    co_return true;
+    namespace compress = dftracer::utils::utilities::fileio::compress;
+    if (level < 0) level = 6;  // zlib's Z_DEFAULT_COMPRESSION
+    compress::GzipMemberCompressor comp(level);
+    co_return comp.compress_member_into(out, data.data(), data.size());
 }
 
 coro::CoroTask<bool> write_shard_events(
     std::size_t worker_idx, std::uint16_t shard_begin, std::uint16_t shard_end,
     std::size_t flush_threshold, std::size_t buffer_capacity,
     fileio::parallel::ParallelWriter* writer,
-    const PerfettoTraceWriterInput* input) {
+    const DftracerTraceWriterInput* input) {
     using namespace dftracer::utils::utilities;
 
     JsonBuffer buf(buffer_capacity);
@@ -285,13 +273,15 @@ coro::CoroTask<bool> write_shard_events(
             local_keys++;
 
             // Layout: shard(2) map_type(1) cat(varint ID) name(varint ID)
-            //         pid(varint) tid(varint) hhash(varint ID) fhash(varint ID)
-            //         time_bucket(varint) num_extra(2) [k(varint ID) v(varint
-            //         ID)]*
-            auto& intern = aggregation_intern();
+            //         pid(varint) tid(varint) hhash(varint ID)
+            //         fhash(8 raw bytes if inline else varint ID)
+            //         time_bucket(varint) num_extra(2)
+            //         [k(varint ID) v(varint ID)]*
+            auto& intern = input->aggregator->intern();
             BinaryReader kr(key_bytes);
-            kr.skip(2);     // shard
-            (void)kr.u8();  // map_type
+            kr.skip(2);  // shard
+            const std::uint8_t type_byte = kr.u8();
+            const bool fhash_inline = (type_byte & AGG_KEY_FHASH_INLINE) != 0;
             auto cat = intern.resolve(static_cast<std::uint32_t>(kr.varint()));
             auto name = intern.resolve(static_cast<std::uint32_t>(kr.varint()));
             auto pid = kr.varint();
@@ -299,37 +289,38 @@ coro::CoroTask<bool> write_shard_events(
             auto hhash_id = static_cast<std::uint32_t>(kr.varint());
             auto hhash =
                 hhash_id ? intern.resolve(hhash_id) : std::string_view{};
-            auto fhash_id = static_cast<std::uint32_t>(kr.varint());
-            auto fhash =
-                fhash_id ? intern.resolve(fhash_id) : std::string_view{};
+            char fbuf[::dftracer::utils::hash::HEX64_DIGITS];
+            std::string_view fhash;
+            if (fhash_inline) {
+                std::uint64_t fh = kr.be64();
+                if (fh != 0) {
+                    ::dftracer::utils::hash::format_hex64(fh, fbuf);
+                    fhash = std::string_view(fbuf, sizeof(fbuf));
+                }
+            } else {
+                auto fhash_id = static_cast<std::uint32_t>(kr.varint());
+                fhash =
+                    fhash_id ? intern.resolve(fhash_id) : std::string_view{};
+            }
             auto time_bucket = kr.varint();
             auto num_extra = kr.be16();
 
             // For REGULAR, pre-parse ts/te by skipping through value bytes.
             std::uint64_t regular_ts = 0, regular_te = 0;
-            if (input->format == PerfettoEventFormat::REGULAR) {
+            if (input->format == TraceEventFormat::REGULAR) {
                 BinaryReader tmp(value_bytes);
                 tmp.varint();            // count
                 skip_metric_stats(tmp);  // duration
                 skip_metric_stats(tmp);  // size
+                skip_metric_stats(tmp);  // offset
                 regular_ts = tmp.varint();
                 regular_te = tmp.varint();
             }
 
             // Emit event header
-            if (input->format == PerfettoEventFormat::COUNTER) {
-                buf.append_literal("{\"name\":\"");
-                buf.append_json_escaped(name);
-                buf.append_literal("\",\"cat\":\"");
-                buf.append_json_escaped(cat);
-                buf.append_literal("\",\"ts\":");
-                buf.append_u64(time_bucket);
-                buf.append_literal(",\"ph\":\"C\",\"pid\":");
-                buf.append_u64(pid);
-                buf.append_literal(",\"tid\":");
-                buf.append_u64(tid);
-                buf.append_literal(",\"args\":{");
-            } else if (input->format == PerfettoEventFormat::REGULAR) {
+            const int type_int = event_type_to_int(event_type_from_cat(cat));
+            if (input->format == TraceEventFormat::REGULAR) {
+                // Expand back to a timed COMPLETE event (ts + dur).
                 std::uint64_t duration = regular_te - regular_ts;
                 buf.append_literal("{\"name\":\"");
                 buf.append_json_escaped(name);
@@ -339,7 +330,33 @@ coro::CoroTask<bool> write_shard_events(
                 buf.append_u64(regular_ts);
                 buf.append_literal(",\"dur\":");
                 buf.append_u64(duration);
-                buf.append_literal(",\"ph\":\"X\",\"pid\":");
+                buf.append_literal(",\"ph\":");
+                buf.append_u64(phase_to_int(RecordPhase::COMPLETE));
+                buf.append_literal(",\"type\":");
+                buf.append_i64(type_int);
+                buf.append_literal(",\"pid\":");
+                buf.append_u64(pid);
+                buf.append_literal(",\"tid\":");
+                buf.append_u64(tid);
+                buf.append_literal(",\"args\":{");
+            } else {
+                // AGGREGATED (ph:3) folds many events into one record at the
+                // bucket time; COUNTER (ph:2) renders the same shape as a
+                // counter sample. Both are instantaneous (no dur).
+                RecordPhase rp = input->format == TraceEventFormat::COUNTER
+                                     ? RecordPhase::COUNTER
+                                     : RecordPhase::AGGREGATED;
+                buf.append_literal("{\"name\":\"");
+                buf.append_json_escaped(name);
+                buf.append_literal("\",\"cat\":\"");
+                buf.append_json_escaped(cat);
+                buf.append_literal("\",\"ts\":");
+                buf.append_u64(time_bucket);
+                buf.append_literal(",\"ph\":");
+                buf.append_u64(phase_to_int(rp));
+                buf.append_literal(",\"type\":");
+                buf.append_i64(type_int);
+                buf.append_literal(",\"pid\":");
                 buf.append_u64(pid);
                 buf.append_literal(",\"tid\":");
                 buf.append_u64(tid);
@@ -371,8 +388,8 @@ coro::CoroTask<bool> write_shard_events(
                 buf.append_literal("\"");
             }
 
-            // Value bytes: count, dur, size, ts, te, parent_pid, num_custom,
-            // customs
+            // Value bytes: count, dur, size, offset, ts, te, parent_pid,
+            // num_custom, customs, distinct_sketch
             BinaryReader vr(value_bytes);
             auto count = vr.varint();
 
@@ -383,6 +400,8 @@ coro::CoroTask<bool> write_shard_events(
                                          buf);
             emit_metric_stats_from_bytes(vr, "ret", input->compute_statistics,
                                          buf);
+            emit_metric_stats_from_bytes(vr, "offset",
+                                         input->compute_statistics, buf);
 
             auto m_ts = vr.varint();
             auto m_te = vr.varint();
@@ -473,8 +492,8 @@ coro::CoroTask<bool> write_shard_events(
 
 }  // namespace
 
-coro::CoroTask<bool> PerfettoTraceWriterUtility::process(
-    const PerfettoTraceWriterInput& input) {
+coro::CoroTask<bool> DftracerTraceWriterUtility::process(
+    const DftracerTraceWriterInput& input) {
     DFTRACER_UTILS_TRACE_SCOPE("write perfetto");
     using namespace dftracer::utils::utilities;
 
@@ -482,28 +501,18 @@ coro::CoroTask<bool> PerfettoTraceWriterUtility::process(
     constexpr std::size_t DEFAULT_FLUSH_BYTES = 12 * 1024 * 1024;
     constexpr std::size_t BUFFER_HEADROOM_BYTES = 4 * 1024 * 1024;
 
-    auto layout_info = fileio::parallel::detect_layout(input.output_path);
     const std::size_t executor_threads =
         this->context().get_executor()->get_num_threads();
     const std::size_t baseline =
         std::min<std::size_t>(executor_threads, AGG_KEY_NUM_SHARDS);
-    // Mirror make_writer's padded-layout gate so sizing picks the matching
-    // flush_threshold.
-    const bool uses_padded =
-        layout_info.layout == fileio::parallel::FileLayout::STRIPED &&
-        input.compress &&
-        layout_info.stripe_size >= fileio::parallel::MIN_PADDED_STRIPE_BYTES;
-    const auto sizing = fileio::parallel::compute_writer_sizing(
-        layout_info, baseline, DEFAULT_FLUSH_BYTES, BUFFER_HEADROOM_BYTES,
-        uses_padded);
-    const std::size_t num_workers = sizing.num_workers;
-    const std::size_t flush_threshold = sizing.flush_threshold;
-    const std::size_t buffer_capacity = sizing.buffer_capacity;
-    fileio::parallel::WriterConfig wcfg;
-    wcfg.layout = layout_info.layout;
-    wcfg.stripe_size = layout_info.stripe_size;
-    wcfg.gzip = input.compress;
-    auto writer = fileio::parallel::make_writer(wcfg);
+    auto cw = fileio::parallel::make_writer_for_path(
+        {input.output_path, baseline, DEFAULT_FLUSH_BYTES,
+         BUFFER_HEADROOM_BYTES, input.compress});
+    const auto layout_info = cw.layout;
+    const std::size_t num_workers = cw.sizing.num_workers;
+    const std::size_t flush_threshold = cw.sizing.flush_threshold;
+    const std::size_t buffer_capacity = cw.sizing.buffer_capacity;
+    auto writer = std::move(cw.writer);
     if (co_await writer->open(input.output_path, num_workers, input.compress,
                               &this->context()) != 0) {
         co_return false;
@@ -531,8 +540,9 @@ coro::CoroTask<bool> PerfettoTraceWriterUtility::process(
     if (input.emit_header &&
         (input.trace_duration > 0 || !input.boundary_ranges.empty())) {
         header.append_literal(
-            "{\"name\":\"trace_metadata\",\"cat\":\"metadata\",\"ph\":"
-            "\"M\",\"args\":{");
+            "{\"name\":\"trace_metadata\",\"cat\":\"metadata\",\"ph\":4,"
+            "\"type\""
+            ":1,\"args\":{");
         header.format("\"trace_duration\":%llu",
                       static_cast<unsigned long long>(input.trace_duration));
 
@@ -570,8 +580,8 @@ coro::CoroTask<bool> PerfettoTraceWriterUtility::process(
     if (input.emit_header) {
         for (std::uint64_t pid : input.root_pids) {
             header.format(
-                "{\"name\":\"root_process\",\"cat\":\"dftracer\",\"ph\":"
-                "\"M\",\"pid\":%llu,\"tid\":%llu,"
+                "{\"name\":\"root_process\",\"cat\":\"dftracer\",\"ph\":4,"
+                "\"type\":1,\"pid\":%llu,\"tid\":%llu,"
                 "\"args\":{\"is_root\":\"true\"}}\n",
                 static_cast<unsigned long long>(pid),
                 static_cast<unsigned long long>(pid));

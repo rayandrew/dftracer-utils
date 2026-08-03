@@ -53,8 +53,8 @@ TEST_SUITE("SystemMetricsMergeOperator") {
         CHECK(merged.te == 250);
         REQUIRE(merged.metrics != nullptr);
         CHECK(merged.metrics->size() == 2);
-        CHECK(merged.metrics->at("cpu_user").count == 3);
-        CHECK(merged.metrics->at("memory").count == 1);
+        CHECK(merged.metrics->at("cpu_user").count() == 3);
+        CHECK(merged.metrics->at("memory").count() == 1);
     }
 
     TEST_CASE("FullMergeV2 merges existing value with operands") {
@@ -104,8 +104,8 @@ TEST_SUITE("SystemMetricsMergeOperator") {
         CHECK(merged.ts == 50);
         CHECK(merged.te == 200);
         REQUIRE(merged.metrics != nullptr);
-        CHECK(merged.metrics->at("cpu").count == 3);
-        CHECK(merged.metrics->at("cpu").mean == doctest::Approx(40.0));
+        CHECK(merged.metrics->at("cpu").count() == 3);
+        CHECK(merged.metrics->at("cpu").mean() == doctest::Approx(40.0));
     }
 
     TEST_CASE("FullMergeV2 handles null existing value") {
@@ -146,7 +146,7 @@ TEST_SUITE("SystemMetricsMergeOperator") {
         CHECK(merged.ts == 100);
         CHECK(merged.te == 300);
         REQUIRE(merged.metrics != nullptr);
-        CHECK(merged.metrics->at("memory").count == 2);
+        CHECK(merged.metrics->at("memory").count() == 2);
     }
 
     TEST_CASE("FullMergeV2 handles single operand") {
@@ -178,6 +178,6 @@ TEST_SUITE("SystemMetricsMergeOperator") {
         CHECK(merged.ts == 100);
         CHECK(merged.te == 500);
         REQUIRE(merged.metrics != nullptr);
-        CHECK(merged.metrics->at("disk_io").count == 1);
+        CHECK(merged.metrics->at("disk_io").count() == 1);
     }
 }

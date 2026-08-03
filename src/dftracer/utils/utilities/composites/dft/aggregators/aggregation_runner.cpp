@@ -11,9 +11,9 @@
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_drain.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_runner.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_visitor.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregators.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/index_resolver_utility.h>
+#include <dftracer/utils/utilities/composites/dft/views/aggregation_fold.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 
@@ -38,38 +38,40 @@ coro::CoroTask<indexer::IndexBuildBatchResult> batch_index_and_aggregate(
     CoroScope* scope, std::vector<std::string> file_paths,
     std::string index_dir, std::size_t checkpoint_size, bool force_rebuild,
     std::size_t parallelism, AggregationConfig agg_config,
-    std::shared_ptr<::dftracer::utils::rocksdb::RocksDatabase> agg_db,
-    std::uint32_t config_hash) {
+    std::uint32_t config_hash, AggInternPtr intern) {
     auto batch_config = std::make_shared<indexer::IndexBuildBatchConfig>();
     batch_config->file_paths = std::move(file_paths);
     batch_config->index_dir = std::move(index_dir);
     batch_config->checkpoint_size = checkpoint_size;
     batch_config->parallelism = parallelism;
     batch_config->force_rebuild = force_rebuild;
-    batch_config->use_batch_write = true;
+    // Aggregation reads the trace via checkpoints and writes the aggregation
+    // and hash tables; the bloom/stats/dimension tier is never read back, so
+    // skip its visitor - the biggest per-event cost - entirely.
+    batch_config->build_bloom = false;
 
     auto agg_config_ptr =
         std::make_shared<AggregationConfig>(std::move(agg_config));
-    batch_config->dft_visitor_factory =
-        [agg_db, config_hash, agg_config_ptr](const std::string& file_path)
-        -> std::vector<std::unique_ptr<composites::dft::DftEventVisitor>> {
-        std::vector<std::unique_ptr<composites::dft::DftEventVisitor>> visitors;
-        visitors.push_back(std::make_unique<AggregationVisitor>(
-            agg_db, config_hash, *agg_config_ptr, file_path));
-        return visitors;
+    batch_config->agg_fold_factory =
+        [config_hash, agg_config_ptr,
+         intern](dftracer::utils::StringIntern& build_intern)
+        -> std::unique_ptr<composites::dft::views::detail::AggregationFold> {
+        return std::make_unique<
+            composites::dft::views::detail::AggregationFold>(
+            build_intern, intern, *agg_config_ptr, config_hash);
     };
 
     co_return co_await indexer::IndexBatchBuilderUtility::process(
         scope, std::move(batch_config));
 }
 
-PerfettoTraceWriterInput build_streaming_input(
+DftracerTraceWriterInput build_streaming_input(
     EventAggregator* merger_ptr, const AggregationConfig* agg_config,
     const std::string* output_file, bool compress_output, int compression_level,
-    PerfettoEventFormat event_format) {
+    TraceEventFormat event_format) {
     auto global_tracker = merger_ptr->build_global_tracker();
 
-    PerfettoTraceWriterInput input;
+    DftracerTraceWriterInput input;
     input.output_path = *output_file;
     input.aggregator = merger_ptr;
     input.tracker = global_tracker.get();
@@ -116,7 +118,7 @@ void write_aggregation_tracking(::dftracer::utils::rocksdb::RocksDatabase* db,
                                 std::uint32_t config_hash) {
     indexer::IndexDatabase idx_db(
         index_path,
-        ::dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+        dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
 
     auto batch = db->begin_batch();
 
@@ -289,13 +291,13 @@ coro::CoroTask<Result<AggregationRunResult>> run_aggregation(
                         &scope, files_to_process, input.index_dir,
                         input.checkpoint_size, input.force_rebuild,
                         input.pipeline_config.executor_threads,
-                        input.agg_config, agg_db, config_hash);
+                        input.agg_config, config_hash, merger->intern_table());
 
                     {
                         ::dftracer::utils::ScopedTimer _vd(stages,
                                                            "visitor_drain");
-                        merge_aggregation_visitors(batch_result.extra_visitors,
-                                                   merger.get());
+                        merge_aggregation_folds(batch_result.agg_outputs,
+                                                merger.get());
                     }
                 }
 
@@ -342,6 +344,7 @@ coro::CoroTask<Result<AggregationRunResult>> run_aggregation(
                                                        "arrow_scan_write");
                     constexpr std::size_t BATCH_ROWS = 10000;
                     AggregationBatch batch;
+                    batch.intern = merger->intern_table();
                     batch.entries.reserve(BATCH_ROWS);
                     batch.global_extra_key_ids = &global_extra_key_ids;
                     batch.global_custom_metric_names =
@@ -378,7 +381,7 @@ coro::CoroTask<Result<AggregationRunResult>> run_aggregation(
             } else
 #endif
                 if (input.output_file) {
-                PerfettoTraceWriterInput streaming_input;
+                DftracerTraceWriterInput streaming_input;
                 {
                     ::dftracer::utils::ScopedTimer _si(stages,
                                                        "build_streaming_input");
@@ -392,7 +395,7 @@ coro::CoroTask<Result<AggregationRunResult>> run_aggregation(
                 {
                     ::dftracer::utils::ScopedTimer _pw(stages,
                                                        "perfetto_write");
-                    PerfettoTraceWriterUtility writer;
+                    DftracerTraceWriterUtility writer;
                     write_success = co_await scope.spawn(
                         writer, std::move(streaming_input));
                 }

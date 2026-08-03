@@ -5,7 +5,8 @@
 #include <dftracer/utils/core/utilities/utility.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_key.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_metrics.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/association_resolver_utility.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_output.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/association_tracker.h>
 
 #include <atomic>
 #include <cstdint>
@@ -18,9 +19,13 @@ namespace dftracer::utils::utilities::composites::dft::aggregators {
 
 class EventAggregator;
 
-enum class PerfettoEventFormat { COUNTER, ASYNC, REGULAR };
+// How the aggregator's folded records are rendered on output. AGGREGATED writes
+// them as ph:3 AGGREGATED records (the new format's folded-event phase);
+// COUNTER as ph:2 counter samples; REGULAR expands them back to ph:1 COMPLETE
+// events.
+enum class TraceEventFormat { AGGREGATED, COUNTER, REGULAR };
 
-struct PerfettoTraceWriterInput {
+struct DftracerTraceWriterInput {
     std::string output_path;
     const EventAggregator* aggregator = nullptr;
     const AssociationTracker* tracker = nullptr;
@@ -34,7 +39,7 @@ struct PerfettoTraceWriterInput {
     std::vector<double> percentiles;
     bool compress = false;
     int compression_level = 6;
-    PerfettoEventFormat format = PerfettoEventFormat::COUNTER;
+    TraceEventFormat format = TraceEventFormat::AGGREGATED;
     /// Workers add their per-shard key count here if non-null.
     std::atomic<std::size_t>* keys_written = nullptr;
     /// Concatenate shards into `output_path` and unlink them on SHARDED
@@ -56,15 +61,15 @@ struct PerfettoTraceWriterInput {
     bool emit_footer = true;
 };
 
-using PerfettoTraceWriterOutput = bool;
+using DftracerTraceWriterOutput = bool;
 
-class PerfettoTraceWriterUtility
-    : public utilities::Utility<PerfettoTraceWriterInput,
-                                PerfettoTraceWriterOutput,
+class DftracerTraceWriterUtility
+    : public utilities::Utility<DftracerTraceWriterInput,
+                                DftracerTraceWriterOutput,
                                 utilities::tags::NeedsContext> {
    public:
     coro::CoroTask<bool> process(
-        const PerfettoTraceWriterInput& input) override;
+        const DftracerTraceWriterInput& input) override;
 };
 
 }  // namespace dftracer::utils::utilities::composites::dft::aggregators

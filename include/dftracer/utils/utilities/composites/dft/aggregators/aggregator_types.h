@@ -3,14 +3,18 @@
 
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/utilities/common/query/query.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_intern.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_key.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_metrics.h>
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #include <dftracer/utils/utilities/common/arrow/arrow_export.h>
+#include <dftracer/utils/utilities/indexer/index_database.h>
 #endif
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -25,6 +29,10 @@ struct DfanalyzerContext {
     const std::unordered_map<std::string, std::string>* file_hashes = nullptr;
     const std::unordered_map<std::string, std::string>* host_hashes = nullptr;
 
+    /// Resolves hashes on demand; preferred over the tables above, which cost
+    /// the trace's entire file list to load.
+    const indexer::IndexDatabase* hash_db = nullptr;
+
     const common::query::Query* query_filter = nullptr;
 
     /// Time origin (minimum time_bucket) for normalization.
@@ -35,6 +43,12 @@ struct DfanalyzerContext {
 
     /// Time granularity in seconds (bucket width for time_range computation).
     double time_granularity = 1.0;
+
+    /// Shard-scan progress, shared across the scan's tasks. Set together or
+    /// left null.
+    std::atomic<std::size_t>* shards_done = nullptr;
+    std::size_t total_shards = 0;
+    const std::function<void(std::size_t, std::size_t)>* progress = nullptr;
 };
 
 enum class AggregationBatchType { EVENT, PROFILE, SYSTEM };
@@ -57,57 +71,57 @@ struct AggregationEntry {
     /// Create a ValueMap from the key and metrics for query evaluation.
     /// Includes cat, name, pid, tid, hhash, fhash, time_bucket, extra_keys,
     /// and aggregation metrics (count, dur_total, dur_min, dur_max, etc.).
-    common::query::ValueMap to_value_map() const {
+    common::query::ValueMap to_value_map(const StringIntern& intern) const {
         common::query::ValueMap fields;
         // Key fields
-        fields["cat"] = std::string(key.cat());
-        fields["name"] = std::string(key.name());
+        fields["cat"] = std::string(key.cat(intern));
+        fields["name"] = std::string(key.name(intern));
         fields["pid"] = static_cast<uint64_t>(key.pid);
         fields["tid"] = static_cast<uint64_t>(key.tid);
-        if (!key.hhash().empty()) {
-            fields["hhash"] = std::string(key.hhash());
+        if (!key.hhash(intern).empty()) {
+            fields["hhash"] = std::string(key.hhash(intern));
         }
-        if (!key.fhash().empty()) {
-            fields["fhash"] = std::string(key.fhash());
+        char fbuf[::dftracer::utils::hash::HEX64_DIGITS];
+        if (auto fh = key.fhash_str(intern, fbuf); !fh.empty()) {
+            fields["fhash"] = std::string(fh);
         }
         fields["time_bucket"] = key.time_bucket;
         // Include extra_keys (args fields used for grouping)
         if (key.extra_keys) {
             for (const auto& [key_id, value_id] : *key.extra_keys) {
-                auto key_str =
-                    std::string(aggregation_intern().resolve(key_id));
-                auto value_str =
-                    std::string(aggregation_intern().resolve(value_id));
+                auto key_str = std::string(intern.resolve(key_id));
+                auto value_str = std::string(intern.resolve(value_id));
                 fields[key_str] = value_str;
             }
         }
         // Aggregation metrics
         fields["count"] = metrics.count;
-        fields["dur_total"] = metrics.duration.total;
-        fields["dur_min"] = metrics.duration.min;
-        fields["dur_max"] = metrics.duration.max;
-        fields["dur_mean"] = metrics.duration.mean;
-        fields["size_total"] = metrics.size.total;
-        fields["size_min"] = metrics.size.min;
-        fields["size_max"] = metrics.size.max;
-        fields["size_mean"] = metrics.size.mean;
+        fields["dur_total"] = metrics.duration.total();
+        fields["dur_min"] = metrics.duration.min();
+        fields["dur_max"] = metrics.duration.max();
+        fields["dur_mean"] = metrics.duration.mean();
+        fields["size_total"] = metrics.size.total();
+        fields["size_min"] = metrics.size.min();
+        fields["size_max"] = metrics.size.max();
+        fields["size_mean"] = metrics.size.mean();
         fields["ts"] = metrics.ts;
         fields["te"] = metrics.te;
         // Custom metrics (arbitrary args fields aggregated as numeric stats)
         if (metrics.custom_metrics) {
             for (const auto& [name, stats] : *metrics.custom_metrics) {
-                fields[name + "_total"] = stats.total;
-                fields[name + "_min"] = stats.min;
-                fields[name + "_max"] = stats.max;
-                fields[name + "_mean"] = stats.mean;
+                fields[name + "_total"] = stats.total();
+                fields[name + "_min"] = stats.min();
+                fields[name + "_max"] = stats.max();
+                fields[name + "_mean"] = stats.mean();
             }
         }
         return fields;
     }
 
     /// Check if this entry matches a query.
-    bool matches(const common::query::Query& query) const {
-        return query.evaluate(to_value_map());
+    bool matches(const common::query::Query& query,
+                 const StringIntern& intern) const {
+        return query.evaluate(to_value_map(intern));
     }
 };
 
@@ -125,6 +139,17 @@ struct AggregationBatch {
     const std::vector<std::uint32_t>* global_extra_key_ids = nullptr;
     const std::vector<std::string>* global_custom_metric_names = nullptr;
 
+    /// The table the entries' string ids belong to.
+    AggInternPtr intern;
+
+    const StringIntern& strings() const {
+        if (!intern) {
+            throw DFTUtilsException(ErrorCode::INTERNAL,
+                                    "aggregation batch has no intern table");
+        }
+        return intern->intern;
+    }
+
     /// Filter entries by query, returning a new batch with matching entries.
     AggregationBatch filter(const common::query::Query& query) const {
         AggregationBatch filtered;
@@ -135,9 +160,10 @@ struct AggregationBatch {
         filtered.has_approximated_entries = has_approximated_entries;
         filtered.global_extra_key_ids = global_extra_key_ids;
         filtered.global_custom_metric_names = global_custom_metric_names;
+        filtered.intern = intern;
 
         for (const auto& entry : entries) {
-            if (entry.matches(query)) {
+            if (entry.matches(query, intern->intern)) {
                 filtered.entries.push_back(entry);
             }
         }
@@ -153,9 +179,6 @@ struct AggregationBatch {
     ///   file_name, host_name, proc_name, io_cat, acc_pat, count, time, size,
     ///   time_min, time_max, size_min, size_max, time_range, time_start,
     ///   time_end
-    /// - System: host_hash, time_range, sys_cpu_*, sys_mem_*
-    common::arrow::ArrowExportResult to_dfanalyzer_arrow(
-        const DfanalyzerContext& ctx) const;
 #endif
 };
 

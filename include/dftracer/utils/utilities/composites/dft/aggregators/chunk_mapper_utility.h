@@ -16,6 +16,8 @@ namespace dftracer::utils::utilities::composites::dft::aggregators {
 struct FileChunkMapperInput {
     utilities::composites::dft::MetadataCollectorUtilityOutput metadata;
     AggregationConfig config;
+    /// Table the chunk keys are interned into.
+    AggInternPtr intern;
     std::optional<common::query::Query> query;
     std::size_t checkpoint_size = 0;
     std::size_t target_chunk_size_mb = 4;
@@ -35,6 +37,11 @@ struct FileChunkMapperInput {
         return *this;
     }
 
+    FileChunkMapperInput& with_intern(AggInternPtr table) {
+        intern = std::move(table);
+        return *this;
+    }
+
     FileChunkMapperInput& with_checkpoint_size(std::size_t size) {
         checkpoint_size = size;
         return *this;
@@ -47,11 +54,6 @@ struct FileChunkMapperInput {
 
     FileChunkMapperInput& with_batch_size(std::size_t size_bytes) {
         batch_size = size_bytes;
-        return *this;
-    }
-
-    FileChunkMapperInput& with_start_chunk_index(int index) {
-        start_chunk_index = index;
         return *this;
     }
 };

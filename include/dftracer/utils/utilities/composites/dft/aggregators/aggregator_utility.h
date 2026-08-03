@@ -24,12 +24,10 @@ struct AggregatorInput {
     std::size_t parallelism = 0;  // 0 = use all available threads
     std::size_t event_batch_size = 10000;
 
-    AggregatorInput& with_directory(const std::string& dir);
     AggregatorInput& with_config(const AggregationConfig& cfg);
     AggregatorInput& with_checkpoint_size(std::size_t sz);
     AggregatorInput& with_index_dir(const std::string& dir);
     AggregatorInput& with_force_rebuild(bool force);
-    AggregatorInput& with_parallelism(std::size_t n);
     AggregatorInput& with_event_batch_size(std::size_t sz);
 };
 

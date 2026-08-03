@@ -18,13 +18,13 @@ struct MergeKey {
     std::uint64_t pid;
     std::uint64_t tid;
     std::uint32_t hhash_id;
-    std::uint32_t fhash_id;
+    std::uint64_t fhash;
     std::uint64_t target_bucket;  // computed from source bucket
 
     bool operator==(const MergeKey& other) const {
         return cat_id == other.cat_id && name_id == other.name_id &&
                pid == other.pid && tid == other.tid &&
-               hhash_id == other.hhash_id && fhash_id == other.fhash_id &&
+               hhash_id == other.hhash_id && fhash == other.fhash &&
                target_bucket == other.target_bucket;
     }
 };
@@ -37,7 +37,7 @@ struct MergeKeyHash {
         h.update_value(k.pid);
         h.update_value(k.tid);
         h.update_value(k.hhash_id);
-        h.update_value(k.fhash_id);
+        h.update_value(k.fhash);
         h.update_value(k.target_bucket);
         return static_cast<std::size_t>(h.finish());
     }
@@ -49,6 +49,7 @@ AggregationBatch shrink_batch(const AggregationBatch& input,
                               std::uint64_t target_interval_us) {
     AggregationBatch result;
     result.batch_type = input.batch_type;
+    result.intern = input.intern;
     result.total_events_processed = input.total_events_processed;
     result.total_files_processed = input.total_files_processed;
     result.total_bytes_processed = input.total_bytes_processed;
@@ -67,8 +68,8 @@ AggregationBatch shrink_batch(const AggregationBatch& input,
         std::uint64_t source_time = key.time_bucket * source_interval_us;
         std::uint64_t target_bucket = source_time / target_interval_us;
 
-        MergeKey mk{key.cat_id,   key.name_id,  key.pid,      key.tid,
-                    key.hhash_id, key.fhash_id, target_bucket};
+        MergeKey mk{key.cat_id,   key.name_id, key.pid,      key.tid,
+                    key.hhash_id, key.fhash,   target_bucket};
 
         auto it = merged.find(mk);
         if (it == merged.end()) {
@@ -98,6 +99,7 @@ AggregationBatch expand_batch(const AggregationBatch& input,
                               std::uint64_t target_interval_us) {
     AggregationBatch result;
     result.batch_type = input.batch_type;
+    result.intern = input.intern;
     result.total_events_processed = input.total_events_processed;
     result.total_files_processed = input.total_files_processed;
     result.total_bytes_processed = input.total_bytes_processed;
@@ -206,15 +208,14 @@ AggregationBatch expand_batch(const AggregationBatch& input,
             new_entry.metrics.count = sub_count_int;
 
             // Scale duration total by weight
-            new_entry.metrics.duration.total =
-                static_cast<std::uint64_t>(std::round(
-                    static_cast<double>(metrics.duration.total) * weight));
-            new_entry.metrics.duration.count = sub_count_int;
+            new_entry.metrics.duration.stat.sum =
+                std::round(metrics.duration.total() * weight);
+            new_entry.metrics.duration.stat.n = sub_count_int;
 
             // Scale size total by weight
-            new_entry.metrics.size.total = static_cast<std::uint64_t>(
-                std::round(static_cast<double>(metrics.size.total) * weight));
-            new_entry.metrics.size.count = sub_count_int;
+            new_entry.metrics.size.stat.sum =
+                std::round(metrics.size.total() * weight);
+            new_entry.metrics.size.stat.n = sub_count_int;
 
             // Keep min/max conservative (can't know which sub-bucket had them)
             // mean stays the same
@@ -225,10 +226,9 @@ AggregationBatch expand_batch(const AggregationBatch& input,
 
             // Scale custom metrics by weight
             if (new_entry.metrics.custom_metrics) {
-                for (auto& [name, stat] : *new_entry.metrics.custom_metrics) {
-                    stat.total = static_cast<std::uint64_t>(
-                        std::round(static_cast<double>(stat.total) * weight));
-                    stat.count = sub_count_int;
+                for (auto& [name, cm] : *new_entry.metrics.custom_metrics) {
+                    cm.stat.sum = std::round(cm.total() * weight);
+                    cm.stat.n = sub_count_int;
                 }
             }
 
@@ -250,6 +250,7 @@ AggregationBatch augment_batch(const AggregationBatch& input,
     if (config.source_interval_us == config.target_interval_us) {
         AggregationBatch result;
         result.batch_type = input.batch_type;
+        result.intern = input.intern;
         result.total_events_processed = input.total_events_processed;
         result.total_files_processed = input.total_files_processed;
         result.total_bytes_processed = input.total_bytes_processed;

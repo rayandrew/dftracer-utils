@@ -7,12 +7,11 @@
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_output.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_runner.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_visitor.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregator_utility.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/association_resolver_utility.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/event_aggregator.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/index_resolver_utility.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/utilities/composites/dft/views/aggregation_fold.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 
@@ -33,11 +32,6 @@ namespace dftracer::utils::utilities::composites::dft::aggregators {
 // AggregatorInput fluent builders
 // ---------------------------------------------------------------------------
 
-AggregatorInput& AggregatorInput::with_directory(const std::string& dir) {
-    directory = dir;
-    return *this;
-}
-
 AggregatorInput& AggregatorInput::with_config(const AggregationConfig& cfg) {
     config = cfg;
     return *this;
@@ -55,11 +49,6 @@ AggregatorInput& AggregatorInput::with_index_dir(const std::string& dir) {
 
 AggregatorInput& AggregatorInput::with_force_rebuild(bool force) {
     force_rebuild = force;
-    return *this;
-}
-
-AggregatorInput& AggregatorInput::with_parallelism(std::size_t n) {
-    parallelism = n;
     return *this;
 }
 
@@ -130,8 +119,8 @@ ArrowExportResult AggregationBatch::to_arrow() const {
         schema.push_back({"count_ci_upper", ColumnType::DOUBLE});
     }
     for (auto id : extra_key_ids) {
-        schema.push_back({std::string(aggregation_intern().resolve(id)),
-                          ColumnType::STRING});
+        schema.push_back(
+            {std::string(strings().resolve(id)), ColumnType::STRING});
     }
     // Custom metric suffixed names
     struct MetricSuffix {
@@ -161,24 +150,32 @@ ArrowExportResult AggregationBatch::to_arrow() const {
         const auto& metrics = entry.metrics;
         std::size_t ci = 0;
         builder.append_int64(ci++, static_cast<int64_t>(batch_type));
-        builder.append_string(ci++, key.cat());
-        builder.append_string(ci++, key.name());
+        builder.append_string(ci++, key.cat(strings()));
+        builder.append_string(ci++, key.name(strings()));
         builder.append_uint64(ci++, key.pid);
         builder.append_uint64(ci++, key.tid);
-        builder.append_string(ci++, key.hhash());
-        builder.append_string(ci++, key.fhash());
+        builder.append_string(ci++, key.hhash(strings()));
+        char fbuf[::dftracer::utils::hash::HEX64_DIGITS];
+        builder.append_string(ci++, key.fhash_str(strings(), fbuf));
         builder.append_uint64(ci++, key.time_bucket);
         builder.append_uint64(ci++, metrics.count);
-        builder.append_uint64(ci++, metrics.duration.total);
-        builder.append_uint64(ci++,
-                              metrics.count > 0 ? metrics.duration.min : 0);
-        builder.append_uint64(ci++, metrics.duration.max);
-        builder.append_double(ci++, metrics.duration.mean);
+        builder.append_uint64(
+            ci++, static_cast<std::uint64_t>(metrics.duration.total()));
+        builder.append_uint64(
+            ci++, static_cast<std::uint64_t>(
+                      metrics.count > 0 ? metrics.duration.min() : 0));
+        builder.append_uint64(
+            ci++, static_cast<std::uint64_t>(metrics.duration.max()));
+        builder.append_double(ci++, metrics.duration.mean());
         builder.append_double(ci++, metrics.duration.get_stddev());
-        builder.append_uint64(ci++, metrics.size.total);
-        builder.append_uint64(ci++, metrics.count > 0 ? metrics.size.min : 0);
-        builder.append_uint64(ci++, metrics.size.max);
-        builder.append_double(ci++, metrics.size.mean);
+        builder.append_uint64(ci++,
+                              static_cast<std::uint64_t>(metrics.size.total()));
+        builder.append_uint64(ci++,
+                              static_cast<std::uint64_t>(
+                                  metrics.count > 0 ? metrics.size.min() : 0));
+        builder.append_uint64(ci++,
+                              static_cast<std::uint64_t>(metrics.size.max()));
+        builder.append_double(ci++, metrics.size.mean());
         builder.append_double(ci++, metrics.size.get_stddev());
         builder.append_uint64(ci++, metrics.ts);
         builder.append_uint64(ci++, metrics.te);
@@ -188,8 +185,8 @@ ArrowExportResult AggregationBatch::to_arrow() const {
             if (key.extra_keys) {
                 for (const auto& [present_id, value_id] : *key.extra_keys) {
                     if (present_id == extra_key_id) {
-                        builder.append_string(
-                            ci++, aggregation_intern().resolve(value_id));
+                        builder.append_string(ci++,
+                                              strings().resolve(value_id));
                         found_extra_key = true;
                         break;
                     }
@@ -205,10 +202,14 @@ ArrowExportResult AggregationBatch::to_arrow() const {
                 auto it = metrics.custom_metrics->find(cm);
                 if (it != metrics.custom_metrics->end()) {
                     const auto& ms = it->second;
-                    builder.append_uint64(ci++, ms.total);
-                    builder.append_uint64(ci++, metrics.count > 0 ? ms.min : 0);
-                    builder.append_uint64(ci++, ms.max);
-                    builder.append_double(ci++, ms.mean);
+                    builder.append_uint64(
+                        ci++, static_cast<std::uint64_t>(ms.total()));
+                    builder.append_uint64(
+                        ci++, static_cast<std::uint64_t>(
+                                  metrics.count > 0 ? ms.min() : 0));
+                    builder.append_uint64(ci++,
+                                          static_cast<std::uint64_t>(ms.max()));
+                    builder.append_double(ci++, ms.mean());
                     builder.append_double(ci++, ms.get_stddev());
                     continue;
                 }
@@ -229,235 +230,6 @@ ArrowExportResult AggregationBatch::to_arrow() const {
     return builder.finish();
 }
 
-// ---------------------------------------------------------------------------
-// AggregationBatch::to_dfanalyzer_arrow
-// ---------------------------------------------------------------------------
-
-namespace {
-
-// IO category constants matching dfanalyzer IOCategory enum
-enum class IOCategory : std::int8_t {
-    READ = 1,
-    WRITE = 2,
-    METADATA = 3,
-    PCTL = 4,
-    IPC = 5,
-    OTHER = 6,
-    SYNC = 7,
-};
-
-IOCategory get_io_category(std::string_view func_name) {
-    using namespace dftracer::utils::utilities::composites::dft::internal;
-    for (auto op : posix_ops::READ)
-        if (op == func_name) return IOCategory::READ;
-    for (auto op : posix_ops::WRITE)
-        if (op == func_name) return IOCategory::WRITE;
-    for (auto op : posix_ops::SYNC)
-        if (op == func_name) return IOCategory::SYNC;
-    for (auto op : posix_ops::METADATA)
-        if (op == func_name) return IOCategory::METADATA;
-    return IOCategory::OTHER;
-}
-
-std::string resolve_hash(
-    const std::unordered_map<std::string, std::string>* hash_table,
-    std::string_view hash) {
-    if (!hash_table || hash.empty()) return std::string(hash);
-    auto it = hash_table->find(std::string(hash));
-    if (it != hash_table->end()) return it->second;
-    return std::string(hash);
-}
-
-std::string build_proc_name(std::string_view host_name, std::string_view hhash,
-                            std::uint64_t pid, std::uint64_t tid) {
-    std::string result = "app#";
-    if (!host_name.empty()) {
-        result.append(host_name);
-    } else if (!hhash.empty()) {
-        result.append(hhash);
-    } else {
-        result.append("unknown");
-    }
-    result.push_back('#');
-    result.append(std::to_string(pid));
-    result.push_back('#');
-    result.append(std::to_string(tid));
-    return result;
-}
-
-}  // namespace
-
-ArrowExportResult AggregationBatch::to_dfanalyzer_arrow(
-    const DfanalyzerContext& ctx) const {
-    RecordBatchBuilder builder;
-
-    // Bucket width in microseconds
-    auto bucket_width_us =
-        static_cast<std::uint64_t>(ctx.time_granularity * ctx.time_resolution);
-
-    if (batch_type == AggregationBatchType::SYSTEM) {
-        // System metrics schema
-        std::vector<common::arrow::ColumnSpec> schema = {
-            {"host_hash", ColumnType::STRING},
-            {"time_range", ColumnType::INT64},
-            {"sys_cpu_iowait_pct", ColumnType::DOUBLE},
-            {"sys_cpu_user_pct", ColumnType::DOUBLE},
-            {"sys_cpu_system_pct", ColumnType::DOUBLE},
-            {"sys_cpu_idle_pct", ColumnType::DOUBLE},
-            {"sys_core_iowait_pct_max", ColumnType::DOUBLE},
-            {"sys_core_iowait_pct_p95", ColumnType::DOUBLE},
-            {"sys_mem_dirty", ColumnType::DOUBLE},
-            {"sys_mem_cached", ColumnType::DOUBLE},
-            {"sys_mem_available", ColumnType::DOUBLE},
-        };
-        builder.declare_schema(schema);
-        builder.reserve(entries.size());
-
-        for (const auto& entry : entries) {
-            const auto& key = entry.key;
-            const auto& metrics = entry.metrics;
-            std::size_t ci = 0;
-
-            builder.append_string(ci++, key.hhash());
-            auto time_range =
-                bucket_width_us > 0
-                    ? static_cast<std::int64_t>(
-                          (key.time_bucket - ctx.time_origin) / bucket_width_us)
-                    : 0;
-            builder.append_int64(ci++, time_range);
-
-            // Extract system metrics from custom_metrics
-            auto get_metric = [&](const char* name) -> double {
-                if (!metrics.custom_metrics) return 0.0;
-                auto it = metrics.custom_metrics->find(name);
-                if (it == metrics.custom_metrics->end()) return 0.0;
-                return it->second.mean;
-            };
-            auto get_metric_max = [&](const char* name) -> double {
-                if (!metrics.custom_metrics) return 0.0;
-                auto it = metrics.custom_metrics->find(name);
-                if (it == metrics.custom_metrics->end()) return 0.0;
-                return static_cast<double>(it->second.max);
-            };
-
-            builder.append_double(ci++, get_metric("iowait_pct"));
-            builder.append_double(ci++, get_metric("user_pct"));
-            builder.append_double(ci++, get_metric("system_pct"));
-            builder.append_double(ci++, get_metric("idle_pct"));
-            builder.append_double(ci++, get_metric_max("iowait_pct"));
-            builder.append_double(ci++,
-                                  get_metric("iowait_pct"));  // p95 approx
-            builder.append_double(ci++, get_metric("Dirty"));
-            builder.append_double(ci++, get_metric("Cached"));
-            builder.append_double(ci++, get_metric("MemAvailable"));
-
-            builder.end_row();
-        }
-    } else {
-        // Events/Profiles schema
-        std::vector<common::arrow::ColumnSpec> schema = {
-            {"cat", ColumnType::STRING},
-            {"func_name", ColumnType::STRING},
-            {"pid", ColumnType::INT64},
-            {"tid", ColumnType::INT64},
-            {"file_hash", ColumnType::STRING},
-            {"host_hash", ColumnType::STRING},
-            {"file_name", ColumnType::STRING},
-            {"host_name", ColumnType::STRING},
-            {"proc_name", ColumnType::STRING},
-            {"io_cat", ColumnType::INT64},
-            {"acc_pat", ColumnType::INT64},
-            {"count", ColumnType::INT64},
-            {"time", ColumnType::DOUBLE},
-            {"size", ColumnType::INT64},
-            {"time_min", ColumnType::DOUBLE},
-            {"time_max", ColumnType::DOUBLE},
-            {"size_min", ColumnType::INT64},
-            {"size_max", ColumnType::INT64},
-            {"time_range", ColumnType::INT64},
-            {"time_start", ColumnType::INT64},
-            {"time_end", ColumnType::INT64},
-        };
-        builder.declare_schema(schema);
-        builder.reserve(entries.size());
-
-        for (const auto& entry : entries) {
-            const auto& key = entry.key;
-            const auto& metrics = entry.metrics;
-            std::size_t ci = 0;
-
-            auto fhash = key.fhash();
-            auto hhash = key.hhash();
-            auto file_name = resolve_hash(ctx.file_hashes, fhash);
-            auto host_name = resolve_hash(ctx.host_hashes, hhash);
-            auto proc_name =
-                build_proc_name(host_name, hhash, key.pid, key.tid);
-            auto io_cat = get_io_category(key.name());
-
-            builder.append_string(ci++, key.cat());
-            builder.append_string(ci++, key.name());
-            builder.append_int64(ci++, static_cast<std::int64_t>(key.pid));
-            builder.append_int64(ci++, static_cast<std::int64_t>(key.tid));
-            builder.append_string(ci++, fhash);
-            builder.append_string(ci++, hhash);
-            builder.append_string(ci++, file_name);
-            builder.append_string(ci++, host_name);
-            builder.append_string(ci++, proc_name);
-            builder.append_int64(ci++, static_cast<std::int64_t>(io_cat));
-            builder.append_int64(ci++, 0);  // acc_pat always 0
-
-            builder.append_int64(ci++,
-                                 static_cast<std::int64_t>(metrics.count));
-            // time: duration in seconds (dur_total is in us)
-            builder.append_double(ci++,
-                                  static_cast<double>(metrics.duration.total) /
-                                      ctx.time_resolution);
-            // size: nullable (0 means null)
-            if (metrics.size.total > 0) {
-                builder.append_int64(
-                    ci++, static_cast<std::int64_t>(metrics.size.total));
-            } else {
-                builder.append_null(ci++);
-            }
-            // time_min/max in seconds
-            builder.append_double(
-                ci++, metrics.count > 0
-                          ? static_cast<double>(metrics.duration.min) /
-                                ctx.time_resolution
-                          : 0.0);
-            builder.append_double(ci++,
-                                  static_cast<double>(metrics.duration.max) /
-                                      ctx.time_resolution);
-            // size_min/max: nullable
-            if (metrics.size.total > 0 && metrics.count > 0) {
-                builder.append_int64(
-                    ci++, static_cast<std::int64_t>(metrics.size.min));
-                builder.append_int64(
-                    ci++, static_cast<std::int64_t>(metrics.size.max));
-            } else {
-                builder.append_null(ci++);
-                builder.append_null(ci++);
-            }
-
-            // time_range: normalized bucket index
-            auto time_range =
-                bucket_width_us > 0
-                    ? static_cast<std::int64_t>(
-                          (key.time_bucket - ctx.time_origin) / bucket_width_us)
-                    : 0;
-            builder.append_int64(ci++, time_range);
-            // time_start/end: relative to time_origin (still in us)
-            builder.append_int64(
-                ci++, static_cast<std::int64_t>(metrics.ts - ctx.time_origin));
-            builder.append_int64(
-                ci++, static_cast<std::int64_t>(metrics.te - ctx.time_origin));
-
-            builder.end_row();
-        }
-    }
-
-    return builder.finish();
-}
 #endif  // DFTRACER_UTILS_ENABLE_ARROW
 
 // ---------------------------------------------------------------------------
@@ -472,7 +244,7 @@ coro::AsyncGenerator<AggregationBatch> AggregatorUtility::process(
     // Determine parallelism
     std::size_t parallelism = input.parallelism;
     if (parallelism == 0) {
-        parallelism = dftracer_utils_hardware_concurrency();
+        parallelism = hardware_concurrency();
     }
 
     // Resolve files and index path with aggregation cache check
@@ -549,25 +321,24 @@ coro::AsyncGenerator<AggregationBatch> AggregatorUtility::process(
         batch_config->checkpoint_size = input.checkpoint_size;
         batch_config->parallelism = parallelism;
         batch_config->force_rebuild = false;  // Already handled above
-        batch_config->use_batch_write = true;
 
-        // Attach AggregationVisitor to each file during parsing
-        batch_config->dft_visitor_factory =
-            [agg_db, agg_config_ptr](const std::string& file_path)
-            -> std::vector<std::unique_ptr<composites::dft::DftEventVisitor>> {
-            std::vector<std::unique_ptr<composites::dft::DftEventVisitor>>
-                visitors;
-            visitors.push_back(std::make_unique<AggregationVisitor>(
-                agg_db, 0, *agg_config_ptr, file_path));
-            return visitors;
+        // Aggregate each file via an AggregationFold in the fused parse.
+        batch_config->agg_fold_factory =
+            [agg_config_ptr, intern = merger->intern_table()](
+                dftracer::utils::StringIntern& build_intern)
+            -> std::unique_ptr<
+                composites::dft::views::detail::AggregationFold> {
+            return std::make_unique<
+                composites::dft::views::detail::AggregationFold>(
+                build_intern, intern, *agg_config_ptr, 0);
         };
 
         auto batch_result = co_await indexer::IndexBatchBuilderUtility::process(
             &scope, std::move(batch_config));
 
-        // Drain visitors and merge results
-        std::vector<std::string> processed_files = merge_aggregation_visitors(
-            batch_result.extra_visitors, merger.get());
+        // Drain the folds' out-of-band outputs and merge results
+        std::vector<std::string> processed_files =
+            merge_aggregation_folds(batch_result.agg_outputs, merger.get());
 
         // Write global config and per-file markers for cache detection
         if (!processed_files.empty()) {
@@ -598,6 +369,7 @@ coro::AsyncGenerator<AggregationBatch> AggregatorUtility::process(
     auto make_batch = [&](AggregationBatchType type) {
         AggregationBatch b;
         b.batch_type = type;
+        b.intern = merger->intern_table();
         b.total_events_processed = total_events;
         b.total_files_processed = total_files;
         b.global_extra_key_ids = global_extra_key_ids.get();
