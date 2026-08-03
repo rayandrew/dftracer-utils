@@ -60,9 +60,6 @@ class ComparisonUtility
     std::vector<GroupComparison> join_visitor(
         const ComparisonVisitorPair& pair) const;
 
-    /// Build an aggregate summary across all groups for a visitor pair.
-    GroupComparison build_summary(const ComparisonVisitorPair& pair) const;
-
     /// Sort groups by worst regression first.
     void sort_by_regression(std::vector<GroupComparison>& groups) const;
 

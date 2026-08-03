@@ -1,4 +1,5 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_intern.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_map.h>
 #include <dftracer/utils/utilities/composites/dft/comparator/comparison_result.h>
 #include <doctest/doctest.h>
@@ -18,24 +19,29 @@ static MetricStats make_stats(double mean, double central_m2, uint64_t total,
                               uint64_t min_val, uint64_t max_val,
                               uint64_t count = 0) {
     MetricStats s;
-    s.mean = mean;
-    s.total = total;
-    s.min = min_val;
-    s.max = max_val;
-    s.count = count;
+    s.stat.sum = static_cast<double>(total);
+    s.stat.min = static_cast<double>(min_val);
+    s.stat.max = static_cast<double>(max_val);
     // If count not provided, fall back to total/mean ratio (integer-rounded).
     const double n =
         count > 0 ? static_cast<double>(count)
                   : (mean != 0.0 ? static_cast<double>(total) / mean : 0.0);
-    s.m2 = central_m2 + n * mean * mean;
+    s.stat.n = static_cast<std::uint64_t>(n);
+    s.stat.sumsq = central_m2 + n * mean * mean;  // central M2 -> raw power sum
     return s;
+}
+
+static dftracer::utils::StringIntern& test_intern() {
+    static auto table = dftracer::utils::utilities::composites::dft::
+        aggregators::make_intern_table();
+    return table->intern;
 }
 
 static AggregationKey make_key(std::string_view cat, std::string_view name,
                                uint64_t pid, uint64_t time_bucket) {
     AggregationKey k;
-    k.cat_id = aggregation_intern().get_or_insert(cat);
-    k.name_id = aggregation_intern().get_or_insert(name);
+    k.cat_id = test_intern().get_or_insert(cat);
+    k.name_id = test_intern().get_or_insert(name);
     k.pid = pid;
     k.tid = 0;
     k.time_bucket = time_bucket;
@@ -135,7 +141,7 @@ TEST_SUITE("CollapseByGroup") {
         AggregationMap agg;
         agg[make_key("POSIX", "lseek64", 1, 0)] = make_metrics(5, 500, 0);
 
-        auto result = collapse_by_group(agg);
+        auto result = collapse_by_group(agg, test_intern(), test_intern());
         CHECK(result.size() == 1);
         auto it = result.begin();
         CHECK(it->second.num_windows == 1);
@@ -149,7 +155,7 @@ TEST_SUITE("CollapseByGroup") {
         agg[make_key("POSIX", "open", 1, 1)] = make_metrics(20, 2000, 0);
         agg[make_key("POSIX", "open", 1, 2)] = make_metrics(30, 3000, 0);
 
-        auto result = collapse_by_group(agg);
+        auto result = collapse_by_group(agg, test_intern(), test_intern());
         REQUIRE(result.size() == 1);
         const auto& cm = result.begin()->second;
         CHECK(cm.num_windows == 3);
@@ -164,7 +170,7 @@ TEST_SUITE("CollapseByGroup") {
         agg[make_key("POSIX", "close", 2, 0)] = make_metrics(15, 1500, 0);
         agg[make_key("POSIX", "close", 3, 0)] = make_metrics(10, 1000, 0);
 
-        auto result = collapse_by_group(agg);
+        auto result = collapse_by_group(agg, test_intern(), test_intern());
         REQUIRE(result.size() == 1);
         const auto& cm = result.begin()->second;
         // One window (time_bucket=0), max count across pids = 15
@@ -178,7 +184,7 @@ TEST_SUITE("CollapseByGroup") {
         agg[make_key("POSIX", "write", 1, 0)] = make_metrics(5, 500, 2048);
         agg[make_key("STDIO", "fread", 1, 0)] = make_metrics(3, 300, 1024);
 
-        auto result = collapse_by_group(agg);
+        auto result = collapse_by_group(agg, test_intern(), test_intern());
         CHECK(result.size() == 3);
     }
 
@@ -189,11 +195,11 @@ TEST_SUITE("CollapseByGroup") {
         // lseek64 is not -> bw_mean = 0
         agg[make_key("POSIX", "lseek64", 1, 0)] = make_metrics(10, 500, 0);
 
-        auto result = collapse_by_group(agg);
+        auto result = collapse_by_group(agg, test_intern(), test_intern());
         REQUIRE(result.size() == 2);
 
         for (const auto& [k, cm] : result) {
-            if (k.name() == "read") {
+            if (k.name(test_intern()) == "read") {
                 CHECK(cm.bw_mean > 0.0);
             } else {
                 CHECK(cm.bw_mean == doctest::Approx(0.0).epsilon(1e-10));

@@ -28,12 +28,6 @@ struct EventCollectorFromMetadataCollectorUtilityInput {
         input.metadata = std::move(meta);
         return input;
     }
-
-    EventCollectorFromMetadataCollectorUtilityInput& with_trim_commas(
-        bool trim) {
-        trim_commas = trim;
-        return *this;
-    }
 };
 
 /**
