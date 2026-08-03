@@ -23,6 +23,9 @@ variables:
   # filesystem. $USER is not expanded in `variables:`; $GITLAB_USER_LOGIN is.
   CUSTOM_CI_BUILDS_DIR: "/usr/workspace/$GITLAB_USER_LOGIN/gitlab-runner-builds"
   CUSTOM_CI_ENV_DIR: "/usr/workspace/$GITLAB_USER_LOGIN/gitlab-runner-envs"
+  # wheels.sh versions from `git describe`. The default shallow fetch hides the
+  # tags once develop moves past them, and the build fails outright.
+  GIT_DEPTH: 0
 
 stages: [alloc, test, publish, deploy, cleanup]
 
