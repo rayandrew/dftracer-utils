@@ -1,4 +1,5 @@
 #include <dftracer/utils/core/common/config.h>
+#include <dftracer/utils/core/common/hash/fnv1a.h>
 #ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
 
 #include <dftracer/utils/core/common/filesystem.h>
@@ -89,15 +90,6 @@ ColumnType nanoarrow_to_column_type(ArrowType type) {
         default:
             return ColumnType::STRING;
     }
-}
-
-uint64_t fnv1a_hash(const std::string& s) {
-    uint64_t hash = 14695981039346656037ULL;
-    for (char c : s) {
-        hash ^= static_cast<uint64_t>(c);
-        hash *= 1099511628211ULL;
-    }
-    return hash;
 }
 
 // Append one row of `view`'s columns into `builder`, dispatching per storage
@@ -221,11 +213,6 @@ int PartitionRouter::open(const std::string& output_dir,
     return 0;
 }
 
-void PartitionRouter::register_predicate(const std::string& view_name,
-                                         PredicateEvaluator evaluator) {
-    predicates_[view_name] = std::move(evaluator);
-}
-
 std::string PartitionRouter::partition_path(
     const std::string& partition_key) const {
     if (partition_key.empty()) {
@@ -259,7 +246,7 @@ int PartitionRouter::compute_bucket(
         combined += v;
         combined += '\0';
     }
-    return static_cast<int>(fnv1a_hash(combined) %
+    return static_cast<int>(dftracer::utils::hash::fnv1a_hash(combined) %
                             static_cast<uint64_t>(config_.num_buckets));
 }
 

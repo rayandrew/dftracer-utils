@@ -80,20 +80,6 @@ inline char* write_varint(char* p, std::uint64_t v) {
     return p;
 }
 
-inline char* write_be16(char* p, std::uint16_t v) {
-    p[0] = static_cast<char>(v >> 8);
-    p[1] = static_cast<char>(v);
-    return p + 2;
-}
-
-inline char* write_be32(char* p, std::uint32_t v) {
-    p[0] = static_cast<char>(v >> 24);
-    p[1] = static_cast<char>(v >> 16);
-    p[2] = static_cast<char>(v >> 8);
-    p[3] = static_cast<char>(v);
-    return p + 4;
-}
-
 inline char* write_be64(char* p, std::uint64_t v) {
     p[0] = static_cast<char>(v >> 56);
     p[1] = static_cast<char>(v >> 48);

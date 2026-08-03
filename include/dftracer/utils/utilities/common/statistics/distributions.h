@@ -19,8 +19,6 @@ enum class DistributionKind : std::uint8_t {
     Weibull,      // params = {shape, scale, _}
 };
 
-std::string_view distribution_name(DistributionKind k);
-
 // Result of fitting a single distribution to a sample array.
 // `params` semantics depend on `kind`.
 struct FittedDistribution {

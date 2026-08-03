@@ -5,20 +5,12 @@ namespace dftracer::utils::utilities::common::json {
 JsonParser::JsonParser(std::size_t capacity) : parser_(capacity) {}
 
 bool JsonParser::parse(std::string_view json_line) {
-    padded_json_ = simdjson::padded_string(json_line);
-    auto result = parser_.iterate(padded_json_);
-    if (result.error()) {
-        valid_ = false;
-        return false;
-    }
-    doc_ = std::move(result.value());
-    active_ = simdjson::ondemand::document_reference(doc_);
-    valid_ = true;
-    return true;
-}
-
-bool JsonParser::parse_padded(simdjson::padded_string_view json) {
-    auto result = parser_.iterate(json);
+    // Reuse padbuf_'s capacity instead of allocating a padded_string per line;
+    // resize() zero-fills the SIMDJSON_PADDING tail On-Demand requires.
+    padbuf_.assign(json_line.data(), json_line.size());
+    padbuf_.resize(json_line.size() + simdjson::SIMDJSON_PADDING);
+    auto result =
+        parser_.iterate(padbuf_.data(), json_line.size(), padbuf_.size());
     if (result.error()) {
         valid_ = false;
         return false;
@@ -66,6 +58,14 @@ std::optional<bool> JsonParser::get_bool(std::string_view key) {
 std::optional<std::string_view> JsonParser::get_string(std::string_view key) {
     if (!valid_) return std::nullopt;
     auto result = active_[key].get_string();
+    if (result.error()) return std::nullopt;
+    return result.value();
+}
+
+std::optional<simdjson::ondemand::value> JsonParser::get_value(
+    std::string_view key) {
+    if (!valid_) return std::nullopt;
+    auto result = active_[key];
     if (result.error()) return std::nullopt;
     return result.value();
 }

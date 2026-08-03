@@ -43,7 +43,6 @@ class PartitionWriter {
     coro::CoroTask<PartitionWriteStats> close();
 
     bool is_open() const noexcept { return is_open_; }
-    int64_t current_file_bytes() const noexcept { return current_file_bytes_; }
     int64_t total_bytes() const noexcept { return total_bytes_; }
     int64_t total_rows() const noexcept { return total_rows_; }
     size_t file_count() const noexcept { return file_index_; }

@@ -1,9 +1,6 @@
 #ifndef DFTRACER_UTILS_UTILITIES_COMMON_JSON_JSON_VALUE_H
 #define DFTRACER_UTILS_UTILITIES_COMMON_JSON_JSON_VALUE_H
 
-#include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/core/utilities/utility.h>
-#include <dftracer/utils/utilities/text/shared.h>
 #include <simdjson.h>
 
 #include <cstdint>
@@ -39,6 +36,10 @@ class JsonValue {
     explicit JsonValue(simdjson::dom::element elem)
         : elem_(elem), valid_(true) {}
 
+    /// The wrapped simdjson element (invalid/empty when !exists()). Lets code
+    /// that already parsed reuse the element instead of re-parsing.
+    simdjson::dom::element element() const { return elem_; }
+
     bool is_null() const { return !valid_ || elem_.is_null(); }
     bool is_bool() const { return valid_ && elem_.is_bool(); }
     bool is_string() const { return valid_ && elem_.is_string(); }
@@ -66,6 +67,17 @@ class JsonValue {
     JsonValue operator[](std::string_view key) const {
         if (!valid_ || !elem_.is_object()) return JsonValue();
         auto result = elem_[key];
+        if (result.error()) return JsonValue();
+        return JsonValue(result.value_unsafe());
+    }
+
+    /// Array element by index (invalid JsonValue if not an array or out of
+    /// range). Lets dotted paths address array elements (e.g. "tags.0.name").
+    JsonValue operator[](std::size_t index) const {
+        if (!valid_ || !elem_.is_array()) return JsonValue();
+        auto arr = elem_.get_array();
+        if (arr.error()) return JsonValue();
+        auto result = arr.value_unsafe().at(index);
         if (result.error()) return JsonValue();
         return JsonValue(result.value_unsafe());
     }
@@ -185,39 +197,15 @@ class JsonValue {
     explicit operator bool() const { return exists(); }
 };
 
-using JsonParserOutput = JsonValue;
-using JsonParserInput = simdjson::dom::element;
-
-class JsonParserUtility
-    : public utilities::Utility<JsonParserInput, JsonParserOutput> {
-   public:
-    coro::CoroTask<JsonParserOutput> process(
-        const JsonParserInput& input) override {
-        co_return JsonValue(input);
-    }
-};
-
-struct StringJsonParserInput {
-    utilities::text::Text content;
-
-    static coro::CoroTask<StringJsonParserInput> from_file_async(
-        const std::string& file_path);
-    static StringJsonParserInput from_file(const std::string& file_path);
-    static StringJsonParserInput from_string(const std::string& json_str);
-};
-
-class StringJsonParserUtility
-    : public utilities::Utility<StringJsonParserInput, JsonParserOutput> {
-   private:
-    utilities::text::Text content_;
-    simdjson::dom::parser parser_;
-    simdjson::dom::document doc_;
-
-   public:
-    coro::CoroTask<JsonParserOutput> process(
-        const StringJsonParserInput& input) override;
-    void reset();
-};
+/// Coerce a JSON number element (uint/int/double) to double; 0 for non-numbers.
+inline double json_number(simdjson::dom::element el) {
+    if (el.is_uint64())
+        return static_cast<double>(el.get_uint64().value_unsafe());
+    if (el.is_int64())
+        return static_cast<double>(el.get_int64().value_unsafe());
+    if (el.is_double()) return el.get_double().value_unsafe();
+    return 0;
+}
 
 }  // namespace dftracer::utils::utilities::common::json
 

@@ -88,6 +88,22 @@ __attribute__((__format__(__printf__, 1, 2))) inline std::string string_format(
     return s;
 }
 
+// Human-readable byte count, e.g. "1.5 MB" or "3.0 MB/s". `per_suffix` appends
+// a rate unit (e.g. "/s"); `precision` sets the fractional digits.
+inline std::string human_bytes(double value, const char* per_suffix = "",
+                               int precision = 1) {
+    static const char* const UNITS[] = {"B", "KB", "MB", "GB", "TB", "PB"};
+    int i = 0;
+    while (value >= 1024.0 && i < 5) {
+        value /= 1024.0;
+        ++i;
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.*f %s%s", precision, value, UNITS[i],
+                  per_suffix);
+    return buf;
+}
+
 }  // namespace dftracer::utils
 
 #endif  // DFTRACER_UTILS_CORE_COMMON_STR_FORMAT_H

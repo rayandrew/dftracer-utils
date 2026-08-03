@@ -59,9 +59,6 @@ class PartitionRouter {
              int64_t chunk_size_bytes,
              IpcCompression compression = DEFAULT_ARROW_IPC_COMPRESSION);
 
-    void register_predicate(const std::string& view_name,
-                            PredicateEvaluator evaluator);
-
     coro::CoroTask<int> write_batch(ArrowExportResult& batch);
     coro::CoroTask<RouterWriteStats> close();
 

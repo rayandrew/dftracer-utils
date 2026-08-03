@@ -88,7 +88,6 @@ class IpcWriter {
         std::size_t pool_slots = 4);
 
     coro::CoroTask<int> write_batch(ArrowExportResult& batch);
-    coro::CoroTask<int> write_batches(std::vector<ArrowExportResult>& batches);
     coro::CoroTask<int> close();
 
     bool is_open() const noexcept { return fd_ >= 0; }

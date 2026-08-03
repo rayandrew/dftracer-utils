@@ -151,47 +151,6 @@ class ShardedMutex {
     }
 
     /**
-     * Execute function on ALL shards without locking.
-     * Only safe when no concurrent access is possible.
-     */
-    template <typename Func>
-    void for_each_shard_unlocked(Func&& func) {
-        for (auto& shard : shards_) {
-            func(shard.data);
-        }
-    }
-
-    template <typename Func>
-    void for_each_shard_unlocked(Func&& func) const {
-        for (const auto& shard : shards_) {
-            func(shard.data);
-        }
-    }
-
-    /**
-     * Get number of shards (compile-time constant)
-     */
-    static constexpr std::size_t num_shards() noexcept { return NUM_SHARDS; }
-
-    /**
-     * Try to execute function with exclusive access to shard (non-blocking)
-     *
-     * @param key Shard key
-     * @param func Function to execute if lock acquired
-     * @return true if function was executed, false if lock not acquired
-     */
-    template <typename Func>
-    bool try_with_shard(std::size_t key, Func&& func) {
-        auto& shard = get_shard(key);
-        std::unique_lock<std::mutex> lock(shard.mutex, std::try_to_lock);
-        if (lock.owns_lock()) {
-            func(shard.data);
-            return true;
-        }
-        return false;
-    }
-
-    /**
      * Clear all shards (calls .clear() on each shard's data)
      * Only available if T has a .clear() method
      */

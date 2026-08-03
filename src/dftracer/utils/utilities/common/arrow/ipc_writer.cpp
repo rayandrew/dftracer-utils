@@ -564,41 +564,6 @@ coro::CoroTask<int> IpcWriter::write_batch(ArrowExportResult& batch) {
 // write_batches (parallel compression)
 // ---------------------------------------------------------------------------
 
-coro::CoroTask<int> IpcWriter::write_batches(
-    std::vector<ArrowExportResult>& batches) {
-    if (!is_open()) co_return -1;
-    if (batches.empty()) co_return 0;
-
-    // Write schema from first batch
-    if (!schema_written_) {
-        int rc = co_await write_schema(batches[0]);
-        if (rc != 0) co_return rc;
-    }
-
-    // Parallel compress all batches
-    std::vector<coro::CoroTask<CompressedBatch>> compress_tasks;
-    compress_tasks.reserve(batches.size());
-
-    for (auto& batch : batches) {
-        if (batch.valid()) {
-            compress_tasks.push_back(compress_batch(batch));
-        }
-    }
-
-    auto compressed = co_await coro::when_all(std::move(compress_tasks));
-
-    // Write in order (sequential to maintain file structure)
-    for (auto& cb : compressed) {
-        if (cb.header.empty()) {
-            co_return -1;
-        }
-        int rc = co_await write_compressed(cb);
-        if (rc != 0) co_return rc;
-    }
-
-    co_return 0;
-}
-
 // ---------------------------------------------------------------------------
 // write_footer
 // ---------------------------------------------------------------------------
