@@ -9,9 +9,8 @@ TEST_SUITE("ComparisonConfig") {
         auto cfg = ComparisonConfig::from_cli("base/", "var/", "", "");
         REQUIRE(cfg.nodes.size() == 1);
         const auto& node = cfg.nodes[0];
-        // Default query covers POSIX and STDIO
-        CHECK(node.query.find("POSIX") != std::string::npos);
-        CHECK(node.query.find("STDIO") != std::string::npos);
+        // No query given means compare every event (not an IO-only default).
+        CHECK(node.query.empty());
         // Default group_by is cat,name
         REQUIRE(node.group_by.size() == 2);
         CHECK(node.group_by[0] == "cat");
