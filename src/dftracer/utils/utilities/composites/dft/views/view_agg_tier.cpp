@@ -6,6 +6,7 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
+#include <dftracer/utils/core/rocksdb/db_manager.h>
 #include <dftracer/utils/utilities/common/query/ast.h>
 #include <dftracer/utils/utilities/common/query/evaluator.h>
 #include <dftracer/utils/utilities/common/query/query.h>
@@ -325,9 +326,18 @@ void clear_tier_cache() {
     g_tier_cache.clear();
 }
 
+void evict_tier_cache(const std::string& index_path) {
+    std::unique_lock<std::shared_mutex> lk(g_tier_mtx);
+    g_tier_cache.erase(index_path);
+}
+
 std::shared_ptr<const TierCache> tier_cache(const std::string& index_path) {
     static const int registered = [] {
         dftracer::utils::rocksdb::register_pre_exit_cleanup(clear_tier_cache);
+        // Drop this index's cached agg DB when its manager entry is reset (e.g.
+        // a rebuild removing the directory), so the tier does not keep the DB
+        // open and block the removal.
+        dftracer::utils::rocksdb::register_reset_listener(evict_tier_cache);
         return 0;
     }();
     (void)registered;
@@ -338,11 +348,16 @@ std::shared_ptr<const TierCache> tier_cache(const std::string& index_path) {
             it != g_tier_cache.end() && it->second->mtime == mtime)
             return it->second;
     }
+    // Build outside the lock: build_tier_cache -> open_agg_db may reset() the
+    // index (its merge-operator open falling back), which fires the tier's own
+    // reset listener and re-locks g_tier_mtx. Holding it here would self-lock.
+    // The build is idempotent, so a concurrent double-build just races to
+    // insert; last write wins and both hold the same data for this mtime.
+    auto tc = build_tier_cache(index_path, mtime);
     std::unique_lock<std::shared_mutex> wlk(g_tier_mtx);
     if (auto it = g_tier_cache.find(index_path);
         it != g_tier_cache.end() && it->second->mtime == mtime)
         return it->second;
-    auto tc = build_tier_cache(index_path, mtime);
     g_tier_cache[index_path] = tc;  // replaces stale; old readers keep theirs
     return tc;
 }

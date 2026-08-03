@@ -3,7 +3,10 @@
 #include <dftracer/utils/core/rocksdb/db_manager.h>
 
 #include <cstdlib>
+#include <functional>
 #include <mutex>
+#include <string>
+#include <vector>
 
 namespace dftracer::utils::rocksdb {
 
@@ -182,7 +185,32 @@ std::shared_ptr<RocksDatabase> RocksDBManager::get_or_open(
     }
 }
 
+namespace {
+std::mutex& reset_listeners_mutex() {
+    static std::mutex m;
+    return m;
+}
+std::vector<std::function<void(const std::string&)>>& reset_listeners() {
+    static std::vector<std::function<void(const std::string&)>> v;
+    return v;
+}
+}  // namespace
+
+void register_reset_listener(std::function<void(const std::string&)> fn) {
+    std::lock_guard<std::mutex> lk(reset_listeners_mutex());
+    reset_listeners().push_back(std::move(fn));
+}
+
 void RocksDBManager::reset(const std::string& db_path) {
+    // Let path-keyed caches drop their handles first (outside mutex_, since a
+    // listener may re-enter the manager), so this reset releases every strong
+    // reference and the DB can close.
+    {
+        std::lock_guard<std::mutex> lk(reset_listeners_mutex());
+        for (auto& fn : reset_listeners())
+            if (fn) fn(db_path);
+    }
+
     std::unique_lock<std::mutex> lock(mutex_);
 
     cv_.wait(lock, [&] { return !opening_.contains(db_path); });
