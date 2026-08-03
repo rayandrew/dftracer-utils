@@ -19,35 +19,41 @@ set(UTILITIES_TEST_SOURCES
     composites/test_directory_file_processor.cpp
     composites/test_file_compressor.cpp
     composites/test_file_decompressor.cpp
-    composites/test_file_merger.cpp
     composites/test_indexed_file_reader.cpp
-    composites/test_line_batch_processor.cpp
 
     # DFT Composites
+    composites/dft/test_schema.cpp
+    composites/dft/test_trace_config.cpp
     composites/dft/test_chunk_extractor.cpp
     composites/dft/test_event_collector.cpp
     composites/dft/test_index_builder.cpp
     composites/dft/test_metadata_collector.cpp
+    composites/dft/test_time_metric.cpp
 
     # DFT Indexing Composites
     composites/dft/indexing/test_bloom_filter.cpp
+    composites/dft/indexing/test_scalable_bloom_filter.cpp
     composites/dft/indexing/test_chunk_statistics.cpp
     composites/dft/indexing/test_chunk_indexer.cpp
     composites/dft/indexing/test_chunk_pruner.cpp
-    composites/dft/indexing/test_manifest_indexer.cpp
-    composites/dft/indexing/test_manifest_index_builder.cpp
-    composites/dft/indexing/test_manifest_queries.cpp
-
-    # DFT Reorganization Composites
-    composites/dft/reorganize/test_reorganization_planner.cpp
-    composites/dft/reorganize/test_reorganize_integration.cpp
-    composites/dft/reorganize/test_reconstruction_planner.cpp
-    composites/dft/reorganize/test_reconstruct_integration.cpp
+    composites/dft/indexing/test_sub_chunk_prune.cpp
+    composites/dft/indexing/test_resolved_field_rewriter.cpp
 
     # DFT Views Composites
     composites/dft/views/test_view_definition.cpp
-    composites/dft/views/test_view_builder.cpp
-    composites/dft/views/test_view_reader.cpp
+    composites/dft/views/test_view_planner.cpp
+    composites/dft/views/test_view_scanner.cpp
+    composites/dft/views/test_view_scan.cpp
+    composites/dft/views/test_view_aggregate.cpp
+    composites/dft/views/test_view_mv.cpp
+    composites/dft/views/test_coverage.cpp
+    composites/dft/views/test_fold.cpp
+    composites/dft/views/test_rollup_store.cpp
+    composites/dft/views/test_dict_fold.cpp
+    composites/dft/views/test_bloom_fold.cpp
+    composites/dft/views/test_raw_gzip_fuse.cpp
+    composites/dft/views/test_event_source.cpp
+    composites/dft/views/test_aggfold.cpp
 
     # DFT Statistics Composites
     composites/dft/statistics/test_trace_statistics.cpp
@@ -68,10 +74,13 @@ set(UTILITIES_TEST_SOURCES
     common/query/test_parser.cpp
     common/query/test_evaluator.cpp
     common/query/test_query.cpp
+    common/query/test_subsumption.cpp
 
     # DFT Aggregator Composites
     common/statistics/test_ddsketch.cpp
+    common/statistics/test_distinct_sketch.cpp
     composites/dft/aggregators/test_aggregation_metrics.cpp
+    composites/dft/aggregators/test_aggregation_rollup.cpp
     composites/dft/aggregators/test_aggregation_key.cpp
     composites/dft/aggregators/test_aggregation_config.cpp
     composites/dft/aggregators/test_aggregation_serialization.cpp
@@ -92,13 +101,13 @@ set(UTILITIES_TEST_SOURCES
     indexer/test_rocksdb_storage.cpp
     indexer/test_scan_prefix.cpp
     indexer/test_index_database.cpp
-    indexer/test_provenance_database.cpp
     indexer/test_index_builder.cpp
+    indexer/test_hash_table_aggregation.cpp
     indexer/test_sst_ingest_spike.cpp
 
     # Compression
-    compression/zlib/test_streaming_compressor.cpp
-    compression/zlib/test_streaming_decompressor.cpp
+    compression/test_libdeflate_gzip.cpp
+    compression/test_gzip_rechunker.cpp
 
     # Filesystem
     filesystem/test_directory_scanner.cpp
@@ -121,18 +130,17 @@ set(UTILITIES_TEST_SOURCES
     fileio/parallel/test_padded_striped_writer.cpp
 
     # I/O Lines
-    fileio/lines/test_streaming_line_reader.cpp
     fileio/lines/sources/test_indexed_file_line_iterator.cpp
     fileio/lines/sources/test_indexed_file_bytes_iterator.cpp
-    fileio/lines/sources/test_plain_file_line_iterator.cpp
-    fileio/lines/sources/test_plain_file_bytes_iterator.cpp
     fileio/lines/sources/test_async_indexed_file_line_generator.cpp
-    fileio/lines/sources/test_async_plain_file_line_generator.cpp
+    fileio/lines/sources/test_async_streaming_gz_line_generator.cpp
     fileio/lines/sources/test_async_indexed_file_bytes_generator.cpp
-    fileio/lines/sources/test_async_plain_file_bytes_generator.cpp
 
     # Reader
     reader/test_trace_reader.cpp
+    reader/test_sub_chunk_skip.cpp
+    reader/test_member_decode_cache.cpp
+    reader/test_member_cache_integration.cpp
 
     # Text
     text/test_line_filter.cpp

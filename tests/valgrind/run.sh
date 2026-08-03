@@ -413,14 +413,14 @@ run_mpi() {
   log "Building MPI tests and binaries (-j $jobs)"
   cmake --build "$mpi_build_dir" -j "$jobs" --target \
     binaries_test_dftracer_call_tree_mpi \
-    binaries_test_dftracer_aggregator_mpi \
+    binaries_test_dftracer_view_mpi \
     dftracer_call_tree dftracer_call_tree_mpi \
-    dftracer_aggregator dftracer_aggregator_mpi
+    dftracer_view
 
   mkdir -p "$LOG_DIR"
   log "Running MPI tests (ranks wrapped in Valgrind via $wrapper)"
   ctest --test-dir "$mpi_build_dir" \
-    -R "test_dftracer_(call_tree|aggregator)_mpi" \
+    -R "test_dftracer_(call_tree_mpi|view_mpi)" \
     --output-on-failure --no-tests=error
 }
 

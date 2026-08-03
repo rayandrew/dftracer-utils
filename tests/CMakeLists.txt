@@ -28,12 +28,18 @@ set(TEST_CPP_SOURCES
     # Core tests
     core/test_runtime.cpp
     core/test_logging.cpp
+    core/test_string_intern.cpp
+    core/test_hex64.cpp
+    core/test_eviction_policy.cpp
+    core/test_filesystem_info.cpp
+    core/test_memory_budget.cpp
     # Pipeline tests
     pipeline/test_pipeline.cpp
 
     pipeline/test_task_scope.cpp
     pipeline/test_simple_scope.cpp
     pipeline/test_coro_scope.cpp
+    pipeline/test_run_loop.cpp
     # Coroutine tests
     coro/test_coro_syntax.cpp
     coro/test_channel.cpp
@@ -43,6 +49,7 @@ set(TEST_CPP_SOURCES
     coro/test_yield.cpp
     coro/test_when_all_heterogeneous.cpp
     coro/test_when_any_heterogeneous.cpp
+    coro/test_async_once.cpp
     # Async I/O tests
     io/test_async_io.cpp
     # Task Graph tests
@@ -55,7 +62,6 @@ set(TEST_CPP_SOURCES
     reader/test_basic_factory.cpp
     reader/test_reader_formats.cpp
     reader/test_reader_robustness.cpp
-    # reader/test_reader_tar_comprehensive.cpp
     # Trace generation utility tests
     utilities/trace_gen/test_fake_trace_writer.cpp
     # Replay tests
@@ -67,6 +73,8 @@ set(TEST_CPP_SOURCES
     server/test_http_request.cpp
     server/test_query_params.cpp
     server/test_trace_index.cpp
+    server/test_cancel.cpp
+    server/test_viz_stats_fastpath.cpp
     )
 
 foreach(test_file ${TEST_CPP_SOURCES})
@@ -78,7 +86,8 @@ foreach(test_file ${TEST_CPP_SOURCES})
   string(REPLACE "/" "_" target_name ${bin_exec})
 
   add_executable(${target_name} ${test_file})
-  target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+                                                 ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(${target_name} PRIVATE doctest::doctest testing_utilities)
   target_set_warnings(${target_name})
   target_enable_coroutine(${target_name})
@@ -161,7 +170,8 @@ foreach (test_file ${TEST_C_SOURCES})
   string(REPLACE "/" "_" target_name ${bin_exec})
 
   add_executable(${target_name} ${test_file})
-  target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+                                                 ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(${target_name} PRIVATE unity_lib testing_utilities)
   target_add_rpath(${target_name})
 
@@ -198,21 +208,16 @@ add_subdirectory(utilities)
 
 set(TEST_BINARY_SOURCES
     binaries/test_dftracer_server.cpp
-    binaries/test_dftracer_merge.cpp
     binaries/test_dftracer_event_count.cpp
     binaries/test_dftracer_validate.cpp
     binaries/test_dftracer_split.cpp
     binaries/test_dftracer_pgzip.cpp
     binaries/test_dftracer_gen_fake_trace.cpp
     binaries/test_dftracer_info.cpp
-    binaries/test_dftracer_reader.cpp
     binaries/test_dftracer_stats.cpp
     binaries/test_dftracer_index.cpp
-    binaries/test_dftracer_aggregator.cpp
     binaries/test_dftracer_gen_dlio_config.cpp
-    binaries/test_dftracer_organize.cpp
     binaries/test_dftracer_view.cpp
-    binaries/test_dftracer_tar.cpp
     binaries/test_dftracer_replay.cpp
     binaries/test_dftracer_comparator.cpp
     binaries/test_dftracer_call_tree.cpp
@@ -220,7 +225,7 @@ set(TEST_BINARY_SOURCES
 
 if(DFTRACER_UTILS_ENABLE_MPI)
   list(APPEND TEST_BINARY_SOURCES
-    binaries/test_dftracer_aggregator_mpi.cpp
+    binaries/test_dftracer_view_mpi.cpp
     binaries/test_dftracer_call_tree_mpi.cpp)
 endif()
 
@@ -230,7 +235,8 @@ foreach(test_file ${TEST_BINARY_SOURCES})
   string(REPLACE "/" "_" target_name ${bin_exec})
 
   add_executable(${target_name} ${test_file})
-  target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_include_directories(${target_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+                                                 ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(${target_name} PRIVATE doctest::doctest testing_utilities)
   target_set_warnings(${target_name})
   target_enable_coroutine(${target_name})
@@ -260,32 +266,19 @@ foreach(test_file ${TEST_BINARY_SOURCES})
   if(DFTRACER_UTILS_ENABLE_TSAN)
     set(integration_test_timeout 180)
   endif()
-  # The MPI aggregator spawns mpiexec several times per test case and
-  # each child runs under ASan, which is ~10x slower than release. The
-  # default 120s is not enough.
-  if(bin_exec STREQUAL "binaries/test_dftracer_aggregator_mpi" OR
+  # MPI tests spawn mpiexec several times per test case and each child runs
+  # under ASan, which is ~10x slower than release. The default 120s is not
+  # enough.
+  if(bin_exec STREQUAL "binaries/test_dftracer_view_mpi" OR
      bin_exec STREQUAL "binaries/test_dftracer_call_tree_mpi")
     set(integration_test_timeout 600)
   endif()
   set_tests_properties(${bin_exec} PROPERTIES TIMEOUT ${integration_test_timeout})
 
-  # dftracer_tar wraps the gzip indexer's parallel pipeline and has shown
-  # intermittent deadlocks on CI. Tar is a secondary code path (real
-  # workflows use directories of .pfw.gz).
-  if(bin_exec STREQUAL "binaries/test_dftracer_tar")
-    set_tests_properties(${bin_exec} PROPERTIES
-      TIMEOUT 240
-      RUN_SERIAL TRUE
-      REPEAT "UNTIL_PASS:3")
-  endif()
-
   # Pass binary paths so tests can find them
   if(bin_exec STREQUAL "binaries/test_dftracer_server")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_SERVER_PATH=$<TARGET_FILE:dftracer_server>")
-  elseif(bin_exec STREQUAL "binaries/test_dftracer_merge")
-    set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
-      "DFTRACER_MERGE_PATH=$<TARGET_FILE:dftracer_merge>")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_event_count")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_EVENT_COUNT_PATH=$<TARGET_FILE:dftracer_event_count>")
@@ -301,30 +294,18 @@ foreach(test_file ${TEST_BINARY_SOURCES})
   elseif(bin_exec STREQUAL "binaries/test_dftracer_info")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_INFO_PATH=$<TARGET_FILE:dftracer_info>")
-  elseif(bin_exec STREQUAL "binaries/test_dftracer_reader")
-    set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
-      "DFTRACER_READER_BIN_PATH=$<TARGET_FILE:dftracer_reader>")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_stats")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_STATS_PATH=$<TARGET_FILE:dftracer_stats>")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_index")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_INDEX_PATH=$<TARGET_FILE:dftracer_index>")
-  elseif(bin_exec STREQUAL "binaries/test_dftracer_aggregator")
-    set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
-      "DFTRACER_AGGREGATOR_PATH=$<TARGET_FILE:dftracer_aggregator>")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_gen_dlio_config")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_GEN_DLIO_CONFIG_PATH=$<TARGET_FILE:dftracer_gen_dlio_config>")
-  elseif(bin_exec STREQUAL "binaries/test_dftracer_organize")
-    set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
-      "DFTRACER_ORGANIZE_PATH=$<TARGET_FILE:dftracer_organize>;DFTRACER_RECONSTRUCT_PATH=$<TARGET_FILE:dftracer_reconstruct>")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_view")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_VIEW_PATH=$<TARGET_FILE:dftracer_view>")
-  elseif(bin_exec STREQUAL "binaries/test_dftracer_tar")
-    set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
-      "DFTRACER_TAR_PATH=$<TARGET_FILE:dftracer_tar>")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_replay")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_REPLAY_PATH=$<TARGET_FILE:dftracer_replay>;ASAN_OPTIONS=detect_leaks=0;LSAN_OPTIONS=detect_leaks=0")
@@ -337,9 +318,9 @@ foreach(test_file ${TEST_BINARY_SOURCES})
   elseif(bin_exec STREQUAL "binaries/test_dftracer_call_tree_mpi")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_CALL_TREE_PATH=$<TARGET_FILE:dftracer_call_tree>;DFTRACER_CALL_TREE_MPI_PATH=$<TARGET_FILE:dftracer_call_tree_mpi>;MPIEXEC_EXECUTABLE=${MPIEXEC_EXECUTABLE};ASAN_OPTIONS=detect_leaks=0;LSAN_OPTIONS=detect_leaks=0")
-  elseif(bin_exec STREQUAL "binaries/test_dftracer_aggregator_mpi")
+  elseif(bin_exec STREQUAL "binaries/test_dftracer_view_mpi")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
-      "DFTRACER_AGGREGATOR_PATH=$<TARGET_FILE:dftracer_aggregator>;DFTRACER_AGGREGATOR_MPI_PATH=$<TARGET_FILE:dftracer_aggregator_mpi>;MPIEXEC_EXECUTABLE=${MPIEXEC_EXECUTABLE};ASAN_OPTIONS=detect_leaks=0;LSAN_OPTIONS=detect_leaks=0")
+      "DFTRACER_VIEW_PATH=$<TARGET_FILE:dftracer_view>;MPIEXEC_EXECUTABLE=${MPIEXEC_EXECUTABLE};ASAN_OPTIONS=detect_leaks=0;LSAN_OPTIONS=detect_leaks=0")
   endif()
 
 endforeach()
