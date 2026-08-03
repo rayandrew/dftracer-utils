@@ -224,7 +224,11 @@ ComparisonConfig ComparisonConfig::from_cli(const std::string& baseline,
 
     ComparisonNode node;
     node.name = "root";
-    node.query = query.empty() ? R"(cat == "POSIX" OR cat == "STDIO")" : query;
+    // Empty query compares every event; an app category (FUNCTION-mode traces
+    // use cat like "dynamo", not POSIX/STDIO) is only applied when the caller
+    // passes one. Defaulting to a POSIX/STDIO filter silently matched zero
+    // events on non-IO traces.
+    node.query = query;
     node.group_by =
         group_by_str.empty() ? split_csv("cat,name") : split_csv(group_by_str);
 
