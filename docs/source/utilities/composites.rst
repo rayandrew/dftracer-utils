@@ -533,10 +533,10 @@ DftEventDispatcher
 ~~~~~~~~~~~~~~~~~~
 
 Adapter that turns a list of ``DftEventVisitor`` instances into a single
-``IndexVisitor`` consumable by ``IndexBuilderUtility``. Owns a per-instance
+``IndexVisitor`` consumable by the index build pipeline. Owns a per-instance
 ``JsonParser`` and parses each decompressed line once before fanning out to
-the configured visitors (``BloomVisitor``, ``ManifestVisitor``,
-``AggregationVisitor``, ...). Supports a ``force_serial`` mode for
+the configured visitors (``BloomVisitor``, ``AggregationVisitor``,
+...). Supports a ``force_serial`` mode for
 deterministic-order replays.
 
 .. code-block:: cpp
@@ -545,7 +545,6 @@ deterministic-order replays.
 
     std::vector<std::unique_ptr<DftEventVisitor>> visitors;
     visitors.push_back(std::make_unique<BloomVisitor>(...));
-    visitors.push_back(std::make_unique<ManifestVisitor>(...));
     DftEventDispatcher dispatcher(std::move(visitors));
 
 AggregationVisitor
@@ -557,16 +556,8 @@ distributed aggregation column families. Pairs with
 distributed reduction; lives in
 ``composites/dft/aggregators/aggregation_visitor.h``.
 
-Reorganization Pipeline
------------------------
-
-Parallel event routing for reorganizing traces by query-based groups. The
-``organize`` flow is a streaming pipeline that fans events through visitor
-groups, batches output, and periodically flushes group writers
-(``GroupWriterTask``) to bound peak memory.
-
 ChunkWriter
-~~~~~~~~~~~
+-----------
 
 Streaming file writer that automatically splits output into chunked files.
 Supports optional gzip compression and JSON array wrapping.
@@ -588,46 +579,6 @@ Supports optional gzip compression and JSON array wrapping.
     ChunkWriter writer(config);
     // Write events - automatically rolls to new chunk file when size exceeded
     // Each chunk is a separate .pfw.gz file
-
-EventRouter
-~~~~~~~~~~~
-
-Routes events from source trace files to output groups in parallel using
-``AsyncMutex``-protected ``ChunkWriter`` instances. Each group is defined by
-a query predicate (from ``ExtractionPlan``), and events matching a group are
-written to that group's chunked output.
-
-.. code-block:: cpp
-
-    #include <dftracer/utils/utilities/composites/dft/reorganize/event_router.h>
-
-    using namespace dftracer::utils::utilities::composites::dft::reorganize;
-
-    EventRouterConfig config;
-    config.plan = extraction_plan;   // from ReorganizationPlanner
-    config.output_dir = "./organized";
-    config.chunk_size_bytes = 256 * 1024 * 1024;
-    config.compress = true;
-    config.executor_threads = 8;
-
-    auto result = co_await route_events(scope, config);
-    // result.total_events_written, result.chunks_created, result.output_files
-
-ProvenanceTracker
-~~~~~~~~~~~~~~~~~
-
-Tracks source-to-output mapping during reorganization. Records which source
-file and line produced each output event, enabling reconstruction of original
-traces from reorganized files via ``dftracer_reconstruct``.
-
-ReconstructorUtility
-~~~~~~~~~~~~~~~~~~~~
-
-Streaming reconstruction pipeline that inverts the organize pipeline:
-plans a reconstruction over a ``.pidx`` provenance store, fans out per-source
-read tasks through coroutines and channels, and merges results in
-original-order back into the requested output. Defined in
-``composites/dft/reorganize/reconstructor_utility.h``.
 
 Comparison
 ----------

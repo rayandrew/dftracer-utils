@@ -6,69 +6,78 @@ This guide will help you get started with dftracer utilities quickly.
 Python Quick Start
 ------------------
 
-Reading Trace Files
-~~~~~~~~~~~~~~~~~~~
+Querying with TraceViewer
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The most common use case is reading trace files:
-
-.. code-block:: python
-
-   from dftracer.utils import TraceReader
-
-   # Open a compressed trace file (auto-detects index sidecar)
-   reader = TraceReader("trace.pfw.gz")
-
-   # ...or pass a directory; TraceReader scans for .pfw / .pfw.gz files
-   # and streams them transparently as a single logical input.
-   reader = TraceReader("./traces")
-
-   # Read all lines
-   lines = reader.read_lines()
-   for line in lines:
-       print(line)
-
-   # Read lines as JSON objects
-   json_objects = reader.read_lines_json()
-   for obj in json_objects:
-       print(obj["name"], obj["dur"])
-
-   # Stream for memory efficiency
-   for obj in reader.iter_lines_json():
-       process(obj)
-
-Streaming with TraceReader
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``TraceReader`` is the recommended way to read trace files. It auto-selects
-sequential or indexed reading and supports streaming iterators:
+:class:`~dftracer.utils.TraceViewer` is the primary way to query a trace. It is
+lazy and Arrow-first: builder methods compose a query and a terminal
+(``collect``) runs it in one pass, served from the index when one exists.
 
 .. code-block:: python
 
-   from dftracer.utils import TraceReader
+   import glob
+   from dftracer.utils import TraceViewer
 
-   reader = TraceReader("trace.pfw.gz")
+   files = sorted(glob.glob("traces/**/*.pfw.gz", recursive=True))
+   view = TraceViewer(files)               # a file or a list of files
 
-   # Stream lines (memory-efficient, uses iterator)
-   for line in reader.iter_lines():
-       process(line)
+   # Top I/O calls by total time.
+   table = (
+       view.filter('cat == "POSIX"')
+           .group_by("name")
+           .agg("count", "sum:dur", "max:dur")
+           .collect()                       # -> pyarrow.Table
+   )
+   df = table.to_pandas()
 
-   # Stream raw byte chunks
-   for chunk in reader.iter_raw(multi_line=False):
-       process(chunk)  # one line per chunk as bytes
+   # A bandwidth time series: bytes per 1 s window per call.
+   ts = (
+       view.filter('cat == "POSIX"')
+           .time_bucket(1_000_000)
+           .group_by("name", "time_bucket")
+           .agg("sum:size")
+           .collect()
+   )
 
-   # Materialize all lines (convenience wrapper)
-   lines = reader.read_lines()
+See :doc:`api/trace_viewer` for the full builder, aggregation specs, and
+``collect_typed``; :doc:`api/query` for the filter DSL; and :doc:`tutorials/python`
+for task-oriented recipes. The rest of this page covers ``Runtime``,
+``Indexer``, and Dask.
 
-   # With explicit Runtime for thread pool control
-   from dftracer.utils import Runtime
+Reading events
+~~~~~~~~~~~~~~
 
-   with Runtime(threads=8) as rt:
-       reader = TraceReader("trace.pfw.gz", runtime=rt)
-       for line in reader.iter_lines():
-           process(line)
+A plain query (no ``group_by``) returns the matching events. ``collect()``
+materializes them as a pyarrow ``Table``; ``stream()`` yields Arrow record
+batches for out-of-core reads (zero-copy; consume with pyarrow, polars, or
+DuckDB).
 
-       # Check progress
-       print(rt.get_progress())
+.. code-block:: python
+
+   view = TraceViewer(files)
+
+   # All POSIX events as a DataFrame.
+   df = view.filter('cat == "POSIX"').select("name", "dur", "ts").collect().to_pandas()
+
+   # Stream Arrow batches instead of materializing.
+   import pyarrow
+   for batch in view.filter('cat == "POSIX"').stream(batch_size=10000):
+       process(pyarrow.record_batch(batch))
+
+Time-unit normalization
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default ``ts``/``dur`` are in the trace's native time unit, declared by its
+``CM`` ``time_metric`` metadata event (``NS``/``MS``/``SEC``/``US``; absent
+means microseconds). ``time_unit`` / ``time_scale`` rescale them for display:
+
+.. code-block:: python
+
+   view.time_unit("us")     # interpret the native unit, scale ts/dur to microseconds
+   view.time_scale(1.0)     # or an explicit nanoseconds-per-unit ratio
+
+Query predicates (e.g. ``ts >= ...``) always match the native index and are
+unaffected by the display unit.
 
 Async Task Submission
 ~~~~~~~~~~~~~~~~~~~~~
@@ -134,58 +143,6 @@ Error handling:
 Failures raised by library operations are typed (``DFTUtilsError`` and its
 subclasses); see `Error Handling`_ below.
 
-Arrow Data Interchange
-~~~~~~~~~~~~~~~~~~~~~~
-
-``TraceReader`` and several utilities support Arrow output for efficient
-columnar data access. Arrow batches implement the PyCapsule protocol for
-zero-copy interchange with pyarrow, polars, and DuckDB.
-
-.. code-block:: python
-
-   from dftracer.utils import TraceReader
-
-   reader = TraceReader("trace.pfw.gz")
-
-   # Stream Arrow batches
-   for batch in reader.iter_arrow(batch_size=10000):
-       df = pyarrow.record_batch(batch).to_pandas()
-
-   # Materialize as ArrowTable
-   table = reader.read_arrow()
-   df = table.to_pandas()
-
-Query Filtering
-~~~~~~~~~~~~~~~
-
-``TraceReader`` supports a query DSL for filtering events. When an index
-exists, chunk pruning skips non-matching chunks automatically.
-
-.. code-block:: python
-
-   from dftracer.utils import TraceReader
-
-   reader = TraceReader("trace.pfw.gz")
-
-   # Filter by category
-   for line in reader.iter_lines(query='cat == "POSIX"'):
-       process(line)
-
-   # Combine filters
-   lines = reader.read_lines(query='cat == "POSIX" and dur > 1000')
-
-   # Arrow output with query
-   table = reader.read_arrow(query='name in ["read", "write"]')
-   df = table.to_pandas()
-
-   # Programmatic query building
-   from dftracer.utils.query import Field
-
-   cat = Field("cat")
-   dur = Field("dur")
-   q = (cat == "POSIX") & (dur > 1000)
-   lines = reader.read_lines(query=str(q))
-
 Utility Bindings
 ~~~~~~~~~~~~~~~~
 
@@ -197,7 +154,7 @@ scalar utilities return dicts.
 
    from dftracer.utils.utilities import (
        AggregatorUtility,
-       StatisticsQueryUtility,
+       ComparatorUtility,
        MetadataCollectorUtility,
    )
 
@@ -212,11 +169,6 @@ scalar utilities return dicts.
        custom_metric_fields=["bytes"],
        compute_percentiles=True,
    )
-
-   # Statistics query (returns dict)
-   sq = StatisticsQueryUtility()
-   stats = sq.process("trace.pfw.gz", query_type="summary")
-   print(f"Events: {stats['total_events']}")
 
    # File metadata (returns dict)
    mc = MetadataCollectorUtility()
@@ -236,12 +188,15 @@ For distributed processing with ``dask.distributed``:
    client = Client("scheduler:8786")
    client.register_plugin(DFTracerUtilsDaskWorkerPlugin(threads=48))
 
-   def count_lines(path):
-       from dftracer.utils import TraceReader
-       return sum(1 for _ in TraceReader(path).iter_lines())
+   def count_events(path):
+       from dftracer.utils import TraceViewer
+       return TraceViewer([path]).agg("count").collect().to_pandas()["count"].sum()
 
-   futures = client.map(count_lines, file_paths)
+   futures = client.map(count_events, file_paths)
    results = client.gather(futures)
+
+For a distributed aggregation that fans one query across the cluster, use
+:class:`~dftracer.utils.dask.DaskTraceViewer` (see :doc:`tutorials/python`).
 
 Working with Indexer
 ~~~~~~~~~~~~~~~~~~~~
@@ -280,7 +235,7 @@ exception derives ``DFTUtilsError``, which derives the built-in ``RuntimeError``
 .. code-block:: python
 
    from dftracer.utils import (
-       TraceReader,
+       TraceViewer,
        DFTUtilsError,        # base of all library exceptions
        DFTUtilsIOError,      # bad I/O / missing file
        DFTUtilsNotFoundError,
@@ -289,9 +244,7 @@ exception derives ``DFTUtilsError``, which derives the built-in ``RuntimeError``
    )
 
    try:
-       reader = TraceReader("missing.pfw.gz")
-       for line in reader.read_lines():
-           process(line)
+       TraceViewer(["missing.pfw.gz"]).agg("count").collect()
    except DFTUtilsIOError as e:
        print(f"I/O failed: {e}")
    except DFTUtilsError as e:
@@ -661,5 +614,5 @@ Key Resources:
 
 - **Pipeline patterns**: :doc:`pipeline` covers CoroScope, channels, fan-out/fan-in, async generators
 - **CLI tools**: :doc:`cli` lists all available command-line utilities
-- **Python bindings**: Use ``from dftracer.utils import TraceReader, Indexer`` for Python scripts
+- **Python bindings**: Use ``from dftracer.utils import TraceViewer, Indexer`` for Python scripts
 - **C++ integration**: Link ``dftracer-utils`` library and include headers from ``include/dftracer/utils/``

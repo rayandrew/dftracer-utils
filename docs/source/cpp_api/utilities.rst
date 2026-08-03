@@ -198,7 +198,7 @@ Each module below has detailed class documentation in the API Reference:
      - DDSketch (percentiles), Log2Histogram (distributions)
      - :doc:`api/utilities/composites/dft/statistics`
    * - Indexer
-     - Bloom filter indexes, manifests, provenance tracking
+     - Bloom filter indexes, manifests, chunk statistics
      - :doc:`api/utilities/indexer`
    * - Reader
      - Streaming trace file reader with index support
@@ -212,9 +212,6 @@ Each module below has detailed class documentation in the API Reference:
    * - Comparator
      - Baseline vs variant trace comparison with Cohen's d
      - :doc:`api/utilities/composites/dft/comparator`
-   * - Reorganization
-     - Parallel event routing and chunked output
-     - :doc:`api/utilities/composites/dft/reorganize`
    * - Replay
      - Replay I/O operations from traces
      - :doc:`api/utilities/replay`

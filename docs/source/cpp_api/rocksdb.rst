@@ -2,8 +2,7 @@ RocksDB
 =======
 
 The RocksDB layer provides the shared storage backend used by the
-root-local ``.dftindex`` and provenance stores introduced by the
-RocksDB migration.
+root-local ``.dftindex`` store introduced by the RocksDB migration.
 
 It includes:
 
@@ -22,12 +21,12 @@ Architecture
 
    graph TD
        Readers["TraceReader / utilities"] --> Manager["RocksDBManager"]
-       Indexers["Indexer / provenance writers"] --> Manager
+       Indexers["Indexer / writers"] --> Manager
        Manager --> Database["RocksDatabase"]
        Database --> CFs["Column families"]
        Database --> Codec["KeyCodec"]
        Database --> Merge["MergeOperators (AGGREGATION, SYSTEM_METRICS)"]
-       CFs --> Store[".dftindex / provenance store"]
+       CFs --> Store[".dftindex store"]
        Codec --> Store
 
 All types live in the ``dftracer::utils::rocksdb`` namespace; the column
@@ -117,7 +116,7 @@ RocksDBManager
 *What*: a process-wide singleton registry of open databases keyed by their
 normalized ``.dftindex`` root path. *Why*: RocksDB allows only one writer
 per path, and reopening is expensive; the manager owns one live instance per
-path so short-lived wrappers (index reader, provenance writer, Python
+path so short-lived wrappers (index reader, index writer, Python
 bindings) share it. *When*: any time you need a handle - always go through
 ``get_or_open()`` instead of constructing ``RocksDatabase`` directly.
 
@@ -159,8 +158,9 @@ Column families
 *When*: pass one of these constants as the ``column_family`` argument to any
 ``RocksDatabase`` call. Names include ``cf::DEFAULT``, ``cf::METADATA``,
 ``cf::CHUNK_STATS``, ``cf::CHUNK_BLOOM`` / ``cf::FILE_BLOOM``,
-``cf::MANIFEST``, ``cf::PROVENANCE``, ``cf::AGGREGATION``, and
-``cf::SYSTEM_METRICS`` (see the header for the complete list).
+``cf::MANIFEST``, ``cf::AGGREGATION``, and ``cf::SYSTEM_METRICS`` (see the
+header for the complete list). ``cf::PROVENANCE`` and ``cf::MANIFEST`` are still declared but
+currently unused; nothing writes to them.
 
 .. code-block:: cpp
 

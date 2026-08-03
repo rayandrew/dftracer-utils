@@ -476,8 +476,8 @@ Lock-free async mutex for coroutines. Ownership is not tied to any thread -
 a coroutine holding the lock can migrate freely. Waiting coroutines suspend
 without blocking the OS thread and are resumed in approximate FIFO order.
 
-Used by the reorganization pipeline for serializing writes to shared
-``ChunkWriter`` instances across parallel event routing coroutines.
+Used, for example, to serialize writes to a shared ``ChunkWriter`` across
+parallel producer coroutines.
 
 .. code-block:: cpp
 

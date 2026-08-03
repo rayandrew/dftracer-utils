@@ -5,14 +5,14 @@ The indexer module provides functionality for indexing DFTracer trace files
 (``.pfw`` / ``.pfw.gz``) backed by a ``.dftindex`` RocksDB store. The
 top-level :class:`~dftracer.utils.Indexer` follows a ``resolve`` / ``build``
 pattern over a directory or file list and exposes the higher index tiers
-(checkpoints, bloom filters, manifests, aggregation).
+(checkpoints, bloom filters, aggregation).
 :class:`~dftracer.utils.CheckpointIndexer` is the lower-level single-file
 interface used for checkpoint-level operations.
 
 Indexer Class
 -------------
 
-.. autoclass:: dftracer.utils.Indexer(directory: str = '', files: list[str] | None = None, index_dir: str = '', require_checkpoint: bool = True, require_bloom: bool = True, require_manifest: bool = True, require_aggregation: bool | AggregationConfig | None = None, checkpoint_size: int = 33554432, parallelism: int = 0, force_rebuild: bool = False, runtime: Runtime | None = None)
+.. autoclass:: dftracer.utils.Indexer(directory: str = '', files: list[str] | None = None, index_dir: str = '', require_checkpoint: bool = True, require_bloom: bool = True, require_aggregation: bool | AggregationConfig | None = None, checkpoint_size: int = 33554432, parallelism: int = 0, force_rebuild: bool = False, runtime: Runtime | None = None)
    :members: resolve, build, ensure_indexed, get_checkpoint_indexer, get_hash_table, query_file_pids, query_all_file_pids, query_file_info, iter_aggregation, iter_arrow_dfanalyzer, iter_arrow_dfanalyzer_all
    :undoc-members:
    :show-inheritance:
@@ -50,19 +50,11 @@ Result of :meth:`~dftracer.utils.Indexer.resolve` /
 CheckpointIndexer Class
 -----------------------
 
-.. autoclass:: dftracer.utils.CheckpointIndexer(gz_path: str, index_path: str | None = None, checkpoint_size: int = 1048576, force_rebuild: bool = False, build_bloom: bool = False, build_manifest: bool = False, runtime: Runtime | None = None)
+.. autoclass:: dftracer.utils.CheckpointIndexer(gz_path: str, index_path: str | None = None, checkpoint_size: int = 1048576, force_rebuild: bool = False, build_bloom: bool = False, runtime: Runtime | None = None)
    :members:
    :undoc-members:
    :show-inheritance:
    :special-members: __enter__, __exit__
-
-IndexerCheckpoint Class
------------------------
-
-.. autoclass:: dftracer.utils.IndexerCheckpoint
-   :members:
-   :undoc-members:
-   :show-inheritance:
 
 Distributed Index (SST-based)
 -----------------------------
@@ -90,8 +82,6 @@ Module-level Functions
 
 .. autofunction:: dftracer.utils.dftracer_utils_ext.scan_files
 
-.. autofunction:: dftracer.utils.dftracer_utils_ext.scan_aggregation_manifest
-
 .. autofunction:: dftracer.utils.dftracer_utils_ext.build_sst_batch
 
 .. autofunction:: dftracer.utils.dftracer_utils_ext.plan_lpt_partition
@@ -111,8 +101,6 @@ The ``dftracer.utils.dask`` module provides Dask-distributed drivers built on
 the SST-based primitives above:
 
 .. autofunction:: dftracer.utils.dask.distributed_index
-
-.. autofunction:: dftracer.utils.dask.distributed_aggregate
 
 Dask is an optional dependency -- this module is only importable when
 ``dask.distributed`` is installed.

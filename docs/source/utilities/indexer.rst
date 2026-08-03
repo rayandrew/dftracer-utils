@@ -1,7 +1,7 @@
 Indexer
 =================
 
-Unified indexing and reading infrastructure for compressed trace files. Builds a sidecar ``.dftindex`` RocksDB store (and optional flat-file SSTs) that enables efficient random access, bloom-filter-accelerated queries, event-level manifest routing, and distributed aggregation, all from a single decompression pass.
+Unified indexing and reading infrastructure for compressed trace files. Builds a sidecar ``.dftindex`` RocksDB store (and optional flat-file SSTs) that enables efficient random access, bloom-filter-accelerated queries, and distributed aggregation, all from a single decompression pass.
 
 .. code-block:: cpp
 
@@ -18,7 +18,6 @@ is ingested into the store):
 - **Checkpoints** - byte offsets and decompression dictionaries for random access
 - **Bloom filters** - per-chunk bloom filters for fast event filtering (optional)
 - **Chunk statistics** - per-chunk event counts, duration distributions (optional)
-- **Manifest** - per-chunk (cat, name) -> line numbers for sparse query routing (optional)
 - **Aggregation / system metrics** - distributed aggregation CFs populated via
   ``SstFileWriter::Merge`` operands
 
@@ -28,54 +27,12 @@ to a single ingest, and re-ingesting is idempotent. String IDs in the
 ``names`` and ``cats`` CFs are deterministic FNV-1a hashes so the same name
 maps to the same id across processes.
 
-A separate ``.pidx`` provenance store tracks source-to-output mapping for
-reorganized files.
-
-IndexBuilder
-------------
-
-Single-pass index builder. Decompresses each file once and builds all requested index data via the visitor pattern.
-
-.. code-block:: cpp
-
-   #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
-
-   using namespace dftracer::utils::utilities::indexer;
-
-   // Build checkpoint + bloom index in one pass
-   auto config = IndexBuildConfig::for_file("trace.pfw.gz")
-       .with_bloom(true)
-       .with_manifest(false)
-       .with_checkpoint_size(32 * 1024 * 1024)
-       .with_index_threshold(8 * 1024 * 1024);  // skip .idx for files < 8MB
-
-   IndexBuilderUtility builder;
-   auto result = co_await builder.process(config);
-
-   // result.success, result.idx_path, result.total_lines, result.chunks_processed
-
-**Incremental builds:** If ``.idx`` already exists with valid checkpoints, requesting bloom or manifest only runs a streaming decompression pass for the new visitors - no checkpoint rebuild.
-
-.. code-block:: cpp
-
-   // First run: checkpoints only
-   auto config1 = IndexBuildConfig::for_file("trace.pfw.gz");
-   co_await builder.process(config1);
-
-   // Later: add bloom (reuses existing checkpoints)
-   auto config2 = IndexBuildConfig::for_file("trace.pfw.gz")
-       .with_bloom(true);
-   co_await builder.process(config2);  // one decompression pass for bloom only
-
-   // Later: all features present, skips entirely
-   co_await builder.process(config2);  // "Skipping already-indexed file"
-
 IndexBatchBuilderUtility
 ------------------------
 
 Builds many files in a single pipelined pass. Parses files in parallel
 (``parallelism`` workers) and routes their parsed artifacts (bloom rows,
-manifest entries, aggregation merge operands, extra-visitor SSTs) to a
+aggregation merge operands, extra-visitor SSTs) to a
 write phase. Supports batched flushing (``flush_every_files``) to bound
 peak memory, distributed SST sinks via ``sink_factory`` / ``sink_commit``,
 preassigned file ids, and per-file gzip-member slicing for cross-rank file
@@ -90,8 +47,6 @@ and assigns disjoint ``[member_begin, member_end)`` ranges to ranks).
    cfg.file_paths = {"a.pfw.gz", "b.pfw.gz", "c.pfw.gz"};
    cfg.index_dir = "/data/.dftindex";
    cfg.parallelism = 16;
-   cfg.build_manifest = true;
-   cfg.use_batch_write = true;
    cfg.rebuild_root_summaries = true;
    cfg.flush_every_files = 8;
 
@@ -139,27 +94,6 @@ additive, idempotent schema across column families.
    // Read-only queries
    int fid = db.get_file_info_id("trace.pfw.gz");
    bool has_bloom = db.has_bloom_data(fid);
-   bool has_manifest = db.has_manifest_data(fid);
-
-ProvenanceDatabase
-------------------
-
-Manages ``.pidx`` files for reorganization provenance tracking.
-
-.. code-block:: cpp
-
-   #include <dftracer/utils/utilities/indexer/provenance_database.h>
-
-   using namespace dftracer::utils::utilities::indexer;
-
-   ProvenanceDatabase pdb("output.pfw.gz.pidx");
-   pdb.init_schema();
-
-   int fid = pdb.get_or_create_file_info("output.pfw.gz", file_hash);
-   pdb.begin_transaction();
-   pdb.insert_info(fid, "version", "1.0");
-   pdb.insert_source(fid, 0, "original.pfw.gz", num_checkpoints);
-   pdb.commit_transaction();
 
 TraceReader
 -----------
@@ -255,16 +189,13 @@ implements ``IndexVisitor``):
 
 - **BloomVisitor** (``composites/dft/visitors/bloom_visitor.h``) - parses
   JSON events, populates bloom filters and chunk statistics
-- **ManifestVisitor** (``composites/dft/visitors/manifest_visitor.h``) -
-  tracks (category, name) -> line numbers per checkpoint for sparse query
-  acceleration
 - **AggregationVisitor** (``composites/dft/aggregators/aggregation_visitor.h``)
   - emits per-chunk aggregation and system-metric merge operands
 
 Low-level IndexerFactory
 ------------------------
 
-Creates checkpoint indexers with automatic format detection (GZIP vs TAR.GZ). Used internally by ``IndexBuilderUtility``.
+Creates checkpoint indexers with automatic format detection (GZIP vs TAR.GZ). Used internally by the index build pipeline.
 
 .. code-block:: cpp
 
@@ -298,11 +229,10 @@ Python API
        indexer.build()
        print(f"Lines: {indexer.get_num_lines()}")
 
-   # Single-pass build with bloom + manifest
-   with Indexer("trace.pfw.gz", build_bloom=True, build_manifest=True) as indexer:
+   # Single-pass build with bloom
+   with Indexer("trace.pfw.gz", build_bloom=True) as indexer:
        indexer.build()
        assert indexer.has_bloom
-       assert indexer.has_manifest
 
    # Incremental: add bloom to existing index
    with Indexer("trace.pfw.gz", build_bloom=True) as indexer:

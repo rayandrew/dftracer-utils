@@ -1,0 +1,172 @@
+TraceViewer (Querying Traces)
+=============================
+
+``TraceViewer`` is the primary API for querying DFTracer traces. It is an
+Arrow-first, lazy, composable view: builder methods (``filter``, ``group_by``,
+``agg``, ...) each return a new view and do no work, and a terminal
+(``collect``, ``collect_typed``, ``stream``, ``export_trace``) executes the
+whole chain in a single pass. When an index exists next to the traces, the
+same query is served from the index (chunk pruning, aggregation tiers,
+summaries) instead of a full decompress.
+
+.. code-block:: python
+
+   import glob
+   from dftracer.utils import TraceViewer
+
+   # A file or a list of files. To query a directory, glob it first.
+   files = sorted(glob.glob("traces/**/*.pfw.gz", recursive=True))
+   view = TraceViewer(files)               # index_path optional; sidecar used when present
+
+   # Top I/O calls by total time, as a pyarrow Table.
+   table = (
+       view.filter('cat == "POSIX"')
+           .group_by("name")
+           .agg("count", "sum:dur", "max:dur")
+           .collect()
+   )
+   df = table.to_pandas()
+
+Constructing a view
+-------------------
+
+.. code-block:: python
+
+   TraceViewer(files, index_path=None, runtime=None)
+
+``files`` is a single file path or a list of file paths (a bare string is
+treated as one file, so glob a directory yourself). Pass ``index_path`` to point
+at an index directory explicitly; omit it to use the sidecar convention. An
+optional :class:`~dftracer.utils.Runtime` controls the thread pool.
+
+The fluent builder
+------------------
+
+Builder methods are lazy and chainable. Row-shaping operators keep a
+``TraceViewer``; ``group_by`` / ``agg`` promote to an
+:class:`~dftracer.utils.AggregatedTraceViewer` (which preserves its type
+through further builder calls).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 32 68
+
+   * - Method
+     - Effect
+   * - ``filter(dsl)`` / ``query(dsl)``
+     - Keep events matching the :doc:`query DSL <query>` (e.g. ``'dur >= 1000 and cat == "POSIX"'``).
+   * - ``phase(name)``
+     - Restrict to a record family: ``"events"`` (``ph="X"``), ``"counters"`` (``ph="C"``), or ``"any"``.
+   * - ``time_range(begin, end)``
+     - Keep events whose timestamp falls in ``[begin, end)``.
+   * - ``time_bucket(interval_us)``
+     - Bucket ``ts`` into fixed ``interval_us`` windows (a group key for time series).
+   * - ``time_unit(unit)`` / ``time_scale(ns_ratio)``
+     - Interpret/scale the trace's native time unit (see the :doc:`quickstart <../quickstart>`).
+   * - ``select(*cols)``
+     - Project a subset of columns.
+   * - ``limit(n)`` / ``offset(n)``
+     - Paginate the result rows.
+   * - ``group_by(*keys)``
+     - Group by one or more keys (promotes to ``AggregatedTraceViewer``).
+   * - ``agg(*specs)``
+     - Aggregate with ``op:field`` specs (promotes to ``AggregatedTraceViewer``).
+   * - ``memory_budget(nbytes)`` / ``auto_spill()``
+     - Bound in-memory aggregation state, spilling to disk past the budget.
+
+Group keys accept the raw event dimensions - ``name``, ``cat``, ``pid``,
+``tid``, ``io_cat``, ``acc_pat``, ``fhash``, ``hhash``, ``file_path``,
+``file_name``, ``host_name`` - plus ``bucket(file_path, 'sub1', 'sub2', ...)``,
+which folds a path to the first listed substring it contains (values matching
+none fold to an empty string).
+
+Aggregation specs are ``op:field`` (or bare ``count``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Spec
+     - Result column
+   * - ``count``
+     - row count
+   * - ``sum:dur`` / ``sum:size``
+     - summed metric (``sum_dur``, ...)
+   * - ``min:ts`` / ``max:te`` / ``min:dur`` / ``max:dur``
+     - extrema (``min_ts``, ``max_te``, ...)
+   * - ``sumsq:dur``
+     - sum of squares (for variance/std)
+   * - ``p50:dur`` / ``p90:dur``
+     - percentiles (from the persisted DDSketch when indexed)
+   * - ``hist:dur``
+     - histogram buckets as an Arrow ``list<struct<lo, hi, count>>``
+   * - ``skew:dur`` / ``kurt:dur``
+     - skewness / kurtosis
+   * - ``set_union:field``
+     - distinct values per group (``set_field``)
+
+Reading the result
+-------------------
+
+``collect`` returns a single pyarrow ``Table``:
+
+.. code-block:: python
+
+   # Per-(name, time bucket) I/O volume as a time series.
+   table = (
+       TraceViewer(files)
+       .filter('cat == "POSIX"')
+       .time_bucket(1_000_000)          # 1 s windows (microseconds)
+       .group_by("name", "time_bucket")
+       .agg("count", "sum:size")
+       .collect()                        # AggregatedTraceViewer caches by default
+   )
+
+``collect_typed`` does a single pass over an aggregation index and returns its
+three record families at once - useful for building several frames from one
+scan:
+
+.. code-block:: python
+
+   typed = TraceViewer(files).group_by("name").agg("count", "sum:dur").collect_typed()
+   regular    = typed["regular"]      # ph="X" events
+   aggregated = typed["aggregated"]   # aggregated records (incl. extra-key dims)
+   counters   = typed["counters"]     # ph="C" counters (incl. system)
+
+Other terminals: ``stream(batch_size=...)`` yields Arrow batches for
+out-of-core reads; ``statistics()`` returns a summary dict; ``export_trace(path)``
+writes a filtered trace (optionally re-compressed and re-indexed).
+
+Materialized views
+-------------------
+
+``materialize()`` persists a query so a later matching read reuses it instead of
+re-scanning. A row query writes a filtered, re-split trace; an aggregation
+persists a rollup. It is idempotent, and ``mv_source()`` reports which
+materialized file(s) would serve the current query (empty if a read would scan
+the base).
+
+.. code-block:: python
+
+   v = TraceViewer(files).filter('cat == "POSIX"')
+   v.materialize()                 # build once
+   v.collect()                     # served from the materialized view
+
+Distributed use
+---------------
+
+For Dask, :class:`~dftracer.utils.dask.DaskTraceViewer` fans the same builder
+API across workers; the dfanalyzer bridge builds its high-level metrics on
+:class:`~dftracer.utils.dfanalyzer.DFAnalyzerAggregatedTraceViewer`, a subclass
+that composes the HLM as one View aggregation. See :doc:`dfanalyzer`.
+
+Reference
+---------
+
+.. autoclass:: dftracer.utils.dftracer_utils_ext.TraceViewer
+   :members:
+   :undoc-members:
+
+.. autoclass:: dftracer.utils.dftracer_utils_ext.AggregatedTraceViewer
+   :members:
+   :undoc-members:
