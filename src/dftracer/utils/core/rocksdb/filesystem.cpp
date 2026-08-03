@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/object_pool.h>
 #include <dftracer/utils/core/io/io_backend.h>
 #include <dftracer/utils/core/io/io_thread_pool.h>
@@ -618,8 +619,15 @@ class DfTracerFileSystem final : public LocalFileSystemWrapper {
 
     void SupportedOps(int64_t& supported_ops) override {
         supported_ops = 0;
+#ifndef DFTRACER_UTILS_VALGRIND_MODE
+        // Async prefetch through our io backend is not Valgrind-safe: under its
+        // serialized scheduler a scan's in-flight ReadAsync can stall (the
+        // server's /viz/density handler then never responds) and RocksDB's
+        // prefetch context leaks at exit. Fall back to synchronous reads there,
+        // matching how io_uring is already disabled under Valgrind.
         supported_ops |= (1 << ::rocksdb::FSSupportedOps::kAsyncIO);
         supported_ops |= (1 << ::rocksdb::FSSupportedOps::kFSPrefetch);
+#endif
     }
 
     ::rocksdb::IOStatus NewSequentialFile(
@@ -754,6 +762,10 @@ class DfTracerFileSystem final : public LocalFileSystemWrapper {
                                            static_cast<off_t>(handle->offset),
                                            &DfTracerFileSystem::on_pread_done,
                                            handle);
+            // RocksDB submits a read then blocks polling for it, so a read left
+            // in the backend's submission batch would never dispatch. Flush now
+            // rather than relying on some other thread to drain the batch.
+            backend->flush();
             return;
         }
 
@@ -786,14 +798,17 @@ class DfTracerFileSystem final : public LocalFileSystemWrapper {
                              const ::rocksdb::IOStatus& status,
                              const ::rocksdb::Slice& result) {
         {
+            // Notify inside the lock: once finished is visible a waiter (Poll,
+            // AbortIO) or RocksDB's handle deleter may free the handle, so we
+            // must not touch it again after releasing the mutex.
             std::lock_guard<std::mutex> lock(handle->mutex);
             handle->result = result;
             handle->status = status;
             handle->running = false;
             handle->finished = true;
+            handle->cv.notify_all();
         }
-        handle->cv.notify_all();
-
+        // completions_mutex_/cv_ live in the FileSystem, not the handle.
         std::lock_guard<std::mutex> lock(completions_mutex_);
         completions_cv_.notify_all();
     }

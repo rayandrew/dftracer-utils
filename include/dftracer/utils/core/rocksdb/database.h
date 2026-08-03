@@ -20,6 +20,14 @@ namespace dftracer::utils::rocksdb {
 
 void mark_process_exiting_for_rocksdb();
 
+// Register a callback to run at the start of
+// mark_process_exiting_for_rocksdb(), before RocksDB handles are abandoned. Use
+// it to drop process-lifetime caches that keep DBs open (e.g. the view tier
+// cache), so those DBs reach a zero refcount and close cleanly while RocksDB is
+// still usable, rather than being leaked by the exit-time abandon path in
+// RocksDatabase::close().
+void register_pre_exit_cleanup(std::function<void()> fn);
+
 class RocksDatabase {
    public:
     using Batch = ::rocksdb::WriteBatch;
@@ -82,6 +90,14 @@ class RocksDatabase {
         const std::vector<std::string>& external_files,
         bool ingest_behind = false);
 
+    /// Ingest into several column families in one atomic call (one manifest
+    /// edit + fsync for all of them). Each entry's files must be
+    /// non-overlapping within that CF; the file lists are borrowed (not copied)
+    /// and must outlive the call. Empty/null lists are skipped.
+    ::rocksdb::Status ingest_external_files_multi(
+        const std::vector<std::pair<std::string_view,
+                                    const std::vector<std::string>*>>& per_cf);
+
     using CfOptionsOverride = std::function<void(
         const std::string&, ::rocksdb::ColumnFamilyOptions&)>;
     void set_cf_options_override(CfOptionsOverride override);
@@ -89,6 +105,10 @@ class RocksDatabase {
     static const decltype(cf::ALL)& default_column_families();
     static ::rocksdb::Options default_options();
     static ::rocksdb::ColumnFamilyOptions default_column_family_options();
+
+    /// Options for families read by key rather than scanned.
+    static ::rocksdb::ColumnFamilyOptions point_lookup_column_family_options();
+    static bool is_point_lookup_cf(std::string_view name) noexcept;
 
    private:
     ::rocksdb::ColumnFamilyHandle* column_family_handle(
