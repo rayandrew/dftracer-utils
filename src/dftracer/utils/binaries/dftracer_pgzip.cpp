@@ -4,8 +4,7 @@
 #include <dftracer/utils/core/coro/coro.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/tasks/task.h>
-#include <dftracer/utils/utilities/compression/zlib/types.h>
-#include <zlib.h>
+#include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 
 #include <chrono>
 #include <cstdio>
@@ -25,7 +24,7 @@ class PgzipArgParse : public cli::ArgParse {
     cli::PipelineArgs pipeline;
     cli::WatchdogArgs watchdog;
 
-    int compression_level = Z_DEFAULT_COMPRESSION;
+    int compression_level = 6;
     std::size_t chunk_size = 4 * 1024 * 1024;
 
     explicit PgzipArgParse(argparse::ArgumentParser& p) : ArgParse(p) {
@@ -36,9 +35,9 @@ class PgzipArgParse : public cli::ArgParse {
     void register_args() override {
         parser()
             .add_argument("-l", "--compression-level")
-            .help("Compression level (0-9, default: Z_DEFAULT_COMPRESSION)")
+            .help("Compression level (0-12, default: 6)")
             .scan<'d', int>()
-            .default_value(Z_DEFAULT_COMPRESSION);
+            .default_value(6);
 
         parser()
             .add_argument("--chunk-size")
@@ -105,46 +104,23 @@ static coro::CoroTask<void> chunk_compressor(
     int compression_level) {
     auto guard = out_producer.guard();
 
-    z_stream strm{};
-    using dftracer::utils::utilities::compression::zlib::CompressionFormat;
-    int rc = deflateInit2(&strm, compression_level, Z_DEFLATED,
-                          static_cast<int>(CompressionFormat::GZIP), 8,
-                          Z_DEFAULT_STRATEGY);
-    if (rc != Z_OK) co_return;
+    namespace compress = dftracer::utils::utilities::fileio::compress;
+    compress::GzipMemberCompressor compressor(compression_level);
+    if (!compressor.valid()) co_return;
 
-    std::string out_buf(64 * 1024, '\0');
-
+    std::vector<std::uint8_t> scratch;
     while (auto work = co_await input_chan.receive()) {
-        std::string compressed;
-        compressed.reserve(work->data.size());
-
-        strm.next_in =
-            reinterpret_cast<Bytef*>(const_cast<char*>(work->data.data()));
-        strm.avail_in = static_cast<uInt>(work->data.size());
-
-        do {
-            strm.next_out = reinterpret_cast<Bytef*>(out_buf.data());
-            strm.avail_out = static_cast<uInt>(out_buf.size());
-
-            rc = deflate(&strm, Z_FINISH);
-
-            std::size_t have = out_buf.size() - strm.avail_out;
-            if (have > 0) {
-                compressed.append(out_buf.data(),
-                                  static_cast<std::ptrdiff_t>(have));
-            }
-        } while (rc == Z_OK);
-
-        deflateReset(&strm);
+        if (!compressor.compress_member_into(scratch, work->data.data(),
+                                             work->data.size()))
+            break;
 
         CompressedChunk result;
         result.index = work->index;
-        result.data = std::move(compressed);
+        result.data.assign(reinterpret_cast<const char*>(scratch.data()),
+                           scratch.size());
 
         if (!co_await out_producer.send(std::move(result))) break;
     }
-
-    deflateEnd(&strm);
     co_return;
 }
 

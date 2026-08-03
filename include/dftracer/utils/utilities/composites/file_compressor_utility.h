@@ -2,15 +2,18 @@
 #define DFTRACER_UTILS_UTILITIES_COMPOSITES_FILE_COMPRESSOR_UTILITY_H
 
 #include <dftracer/utils/core/common/byte_view.h>
+#include <dftracer/utils/core/common/constants.h>
 #include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/utilities/utility.h>
-#include <dftracer/utils/utilities/compression/zlib/streaming_compressor_utility.h>
 #include <dftracer/utils/utilities/fileio/binary_file_reader_utility.h>
+#include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/fileio/streaming_file_writer_utility.h>
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace dftracer::utils::utilities::composites {
 
@@ -20,24 +23,21 @@ namespace dftracer::utils::utilities::composites {
 struct FileCompressionUtilityInput {
     std::string input_path;   // Input file path
     std::string output_path;  // Output .gz file path (empty = auto-generate)
-    int compression_level;  // Compression level (0-9, or Z_DEFAULT_COMPRESSION)
-    std::size_t chunk_size;  // Chunk size for streaming (bytes)
-    compression::zlib::CompressionFormat format =
-        compression::zlib::CompressionFormat::AUTO;
+    int compression_level;    // libdeflate level (0-12)
+    // Uncompressed bytes per gzip member; the output is multi-member so it can
+    // be inflated/indexed in parallel.
+    std::size_t member_size;
 
     /**
      * @brief Create input with auto-generated output path.
      */
     static FileCompressionUtilityInput from_file(
-        const std::string& input_path,
-        int compression_level = Z_DEFAULT_COMPRESSION,
-        std::size_t chunk_size = 64 * 1024) {
+        const std::string& input_path, int compression_level = 6,
+        std::size_t member_size = constants::indexer::DEFAULT_CHECKPOINT_SIZE) {
         return FileCompressionUtilityInput{
             input_path,
             input_path + ".gz",  // Auto-generate output path
-            compression_level, chunk_size,
-            compression::zlib::CompressionFormat::GZIP  // Default to GZIP
-        };
+            compression_level, member_size};
     }
 
     /**
@@ -57,19 +57,10 @@ struct FileCompressionUtilityInput {
     }
 
     /**
-     * @brief Set chunk size.
+     * @brief Set the uncompressed bytes per gzip member.
      */
-    FileCompressionUtilityInput& with_chunk_size(std::size_t size) {
-        chunk_size = size;
-        return *this;
-    }
-
-    /**
-     * @brief Set compression format.
-     */
-    FileCompressionUtilityInput& with_format(
-        compression::zlib::CompressionFormat fmt) {
-        format = fmt;
+    FileCompressionUtilityInput& with_member_size(std::size_t size) {
+        member_size = size;
         return *this;
     }
 };
@@ -93,13 +84,6 @@ struct FileCompressionUtilityOutput {
         if (original_size == 0) return 0.0;
         return static_cast<double>(compressed_size) /
                static_cast<double>(original_size);
-    }
-
-    /**
-     * @brief Get compression percentage (how much space saved).
-     */
-    double compression_percentage() const {
-        return (1.0 - compression_ratio()) * 100.0;
     }
 };
 
@@ -161,18 +145,40 @@ class FileCompressorUtility
             // Get original file size
             original_size = fs::file_size(input.input_path);
 
-            compression::zlib::ManualStreamingCompressorUtility compressor(
-                input.compression_level, input.format);
+            int level =
+                input.compression_level < 0 ? 6 : input.compression_level;
+            fileio::compress::GzipMemberCompressor compressor(level);
             fileio::StreamingFileWriterUtility writer(input.output_path);
 
-            auto gen =
-                (fileio::read_binary_file(input.input_path, input.chunk_size) >>
-                 [&](ByteView chunk) { return compressor.compress(chunk); }) |
-                [&] { return compressor.finalize_stream(); };
+            std::vector<char> member;
+            std::vector<std::uint8_t> scratch;
+            const std::size_t member_size =
+                input.member_size > 0
+                    ? input.member_size
+                    : constants::indexer::DEFAULT_CHECKPOINT_SIZE;
 
-            while (auto out = co_await gen.next()) {
-                co_await writer.process(*out);
+            auto flush_member = [&]() -> coro::CoroTask<void> {
+                if (member.empty()) co_return;
+                if (!compressor.compress_member_into(scratch, member.data(),
+                                                     member.size())) {
+                    throw DFTUtilsException(ErrorCode::COMPRESSION,
+                                            "gzip member compression failed");
+                }
+                co_await writer.process(
+                    ByteView(reinterpret_cast<const char*>(scratch.data()),
+                             scratch.size()));
+                member.clear();
+            };
+
+            auto gen = fileio::read_binary_file(input.input_path, member_size);
+            while (auto chunk = co_await gen.next()) {
+                member.insert(member.end(), chunk->as<char>(),
+                              chunk->as<char>() + chunk->size());
+                if (member.size() >= member_size) {
+                    co_await flush_member();
+                }
             }
+            co_await flush_member();
 
             writer.close();
 

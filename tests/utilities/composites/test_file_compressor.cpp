@@ -139,12 +139,12 @@ TEST_SUITE("FileCompressor") {
 
             auto input_small = FileCompressionUtilityInput::from_file(test_file)
                                    .with_output(small_output)
-                                   .with_chunk_size(1024);
+                                   .with_member_size(1024);
             auto result_small = compressor.process(input_small).get();
 
             auto input_large = FileCompressionUtilityInput::from_file(test_file)
                                    .with_output(large_output)
-                                   .with_chunk_size(64 * 1024);
+                                   .with_member_size(64 * 1024);
             auto result_large = compressor.process(input_large).get();
 
             REQUIRE(result_small.has_value());

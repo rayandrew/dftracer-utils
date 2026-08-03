@@ -1,4 +1,6 @@
 #include <dftracer/utils/core/common/config.h>
+#include <dftracer/utils/core/common/scoped_fd.h>
+#include <dftracer/utils/core/io/io.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/rocksdb/db_manager.h>
 #include <dftracer/utils/core/task_graph/task_graph.h>
@@ -7,9 +9,12 @@
 #include <dftracer/utils/core/utilities/utility_adapter.h>
 #include <dftracer/utils/utilities/composites/composites.h>
 #include <dftracer/utils/utilities/composites/dft/chunk_extractor_utility.h>
+#include <dftracer/utils/utilities/fileio/compress/gzip_rechunker.h>
 #include <dftracer/utils/utilities/fileio/types/types.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -58,7 +63,8 @@ class SplitArgParse : public cli::ArgParse {
 
         parser()
             .add_argument("-s", "--chunk-size")
-            .help("Chunk size in MB")
+            .help(
+                "Output file size in MB (approximate compressed/on-disk size)")
             .scan<'d', int>()
             .default_value(4);
 
@@ -92,6 +98,9 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
     const auto compress = cli->compress;
     const auto verify = cli->verify;
     const auto checkpoint_size = cli->indexing.checkpoint_size;
+    // The gzip member is the pruning/checkpoint unit, so the output member
+    // size is the checkpoint size.
+    const std::size_t member_size_bytes = checkpoint_size;
     const auto executor_threads = cli->pipeline.executor_threads;
     auto index_dir = cli->indexing.index_dir;
 
@@ -115,7 +124,9 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
     std::printf("  Compress: %s\n", compress ? "true" : "false");
     std::printf("  Data dir: %s\n", log_dir.c_str());
     std::printf("  Output dir: %s\n", output_dir.c_str());
-    std::printf("  Chunk size: %d MB\n", chunk_size_mb);
+    std::printf("  Chunk size: %d MB (compressed)\n", chunk_size_mb);
+    std::printf("  Checkpoint / gzip member size: %zu bytes\n",
+                member_size_bytes);
     std::printf("  Executor threads: %zu\n", executor_threads);
     std::printf("==========================================\n\n");
 
@@ -150,6 +161,43 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
 
     DFTRACER_UTILS_LOG_INFO("Found %zu input files", input_files.size());
 
+    // A single huge gzip member cannot be indexed with bounded memory (the
+    // index/read paths decode a whole member at once). Rechunk any such input
+    // to bounded multi-member gzip first, then run the normal pipeline on the
+    // rechunked copy. Regular multi-member traces are left untouched.
+    namespace gzc = utilities::fileio::compress;
+    std::string rechunk_dir;
+    for (auto& path : input_files) {
+        if (!path.ends_with(".gz")) continue;
+        ssize_t fd = co_await io::open(path.c_str(), O_RDONLY);
+        if (fd < 0) continue;
+        ScopedFd sfd(static_cast<int>(fd));
+        struct stat st;
+        if (::fstat(sfd.get(), &st) != 0) continue;
+        const auto fsize = static_cast<std::uint64_t>(st.st_size);
+        if (!co_await gzc::gzip_needs_rechunk(sfd.get(), fsize,
+                                              gzc::RECHUNK_MEMBER_CAP)) {
+            continue;
+        }
+        sfd.reset();
+
+        if (rechunk_dir.empty()) {
+            rechunk_dir =
+                fs::temp_directory_path() /
+                ("dftracer_rechunk_" + std::to_string(std::time(nullptr)) +
+                 "_" + std::to_string(getpid()));
+            fs::create_directories(rechunk_dir);
+        }
+        std::string out =
+            rechunk_dir + "/" + fs::path(path).filename().string();
+        DFTRACER_UTILS_LOG_WARN(
+            "Input %s is a single large gzip member; rechunking to bounded "
+            "members at %s",
+            path.c_str(), out.c_str());
+        co_await gzc::gzip_rechunk_to_members(path, out, member_size_bytes, 6);
+        path = out;
+    }
+
     if (force) {
         const std::string shared_index_path =
             utilities::composites::dft::internal::determine_index_path(
@@ -183,7 +231,6 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
             batch_config->index_dir = index_dir;
             batch_config->checkpoint_size = checkpoint_size;
             batch_config->parallelism = executor_threads;
-            batch_config->use_batch_write = true;
             batch_config->rebuild_root_summaries = true;
 
             auto result =
@@ -259,8 +306,9 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
     auto* output_dir_ptr = &output_dir;
 
     auto task_extract_chunks = make_task(
-        [app_name_ptr, output_dir_ptr, compress, verify, executor_threads](
-            CoroScope& scope, std::vector<ChunkManifest> manifests)
+        [app_name_ptr, output_dir_ptr, compress, verify, executor_threads,
+         member_size_bytes](CoroScope& scope,
+                            std::vector<ChunkManifest> manifests)
             -> coro::CoroTask<ExtractChunksOutput> {
             DFTRACER_UTILS_LOG_INFO("Extracting %zu chunks in parallel...",
                                     manifests.size());
@@ -279,7 +327,8 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
                                  .with_output_dir(*output_dir_ptr)
                                  .with_app_name(*app_name_ptr)
                                  .with_compression(compress)
-                                 .with_compute_hash(verify);
+                                 .with_compute_hash(verify)
+                                 .with_member_size(member_size_bytes);
 
                 futures.push_back(scope.spawn(
                     [input = std::move(input),
@@ -439,6 +488,12 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
         DFTRACER_UTILS_LOG_INFO("Cleaning up temporary index directory: %s",
                                 temp_index_dir.c_str());
         fs::remove_all(temp_index_dir);
+    }
+
+    if (!rechunk_dir.empty() && fs::exists(rechunk_dir)) {
+        DFTRACER_UTILS_LOG_INFO("Cleaning up temporary rechunk directory: %s",
+                                rechunk_dir.c_str());
+        fs::remove_all(rechunk_dir);
     }
 
     co_return exit_code;

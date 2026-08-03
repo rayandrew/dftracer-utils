@@ -16,7 +16,7 @@ TEST_SUITE("ChunkExtractor") {
         TestEnvironment env(100);
 
         // Create a DFTracer test file
-        std::string test_file = env.create_dft_test_file(5);
+        std::string test_file = env.create_dft_test_gzip_file(5);
 
         // Create manifest
         internal::DFTracerChunkManifest manifest;

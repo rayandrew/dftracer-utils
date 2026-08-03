@@ -48,6 +48,7 @@ ChunkExtractorUtility::extract_and_write(
     writer_config.base_name =
         input.app_name + "-" + std::to_string(input.chunk_index);
     writer_config.chunk_size_bytes = std::numeric_limits<std::size_t>::max();
+    writer_config.member_size_bytes = input.member_size_bytes;
     writer_config.compress = input.compress;
 
     ChunkWriter writer(writer_config);
@@ -111,11 +112,20 @@ ChunkExtractorUtility::extract_and_write(
                     }
                 }
             } else {
-                auto line_gen = sources::async_plain_file_bytes(
-                    spec.file_path, spec.start_byte, spec.end_byte);
+                // No index: stream the gzip trace and clip to the byte range
+                // ourselves. Offsets are into the uncompressed stream, and a
+                // line starting before the range belongs to the previous
+                // chunk.
+                auto line_gen =
+                    sources::async_streaming_gz_lines(spec.file_path);
+                std::size_t byte_pos = 0;
 
                 while (auto line_opt = co_await line_gen.next()) {
                     const auto& line = *line_opt;
+                    const std::size_t line_start = byte_pos;
+                    byte_pos += line.content.length() + 1;
+                    if (line_start < spec.start_byte) continue;
+                    if (spec.end_byte > 0 && line_start >= spec.end_byte) break;
                     const char* trimmed;
                     std::size_t trimmed_length;
                     if (json_trim_and_validate(line.content.data(),
