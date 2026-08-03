@@ -16,6 +16,15 @@
 
 namespace dftracer::utils::utilities::filesystem {
 
+// Index-artifact directories (`.dftindex`, `.dftindex-views`,
+// `.dftindex_staging`) hold generated `.pfw.gz` files (materialized views) and
+// index data, never input traces. A recursive scan must not descend into them
+// or it would ingest a view's own output as a source file.
+inline bool is_index_artifact_dir(const fs::path& p) {
+    const std::string name = p.filename().string();
+    return name.rfind(".dftindex", 0) == 0;
+}
+
 /**
  * @brief Input structure representing a directory to scan.
  */
@@ -102,10 +111,13 @@ class DirectoryScannerUtility
         }
 
         if (input.recursive) {
-            // Recursive directory iteration
-            for (const auto& entry :
-                 fs::recursive_directory_iterator(input.path)) {
-                raw_entries.push_back(entry);
+            fs::recursive_directory_iterator it(input.path), end;
+            for (; it != end; ++it) {
+                if (it->is_directory() && is_index_artifact_dir(it->path())) {
+                    it.disable_recursion_pending();  // do not ingest index dirs
+                    continue;
+                }
+                raw_entries.push_back(*it);
             }
         } else {
             // Non-recursive directory iteration
@@ -158,6 +170,7 @@ class DirectoryScannerUtility
             const fs::directory_entry& entry = *it;
             std::error_code sec;
             if (entry.is_directory(sec) && !entry.is_symlink(sec)) {
+                if (is_index_artifact_dir(entry.path())) continue;
                 subdirs.push_back(ctx.spawn(
                     [p = entry.path(), populate_size](CoroScope& child)
                         -> coro::CoroTask<std::vector<FileEntry>> {

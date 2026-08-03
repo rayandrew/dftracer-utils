@@ -12,7 +12,7 @@ namespace dftracer::utils::utilities::fileio::lines {
  *
  * This template provides a reusable iterator implementation for any container
  * that implements has_next() and next() methods. It eliminates code duplication
- * across LineRange, LineBytesRange, and IndexedFileLineIterator.
+ * across the line iterators.
  *
  * @tparam Container The container type that provides has_next() and next()
  * methods

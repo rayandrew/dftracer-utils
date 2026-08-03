@@ -126,10 +126,29 @@ std::unique_ptr<ParallelWriter> make_writer(const WriterConfig& cfg) {
     // Padded striped needs gzip and a large-enough stripe to guarantee a
     // compressed flush fits one slot. Below the minimum, fall back to the
     // atomic-byte-offset writer.
-    if (cfg.gzip && cfg.stripe_size >= MIN_PADDED_STRIPE_BYTES) {
+    LayoutInfo info{cfg.layout, FilesystemKind::UNKNOWN, cfg.stripe_size, 0};
+    if (uses_padded_layout(info, cfg.gzip)) {
         return make_padded_striped_writer(cfg.stripe_size);
     }
     return make_striped_writer();
+}
+
+ConfiguredWriter make_writer_for_path(const WriterRequest& req) {
+    LayoutInfo info = detect_layout(req.path);
+    // A striped layout with no usable stripe size cannot slot workers by
+    // offset; degrade to sharded so writes still land correctly.
+    if (info.layout == FileLayout::STRIPED && info.stripe_size == 0) {
+        info.layout = FileLayout::SHARDED;
+    }
+    const bool padded = uses_padded_layout(info, req.gzip);
+    WriterSizing sizing = compute_writer_sizing(
+        info, req.baseline_workers, req.default_flush_bytes,
+        req.buffer_headroom_bytes, padded);
+    WriterConfig cfg;
+    cfg.layout = info.layout;
+    cfg.stripe_size = info.stripe_size;
+    cfg.gzip = req.gzip;
+    return ConfiguredWriter{make_writer(cfg), info, sizing};
 }
 
 }  // namespace dftracer::utils::utilities::fileio::parallel

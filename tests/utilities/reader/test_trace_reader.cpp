@@ -100,6 +100,24 @@ static CoroTask<std::size_t> count_json_lines(AsyncGenerator<JsonLine> gen) {
 
 }  // namespace
 
+namespace {
+/// Traces must be gzip, so a fixture written as plain text is compressed
+/// before the reader sees it. Returns the .gz path.
+///
+/// The result goes in its own directory: a gzip trace sitting directly in
+/// the temp root would pick up any .dftindex another test left there and be
+/// read through an index that does not list it.
+std::string gzip_fixture(const std::string& plain_path) {
+    const fs::path dir = make_unique_test_path("trace_fixture");
+    fs::create_directories(dir);
+    const std::string gz_path =
+        (dir / (fs::path(plain_path).filename().string() + ".gz")).string();
+    REQUIRE(dft_utils_test::compress_file_to_gzip(plain_path, gz_path));
+    fs::remove(plain_path);
+    return gz_path;
+}
+}  // namespace
+
 TEST_SUITE("TraceReader") {
     TEST_CASE("Read all lines without index") {
         TestEnvironment env(100);
@@ -142,6 +160,33 @@ TEST_SUITE("TraceReader") {
             auto n_plain = count_lines(plain_reader.read_lines()).get();
             CHECK(n_plain == n_indexed);
         }
+    }
+
+    TEST_CASE("Query nested args field by bare and dotted name") {
+        // Test data events carry args:{"ret":1024*i, ...}. Bare `ret` and
+        // dotted `args.ret` must select the same events in the ValueMap path.
+        TestEnvironment env(100);
+        std::string gz_file = env.create_dft_test_gzip_file(100);
+        std::string index_dir = env.get_dir();
+        std::string index_path = env.get_index_path(gz_file);
+        auto indexer = IndexerFactory::create(gz_file, index_path,
+                                              32 * 1024 * 1024, false);
+        REQUIRE(indexer != nullptr);
+        indexer->build();
+
+        TraceReader reader({.file_path = gz_file, .index_dir = index_dir});
+        REQUIRE(reader.has_index());
+
+        ReadConfig bare;
+        bare.query = "ret >= 100000";
+        auto n_bare = count_json_lines(reader.read_json(bare)).get();
+
+        ReadConfig dotted;
+        dotted.query = "args.ret >= 100000";
+        auto n_dotted = count_json_lines(reader.read_json(dotted)).get();
+
+        CHECK(n_bare > 0);
+        CHECK(n_dotted == n_bare);
     }
 
     TEST_CASE("Read with start_line skip") {
@@ -274,8 +319,9 @@ TEST_SUITE("TraceReader") {
             out << second_line << "\n";
             out << third_line << "\n";
         }
+        auto gz_file = gzip_fixture(test_file.string());
 
-        TraceReader reader({.file_path = test_file.string()});
+        TraceReader reader({.file_path = gz_file});
 
         ReadConfig rc;
         rc.start_byte = 0;
@@ -288,7 +334,7 @@ TEST_SUITE("TraceReader") {
         CHECK(lines[0].find(R"("name":"read")") != std::string::npos);
         CHECK(lines[1].find(R"("name":"write")") != std::string::npos);
 
-        fs::remove(test_file);
+        fs::remove(gz_file);
     }
 
     TEST_CASE("read_lines plain file byte range skips partial first line") {
@@ -300,8 +346,9 @@ TEST_SUITE("TraceReader") {
             out << "beta\n";
             out << "gamma\n";
         }
+        auto gz_file = gzip_fixture(test_file.string());
 
-        TraceReader reader({.file_path = test_file.string()});
+        TraceReader reader({.file_path = gz_file});
 
         ReadConfig rc;
         rc.start_byte = 2;
@@ -312,7 +359,7 @@ TEST_SUITE("TraceReader") {
         CHECK(lines[0] == "beta");
         CHECK(lines[1] == "gamma");
 
-        fs::remove(test_file);
+        fs::remove(gz_file);
     }
 
     TEST_CASE("read_raw indexed and unindexed produce same chunk count") {
@@ -413,18 +460,21 @@ TEST_SUITE("TraceReader") {
                 << "\n";
         }
 
-        TraceReader reader({.file_path = test_file.string()});
+        const auto uncompressed_size = fs::file_size(test_file);
+        auto gz_file = gzip_fixture(test_file.string());
+
+        TraceReader reader({.file_path = gz_file});
 
         ReadConfig rc;
         rc.start_byte = 0;
-        rc.end_byte = fs::file_size(test_file);
+        rc.end_byte = uncompressed_size;
         rc.query = R"(name == "write")";
         auto lines = collect_lines(reader.read_lines(rc)).get();
 
         REQUIRE(lines.size() == 1);
         CHECK(lines[0].find(R"("name":"write")") != std::string::npos);
 
-        fs::remove(test_file);
+        fs::remove(gz_file);
     }
 
     TEST_CASE("Query with AND narrows results") {
@@ -533,15 +583,7 @@ TEST_SUITE("TraceReader") {
         REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
-        using dftracer::utils::utilities::indexer::IndexBuildConfig;
-        using dftracer::utils::utilities::indexer::IndexBuilderUtility;
-        IndexBuilderUtility builder;
-        auto build_result = builder
-                                .process(IndexBuildConfig::for_file(gz)
-
-                                             )
-                                .get();
-        REQUIRE(build_result.success);
+        REQUIRE(dft_utils_test::build_index(gz));
 
         TraceReader reader({.file_path = gz});
         REQUIRE(reader.has_index());
@@ -582,15 +624,7 @@ TEST_SUITE("TraceReader") {
         REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
-        using dftracer::utils::utilities::indexer::IndexBuildConfig;
-        using dftracer::utils::utilities::indexer::IndexBuilderUtility;
-        IndexBuilderUtility builder;
-        auto build_result = builder
-                                .process(IndexBuildConfig::for_file(gz)
-
-                                             )
-                                .get();
-        REQUIRE(build_result.success);
+        REQUIRE(dft_utils_test::build_index(gz));
 
         TraceReader reader({.file_path = gz});
         REQUIRE(reader.has_index());
@@ -644,15 +678,8 @@ TEST_SUITE("TraceReader") {
         REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
-        using dftracer::utils::utilities::indexer::IndexBuildConfig;
-        using dftracer::utils::utilities::indexer::IndexBuilderUtility;
-        IndexBuilderUtility builder;
-        auto build_result = builder
-                                .process(IndexBuildConfig::for_file(gz)
-                                             .with_checkpoint_size(32 * 1024)
-                                             .with_manifest(true))
-                                .get();
-        REQUIRE(build_result.success);
+        REQUIRE(dft_utils_test::build_index(gz, "", 0,
+                                            /*checkpoint_size=*/32 * 1024));
 
         TraceReader reader({.file_path = gz, .checkpoint_size = 32 * 1024});
         REQUIRE(reader.has_index());
@@ -766,7 +793,9 @@ TEST_SUITE("TraceReader::read_json") {
             }
         }
 
-        TraceReader reader({.file_path = pfw});
+        auto gz = gzip_fixture(pfw);
+
+        TraceReader reader({.file_path = gz});
 
         ReadConfig rc;
         rc.query = R"(cat == "POSIX")";
@@ -775,7 +804,7 @@ TEST_SUITE("TraceReader::read_json") {
         CHECK(line_count == json_count);
         CHECK(json_count == 100);
 
-        fs::remove(pfw);
+        fs::remove(gz);
     }
 
     TEST_CASE("read_json works with index and chunk pruning") {
@@ -804,15 +833,8 @@ TEST_SUITE("TraceReader::read_json") {
         REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
-        using dftracer::utils::utilities::indexer::IndexBuildConfig;
-        using dftracer::utils::utilities::indexer::IndexBuilderUtility;
-        IndexBuilderUtility builder;
-        auto build_result = builder
-                                .process(IndexBuildConfig::for_file(gz)
-                                             .with_checkpoint_size(32 * 1024)
-                                             .with_manifest(true))
-                                .get();
-        REQUIRE(build_result.success);
+        REQUIRE(dft_utils_test::build_index(gz, "", 0,
+                                            /*checkpoint_size=*/32 * 1024));
 
         TraceReader reader({.file_path = gz, .checkpoint_size = 32 * 1024});
         REQUIRE(reader.has_index());
@@ -844,13 +866,15 @@ TEST_SUITE("TraceReader::read_json") {
                 << "\n";
         }
 
-        TraceReader reader({.file_path = test_file.string()});
+        auto gz_file = gzip_fixture(test_file.string());
+
+        TraceReader reader({.file_path = gz_file});
         auto events = collect_json_events(reader.read_json()).get();
         REQUIRE(events.size() == 1);
         CHECK(events[0].name == "read");
         CHECK(events[0].cat == "POSIX");
         CHECK(events[0].ph == "X");
 
-        fs::remove(test_file);
+        fs::remove(gz_file);
     }
 }

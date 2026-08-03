@@ -47,11 +47,6 @@ struct PatternDirectoryScannerUtilityInput {
         recursive = rec;
         return *this;
     }
-
-    PatternDirectoryScannerUtilityInput& with_populate_size(bool with_size) {
-        populate_size = with_size;
-        return *this;
-    }
 };
 
 /**

@@ -40,12 +40,18 @@ class GzipLineByteStream : public GzipStream {
                     dftracer::utils::utilities::indexer::internal::Indexer
                         &indexer) override {
         GzipStream::initialize(gz_path, start_bytes, end_bytes, indexer);
-        actual_start_bytes_ = find_line_start(start_bytes).get();
+        actual_start_bytes_ = start_bytes;
+        current_position_ = start_bytes;
+    }
+
+    coro::CoroTask<void> on_initialized() override {
+        if (is_finished_) co_return;
+        actual_start_bytes_ = co_await find_line_start(start_bytes_);
         current_position_ = actual_start_bytes_;
     }
 
     coro::CoroTask<std::size_t> find_line_start(std::size_t target_start) {
-        std::size_t current_pos = checkpoint_.uc_offset;
+        std::size_t current_pos = seek_anchor_offset();
         std::size_t actual_start = target_start;
 
         // If target is at the start of the file, no adjustment needed
@@ -58,7 +64,7 @@ class GzipLineByteStream : public GzipStream {
                                        : current_pos;
 
         if (search_start > current_pos) {
-            skip(search_start);
+            co_await skip(search_start);
             current_pos = search_start;
         }
 
@@ -83,9 +89,9 @@ class GzipLineByteStream : public GzipStream {
             }
         }
 
-        restart_compression();
-        if (actual_start > checkpoint_.uc_offset) {
-            skip(actual_start);
+        co_await restart_compression();
+        if (actual_start > seek_anchor_offset()) {
+            co_await skip(actual_start);
         }
 
         co_return actual_start;
@@ -210,6 +216,7 @@ class GzipLineByteStream : public GzipStream {
     }
 
     coro::CoroTask<::std::span<const char>> read_async() override {
+        co_await ensure_initialized();
         if (is_finished_) {
             co_return {};
         }

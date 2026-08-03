@@ -70,12 +70,6 @@ class IndexedFileLineIteratorConfig {
         return *this;
     }
 
-    IndexedFileLineIteratorConfig& with_range_type(
-        dftracer::utils::utilities::reader::internal::RangeType type) {
-        range_type_ = type;
-        return *this;
-    }
-
     IndexedFileLineIteratorConfig& with_line_range(std::size_t start_line,
                                                    std::size_t end_line) {
         range_type_ =

@@ -139,12 +139,9 @@ class StreamingFileWriterUtility {
         }
     }
 
-    bool append_mode() const { return append_; }
-    bool create_dirs_mode() const { return create_dirs_; }
     std::size_t total_bytes() const { return total_bytes_; }
     std::size_t total_chunks() const { return total_chunks_; }
     const fs::path& path() const { return path_; }
-    bool is_opened() const { return opened_; }
     bool is_closed() const { return !opened_; }
 };
 

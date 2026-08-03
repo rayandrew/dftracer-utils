@@ -385,7 +385,7 @@ std::unique_ptr<ReaderStream> GzipReader::stream(const StreamConfig &config) {
         1;  // Track what line number start_bytes corresponds to
 
     if (range_type == RangeType::LINE_RANGE) {
-        // Convert line numbers to byte offsets using checkpoints
+        // Convert line numbers to byte offsets using the member table
         if (start == 0 || end == 0) {
             throw ReaderError(ReaderError::INVALID_ARGUMENT,
                               "Line numbers must be 1-based (start from 1)");
@@ -402,75 +402,54 @@ std::unique_ptr<ReaderStream> GzipReader::stream(const StreamConfig &config) {
                                   std::to_string(total_lines) + ")");
         }
 
-        // Get checkpoints for the line range
-        std::vector<
-            dftracer::utils::utilities::indexer::internal::IndexerCheckpoint>
-            checkpoints = indexer->get_checkpoints_for_line_range(start, end);
+        // Members carry the same line bookkeeping as the old recovery
+        // points, and their starts are decodable without a dictionary.
+        auto members = indexer->get_members();
 
-        DFTRACER_UTILS_LOG_DEBUG("Line range %zu-%zu: found %zu checkpoints",
-                                 start, end, checkpoints.size());
+        std::size_t last_overlap_end = 0;
+        bool found_overlap = false;
+        for (const auto &member : members) {
+            if (member.first_line_num <= end && member.last_line_num >= start) {
+                last_overlap_end = member.uc_offset + member.uc_size;
+                found_overlap = true;
+            }
+        }
 
-        if (checkpoints.empty()) {
-            // No checkpoints, read from beginning
+        if (!found_overlap) {
             start_bytes = 0;
             end_bytes = indexer->get_max_bytes();
             actual_start_line = 1;
             DFTRACER_UTILS_LOG_DEBUG(
-                "No checkpoints found, using full file: start_bytes=%zu, "
-                "end_bytes=%zu, max_bytes=%" PRIu64,
-                start_bytes, end_bytes, indexer->get_max_bytes());
+                "No member covers lines %zu-%zu, using full file: "
+                "end_bytes=%zu",
+                start, end, end_bytes);
         } else {
-            // Use checkpoint to determine byte range.
-            //
-            // Checkpoint uc_offset values fall at deflate block boundaries
-            // which may land in the middle of a text line.  When we start
-            // decompressing from such a mid-line position the first "line"
-            // seen by MultiLineStream is a partial fragment.  If
-            // actual_start_line == start_line the fragment is emitted as
-            // the requested first line, producing wrong content.
-            //
-            // To avoid this we choose a checkpoint whose last_line_num is
-            // strictly less than (start - 1), guaranteeing
-            // actual_start_line < start.  MultiLineStream then filters
-            // out the (potentially partial) early lines before reaching
-            // the requested range.
-            auto all_checkpoints = indexer->get_checkpoints();
+            // Members are line-aligned (each written member is a whole-line
+            // batch), so a member's uc_offset is the first byte of its
+            // first_line_num. Begin decoding at the member containing `start`
+            // and label the first decoded line as that member's first line;
+            // LineStream then drops [first_line_num, start) and serves
+            // [start, end]. Decoding from the containing member avoids
+            // re-inflating earlier members.
             bool found_start = false;
-
-            // Walk checkpoints from the end to find the latest one whose
-            // line range ends before (start - 1).
-            for (auto it = all_checkpoints.rbegin();
-                 it != all_checkpoints.rend(); ++it) {
-                if (it->last_line_num < start - 1) {
-                    start_bytes = it->uc_offset;
-                    actual_start_line = it->last_line_num + 1;
+            for (const auto &member : members) {
+                if (member.first_line_num <= start &&
+                    start <= member.last_line_num) {
+                    start_bytes = member.uc_offset;
+                    actual_start_line = member.first_line_num;
                     found_start = true;
                     break;
                 }
             }
-
             if (!found_start) {
-                // No suitable checkpoint found -- start from beginning
                 start_bytes = 0;
                 actual_start_line = 1;
             }
-
-            const auto &last_checkpoint = checkpoints.back();
-            end_bytes = last_checkpoint.uc_offset + last_checkpoint.uc_size;
+            end_bytes = last_overlap_end;
 
             DFTRACER_UTILS_LOG_DEBUG(
-                "Using checkpoints: matched_first_idx=%" PRIu64
-                " "
-                "(first_line=%" PRIu64 ", last_line=%" PRIu64
-                "), "
-                "end_checkpoint_idx=%" PRIu64 " (first_line=%" PRIu64
-                ", last_line=%" PRIu64
-                "), "
-                "byte_range=%zu-%zu, actual_start_line=%zu",
-                checkpoints[0].checkpoint_idx, checkpoints[0].first_line_num,
-                checkpoints[0].last_line_num, last_checkpoint.checkpoint_idx,
-                last_checkpoint.first_line_num, last_checkpoint.last_line_num,
-                start_bytes, end_bytes, actual_start_line);
+                "Lines %zu-%zu -> byte range %zu-%zu, actual_start_line=%zu",
+                start, end, start_bytes, end_bytes, actual_start_line);
         }
     }
 

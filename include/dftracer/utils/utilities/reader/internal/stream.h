@@ -14,7 +14,7 @@ namespace dftracer::utils::utilities::reader::internal {
  *
  * ReaderStream provides incremental access to data (bytes, lines, etc.)
  * without loading everything into memory. Implementations handle
- * different formats (gzip, tar, etc.) transparently.
+ * the supported input formats (gzip) transparently.
  *
  * Usage:
  * @code

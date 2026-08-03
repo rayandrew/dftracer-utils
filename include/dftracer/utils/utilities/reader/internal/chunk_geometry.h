@@ -6,6 +6,7 @@
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,13 @@ struct ArrowWorkItem {
     // byte offsets via the checkpoint index. 0 = no line constraint.
     std::size_t start_line = 0;
     std::size_t end_line = 0;
+
+    // Sub-chunk skip for a single member (set only on non-coalesced items).
+    // sub_event_counts[b] is bucket b's data-event (ph != "M") count in order;
+    // sub_keep[b] == 0 means every event in bucket b is range-excluded, so the
+    // reader skips those data events before parse/eval. Empty = no skipping.
+    std::vector<std::uint32_t> sub_event_counts;
+    std::vector<char> sub_keep;
 };
 
 // Enumerate byte/line-range work items across `files`, pruning against the

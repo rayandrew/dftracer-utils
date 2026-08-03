@@ -87,6 +87,30 @@ std::unique_ptr<ParallelWriter> make_sharded_writer();
 std::unique_ptr<ParallelWriter> make_padded_striped_writer(
     std::size_t stripe_size);
 
+/// Everything needed to build a writer for a target path in one place.
+struct WriterRequest {
+    std::string path;
+    std::size_t baseline_workers;
+    std::size_t default_flush_bytes;
+    std::size_t buffer_headroom_bytes;
+    bool gzip;
+};
+
+/// A configured (but not yet opened) writer plus the resolved layout and
+/// sizing, so the caller can open() with the right worker count and remap
+/// member offsets.
+struct ConfiguredWriter {
+    std::unique_ptr<ParallelWriter> writer;
+    LayoutInfo layout;    // resolved layout (striped-with-no-stripe -> sharded)
+    WriterSizing sizing;  // num_workers / flush_threshold / buffer_capacity
+};
+
+/// Detect the target filesystem's layout, apply the padded-vs-atomic gate and
+/// sizing policy, and build the matching writer - the whole detect_layout +
+/// compute_writer_sizing + make_writer dance in one call. The caller still
+/// opens the writer (it owns the CoroScope and gzip-extension choice).
+ConfiguredWriter make_writer_for_path(const WriterRequest& req);
+
 }  // namespace dftracer::utils::utilities::fileio::parallel
 
 #endif  // DFTRACER_UTILS_UTILITIES_FILEIO_PARALLEL_PARALLEL_WRITER_H

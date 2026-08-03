@@ -36,7 +36,7 @@ struct Line {
  * @brief Input for reading a range of lines from an indexed file.
  *
  * This structure encapsulates all information needed to read a specific
- * range of lines from an indexed archive (gzip, tar.gz, etc.).
+ * range of lines from an indexed gzip file.
  * Used for lazy evaluation and caching strategies.
  *
  * Usage:
@@ -70,12 +70,6 @@ struct LineReadInput {
 
     LineReadInput& with_index(std::string idx) {
         index_path = std::move(idx);
-        return *this;
-    }
-
-    LineReadInput& with_range(std::size_t start, std::size_t end) {
-        start_line = start;
-        end_line = end;
         return *this;
     }
 

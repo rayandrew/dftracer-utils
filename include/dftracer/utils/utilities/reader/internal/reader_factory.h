@@ -33,8 +33,6 @@ class ReaderFactory {
     /**
      * Check if a reader type is supported for the given format
      */
-    static bool is_format_supported(ArchiveFormat format);
-
    private:
     ReaderFactory() = delete;  // Static-only class
 };
