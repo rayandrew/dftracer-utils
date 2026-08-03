@@ -26,7 +26,18 @@ Build query expressions using Field objects with Python operators:
     level = Field("args.level")
     q = level == "DEBUG"
 
-    # Convert to query string for C++ parser
+    # String matching: SQL LIKE (% wildcard), case-insensitive, regex, substring
+    q = Field("name").like("%read%")
+    q = Field("name").ilike("READ")
+    q = Field("name").regex("^p?read$")
+    q = Field("args.file").contains("tmp")  # substring: "tmp" in args.file
+
+    # Resolved virtual fields (resolved.* / r.*): the engine rewrites these to
+    # concrete hash lookups against the index.
+    q = resolved("hostname") == "node01"
+    q = resolved("fpath").like("%/scratch/%")
+
+    # Convert to query string for the C++ parser
     query_string = str(q)
 """
 
@@ -34,7 +45,12 @@ from __future__ import annotations
 
 from typing import Sequence, Union
 
+__all__ = ["Expr", "Field", "resolved", "Value"]
+
 Value = Union[str, int, float, bool]
+
+# Resolved virtual-field leaf names accepted after the resolved./r. prefix.
+_RESOLVED_FIELDS = frozenset({"fpath", "cwd", "hostname", "host", "exec", "cmd"})
 
 
 class Expr:
@@ -81,6 +97,30 @@ class _NotInExpr(Expr):
     def __str__(self) -> str:
         items = ", ".join(_format_value(v) for v in self._values)
         return f"{self._field} not in [{items}]"
+
+
+class _MatchExpr(Expr):
+    """A string-match predicate: `field <op> "pattern"` where op is one of
+    like / ilike / ~ (regex) / ~* (case-insensitive regex)."""
+
+    def __init__(self, field: str, op: str, pattern: str) -> None:
+        self._field = field
+        self._op = op
+        self._pattern = pattern
+
+    def __str__(self) -> str:
+        return f"{self._field} {self._op} {_format_value(self._pattern)}"
+
+
+class _ContainsExpr(Expr):
+    """A substring predicate, serialized literal-first as `"sub" in field`."""
+
+    def __init__(self, field: str, sub: str) -> None:
+        self._field = field
+        self._sub = sub
+
+    def __str__(self) -> str:
+        return f"{_format_value(self._sub)} in {self._field}"
 
 
 class _BinaryExpr(Expr):
@@ -134,6 +174,37 @@ class Field:
 
     def not_in(self, values: Sequence[Value]) -> Expr:
         return _NotInExpr(self._name, values)
+
+    def like(self, pattern: str) -> Expr:
+        """SQL LIKE: `%` matches any run, `_` any single char."""
+        return _MatchExpr(self._name, "like", pattern)
+
+    def ilike(self, pattern: str) -> Expr:
+        """Case-insensitive LIKE."""
+        return _MatchExpr(self._name, "ilike", pattern)
+
+    def regex(self, pattern: str) -> Expr:
+        """ECMAScript regex match (anchored as written)."""
+        return _MatchExpr(self._name, "~", pattern)
+
+    def iregex(self, pattern: str) -> Expr:
+        """Case-insensitive regex match."""
+        return _MatchExpr(self._name, "~*", pattern)
+
+    def contains(self, sub: str) -> Expr:
+        """Unanchored substring search (`"sub" in field`)."""
+        return _ContainsExpr(self._name, sub)
+
+
+def resolved(name: str) -> Field:
+    """A resolved virtual field (`resolved.<name>`), which the engine rewrites
+    to a concrete hash lookup against the index. Known names: fpath, cwd,
+    hostname (alias host), exec, cmd."""
+    if name not in _RESOLVED_FIELDS:
+        raise ValueError(
+            f"unknown resolved field {name!r}; expected one of {sorted(_RESOLVED_FIELDS)}"
+        )
+    return Field("resolved." + name)
 
 
 def _format_value(v: Value) -> str:
