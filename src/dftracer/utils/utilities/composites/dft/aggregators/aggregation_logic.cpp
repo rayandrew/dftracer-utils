@@ -7,6 +7,25 @@
 namespace dftracer::utils::utilities::composites::dft::aggregators {
 
 namespace {
+std::uint64_t parse_hex_hash(std::string_view sv) {
+    std::uint64_t v = 0;
+    for (char c : sv) {
+        std::uint64_t d;
+        if (c >= '0' && c <= '9')
+            d = static_cast<std::uint64_t>(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            d = static_cast<std::uint64_t>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F')
+            d = static_cast<std::uint64_t>(c - 'A' + 10);
+        else
+            return std::hash<std::string_view>{}(sv);
+        v = (v << 4) | d;
+    }
+    return v ? v : 1;
+}
+}  // namespace
+
+namespace {
 
 void apply_preaggregated_metric(MetricStats& stats, std::uint64_t ev_count,
                                 const ArgsValueProxy& sum_val,
@@ -14,21 +33,21 @@ void apply_preaggregated_metric(MetricStats& stats, std::uint64_t ev_count,
                                 const ArgsValueProxy& max_val) {
     if (!sum_val.exists() && !min_val.exists() && !max_val.exists()) return;
 
-    const auto total = sum_val.exists() ? sum_val.get<std::uint64_t>() : 0;
-    stats.count += ev_count;
-    stats.total += total;
-    if (min_val.exists()) {
-        stats.min = std::min(stats.min, min_val.get<std::uint64_t>());
-    }
-    if (max_val.exists()) {
-        stats.max = std::max(stats.max, max_val.get<std::uint64_t>());
-    }
-
-    if (stats.count > 0) {
-        stats.mean =
-            static_cast<double>(stats.total) / static_cast<double>(stats.count);
-        stats.m2 = 0.0;
-    }
+    // Pre-aggregated input carries only sum/min/max (no power sums), so merge a
+    // FieldStat with n=ev_count and sumsq/m3/m4 left 0. Absent min/max must not
+    // move the running extrema, so seed them from the neutral element.
+    common::statistics::FieldStat add;
+    add.n = ev_count;
+    add.sum = sum_val.exists()
+                  ? static_cast<double>(sum_val.get<std::uint64_t>())
+                  : 0.0;
+    add.min = min_val.exists()
+                  ? static_cast<double>(min_val.get<std::uint64_t>())
+                  : (stats.stat.n ? stats.stat.min : add.sum);
+    add.max = max_val.exists()
+                  ? static_cast<double>(max_val.get<std::uint64_t>())
+                  : (stats.stat.n ? stats.stat.max : add.sum);
+    stats.stat.merge(add);
 }
 
 }  // namespace
@@ -46,9 +65,8 @@ std::uint64_t compute_time_bucket(std::uint64_t timestamp,
 }
 
 AggregationKey build_aggregation_key(const DFTracerEvent& ev,
-                                     const AggregationConfig& config) {
-    auto& intern = aggregation_intern();
-
+                                     const AggregationConfig& config,
+                                     StringIntern& intern) {
     AggregationKey key;
     std::string cat_storage;
     key.cat_id =
@@ -62,8 +80,13 @@ AggregationKey build_aggregation_key(const DFTracerEvent& ev,
         key.hhash_id = intern.get_or_insert(hhash_sv);
     }
     auto fhash_sv = ev.args["fhash"].get<std::string_view>();
-    if (!fhash_sv.empty()) {
-        key.fhash_id = intern.get_or_insert(fhash_sv);
+    if (!fhash_sv.empty() && config.group_by_file) {
+        if (auto v = ::dftracer::utils::hash::parse_hex64(fhash_sv)) {
+            key.fhash = *v;
+        } else {
+            key.fhash_inline = false;
+            key.fhash = intern.get_or_insert(fhash_sv);
+        }
     }
 
     key.time_bucket = compute_time_bucket(ev.ts, ev.dur, config);
@@ -86,7 +109,8 @@ AggregationKey build_aggregation_key(const DFTracerEvent& ev,
 void update_aggregation_entry(const DFTracerEvent& ev,
                               const AggregationConfig& config,
                               AggregationMap& aggregations,
-                              const AggregationKey& key) {
+                              const AggregationKey& key,
+                              const StringIntern& intern) {
     auto it = aggregations.find(key);
     if (it == aggregations.end()) {
         it = aggregations
@@ -94,6 +118,12 @@ void update_aggregation_entry(const DFTracerEvent& ev,
                  .first;
     }
     auto& metrics = it->second;
+
+    if (!config.group_by_file) {
+        auto fhash = ev.args["fhash"].get<std::string_view>();
+        if (!fhash.empty())
+            metrics.distinct_files.add_hash(parse_hex_hash(fhash));
+    }
 
     std::uint64_t ev_count = 0;
 
@@ -137,7 +167,7 @@ void update_aggregation_entry(const DFTracerEvent& ev,
 
         auto ret = ev.args["ret"];
         if (ret.exists() &&
-            internal::is_data_transfer_op(key.cat(), key.name())) {
+            internal::is_data_transfer_op(key.cat(intern), key.name(intern))) {
             std::uint64_t size = ret.get<std::uint64_t>();
             metrics.update_size(size, config.compute_percentiles);
         }

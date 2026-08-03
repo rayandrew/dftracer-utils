@@ -11,12 +11,12 @@ TEST_SUITE("MetricStats") {
         MetricStats stats;
         stats.update(42);
 
-        CHECK(stats.count == 1);
-        CHECK(stats.mean == doctest::Approx(42.0));
+        CHECK(stats.count() == 1);
+        CHECK(stats.mean() == doctest::Approx(42.0));
         CHECK(stats.get_stddev() == 0.0);
-        CHECK(stats.total == 42);
-        CHECK(stats.min == 42);
-        CHECK(stats.max == 42);
+        CHECK(stats.total() == 42);
+        CHECK(stats.min() == 42);
+        CHECK(stats.max() == 42);
     }
 
     TEST_CASE("MetricStats - Two values") {
@@ -24,11 +24,11 @@ TEST_SUITE("MetricStats") {
         stats.update(10);
         stats.update(20);
 
-        CHECK(stats.count == 2);
-        CHECK(stats.mean == doctest::Approx(15.0));
-        CHECK(stats.total == 30);
-        CHECK(stats.min == 10);
-        CHECK(stats.max == 20);
+        CHECK(stats.count() == 2);
+        CHECK(stats.mean() == doctest::Approx(15.0));
+        CHECK(stats.total() == 30);
+        CHECK(stats.min() == 10);
+        CHECK(stats.max() == 20);
 
         // stddev = sqrt(((10-15)^2 + (20-15)^2) / 1) = sqrt(50) ~ 7.071
         double stddev = stats.get_stddev();
@@ -44,11 +44,11 @@ TEST_SUITE("MetricStats") {
             stats.update(v);
         }
 
-        CHECK(stats.count == 8);
-        CHECK(stats.mean == doctest::Approx(5.0));
-        CHECK(stats.total == 40);
-        CHECK(stats.min == 2);
-        CHECK(stats.max == 9);
+        CHECK(stats.count() == 8);
+        CHECK(stats.mean() == doctest::Approx(5.0));
+        CHECK(stats.total() == 40);
+        CHECK(stats.min() == 2);
+        CHECK(stats.max() == 9);
 
         // Sample stddev = sqrt(sum((x-mean)^2) / (n-1))
         // = sqrt((9+1+1+1+0+0+4+16)/7) = sqrt(32/7) ~ 2.138
@@ -62,8 +62,8 @@ TEST_SUITE("MetricStats") {
             stats.update(5);
         }
 
-        CHECK(stats.count == 10);
-        CHECK(stats.mean == doctest::Approx(5.0));
+        CHECK(stats.count() == 10);
+        CHECK(stats.mean() == doctest::Approx(5.0));
         CHECK(stats.get_stddev() == doctest::Approx(0.0).epsilon(1e-10));
         CHECK(stats.get_skewness() == doctest::Approx(0.0).epsilon(1e-10));
         CHECK(stats.get_kurtosis() == doctest::Approx(0.0).epsilon(1e-10));
@@ -90,11 +90,12 @@ TEST_SUITE("MetricStats") {
 
         first_half.merge_from(second_half);
 
-        CHECK(first_half.count == single.count);
-        CHECK(first_half.mean == doctest::Approx(single.mean).epsilon(0.001));
-        CHECK(first_half.total == single.total);
-        CHECK(first_half.min == single.min);
-        CHECK(first_half.max == single.max);
+        CHECK(first_half.count() == single.count());
+        CHECK(first_half.mean() ==
+              doctest::Approx(single.mean()).epsilon(0.001));
+        CHECK(first_half.total() == single.total());
+        CHECK(first_half.min() == single.min());
+        CHECK(first_half.max() == single.max());
         CHECK(first_half.get_stddev() ==
               doctest::Approx(single.get_stddev()).epsilon(0.01));
     }
@@ -106,15 +107,15 @@ TEST_SUITE("MetricStats") {
 
         MetricStats empty_stats;
 
-        double mean_before = stats.mean;
-        std::uint64_t total_before = stats.total;
-        std::uint64_t count_before = stats.count;
+        double mean_before = stats.mean();
+        std::uint64_t total_before = stats.total();
+        std::uint64_t count_before = stats.count();
 
         stats.merge_from(empty_stats);
 
-        CHECK(stats.count == count_before);
-        CHECK(stats.mean == doctest::Approx(mean_before));
-        CHECK(stats.total == total_before);
+        CHECK(stats.count() == count_before);
+        CHECK(stats.mean() == doctest::Approx(mean_before));
+        CHECK(stats.total() == total_before);
     }
 
     TEST_CASE("MetricStats - Percentile integration") {
@@ -123,7 +124,7 @@ TEST_SUITE("MetricStats") {
             stats.update(i, true);  // compute_percentiles = true
         }
 
-        CHECK(stats.count == 100);
+        CHECK(stats.count() == 100);
         CHECK(stats.sketch != nullptr);
         CHECK_FALSE(stats.sketch->empty());
         REQUIRE(stats.sketch != nullptr);
@@ -139,25 +140,25 @@ TEST_SUITE("AggregationMetrics") {
 
         metrics.update_duration(100);
         CHECK(metrics.count == 1);
-        CHECK(metrics.duration.count == 1);
-        CHECK(metrics.duration.total == 100);
-        CHECK(metrics.duration.min == 100);
-        CHECK(metrics.duration.max == 100);
+        CHECK(metrics.duration.count() == 1);
+        CHECK(metrics.duration.total() == 100);
+        CHECK(metrics.duration.min() == 100);
+        CHECK(metrics.duration.max() == 100);
 
         metrics.update_duration(200);
         CHECK(metrics.count == 2);
-        CHECK(metrics.duration.count == 2);
-        CHECK(metrics.duration.total == 300);
+        CHECK(metrics.duration.count() == 2);
+        CHECK(metrics.duration.total() == 300);
 
         metrics.update_size(50);
-        CHECK(metrics.size.count == 1);
-        CHECK(metrics.size.total == 50);
-        CHECK(metrics.size.min == 50);
-        CHECK(metrics.size.max == 50);
+        CHECK(metrics.size.count() == 1);
+        CHECK(metrics.size.total() == 50);
+        CHECK(metrics.size.min() == 50);
+        CHECK(metrics.size.max() == 50);
 
         metrics.update_size(150);
-        CHECK(metrics.size.count == 2);
-        CHECK(metrics.size.total == 200);
+        CHECK(metrics.size.count() == 2);
+        CHECK(metrics.size.total() == 200);
     }
 
     TEST_CASE("AggregationMetrics - update_timestamp") {
@@ -205,13 +206,13 @@ TEST_SUITE("AggregationMetrics") {
         metrics.update_custom_metric("bytes_read", 1024);
         REQUIRE(metrics.custom_metrics != nullptr);
         CHECK(metrics.custom_metrics->count("bytes_read") == 1);
-        CHECK((*metrics.custom_metrics)["bytes_read"].count == 1);
-        CHECK((*metrics.custom_metrics)["bytes_read"].total == 1024);
+        CHECK((*metrics.custom_metrics)["bytes_read"].count() == 1);
+        CHECK((*metrics.custom_metrics)["bytes_read"].total() == 1024);
 
         metrics.update_duration(200);  // count = 2
         metrics.update_custom_metric("bytes_read", 2048);
-        CHECK((*metrics.custom_metrics)["bytes_read"].count == 2);
-        CHECK((*metrics.custom_metrics)["bytes_read"].total == 3072);
+        CHECK((*metrics.custom_metrics)["bytes_read"].count() == 2);
+        CHECK((*metrics.custom_metrics)["bytes_read"].total() == 3072);
     }
 
     TEST_CASE("AggregationMetrics - sparse custom metrics have correct count") {
@@ -228,9 +229,9 @@ TEST_SUITE("AggregationMetrics") {
         metrics.update_custom_metric("bytes_read", 2048);
 
         CHECK(metrics.count == 3);
-        CHECK(metrics.duration.count == 3);
-        CHECK((*metrics.custom_metrics)["bytes_read"].count == 2);
-        CHECK((*metrics.custom_metrics)["bytes_read"].mean ==
+        CHECK(metrics.duration.count() == 3);
+        CHECK((*metrics.custom_metrics)["bytes_read"].count() == 2);
+        CHECK((*metrics.custom_metrics)["bytes_read"].mean() ==
               doctest::Approx(1536.0));  // (1024+2048)/2
     }
 
@@ -253,15 +254,15 @@ TEST_SUITE("AggregationMetrics") {
         a.merge_from(b);
 
         CHECK(a.count == 3);
-        CHECK(a.duration.count == 3);
-        CHECK(a.duration.total == 600);  // 100+200+300
-        CHECK(a.size.count == 3);
-        CHECK(a.size.total == 450);      // 50+150+250
-        CHECK(a.ts == 500);              // min of 1000, 500
-        CHECK(a.te == 1100);             // max of 1100, 700
+        CHECK(a.duration.count() == 3);
+        CHECK(a.duration.total() == 600);  // 100+200+300
+        CHECK(a.size.count() == 3);
+        CHECK(a.size.total() == 450);      // 50+150+250
+        CHECK(a.ts == 500);                // min of 1000, 500
+        CHECK(a.te == 1100);               // max of 1100, 700
         REQUIRE(a.custom_metrics != nullptr);
-        CHECK((*a.custom_metrics)["io_ops"].count == 3);
-        CHECK((*a.custom_metrics)["io_ops"].total == 60);
+        CHECK((*a.custom_metrics)["io_ops"].count() == 3);
+        CHECK((*a.custom_metrics)["io_ops"].total() == 60);
     }
 
     TEST_CASE("AggregationMetrics - merge sparse custom metrics") {
@@ -280,9 +281,9 @@ TEST_SUITE("AggregationMetrics") {
 
         CHECK(a.count == 3);
         auto& bytes = (*a.custom_metrics)["bytes"];
-        CHECK(bytes.count == 2);  // only 2 events had bytes, not 3
-        CHECK(bytes.total == 1500);
-        CHECK(bytes.mean == doctest::Approx(750.0));
+        CHECK(bytes.count() == 2);  // only 2 events had bytes, not 3
+        CHECK(bytes.total() == 1500);
+        CHECK(bytes.mean() == doctest::Approx(750.0));
     }
 
     TEST_CASE("AggregationMetrics - get_stddev via MetricStats") {

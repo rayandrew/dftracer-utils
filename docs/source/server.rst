@@ -250,6 +250,15 @@ Get global metadata about all trace files (time bounds, file listing).
         ]
     }
 
+Time units
+++++++++++
+
+All timestamps and durations in the server API are **microseconds**. If a trace
+declares a different unit via its ``CM`` ``time_metric`` metadata event
+(``NS``/``MS``/``SEC``; absent means ``US``), the server resolves that unit once
+per trace and converts every request bound and response value to microseconds -
+so clients always work in microseconds regardless of the trace's native unit.
+
 Visualization API
 ~~~~~~~~~~~~~~~~~
 
@@ -354,9 +363,17 @@ zoomed-out views still show where activity is. Returns full-size events (with
 ``args``, for the detail panel) plus a ``density`` array of blocks. Same
 ``begin``/``end``/``summary`` parameters as ``/api/v1/viz/events``.
 
+Optional ``group_by=<column>`` splits blocks by an event column (a top-level
+field, an ``args`` key, or a ``resolved.*`` alias such as ``resolved.fpath``).
+Each block gains a ``group`` value; hash columns keep the raw hash and the
+response metadata carries a ``group_names`` map (hash to resolved name). Events
+missing the column, or a column that does not exist, group under ``(none)`` on
+the client - they are never dropped.
+
 .. code-block:: bash
 
     curl "http://localhost:8080/api/v1/viz/density?begin=0&end=999999999&summary=2"
+    curl "http://localhost:8080/api/v1/viz/density?begin=0&end=999999999&summary=2&group_by=cat"
 
 .. code-block:: json
 
@@ -367,6 +384,22 @@ zoomed-out views still show where activity is. Returns full-size events (with
          "count": 910, "total": 22044, "depth": 0}
       ]
     }
+
+GET /api/v1/viz/columns
++++++++++++++++++++++++
+
+The complete set of groupable columns in the trace (top-level scalar fields plus
+``args`` keys), for the lane-grouping UI. Harvested at index build (stored
+durably in the index) with the summary scan as fallback for older indexes;
+``ready`` is ``false`` while that fallback scan is still running.
+
+.. code-block:: bash
+
+    curl "http://localhost:8080/api/v1/viz/columns"
+
+.. code-block:: json
+
+    {"columns": ["cat", "name", "mhost", "fhash"], "ready": true}
 
 GET /api/v1/viz/counters
 ++++++++++++++++++++++++

@@ -11,6 +11,21 @@ if(APPLE
       CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
+# An empty CMAKE_OSX_SYSROOT leaves CMake's implicit-include detection unaware
+# of the SDK's /usr/include
+if(APPLE AND NOT CMAKE_OSX_SYSROOT)
+  execute_process(
+    COMMAND xcrun --show-sdk-path
+    OUTPUT_VARIABLE _dftracer_sdk_path
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+  if(_dftracer_sdk_path AND IS_DIRECTORY "${_dftracer_sdk_path}")
+    set(CMAKE_OSX_SYSROOT
+        "${_dftracer_sdk_path}"
+        CACHE PATH "macOS SDK sysroot" FORCE)
+  endif()
+endif()
+
 set(DFTRACER_UTILS_VERSION_MAJOR 0)
 set(DFTRACER_UTILS_VERSION_MINOR 0)
 set(DFTRACER_UTILS_VERSION_PATCH 12)

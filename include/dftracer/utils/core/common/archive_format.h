@@ -8,7 +8,6 @@ namespace dftracer::utils {
  */
 enum class ArchiveFormat {
     GZIP,    // Standard GZIP file
-    TAR_GZ,  // TAR.GZ archive (tar files compressed with gzip)
     UNKNOWN  // Unrecognized or unsupported format
 };
 
@@ -16,8 +15,6 @@ inline const char* get_format_name(ArchiveFormat format) {
     switch (format) {
         case ArchiveFormat::GZIP:
             return "GZIP";
-        case ArchiveFormat::TAR_GZ:
-            return "TAR.GZ";
         case ArchiveFormat::UNKNOWN:
             return "UNKNOWN";
     }

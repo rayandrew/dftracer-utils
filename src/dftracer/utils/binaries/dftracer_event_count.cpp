@@ -63,7 +63,7 @@ static EventCountBatchResult process_index_group_event_counts_sync(
 
     utilities::indexer::IndexDatabase db(
         index_path,
-        dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+        dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
 
     auto metadata_rows = db.query_file_metadata_batch(file_ids);
     auto merged_stats = db.query_merged_statistics_batch(file_ids);
@@ -163,7 +163,6 @@ static int run_event_count(const EventCountArgParse* cli) {
             batch_config->checkpoint_size = checkpoint_size;
             batch_config->parallelism = executor_threads;
             batch_config->force_rebuild = force_rebuild;
-            batch_config->use_batch_write = true;
             batch_config->rebuild_root_summaries = true;
             co_await IndexBatchBuilderUtility::process(&scope,
                                                        std::move(batch_config));

@@ -7,25 +7,20 @@
  *
  * This header provides access to:
  * - Line types (Line, Lines, etc.)
- * - Line range iterators (LineRange, LineBytesRange)
- * - Streaming line reader utility
- * - All line source iterators
+ * - Streaming line reader utility (async)
+ * - The line source generators
  *
  * Usage:
  * @code
  * #include <dftracer/utils/utilities/fileio/lines/lines.h>
  *
- * // Read lines from a file
- * auto range = StreamingLineReader::read("data.txt");
- * while (range.has_next()) {
- *     Line line = range.next();
- *     // Process line...
+ * auto gen = StreamingLineReader::read_async(config);
+ * while (auto line = co_await gen.next()) {
+ *     // Process *line...
  * }
  * @endcode
  */
 
-#include <dftracer/utils/utilities/fileio/lines/line_bytes_range.h>
-#include <dftracer/utils/utilities/fileio/lines/line_range.h>
 #include <dftracer/utils/utilities/fileio/lines/line_types.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/sources.h>
 

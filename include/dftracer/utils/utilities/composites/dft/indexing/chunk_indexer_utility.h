@@ -2,8 +2,8 @@
 #define DFTRACER_UTILS_UTILITIES_COMPOSITES_DFT_INDEXING_CHUNK_INDEXER_UTILITY_H
 
 #include <dftracer/utils/core/utilities/utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/bloom_filter.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/scalable_bloom_filter.h>
 #include <dftracer/utils/utilities/hash/hasher_utility.h>
 
 #include <algorithm>
@@ -31,7 +31,10 @@ struct ChunkIndexerConfig {
 
     std::size_t expected_entries_per_chunk = 1024;
     double false_positive_rate = 0.01;
-    bool build_manifest = false;
+
+    // Events per sub-chunk zone-map bucket (0 disables sub-chunk zone-maps).
+    // A member holds ceil(member_events / sub_chunk_events) buckets.
+    std::size_t sub_chunk_events = 4096;
 
     // Max compressed size for value_counts BLOB (0 = disable dictionaries)
     std::size_t value_counts_cap = 4096;
@@ -51,7 +54,7 @@ struct ChunkIndexerConfig {
         }
         hasher.update(expected_entries_per_chunk);
         hasher.update(false_positive_rate);
-        hasher.update(build_manifest);
+        hasher.update(sub_chunk_events);
         return hasher.get_hash().value;
     }
 };
@@ -69,12 +72,6 @@ struct IndexedDimensions {
     bool has_dimension(const std::string& dim) const {
         return std::find(dimensions.begin(), dimensions.end(), dim) !=
                dimensions.end();
-    }
-
-    void add_dimension(const std::string& dim) {
-        if (!has_dimension(dim)) {
-            dimensions.push_back(dim);
-        }
     }
 
     // Compute missing dimensions from a target configuration
@@ -164,44 +161,17 @@ struct ChunkIndexerInput {
         return *this;
     }
 
-    ChunkIndexerInput& with_hash_maps(HashResolveMap hh, HashResolveMap fh,
-                                      HashResolveMap sh) {
-        hhash_map = std::move(hh);
-        fhash_map = std::move(fh);
-        shash_map = std::move(sh);
-        return *this;
-    }
-
     // Existing chunk state for incremental re-scanning
     std::shared_ptr<ChunkIndexState> existing_state;
-
-    ChunkIndexerInput& with_existing_state(
-        std::shared_ptr<ChunkIndexState> state) {
-        existing_state = std::move(state);
-        return *this;
-    }
-};
-
-struct EventLineGroup {
-    std::string cat;
-    std::string name;
-    std::vector<std::uint32_t> line_numbers;
-};
-
-struct MetadataLineGroup {
-    std::string meta_type;
-    std::vector<std::uint32_t> line_numbers;
 };
 
 struct ChunkIndexerOutput {
     std::uint64_t checkpoint_idx = 0;
-    std::unordered_map<std::string, BloomFilter> bloom_filters;
+    std::unordered_map<std::string, ScalableBloomFilter> bloom_filters;
     ChunkStatistics statistics;
     HashResolutions hash_resolutions;
     std::size_t events_processed = 0;
     bool success = false;
-    std::vector<EventLineGroup> event_line_groups;
-    std::vector<MetadataLineGroup> metadata_line_groups;
 };
 
 class ChunkIndexerUtility

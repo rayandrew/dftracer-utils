@@ -6,39 +6,45 @@
 
 namespace dftracer::utils::utilities::common::json {
 
-// Escape a string for embedding in a JSON string literal (quotes, backslash,
-// and the standard control-character shorthands).
-inline std::string escape_json_string(std::string_view s) {
-    std::string result;
-    result.reserve(s.size());
+// Append the JSON-escaped form of `s` (quotes, backslash, and the standard
+// control-character shorthands) to `out`. No temporary allocation, so callers
+// building a JSON line in a loop don't churn a string per field.
+inline void append_json_escaped(std::string& out, std::string_view s) {
     for (char c : s) {
         switch (c) {
             case '"':
-                result += "\\\"";
+                out += "\\\"";
                 break;
             case '\\':
-                result += "\\\\";
+                out += "\\\\";
                 break;
             case '\b':
-                result += "\\b";
+                out += "\\b";
                 break;
             case '\f':
-                result += "\\f";
+                out += "\\f";
                 break;
             case '\n':
-                result += "\\n";
+                out += "\\n";
                 break;
             case '\r':
-                result += "\\r";
+                out += "\\r";
                 break;
             case '\t':
-                result += "\\t";
+                out += "\\t";
                 break;
             default:
-                result += c;
+                out += c;
                 break;
         }
     }
+}
+
+// Escape a string for embedding in a JSON string literal.
+inline std::string escape_json_string(std::string_view s) {
+    std::string result;
+    result.reserve(s.size());
+    append_json_escaped(result, s);
     return result;
 }
 

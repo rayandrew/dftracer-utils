@@ -5,7 +5,6 @@
 #include <dftracer/utils/core/coro/coro.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/pipeline/executor.h>
-#include <dftracer/utils/core/pipeline/watchdog.h>
 #include <dftracer/utils/core/task_handle.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/utilities/utility_traits.h>
@@ -21,6 +20,8 @@
 #include <vector>
 
 namespace dftracer::utils {
+
+class Watchdog;
 
 namespace detail {
 
@@ -115,13 +116,13 @@ class Runtime {
     void shutdown();
     std::size_t threads() const;
     std::size_t io_threads() const;
-    Executor* executor() { return executor_.get(); }
+    TaskExecutor* executor() { return executor_.get(); }
     Watchdog* watchdog() { return watchdog_.get(); }
 
    private:
     void cleanup_completed_futures();
 
-    std::unique_ptr<Executor> executor_;
+    std::unique_ptr<TaskExecutor> executor_;
     std::unique_ptr<Watchdog> watchdog_;
     std::size_t threads_;
     std::atomic<bool> shutdown_called_{false};

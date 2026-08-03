@@ -2,8 +2,10 @@
 #define DFTRACER_UTILS_UTILITIES_TRACE_GEN_FAKE_TRACE_WRITER_H
 
 #include <dftracer/utils/core/common/byte_view.h>
+#include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/compression/zlib/streaming_compressor_utility.h>
+#include <dftracer/utils/utilities/composites/dft/schema.h>
+#include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/fileio/streaming_file_writer_utility.h>
 #include <dftracer/utils/utilities/hash/hasher_utility.h>
 
@@ -11,6 +13,7 @@
 #include <cstdio>
 #include <random>
 #include <string>
+#include <vector>
 
 // Synthetic chrome/Perfetto trace emission (gzip .pfw.gz). A production
 // utility for generating trace files with known patterns; consumed by the
@@ -18,9 +21,9 @@
 namespace dftracer::utils::utilities::trace_gen {
 
 // ---------------------------------------------------------------------------
-// TraceWriter - compresses via ManualStreamingCompressorUtility and writes
-//               via StreamingFileWriterUtility.  Natural deflate blocks
-//               provide block boundaries for the gzip indexer.
+// TraceWriter - compresses each flushed buffer into one gzip member with
+//               libdeflate and writes it via StreamingFileWriterUtility, so
+//               the output is multi-member (parallel-inflatable/indexable).
 // ---------------------------------------------------------------------------
 class TraceWriter {
    public:
@@ -44,32 +47,30 @@ class TraceWriter {
 
     void flush() {
         if (buf_.empty()) return;
-        [this]() -> coro::CoroTask<void> {
-            auto gen = compressor_.compress(ByteView(buf_));
-            while (auto chunk = co_await gen.next()) {
-                co_await writer_.process(*chunk);
-            }
+        if (!compressor_.compress_member_into(scratch_, buf_.data(),
+                                              buf_.size())) {
+            throw DFTUtilsException(ErrorCode::COMPRESSION,
+                                    "gzip member compression failed");
+        }
+        const auto* p = reinterpret_cast<const char*>(scratch_.data());
+        auto len = scratch_.size();
+        [this, p, len]() -> coro::CoroTask<void> {
+            co_await writer_.process(ByteView(p, len));
         }()
-                        .get();
+                                .get();
         buf_.clear();
     }
 
     void close() {
         flush();
-        [this]() -> coro::CoroTask<void> {
-            auto gen = compressor_.finalize_stream();
-            while (auto chunk = co_await gen.next()) {
-                co_await writer_.process(*chunk);
-            }
-        }()
-                        .get();
         writer_.close();
     }
 
    private:
-    compression::zlib::ManualStreamingCompressorUtility compressor_;
+    fileio::compress::GzipMemberCompressor compressor_;
     fileio::StreamingFileWriterUtility writer_;
     std::string buf_;
+    std::vector<std::uint8_t> scratch_;
     std::size_t flush_threshold_;
 };
 
@@ -107,17 +108,27 @@ inline void json_escape(std::string& out, const std::string& s) {
     }
 }
 
-// Metadata event: {"name":"HH"/"FH"/"SH","ph":"M",
+namespace dft = composites::dft;
+
+// Metadata event: {"name":"HH"/"FH"/"SH","ph":4,"type":1,
 //                  "args":{"hhash":"...","name":"...","value":"..."}}
+// Hash and tracer-bookkeeping metadata is the DFTRACER layer.
 inline void emit_metadata(TraceWriter& w, const std::string& kind,
                           const std::string& hhash,
                           const std::string& resolved_name,
                           const std::string& hash_value) {
+    static constexpr int PH_M = dft::phase_to_int(dft::RecordPhase::METADATA);
+    static constexpr int TY_DFT =
+        dft::event_type_to_int(dft::EventType::DFTRACER);
     std::string buf;
     buf.reserve(256);
     buf += R"({"name":")";
     buf += kind;
-    buf += R"(","ph":"M","args":{"hhash":")";
+    buf += R"(","ph":)";
+    buf += std::to_string(PH_M);
+    buf += R"(,"type":)";
+    buf += std::to_string(TY_DFT);
+    buf += R"(,"args":{"hhash":")";
     json_escape(buf, hhash);
     buf += R"(","name":")";
     json_escape(buf, resolved_name);
@@ -128,7 +139,7 @@ inline void emit_metadata(TraceWriter& w, const std::string& kind,
     w.write(buf);
 }
 
-// Regular event (duration, ph=X)
+// Regular complete event (duration, ph=1)
 struct EventArgs {
     std::uint64_t id = 0;
     std::uint64_t pid = 0;
@@ -141,6 +152,8 @@ struct EventArgs {
     std::string hhash;
     std::string fhash;
     std::string cmd_hash;
+    // Instrumentation layer. Unknown lets emit_event infer it from cat.
+    dft::EventType type = dft::EventType::UNKNOWN;
     // Optional extra args appended verbatim (no leading comma)
     std::string extra;
 };
@@ -160,12 +173,18 @@ inline void emit_event(TraceWriter& w, const EventArgs& a) {
     buf += R"(","cat":")";
     json_escape(buf, a.cat);
 
-    std::snprintf(num_buf, sizeof(num_buf),
-                  R"(","pid":%llu,"tid":%llu,"ts":%llu,"dur":%llu,"ph":"X")",
-                  static_cast<unsigned long long>(a.pid),
-                  static_cast<unsigned long long>(a.tid),
-                  static_cast<unsigned long long>(a.ts),
-                  static_cast<unsigned long long>(a.dur));
+    dft::EventType ty = a.type != dft::EventType::UNKNOWN
+                            ? a.type
+                            : dft::event_type_from_cat(a.cat);
+    std::snprintf(
+        num_buf, sizeof(num_buf),
+        R"(","pid":%llu,"tid":%llu,"ts":%llu,"dur":%llu,"ph":%d,"type":%d)",
+        static_cast<unsigned long long>(a.pid),
+        static_cast<unsigned long long>(a.tid),
+        static_cast<unsigned long long>(a.ts),
+        static_cast<unsigned long long>(a.dur),
+        dft::phase_to_int(dft::RecordPhase::COMPLETE),
+        dft::event_type_to_int(ty));
     buf += num_buf;
 
     buf += R"(,"args":{)";

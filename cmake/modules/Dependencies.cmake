@@ -348,7 +348,7 @@ endfunction()
 # ==============================================================================
 
 set(DFTRACER_UTILS_ROCKSDB_VERSION
-    "10.10.1"
+    "11.1.2"
     CACHE STRING "RocksDB version to find or build")
 set(DFTRACER_UTILS_ROCKSDB_PREFIX
     "$ENV{DFTRACER_UTILS_ROCKSDB_PREFIX}"
@@ -1379,6 +1379,63 @@ function(need_zstd)
           TRUE
           PARENT_SCOPE)
     endif()
+  endif()
+endfunction()
+
+# ==============================================================================
+# libdeflate - one-shot (whole-buffer) gzip/deflate codec used for
+# member-at-a-time decompression on the read path. No decompress-speed work has
+# landed upstream since ~v1.23, so we pin the tested release rather than master.
+# ==============================================================================
+function(need_libdeflate)
+  if(DFTRACER_UTILS_LOCAL_PACKAGES)
+    find_package(libdeflate QUIET CONFIG)
+    if(libdeflate_FOUND)
+      dftracer_utils_ok("Found system libdeflate")
+      return()
+    endif()
+  endif()
+
+  if(NOT libdeflate_ADDED)
+    cpmaddpackage(
+      NAME
+      libdeflate
+      GITHUB_REPOSITORY
+      ebiggers/libdeflate
+      VERSION
+      1.25
+      GIT_TAG
+      v1.25
+      OPTIONS
+      "LIBDEFLATE_BUILD_SHARED_LIB OFF"
+      "LIBDEFLATE_BUILD_STATIC_LIB ON"
+      "LIBDEFLATE_BUILD_GZIP OFF")
+  endif()
+
+  if(libdeflate_ADDED)
+    # The static lib links into our shared libraries, so it must be PIC (GNU ld
+    # rejects non-PIC objects in a shared object; macOS ld tolerates it).
+    if(TARGET libdeflate_static)
+      set_target_properties(libdeflate_static
+                            PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    endif()
+    dftracer_utils_ok("Built libdeflate with CPM")
+  endif()
+endfunction()
+
+# Link the resolved libdeflate target (name varies: CPM static build vs a
+# system find_package) into `target`.
+function(link_libdeflate target)
+  if(TARGET libdeflate::libdeflate_static)
+    target_link_libraries(${target} PRIVATE libdeflate::libdeflate_static)
+  elseif(TARGET libdeflate::libdeflate_shared)
+    target_link_libraries(${target} PRIVATE libdeflate::libdeflate_shared)
+  elseif(TARGET libdeflate_static)
+    target_link_libraries(${target} PRIVATE libdeflate_static)
+  elseif(TARGET libdeflate_shared)
+    target_link_libraries(${target} PRIVATE libdeflate_shared)
+  else()
+    message(FATAL_ERROR "link_libdeflate: no libdeflate target available")
   endif()
 endfunction()
 

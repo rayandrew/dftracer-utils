@@ -29,6 +29,9 @@ ArrowType to_nanoarrow_type(ColumnType t) noexcept {
             // Dictionary uses INT32 indices; dictionary values handled
             // separately
             return NANOARROW_TYPE_INT32;
+        case ColumnType::HIST:
+            // list<struct<...>>; schema built explicitly in finish().
+            return NANOARROW_TYPE_LIST;
     }
     return NANOARROW_TYPE_UNINITIALIZED;
 }
@@ -74,6 +77,11 @@ void RecordBatchBuilder::backfill_nulls(ColumnData& col,
             break;
         case ColumnType::DICT_STRING:
             col.dict_indices.resize(col.count + n, -1);  // -1 = null
+            break;
+        case ColumnType::HIST:
+            // Null rows contribute no buckets: repeat the current end offset.
+            col.hist_offsets.resize(
+                col.count + n, static_cast<std::int32_t>(col.hist_bins.size()));
             break;
     }
     col.count += n;
@@ -212,6 +220,19 @@ void RecordBatchBuilder::append_bool(std::size_t col_idx, bool value) {
     }
 }
 
+void RecordBatchBuilder::append_hist(
+    std::size_t col_idx, const std::vector<statistics::HistogramBin>& bins) {
+    auto& col = columns_[col_idx];
+    col.hist_bins.insert(col.hist_bins.end(), bins.begin(), bins.end());
+    col.hist_offsets.push_back(static_cast<std::int32_t>(col.hist_bins.size()));
+    if (col.has_nulls) col.validity.push_back(1);
+    ++col.count;
+    if (!schema_declared_ && !schema_locked_ && !touched_[col_idx]) {
+        touched_[col_idx] = true;
+        ++row_touched_count_;
+    }
+}
+
 void RecordBatchBuilder::append_null(std::size_t col_idx) {
     auto& col = columns_[col_idx];
     if (!col.has_nulls) {
@@ -239,6 +260,10 @@ void RecordBatchBuilder::append_null(std::size_t col_idx) {
             break;
         case ColumnType::DICT_STRING:
             col.dict_indices.push_back(-1);  // -1 = null
+            break;
+        case ColumnType::HIST:
+            col.hist_offsets.push_back(
+                static_cast<std::int32_t>(col.hist_bins.size()));
             break;
     }
     ++col.count;
@@ -294,6 +319,9 @@ void RecordBatchBuilder::reserve(std::size_t num_rows) {
             case ColumnType::DICT_STRING:
                 col.dict_indices.reserve(num_rows);
                 break;
+            case ColumnType::HIST:
+                col.hist_offsets.reserve(num_rows);
+                break;
         }
         col.validity.reserve(num_rows);
     }
@@ -336,6 +364,37 @@ ArrowExportResult RecordBatchBuilder::finish() {
                 throw DFTUtilsException(
                     ErrorCode::INTERNAL,
                     "ArrowSchemaInitFromType(dict values) failed");
+            }
+        } else if (col.type == ColumnType::HIST) {
+            // list<struct<lo:double, hi:double, count:uint64>>
+            if (ArrowSchemaInitFromType(child_schema, NANOARROW_TYPE_LIST) !=
+                NANOARROW_OK) {
+                throw DFTUtilsException(ErrorCode::INTERNAL,
+                                        "ArrowSchemaInitFromType(list) failed");
+            }
+            // ArrowSchemaInitFromType(LIST) already allocated, initialized and
+            // named children[0] "item"; re-initializing it here would orphan
+            // that name allocation (ArrowSchemaInit nulls the field without
+            // freeing). Set the type in place instead.
+            ArrowSchema* item = child_schema->children[0];
+            if (ArrowSchemaSetType(item, NANOARROW_TYPE_STRUCT) !=
+                    NANOARROW_OK ||
+                ArrowSchemaAllocateChildren(item, 3) != NANOARROW_OK) {
+                throw DFTUtilsException(ErrorCode::INTERNAL,
+                                        "hist struct schema init failed");
+            }
+            const ArrowType fts[3] = {NANOARROW_TYPE_DOUBLE,
+                                      NANOARROW_TYPE_DOUBLE,
+                                      NANOARROW_TYPE_UINT64};
+            const char* fnames[3] = {"lo", "hi", "count"};
+            for (int c = 0; c < 3; ++c) {
+                if (ArrowSchemaInitFromType(item->children[c], fts[c]) !=
+                        NANOARROW_OK ||
+                    ArrowSchemaSetName(item->children[c], fnames[c]) !=
+                        NANOARROW_OK) {
+                    throw DFTUtilsException(ErrorCode::INTERNAL,
+                                            "hist field schema init failed");
+                }
             }
         } else {
             if (ArrowSchemaInitFromType(child_schema,
@@ -530,6 +589,49 @@ ArrowExportResult RecordBatchBuilder::finish() {
                 }
                 break;
             }
+            case ColumnType::HIST: {
+                // Build list<struct<lo,hi,count>> via the element-append API;
+                // ArrowArrayFinishElement maintains the list offsets and the
+                // struct/child lengths.
+                ArrowArray* st = child->children[0];
+                ArrowArray* c_lo = st->children[0];
+                ArrowArray* c_hi = st->children[1];
+                ArrowArray* c_cnt = st->children[2];
+                std::size_t pos = 0;
+                for (std::size_t r = 0; r < row_count; ++r) {
+                    const std::int32_t end = col.hist_offsets[r];
+                    if (col.has_nulls && col.validity[r] == 0) {
+                        if (ArrowArrayAppendNull(child, 1) != NANOARROW_OK) {
+                            throw DFTUtilsException(
+                                ErrorCode::INTERNAL,
+                                "ArrowArrayAppendNull(hist) failed");
+                        }
+                        ++null_count;
+                        pos = static_cast<std::size_t>(end);
+                        continue;
+                    }
+                    for (; pos < static_cast<std::size_t>(end); ++pos) {
+                        const auto& b = col.hist_bins[pos];
+                        if (ArrowArrayAppendDouble(c_lo, b.lower) !=
+                                NANOARROW_OK ||
+                            ArrowArrayAppendDouble(c_hi, b.upper) !=
+                                NANOARROW_OK ||
+                            ArrowArrayAppendUInt(c_cnt, b.count) !=
+                                NANOARROW_OK ||
+                            ArrowArrayFinishElement(st) != NANOARROW_OK) {
+                            throw DFTUtilsException(
+                                ErrorCode::INTERNAL,
+                                "hist bucket append failed");
+                        }
+                    }
+                    if (ArrowArrayFinishElement(child) != NANOARROW_OK) {
+                        throw DFTUtilsException(
+                            ErrorCode::INTERNAL,
+                            "ArrowArrayFinishElement(hist) failed");
+                    }
+                }
+                break;
+            }
         }
 
         if (col.type == ColumnType::INT64 || col.type == ColumnType::UINT64 ||
@@ -570,6 +672,8 @@ void RecordBatchBuilder::reset(bool keep_schema) {
             col.dict_indices.clear();
             col.dict_values.clear();
             col.dict_map.clear();
+            col.hist_bins.clear();
+            col.hist_offsets.clear();
             col.validity.clear();
             col.count = 0;
             col.has_nulls = false;

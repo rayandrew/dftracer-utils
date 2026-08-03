@@ -1241,22 +1241,21 @@ TEST_CASE("C++ Reader - Line reading functionality" *
         auto indexer = IndexerFactory::create(gz_file, idx_file, mb_to_b(0.1));
         indexer->build();
 
-        // Verify the indexer has line counts and checkpoints
+        // Verify the indexer has line counts and members
         std::size_t total_lines = indexer->get_num_lines();
-        auto checkpoints = indexer->get_checkpoints();
+        auto members = indexer->get_members();
 
         // Skip line reading tests if indexer doesn't have proper line support
         // This can happen with very small test files
-        if (total_lines == 0 || checkpoints.empty()) {
+        if (total_lines == 0 || members.empty()) {
             MESSAGE(
                 "Skipping line reading tests - indexer has no line data (file "
                 "too small?)");
             return;
         }
 
-        INFO("Indexer created with " << checkpoints.size()
-                                     << " checkpoints and " << total_lines
-                                     << " total lines");
+        INFO("Indexer created with " << members.size() << " members and "
+                                     << total_lines << " total lines");
     }
 
     SUBCASE("Basic line reading functionality") {

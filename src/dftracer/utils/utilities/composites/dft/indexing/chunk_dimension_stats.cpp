@@ -1,6 +1,6 @@
 #include <dftracer/utils/core/common/little_endian.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
-#include <zlib.h>
+#include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 
 #include <algorithm>
 #include <charconv>
@@ -121,30 +121,25 @@ ChunkDimensionStats::compress_value_counts(std::size_t cap_bytes) const {
     auto raw = serialize_value_counts();
     if (raw.empty()) return std::nullopt;
 
-    z_stream strm{};
-    if (deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
-        return std::nullopt;
+    namespace compress = dftracer::utils::utilities::fileio::compress;
+    compress::GzipMemberCompressor compressor;
+    if (!compressor.valid()) return std::nullopt;
+
+    auto member = compressor.compress_member(raw.data(), raw.size());
+    if (!member) return std::nullopt;
+
+    // Prefix the decoded length so the reader can size the output buffer
+    // exactly instead of guessing.
+    std::vector<std::uint8_t> out;
+    out.reserve(4 + member->size());
+    const auto n = static_cast<std::uint32_t>(raw.size());
+    for (int i = 0; i < 4; ++i) {
+        out.push_back(static_cast<std::uint8_t>((n >> (i * 8)) & 0xFF));
     }
+    out.insert(out.end(), member->begin(), member->end());
 
-    uLongf compressed_len = compressBound(static_cast<uLong>(raw.size()));
-    std::vector<std::uint8_t> compressed(compressed_len);
-
-    strm.next_in = raw.data();
-    strm.avail_in = static_cast<uInt>(raw.size());
-    strm.next_out = compressed.data();
-    strm.avail_out = static_cast<uInt>(compressed_len);
-
-    int rc = deflate(&strm, Z_FINISH);
-    if (rc != Z_STREAM_END) {
-        deflateEnd(&strm);
-        return std::nullopt;
-    }
-
-    compressed.resize(strm.total_out);
-    deflateEnd(&strm);
-    if (compressed.size() > cap_bytes) return std::nullopt;
-
-    return compressed;
+    if (out.size() > cap_bytes) return std::nullopt;
+    return out;
 }
 
 namespace {
@@ -192,26 +187,20 @@ ChunkDimensionStats::deserialize_value_counts(const std::uint8_t* data,
 dftracer::utils::StringViewMap<std::uint64_t>
 ChunkDimensionStats::decompress_value_counts(const std::uint8_t* data,
                                              std::size_t len) {
-    if (!data || len == 0) return {};
+    if (!data || len < 4) return {};
 
-    // Decompress: start with 4x estimate, grow if needed
-    std::vector<std::uint8_t> decompressed(len * 4);
-    uLongf decompressed_len = static_cast<uLongf>(decompressed.size());
+    std::uint32_t decoded_len = read_u32_le(data);
 
-    int rc = uncompress(decompressed.data(), &decompressed_len, data,
-                        static_cast<uLong>(len));
+    namespace compress = dftracer::utils::utilities::fileio::compress;
+    compress::GzipMemberDecompressor decompressor;
+    if (!decompressor.valid()) return {};
 
-    // Retry with larger buffer if needed
-    if (rc == Z_BUF_ERROR) {
-        decompressed.resize(len * 16);
-        decompressed_len = static_cast<uLongf>(decompressed.size());
-        rc = uncompress(decompressed.data(), &decompressed_len, data,
-                        static_cast<uLong>(len));
-    }
+    std::vector<std::uint8_t> decompressed(decoded_len);
+    auto res = decompressor.decompress(data + 4, len - 4, decompressed.data(),
+                                       decompressed.size());
+    if (!res || res->out_bytes != decoded_len) return {};
 
-    if (rc != Z_OK) return {};
-
-    return deserialize_value_counts(decompressed.data(), decompressed_len);
+    return deserialize_value_counts(decompressed.data(), res->out_bytes);
 }
 
 }  // namespace dftracer::utils::utilities::composites::dft::indexing

@@ -6,6 +6,7 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_indexer_utility.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -30,7 +31,6 @@ class IndexArgParse : public cli::ArgParse {
     cli::IndexingArgs indexing;
 
     std::string dimensions;
-    bool manifest = false;
     bool rebuild_summaries = false;
     std::size_t read_batch_size = 4;
     std::size_t expected_entries = 1024;
@@ -51,13 +51,6 @@ class IndexArgParse : public cli::ArgParse {
                 "Comma-separated extra dimensions to index from args "
                 "(e.g., args.level,args.mode,args.io.size)")
             .default_value<std::string>("");
-
-        parser()
-            .add_argument("--manifest")
-            .help(
-                "Also build manifest data in the .dftindex store "
-                "(per-checkpoint event line routing)")
-            .flag();
 
         parser()
             .add_argument("--rebuild-summaries")
@@ -91,7 +84,6 @@ class IndexArgParse : public cli::ArgParse {
 
     void post_parse() override {
         dimensions = parser().get<std::string>("--dimensions");
-        manifest = parser().get<bool>("--manifest");
         rebuild_summaries = parser().get<bool>("--rebuild-summaries");
         read_batch_size = parser().get<std::size_t>("--read-batch-size");
         expected_entries = parser().get<std::size_t>("--expected-entries");
@@ -114,7 +106,6 @@ static coro::CoroTask<int> run_index(const IndexArgParse* cli) {
         cli->indexing.index_dir.empty() ? log_dir : cli->indexing.index_dir;
     const auto expected_entries = cli->expected_entries;
     const auto false_positive_rate = cli->false_positive_rate;
-    const auto build_manifest = cli->manifest;
     const auto rebuild_summaries = cli->rebuild_summaries;
 
     std::vector<std::string> user_dimensions = cli::split_csv(dimensions_str);
@@ -159,7 +150,6 @@ static coro::CoroTask<int> run_index(const IndexArgParse* cli) {
                         i < extra_dimensions.size() - 1 ? ", " : "\n");
         }
     }
-    std::printf("  Build manifest: %s\n", build_manifest ? "true" : "false");
     std::printf("==========================================\n\n");
 
     // Discover input files
@@ -182,6 +172,31 @@ static coro::CoroTask<int> run_index(const IndexArgParse* cli) {
 
     DFTRACER_UTILS_LOG_INFO("Found %zu input files", input_files.size());
 
+    // Normalize single-member inputs to bounded multi-member gzip so the build
+    // never OOMs; readers use the same split/ copies.
+    {
+        auto norm = co_await normalize_members_for_ingest(
+            std::move(input_files), checkpoint_size);
+        input_files = std::move(norm.files);
+        for (const auto& [src, dst] : norm.split)
+            DFTRACER_UTILS_LOG_WARN(
+                "auto-split single-member input (original kept): %s -> %s",
+                src.c_str(), dst.c_str());
+    }
+
+    // On-disk sizes are compressed for .pfw.gz; estimate_per_file_bytes expands
+    // them (PER_FILE_EXPANSION_FACTOR) to a decompressed + aggregated peak.
+    std::vector<std::size_t> file_sizes;
+    file_sizes.reserve(input_files.size());
+    for (const auto& f : input_files) {
+        std::error_code ec;
+        const auto sz = fs::file_size(f, ec);
+        file_sizes.push_back(ec ? 0 : sz);
+    }
+    const std::size_t required_bytes =
+        estimate_per_file_bytes(file_sizes) * file_sizes.size();
+    cli::warn_if_memory_tight(required_bytes);
+
     auto pipeline_config =
         cli::build_pipeline_config("DFTracer Bloom Indexer", cli->pipeline);
 
@@ -193,8 +208,7 @@ static coro::CoroTask<int> run_index(const IndexArgParse* cli) {
     {
         IndexDatabase coord_db(index_dir);
         coord_db.init_schema();
-        preassigned_file_ids =
-            coord_db.register_files(input_files, build_manifest);
+        preassigned_file_ids = coord_db.register_files(input_files);
     }
 
     const std::string staging_root =
@@ -212,7 +226,6 @@ static coro::CoroTask<int> run_index(const IndexArgParse* cli) {
     batch_config->checkpoint_size = checkpoint_size;
     batch_config->parallelism = executor_threads;
     batch_config->force_rebuild = force_rebuild;
-    batch_config->build_manifest = build_manifest;
     batch_config->bloom_config = indexer_config;
     batch_config->bloom_dimensions = all_dimensions;
     batch_config->rebuild_root_summaries = false;
@@ -293,9 +306,6 @@ static coro::CoroTask<int> run_index(const IndexArgParse* cli) {
     for (std::size_t i = 0; i < all_dimensions.size(); ++i) {
         std::printf("%s%s", all_dimensions[i].c_str(),
                     i < all_dimensions.size() - 1 ? ", " : "\n");
-    }
-    if (build_manifest) {
-        std::printf("  Manifest index: built\n");
     }
     std::printf("==========================================\n");
 

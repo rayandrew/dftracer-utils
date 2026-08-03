@@ -17,7 +17,7 @@ TEST_SUITE("EventCollector") {
         TestEnvironment env(100);
 
         // Create a DFTracer test file
-        std::string test_file = env.create_dft_test_file(10);
+        std::string test_file = env.create_dft_test_gzip_file(10);
 
         // First collect metadata
         auto meta_input = MetadataCollectorUtilityInput::from_file(test_file)

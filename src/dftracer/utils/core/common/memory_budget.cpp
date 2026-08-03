@@ -1,4 +1,5 @@
 #include <dftracer/utils/core/common/memory_budget.h>
+#include <dftracer/utils/core/common/str_format.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -157,23 +158,6 @@ std::size_t compute_memory_budget(std::size_t user_override_bytes) {
     return std::max(budget, MIN_MEMORY_BUDGET_BYTES);
 }
 
-std::size_t compute_channel_capacity(std::size_t memory_budget_bytes,
-                                     std::size_t estimated_batch_bytes,
-                                     std::size_t num_workers) {
-    std::size_t from_budget =
-        memory_budget_bytes / std::max(estimated_batch_bytes, std::size_t(1));
-    std::size_t minimum = std::max(num_workers * 2, std::size_t(4));
-    return std::max(from_budget, minimum);
-}
-
-std::size_t compute_file_batch_size(std::size_t memory_budget_bytes,
-                                    std::size_t estimated_file_bytes,
-                                    std::size_t min_files) {
-    std::size_t from_budget =
-        memory_budget_bytes / std::max(estimated_file_bytes, std::size_t(1));
-    return std::max(from_budget, std::max(min_files, std::size_t(1)));
-}
-
 std::size_t estimate_per_file_bytes(const std::vector<std::size_t> &file_sizes,
                                     std::size_t user_override_bytes) {
     if (user_override_bytes > 0) return user_override_bytes;
@@ -201,6 +185,31 @@ std::size_t estimate_per_file_bytes(const std::vector<std::size_t> &file_sizes,
     estimate = std::max(estimate, MIN_PER_FILE_PEAK_BYTES);
     estimate = std::min(estimate, MAX_PER_FILE_PEAK_BYTES);
     return estimate;
+}
+
+MemoryBudgetAdvice memory_budget_advice(std::size_t required_bytes,
+                                        std::size_t available_bytes) {
+    if (available_bytes == 0) available_bytes = detect_available_memory();
+    MemoryBudgetAdvice a;
+    a.required_bytes = required_bytes;
+    a.available_bytes = available_bytes;
+    a.peak_bytes = required_bytes * PEAK_MEMORY_FACTOR;
+    a.fits = a.peak_bytes <= available_bytes;
+    a.suggested_nodes =
+        a.fits ? 1 : (a.peak_bytes + available_bytes - 1) / available_bytes;
+    return a;
+}
+
+std::string format_memory_budget_warning(const MemoryBudgetAdvice &advice) {
+    if (advice.fits) return std::string();
+    auto hb = [](std::size_t b) { return human_bytes(static_cast<double>(b)); };
+    return "workload needs ~" + hb(advice.peak_bytes) + " at peak (" +
+           std::to_string(PEAK_MEMORY_FACTOR) + "x the ~" +
+           hb(advice.required_bytes) + " aggregated size); ~" +
+           hb(advice.available_bytes) + " available. Increase memory to ~" +
+           hb(advice.peak_bytes) +
+           ", or split across >=" + std::to_string(advice.suggested_nodes) +
+           " nodes.";
 }
 
 }  // namespace dftracer::utils

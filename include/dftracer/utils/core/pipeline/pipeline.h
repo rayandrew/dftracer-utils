@@ -5,7 +5,6 @@
 #include <dftracer/utils/core/pipeline/error.h>
 #include <dftracer/utils/core/pipeline/pipeline_config.h>
 #include <dftracer/utils/core/pipeline/pipeline_output.h>
-#include <dftracer/utils/core/pipeline/scheduler.h>
 #include <dftracer/utils/core/runtime.h>
 
 #include <any>
@@ -21,6 +20,7 @@ namespace dftracer::utils {
 
 class Task;
 class Executor;
+class Scheduler;
 
 /**
  * Pipeline - DAG container and orchestrator
@@ -171,13 +171,6 @@ class Pipeline {
      */
     std::shared_ptr<Task> get_destination() const { return destination_; }
 
-    /**
-     * Get all tasks in the pipeline
-     */
-    const std::vector<std::shared_ptr<Task>>& get_all_tasks() const {
-        return all_tasks_;
-    }
-
    private:
     /**
      * Validate reachability from source to destination (if set)
@@ -187,8 +180,6 @@ class Pipeline {
     /**
      * Validate type compatibility across all edges
      */
-    bool validate_types();
-
     /**
      * Check for cycles in the DAG
      */

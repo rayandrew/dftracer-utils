@@ -28,6 +28,13 @@ repeated in each tool's section.
   (default: 33554432 B / 32 MB)
 - ``-f, --force`` - Force index recreation
 
+**Compression** (``CompressionArgs``)
+
+- ``--gzip-member-size <MB>`` - Uncompressed gzip member size in MB within each
+  compressed output file (default: 8; ``0`` = single member). Exposed by the
+  trace-writing tools (``split``, ``merge``). See
+  :ref:`multi-member-gzip`.
+
 **Query** (``QueryArgs``)
 
 - ``--query <query>`` - Query DSL filter
@@ -60,6 +67,39 @@ repeated in each tool's section.
   (default), ``warn``, ``error``, or ``off``. Available on every tool; overrides
   the ``DFTRACER_UTILS_LOG_LEVEL`` environment variable (see
   :doc:`installation`).
+
+.. _multi-member-gzip:
+
+Multi-member gzip output
+------------------------
+
+The trace-writing tools (``split``, ``merge``) emit
+**multi-member gzip**: each compressed ``.pfw.gz`` file is a sequence of
+independent gzip members rather than one monolithic stream.
+
+**Why it matters.** A single-member gzip stream can only be inflated serially,
+so indexing and reading a large file is limited to one core per file.
+Multi-member output lets readers and the indexer divide a single file into
+per-member work and inflate/parse it in parallel (see the ``gzip_member_scanner``
+and the parallel index build). This is what keeps large traces fast without
+first building an index. The native DFTracer runtime writes multi-member gzip;
+tools that re-chunk traces should preserve that shape.
+
+**Sizing.** ``--gzip-member-size`` is measured in **uncompressed** MB because a
+member is a unit of parallel inflate/parse **work**, which is proportional to
+uncompressed bytes. This is intentionally a different unit from the tools'
+``--chunk-size`` (which controls the **compressed** on-disk file size):
+
+- ``--chunk-size`` (compressed) - how big each output file is on disk.
+- ``--gzip-member-size`` (uncompressed) - the intra-file parallelism granularity.
+
+Because a chunk is sized in compressed bytes (roughly 10x smaller than
+uncompressed), a chunk comfortably holds many members. For example a 32 MB
+compressed chunk is ~300 MB uncompressed, so ``--gzip-member-size 4`` yields
+roughly ``300 / 4 ≈ 75`` members. Smaller members give more parallelism at a
+small compression-ratio cost (each member resets the deflate dictionary);
+larger members compress slightly better with coarser parallelism.
+``--gzip-member-size 0`` restores single-member output.
 
 dftracer_reader
 ---------------
@@ -156,6 +196,7 @@ dftracer_merge
 - ``-f, --force`` - Override existing output file and force index recreation
 - ``-c, --compress`` - Compress output file with gzip
 - ``-g, --gzip-only`` - Process only .pfw.gz files
+- ``--gzip-member-size <MB>`` - Uncompressed gzip member size in MB in the compressed output (default: 8; ``0`` = single member). See :ref:`multi-member-gzip`.
 - ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
 - ``--executor-threads <count>`` - Number of worker threads for parallel processing (default: number of CPU cores)
 - ``--index-dir <path>`` - Directory to store index files (default: system temp directory)
@@ -189,13 +230,21 @@ dftracer_split
 - ``-n, --app-name <name>`` - Application name for output files (default: app)
 - ``-d, --directory <path>`` - Input directory containing .pfw or .pfw.gz files (default: .)
 - ``-o, --output <dir>`` - Output directory for split files (default: ./split)
-- ``-s, --chunk-size <MB>`` - Chunk size in MB (default: 4)
+- ``-s, --chunk-size <MB>`` - Output file size in MB, approximate **compressed** on-disk size (default: 4)
+- ``--gzip-member-size <MB>`` - **Uncompressed** gzip member size in MB within each output file (default: 8; ``0`` = single member). See :ref:`multi-member-gzip`.
 - ``-f, --force`` - Override existing files and force index recreation
 - ``-c, --compress`` - Compress output files with gzip (default: true)
 - ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
 - ``--executor-threads <count>`` - Number of worker threads for parallel processing (default: number of CPU cores)
 - ``--index-dir <path>`` - Directory to store index files (default: system temp directory)
 - ``--verify`` - Verify output chunks match input by comparing event IDs
+
+.. note::
+
+   ``--chunk-size`` is **compressed** (the resulting on-disk file size), while
+   ``--gzip-member-size`` is **uncompressed** (the parallel-work granularity).
+   They are orthogonal: a 32 MB compressed chunk holds ~300 MB uncompressed, so
+   at 8 MB members it contains ~37 members. See :ref:`multi-member-gzip`.
 
 **Example:**
 
@@ -206,6 +255,9 @@ dftracer_split
 
    # Split with 10MB chunks and custom app name
    dftracer_split -d ./traces -s 10 -n myapp -o ./chunks
+
+   # Larger chunks with fine-grained 4 MB members for more read parallelism
+   dftracer_split -d ./traces -s 256 --gzip-member-size 4 -o ./chunks
 
    # Split without compression and verify output
    dftracer_split -d ./data -c false --verify -o ./output
@@ -468,7 +520,7 @@ Watchdog, Indexing).
     # Build with custom dimensions and force rebuild
     dftracer_index -d ./traces --dimensions "args.level,args.io.size" --force
 
-    # Build manifest indices for reorganization
+    # Build manifest indices for sparse query routing
     dftracer_index -d ./traces --manifest
 
 dftracer_aggregator
@@ -643,75 +695,6 @@ scripts/compare_dlio_yamls.py --python <a.yaml> --cpp <b.yaml>`` (the inline
 PEP-723 metadata installs ``pyyaml`` and ``numpy`` automatically). Same model
 family + small KS = the two YAMLs would produce indistinguishable DLIO sample
 streams.
-
-dftracer_organize
------------------
-
-**Description:** Reorganize traces by routing events to query-based groups with provenance tracking
-
-**Usage:**
-
-.. code-block:: bash
-
-    dftracer_organize [OPTIONS] --output <dir> --groups <groups...>
-
-**Options:**
-
-- ``--files <files...>`` - Input trace files (.pfw, .pfw.gz)
-- ``-d, --directory <path>`` - Directory containing trace files
-- ``-o, --output <dir>`` - Output directory [required]
-- ``--groups <groups...>`` - Query groups: ``'io:cat == "POSIX"'`` ``'compute:cat == "APP"'`` [required]
-- ``--chunk-size <MB>`` - Target chunk size in MB for output files (default: 256)
-- ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
-- ``--index-dir <path>`` - Directory for sidecar files
-- ``-f, --force`` - Force rebuild of indices
-- ``--no-compress`` - Write plain .pfw instead of .pfw.gz
-- ``--executor-threads <count>`` - Worker threads (default: number of CPU cores)
-
-**Example:**
-
-.. code-block:: bash
-
-    # Separate I/O and compute operations
-    dftracer_organize -d ./traces -o ./organized \
-        --groups 'io:cat == "POSIX"' 'compute:cat == "APP"'
-
-    # Create multiple semantic views
-    dftracer_organize -d ./traces -o ./views \
-        --groups 'read:name == "read"' 'write:name == "write"' 'other:'
-
-    # Keep uncompressed output
-    dftracer_organize -d ./traces -o ./plain --groups "all:" --no-compress
-
-dftracer_reconstruct
---------------------
-
-**Description:** Reconstruct original traces from reorganized files using provenance tracking in .pidx sidecars
-
-**Usage:**
-
-.. code-block:: bash
-
-    dftracer_reconstruct [OPTIONS] --directory <dir> --output <dir>
-
-**Options:**
-
-- ``-d, --directory <path>`` - Directory containing reorganized files [required]
-- ``-o, --output <dir>`` - Output directory [required]
-- ``--index-dir <path>`` - Directory for sidecar files
-- ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
-- ``--no-compress`` - Write plain .pfw instead of .pfw.gz
-- ``--executor-threads <count>`` - Worker threads (default: number of CPU cores)
-
-**Example:**
-
-.. code-block:: bash
-
-    # Reconstruct from reorganized directory
-    dftracer_reconstruct -d ./organized -o ./reconstructed
-
-    # Reconstruct without compression
-    dftracer_reconstruct -d ./views -o ./reconstructed --no-compress
 
 dftracer_replay
 ---------------

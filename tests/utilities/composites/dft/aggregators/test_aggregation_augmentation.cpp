@@ -21,9 +21,8 @@ AggregationBatch create_test_batch(std::uint64_t time_bucket,
     metrics.count = count;
     metrics.ts = ts;
     metrics.te = te;
-    metrics.duration.count = count;
-    metrics.duration.total = count * 1000;
-    metrics.duration.mean = 1000.0;
+    metrics.duration.stat.n = count;
+    metrics.duration.stat.sum = count * 1000;
 
     batch.entries.emplace_back(key, metrics);
     return batch;
@@ -59,8 +58,8 @@ TEST_SUITE("AggregationAugmentation") {
             metrics.count = 20;
             metrics.ts = i * 1000;
             metrics.te = (i + 1) * 1000;
-            metrics.duration.count = 20;
-            metrics.duration.total = 20000;
+            metrics.duration.stat.n = 20;
+            metrics.duration.stat.sum = 20000;
 
             batch.entries.emplace_back(key, metrics);
         }

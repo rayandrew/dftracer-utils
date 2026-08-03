@@ -5,7 +5,6 @@
 #include <dftracer/utils/core/utilities/utilities.h>
 #include <dftracer/utils/utilities/composites/dft/event_id_extractor_utility.h>
 #include <dftracer/utils/utilities/composites/dft/internal/chunk_manifest.h>
-#include <dftracer/utils/utilities/compression/zlib/streaming_compressor_utility.h>
 #include <dftracer/utils/utilities/fileio/types/types.h>
 
 #include <cstddef>
@@ -27,6 +26,8 @@ struct ChunkExtractorUtilityInput {
     std::string app_name;
     bool compress = false;
     bool compute_hash = true;
+    // Uncompressed bytes per gzip member (0 = single member per file).
+    std::size_t member_size_bytes = 0;
 
     ChunkExtractorUtilityInput()
         : chunk_index(0), compress(false), compute_hash(true) {}
@@ -59,26 +60,17 @@ struct ChunkExtractorUtilityInput {
         return *this;
     }
 
-    // Convert to byte-based fileio::ChunkManifest for extraction
-    fileio::ChunkManifest to_io_manifest() const {
-        fileio::ChunkManifest io_manifest;
-        io_manifest.total_size_mb = manifest.total_size_mb;
-        for (const auto& dft_spec : manifest.specs) {
-            fileio::ChunkSpec io_spec;
-            io_spec.file_path = dft_spec.file_path;
-            io_spec.index_path = dft_spec.index_path;
-            io_spec.size_mb = dft_spec.size_mb;
-            io_spec.start_byte = dft_spec.start_byte;
-            io_spec.end_byte = dft_spec.end_byte;
-            io_manifest.specs.push_back(io_spec);
-        }
-        return io_manifest;
+    ChunkExtractorUtilityInput& with_member_size(std::size_t bytes) {
+        member_size_bytes = bytes;
+        return *this;
     }
 
     bool operator==(const ChunkExtractorUtilityInput& other) const {
         return chunk_index == other.chunk_index && manifest == other.manifest &&
                output_dir == other.output_dir && app_name == other.app_name &&
-               compress == other.compress && compute_hash == other.compute_hash;
+               compress == other.compress &&
+               compute_hash == other.compute_hash &&
+               member_size_bytes == other.member_size_bytes;
     }
 };
 

@@ -55,7 +55,7 @@ using ChunkManifestMapperUtilityOutput =
  * - Tracks both byte offsets and line ranges for each chunk
  * - Approximates byte offsets from line-based metadata
  * - Assumes uniform byte distribution across lines
- * - Line boundary alignment happens during extraction (LineBytesRange)
+ * - Line boundary alignment happens during extraction
  *
  * Usage:
  * @code

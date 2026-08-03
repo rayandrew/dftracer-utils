@@ -1,6 +1,8 @@
 #ifndef DFTRACER_UTILS_UTILITIES_FILEIO_PARALLEL_LAYOUT_H
 #define DFTRACER_UTILS_UTILITIES_FILEIO_PARALLEL_LAYOUT_H
 
+#include <dftracer/utils/core/common/filesystem_info.h>
+
 #include <cstddef>
 #include <string>
 
@@ -11,14 +13,9 @@ enum class FileLayout {
     STRIPED,  // single file, atomic-offset pwrite; used on local and PFS
 };
 
-enum class FilesystemKind {
-    UNKNOWN,
-    LOCAL,  // ext4, xfs, btrfs, tmpfs, etc.
-    NFS,
-    LUSTRE,
-    GPFS,
-    BEEGFS,
-};
+// Filesystem classification lives in core/common; re-exported here so existing
+// callers keep using parallel::FilesystemKind.
+using dftracer::utils::FilesystemKind;
 
 struct LayoutInfo {
     FileLayout layout;
@@ -41,6 +38,12 @@ struct WriterSizing {
 /// Below this, compressed payloads may not reliably fit one stripe, so we
 /// fall back to the atomic-offset striped writer.
 constexpr std::size_t MIN_PADDED_STRIPE_BYTES = 1 * 1024 * 1024;
+
+/// True if make_writer() will select the padded-striped layout for this
+/// (layout, gzip) pair. Single source of truth for the padded-vs-atomic gate,
+/// so callers that must size the writer to match don't re-derive it (and drift
+/// when the gate changes).
+bool uses_padded_layout(const LayoutInfo& info, bool gzip) noexcept;
 
 /// Pure sizing policy. Worker count is capped by stripe_count on PFS.
 /// For the atomic-offset striped writer, flush_threshold = max(default,

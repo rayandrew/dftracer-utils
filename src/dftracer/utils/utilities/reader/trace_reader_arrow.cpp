@@ -3,6 +3,8 @@
 #include <dftracer/utils/core/common/string_arena.h>
 #include <dftracer/utils/utilities/common/arrow/column_builder.h>
 #include <dftracer/utils/utilities/common/query/query.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/resolved_field_rewriter.h>
+#include <dftracer/utils/utilities/composites/dft/schema.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/reader/internal/reader.h>
 #include <dftracer/utils/utilities/reader/internal/trace_reader_prefilter.h>
@@ -17,6 +19,7 @@
 
 namespace dftracer::utils::utilities::reader {
 
+namespace indexing = composites::dft::indexing;
 using common::query::Query;
 using internal::build_prefilter;
 using internal::CompiledEqProbe;
@@ -207,56 +210,8 @@ bool arrow_row_from_doc(RecordBatchBuilder& builder,
 }
 
 void collect_query_fields(simdjson::ondemand::document_reference doc,
-                          const Query& query, common::query::ValueMap& out);
-
-// Run iterate_many over `padded`, build arrow rows, and emit completed
-// batches via `yield_one`. Updates `carry` with the truncated tail (if any)
-// for the caller to prepend to the next chunk.
-template <typename Yield>
-void parse_padded_into_arrow(simdjson::ondemand::parser& bulk_parser,
-                             simdjson::padded_string& padded,
-                             const std::optional<Query>& query, bool flatten,
-                             RecordBatchBuilder& builder, StringArena& arena,
-                             std::vector<ArrowKeyHint>& hints,
-                             std::size_t batch_size, std::string* carry,
-                             Yield&& yield_one) {
-    auto docs_r = bulk_parser.iterate_many(padded, 1 << 20, false);
-    if (docs_r.error()) {
-        if (carry) carry->clear();
-        return;
-    }
-    auto& docs = docs_r.value();
-    for (auto it = docs.begin(); it != docs.end(); ++it) {
-        auto doc_result = *it;
-        if (doc_result.error()) continue;
-        auto& doc = doc_result.value();
-        if (query) {
-            common::query::ValueMap fields;
-            collect_query_fields(doc, *query, fields);
-            if (!query->evaluate(fields)) continue;
-            doc.rewind();
-        }
-        if (!arrow_row_from_doc(builder, hints, doc, flatten)) continue;
-        if (builder.num_rows() >= batch_size) {
-            auto result = builder.finish();
-            arena.clear();
-            if (!builder.is_schema_locked()) builder.lock_schema();
-            builder.reset(true);
-            builder.reserve(batch_size);
-            yield_one(std::move(result));
-        }
-    }
-    if (carry) {
-        std::size_t total = padded.size();
-        std::size_t truncated = docs.truncated_bytes();
-        if (truncated > 0 && truncated <= total) {
-            carry->assign(padded.data() + total - truncated,
-                          padded.data() + total);
-        } else {
-            carry->clear();
-        }
-    }
-}
+                          const Query& query, bool check_dotted,
+                          common::query::ValueMap& out);
 
 // Build a simdjson-padded buffer containing only the lines in `chunk` that
 // pass the line-level prefilter. For queries with no useful prefilter, the
@@ -286,7 +241,8 @@ std::string collect_matching_lines(std::span<const char> chunk,
 // Extract fields referenced by the query into a ValueMap, walking one level
 // of object nesting. Fields not referenced by the query are skipped.
 void collect_query_fields(simdjson::ondemand::document_reference doc,
-                          const Query& query, common::query::ValueMap& out) {
+                          const Query& query, bool check_dotted,
+                          common::query::ValueMap& out) {
     auto obj = doc.get_object();
     if (obj.error()) return;
     for (auto field : obj.value()) {
@@ -309,9 +265,8 @@ void collect_query_fields(simdjson::ondemand::document_reference doc,
                 if (nk_r.error()) continue;
                 auto nv_r = nf.value();
                 if (nv_r.error()) continue;
-                if (!query.references(nk_r.value())) continue;
-                out[std::string(nk_r.value())] =
-                    ondemand_to_literal(nv_r.value());
+                internal::store_referenced_nested(out, query, check_dotted, key,
+                                                  nk_r.value(), nv_r.value());
             }
         } else if (query.references(key)) {
             out[std::string(key)] = ondemand_to_literal(val);
@@ -330,6 +285,22 @@ coro::AsyncGenerator<ArrowExportResult> TraceReader::read_arrow(
         query = std::move(*parsed);
     }
 
+    // Resolve virtual fields (resolved.*/r.*) to concrete hash in-clauses via
+    // the index before the query drives pruning or per-event evaluation.
+    if (query && has_index_ && !index_path_.empty() &&
+        indexing::has_resolved_fields(*query)) {
+        try {
+            indexer::IndexDatabase db(
+                index_path_,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
+            if (auto rewritten =
+                    indexing::rewrite_resolved_fields(*query, db)) {
+                query = std::move(*rewritten);
+            }
+        } catch (...) {
+        }
+    }
+
     // When chunk_prune_only is set, dim_stats already proved every event in
     // the chunk that has the predicate field matches the literal. We still
     // need to skip events that lack the field (e.g., metadata "ph":"M"
@@ -339,6 +310,9 @@ coro::AsyncGenerator<ArrowExportResult> TraceReader::read_arrow(
         const auto& fset = query->fields();
         presence_check_paths.assign(fset.begin(), fset.end());
     }
+
+    const bool query_has_dotted =
+        query && internal::query_references_dotted(*query);
 
     // For AND-of-EQ predicates, evaluate directly against simdjson without
     // ValueMap (avoids wyhash + per-field std::string allocation per row).
@@ -386,8 +360,9 @@ coro::AsyncGenerator<ArrowExportResult> TraceReader::read_arrow(
     std::optional<indexer::IndexDatabase> db_keep_alive;
     if (has_index_ && !index_path_.empty()) {
         try {
-            db_keep_alive.emplace(index_path_,
-                                  rocksdb::RocksDatabase::OpenMode::ReadOnly);
+            db_keep_alive.emplace(
+                index_path_,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
         } catch (...) {
         }
     }
@@ -401,6 +376,16 @@ coro::AsyncGenerator<ArrowExportResult> TraceReader::read_arrow(
                                   ? build_prefilter(*query)
                                   : LinePrefilter{};
     bool have_line_prefilter = !prefilter.empty();
+
+    // Sub-chunk skip: a single-member item whose excluded buckets hold no
+    // matching event. Disabled under a line prefilter, which drops lines
+    // before the loop and would desync the ordinal. Ordinals count data
+    // events (ph != "M") in file order, matching the indexer's buckets.
+    const bool sub_skip =
+        !config.sub_event_counts.empty() && !have_line_prefilter;
+    std::size_t sub_bucket = 0;
+    std::uint64_t sub_ordinal = 0;
+    std::uint64_t sub_bucket_end = sub_skip ? config.sub_event_counts[0] : 0;
 
     simdjson::ondemand::parser bulk_parser;
     RecordBatchBuilder builder;
@@ -468,12 +453,39 @@ coro::AsyncGenerator<ArrowExportResult> TraceReader::read_arrow(
             if (doc_result.error()) continue;
             auto& doc = doc_result.value();
 
+            if (sub_skip) {
+                // Metadata (ph == "M") is not counted in sub-buckets; pass it
+                // through (it fails any ts/dur predicate anyway). Data events
+                // advance the ordinal and skip when their bucket is excluded.
+                bool is_meta = false;
+                auto ph = doc.find_field_unordered("ph");
+                if (!ph.error()) {
+                    auto pv = ph.value_unsafe();
+                    if (composites::dft::read_phase(pv) ==
+                        composites::dft::RecordPhase::METADATA) {
+                        is_meta = true;
+                    }
+                }
+                doc.rewind();
+                if (!is_meta) {
+                    while (sub_ordinal >= sub_bucket_end &&
+                           sub_bucket + 1 < config.sub_event_counts.size()) {
+                        ++sub_bucket;
+                        sub_bucket_end += config.sub_event_counts[sub_bucket];
+                    }
+                    bool keep = sub_bucket >= config.sub_keep.size() ||
+                                config.sub_keep[sub_bucket] != 0;
+                    ++sub_ordinal;
+                    if (!keep) continue;
+                }
+            }
+
             if (query && !config.chunk_prune_only) {
                 if (use_compiled) {
                     if (!eval_compiled_eq(compiled_probes, doc)) continue;
                 } else {
                     common::query::ValueMap fields;
-                    collect_query_fields(doc, *query, fields);
+                    collect_query_fields(doc, *query, query_has_dotted, fields);
                     if (!query->evaluate(fields)) continue;
                 }
                 doc.rewind();

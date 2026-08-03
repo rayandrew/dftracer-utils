@@ -6,9 +6,9 @@
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/utilities/common/query/query.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_pruner_utility.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/sub_chunk_prune.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
-#include <dftracer/utils/utilities/indexer/internal/checkpoint.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
 
 #include <algorithm>
@@ -32,38 +32,22 @@ struct ClipRange {
     bool has_byte_clip() const { return end_byte > start_byte; }
 };
 
-// Geometry of the pruner chunks for one file, derived from its gzip recovery
-// points. Pruner chunk_idx is 0-indexed over uncompressed slices: recovery
-// point ckpts[k] sits at the START of chunk (k+1); chunk 0 has no recovery
-// point at its start (decoded from gzip stream start). Total chunks =
-// ckpts.size()+1.
+// Geometry of the pruner chunks for one file, indexed by pruner chunk_idx.
 struct ChunkGeometry {
-    const std::vector<dftracer::utils::utilities::indexer::IndexerCheckpoint>
-        &ckpts;
+    const std::vector<dftracer::utils::utilities::indexer::ChunkSpan> &spans;
 
-    std::size_t total_chunks() const { return ckpts.size() + 1; }
+    std::size_t total_chunks() const { return spans.size(); }
     std::size_t start_byte(std::uint64_t cidx) const {
-        if (cidx == 0) return 0;
-        return ckpts[cidx - 1].uc_offset;
+        return spans[cidx].uc_offset;
     }
     std::size_t end_byte(std::uint64_t cidx) const {
-        if (cidx == 0) return ckpts.empty() ? 0 : ckpts[0].uc_offset;
-        std::size_t k = cidx - 1;
-        return ckpts[k].uc_offset + ckpts[k].uc_size;
+        return spans[cidx].uc_offset + spans[cidx].uc_size;
     }
-    // Chunk 0 covers everything before the first recovery point; chunk k>=1
-    // spans recovery point (k-1).
     std::size_t first_line(std::uint64_t cidx) const {
-        if (cidx == 0) return 1;
-        return ckpts[cidx - 1].first_line_num;
+        return spans[cidx].first_line_num;
     }
     std::size_t last_line(std::uint64_t cidx) const {
-        if (cidx == 0) {
-            if (ckpts.empty()) return SIZE_MAX;
-            return ckpts[0].first_line_num > 0 ? ckpts[0].first_line_num - 1
-                                               : 0;
-        }
-        return ckpts[cidx - 1].last_line_num;
+        return spans[cidx].last_line_num;
     }
 };
 
@@ -223,9 +207,9 @@ void emit_work_items(std::vector<ArrowWorkItem> &items, const std::string &fp,
         std::uint64_t ecidx = keep_chunks[group_end - 1];
         std::size_t start_byte = geo.start_byte(scidx);
         std::size_t end_byte = geo.end_byte(ecidx);
-        // start_at_checkpoint: a gzip recovery point sits at start_byte (true
-        // for any cidx>=1; false for the implicit chunk 0 which decodes from
-        // stream start).
+        // Chunk 0 decodes from stream start and so begins on a line boundary;
+        // any later chunk begins at a member/recovery-point boundary that is
+        // typically mid-line.
         bool start_at_checkpoint = (scidx >= 1);
         bool end_at_checkpoint = (group_end < keep_chunks.size());
         if (clip.has_line_clip()) {
@@ -262,8 +246,14 @@ void emit_work_items(std::vector<ArrowWorkItem> &items, const std::string &fp,
                 continue;
             }
         }
-        items.push_back({fp, start_byte, end_byte, start_at_checkpoint,
-                         end_at_checkpoint, file_pure_match});
+        ArrowWorkItem byte_item;
+        byte_item.file_path = fp;
+        byte_item.start_byte = start_byte;
+        byte_item.end_byte = end_byte;
+        byte_item.start_at_checkpoint = start_at_checkpoint;
+        byte_item.end_at_checkpoint = end_at_checkpoint;
+        byte_item.chunk_prune_only = file_pure_match;
+        items.push_back(std::move(byte_item));
         group_start = group_end;
     }
 }
@@ -324,7 +314,7 @@ std::vector<ArrowWorkItem> enumerate_work_items(
         try {
             idx_db = std::make_unique<indexer_ns::IndexDatabase>(
                 index_path,
-                dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
         } catch (...) {
             for (auto i : file_idxs) push_unsplit(files[i]);
             continue;
@@ -334,7 +324,7 @@ std::vector<ArrowWorkItem> enumerate_work_items(
         struct FileCtx {
             std::size_t file_idx;
             int fid;
-            std::vector<indexer_ns::IndexerCheckpoint> ckpts;
+            std::vector<indexer_ns::ChunkSpan> spans;
         };
         std::vector<FileCtx> file_ctxs;
         file_ctxs.reserve(file_idxs.size());
@@ -347,15 +337,11 @@ std::vector<ArrowWorkItem> enumerate_work_items(
                 push_unsplit(files[i]);
                 continue;
             }
-            fc.ckpts = idx_db->query_checkpoints(fc.fid);
-            if (fc.ckpts.empty()) {
+            fc.spans = idx_db->query_chunk_spans(fc.fid);
+            if (fc.spans.empty()) {
                 push_unsplit(files[i]);
                 continue;
             }
-            std::sort(fc.ckpts.begin(), fc.ckpts.end(),
-                      [](const auto &a, const auto &b) {
-                          return a.first_line_num < b.first_line_num;
-                      });
             file_ctxs.push_back(std::move(fc));
         }
 
@@ -386,11 +372,22 @@ std::vector<ArrowWorkItem> enumerate_work_items(
             eq_leaves;
         if (parsed) eq_leaves = extract_eq_leaves(parsed->root());
 
+        // Sub-chunk skip applies only to full-member reads (a clip that trims
+        // the member start would offset the ordinal count) and only when the
+        // query constrains ts/dur.
+        namespace idx = dftracer::utils::utilities::composites::dft::indexing;
+        bool sub_chunk_eligible = false;
+        if (parsed && !clip.has_line_clip() && !clip.has_byte_clip()) {
+            auto ts = idx::extract_and_range(parsed->root(), "ts");
+            auto dur = idx::extract_and_range(parsed->root(), "dur");
+            sub_chunk_eligible = ts.constrained || dur.constrained;
+        }
+
         for (std::size_t fc_idx = 0; fc_idx < file_ctxs.size(); ++fc_idx) {
             auto &fc = file_ctxs[fc_idx];
             const auto &fp = files[fc.file_idx];
 
-            ChunkGeometry geo{fc.ckpts};
+            ChunkGeometry geo{fc.spans};
             std::vector<std::uint64_t> keep_chunks = select_kept_chunks(
                 geo, parsed.has_value(), pruner_outs[fc_idx], clip);
             if (keep_chunks.empty()) continue;
@@ -405,7 +402,54 @@ std::vector<ArrowWorkItem> enumerate_work_items(
                     *idx_db, fc.fid, *eq_leaves, keep_chunks);
             }
 
-            emit_work_items(items, fp, geo, keep_chunks, file_pure_match,
+            if (!sub_chunk_eligible) {
+                emit_work_items(items, fp, geo, keep_chunks, file_pure_match,
+                                max_workers, clip);
+                continue;
+            }
+
+            // Emit members with an active skip-mask as their own full-member
+            // items carrying the mask; the rest coalesce normally.
+            auto stats_rows = idx_db->query_chunk_statistics(fc.fid);
+            std::unordered_map<
+                std::uint64_t,
+                const composites::dft::indexing::ChunkStatistics *>
+                by_member;
+            by_member.reserve(stats_rows.size());
+            for (const auto &r : stats_rows) {
+                by_member[r.checkpoint_idx] = &r.stats;
+            }
+
+            std::vector<std::uint64_t> unmasked;
+            unmasked.reserve(keep_chunks.size());
+            for (auto cidx : keep_chunks) {
+                auto sit = by_member.find(cidx);
+                std::vector<char> keep;
+                if (sit != by_member.end() &&
+                    !sit->second->sub_zonemaps.empty()) {
+                    keep = idx::sub_chunk_keep_mask(
+                        sit->second->sub_zonemaps, parsed->root(), "ts", "dur");
+                }
+                if (keep.empty()) {
+                    unmasked.push_back(cidx);
+                    continue;
+                }
+                ArrowWorkItem item;
+                item.file_path = fp;
+                item.start_byte = geo.start_byte(cidx);
+                item.end_byte = geo.end_byte(cidx);
+                item.start_at_checkpoint = (cidx >= 1);
+                item.end_at_checkpoint = (cidx + 1 < geo.total_chunks());
+                item.chunk_prune_only = file_pure_match;
+                item.sub_event_counts.reserve(sit->second->sub_zonemaps.size());
+                for (const auto &z : sit->second->sub_zonemaps) {
+                    item.sub_event_counts.push_back(
+                        static_cast<std::uint32_t>(z.event_count));
+                }
+                item.sub_keep = std::move(keep);
+                items.push_back(std::move(item));
+            }
+            emit_work_items(items, fp, geo, unmasked, file_pure_match,
                             max_workers, clip);
         }
     }

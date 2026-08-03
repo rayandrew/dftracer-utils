@@ -2,6 +2,7 @@
 #include <dftracer/utils/core/coro/when_all.h>
 #include <dftracer/utils/core/pipeline/executor.h>
 #include <dftracer/utils/core/pipeline/scheduler.h>
+#include <dftracer/utils/core/pipeline/thread_pool_executor.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <doctest/doctest.h>
@@ -16,7 +17,7 @@ using namespace dftracer::utils;
 using namespace dftracer::utils::coro;
 
 TEST_CASE("when_all - Two heterogeneous types (int, string)") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<int> int_result{0};
@@ -54,7 +55,7 @@ TEST_CASE("when_all - Two heterogeneous types (int, string)") {
 }
 
 TEST_CASE("when_all - Three heterogeneous types (int, float, string)") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<int> int_result{0};
@@ -99,7 +100,7 @@ TEST_CASE("when_all - Three heterogeneous types (int, float, string)") {
 }
 
 TEST_CASE("when_all - Mixed void and non-void") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> flag{false};
@@ -140,7 +141,7 @@ TEST_CASE("when_all - Mixed void and non-void") {
 }
 
 TEST_CASE("when_all - All void types") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<int> counter{0};
@@ -176,7 +177,7 @@ TEST_CASE("when_all - All void types") {
 }
 
 TEST_CASE("when_all - Exception propagation from one task") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> exception_caught{false};
@@ -215,7 +216,7 @@ TEST_CASE("when_all - Exception propagation from one task") {
 }
 
 TEST_CASE("when_all - Homogeneous types still work with variadic overload") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<int> sum{0};

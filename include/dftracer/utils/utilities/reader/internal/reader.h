@@ -119,17 +119,6 @@ class Reader {
     std::string read_lines(std::size_t start_line, std::size_t end_line) {
         return read_lines_async(start_line, end_line).get();
     }
-    void read_lines_with_processor(std::size_t start_line, std::size_t end_line,
-                                   LineProcessor &processor) {
-        read_lines_with_processor_async(start_line, end_line, processor).get();
-    }
-    void read_line_bytes_with_processor(std::size_t start_bytes,
-                                        std::size_t end_bytes,
-                                        LineProcessor &processor) {
-        read_line_bytes_with_processor_async(start_bytes, end_bytes, processor)
-            .get();
-    }
-
     // Stream creation
     /**
      * @brief Create a stream for incremental reading.

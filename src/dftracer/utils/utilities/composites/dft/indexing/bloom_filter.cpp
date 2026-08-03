@@ -116,11 +116,6 @@ void BloomFilter::compute_hashes(std::string_view value, std::uint64_t& h1,
     h2 ^= (h2 >> 31);
 }
 
-std::size_t BloomFilter::nth_hash(std::uint64_t h1, std::uint64_t h2,
-                                  std::size_t n) const {
-    return static_cast<std::size_t>((h1 + n * h2) % num_bits_);
-}
-
 void BloomFilter::add(std::string_view value) {
     if (last_value_valid_ && value.size() == last_value_size_ &&
         std::memcmp(last_value_buf_.data(), value.data(), value.size()) == 0) {

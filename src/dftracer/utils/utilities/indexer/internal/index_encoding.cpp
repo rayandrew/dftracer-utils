@@ -17,37 +17,29 @@ std::string prefix_for_file(int file_id) {
 
 std::string metadata_key(int file_id) { return prefix_for_file(file_id); }
 
-std::string checkpoint_key(int file_id, std::uint64_t uc_offset,
-                           std::uint64_t checkpoint_idx) {
-    std::string key = prefix_for_file(file_id);
-    key.reserve(sizeof(std::uint32_t) + 2 * sizeof(std::uint64_t));
-    append_u64(key, uc_offset);
-    append_u64(key, checkpoint_idx);
+std::string gzip_member_prefix(int file_id) {
+    std::string key("m|");
+    key.reserve(2 + sizeof(std::uint32_t));
+    rocks::KeyCodec::append_be32(key, static_cast<std::uint32_t>(file_id));
     return key;
 }
 
-std::string manifest_event_key(int file_id, std::uint64_t checkpoint_idx,
-                               std::string_view cat, std::string_view name) {
-    std::string key("E|");
-    key.reserve(2 + sizeof(std::uint32_t) + sizeof(std::uint64_t) + 1 +
-                cat.size() + name.size());
-    rocks::KeyCodec::append_be32(key, static_cast<std::uint32_t>(file_id));
-    append_u64(key, checkpoint_idx);
-    key.append(cat);
-    key.push_back('\0');
-    key.append(name);
+std::string gzip_member_key(int file_id, std::uint64_t member_idx) {
+    std::string key = gzip_member_prefix(file_id);
+    key.reserve(2 + sizeof(std::uint32_t) + sizeof(std::uint64_t));
+    append_u64(key, member_idx);
     return key;
 }
 
-std::string manifest_metadata_key(int file_id, std::uint64_t checkpoint_idx,
-                                  std::string_view meta_type) {
-    std::string key("M|");
-    key.reserve(2 + sizeof(std::uint32_t) + sizeof(std::uint64_t) +
-                meta_type.size());
-    rocks::KeyCodec::append_be32(key, static_cast<std::uint32_t>(file_id));
-    append_u64(key, checkpoint_idx);
-    key.append(meta_type);
-    return key;
+std::string encode_gzip_member_value(const GzipMemberRecord& member) {
+    std::string value;
+    append_u64(value, member.c_offset);
+    append_u64(value, member.c_size);
+    append_u64(value, member.uc_offset);
+    append_u64(value, member.uc_size);
+    append_u64(value, member.first_line_num);
+    append_u64(value, member.last_line_num);
+    return value;
 }
 
 std::string encode_metadata_record(std::uint64_t checkpoint_size,
@@ -60,63 +52,19 @@ std::string encode_metadata_record(std::uint64_t checkpoint_size,
     return value;
 }
 
-std::string encode_checkpoint_value(const IndexerCheckpoint& checkpoint) {
-    std::string value;
-    append_u64(value, checkpoint.uc_size);
-    append_u64(value, checkpoint.c_offset);
-    append_u64(value, checkpoint.c_size);
-    append_i64(value, checkpoint.bits);
-    append_blob(value, checkpoint.dict_compressed);
-    append_u64(value, checkpoint.num_lines);
-    append_u64(value, checkpoint.first_line_num);
-    append_u64(value, checkpoint.last_line_num);
-    return value;
-}
-
-namespace {
-
-// Packs lines directly into `out` as the `blob` payload of append_blob's
-// wire format: u32 byte-length followed by raw little-endian uint32s.
-void append_line_numbers_blob(std::string& out,
-                              std::span<const std::uint32_t> lines) {
-    const auto bytes =
-        static_cast<std::uint32_t>(lines.size() * sizeof(std::uint32_t));
-    rocks::KeyCodec::append_be32(out, bytes);
-    if (!lines.empty()) {
-        out.append(reinterpret_cast<const char*>(lines.data()), bytes);
-    }
-}
-
-}  // namespace
-
-std::string encode_event_range_value(std::span<const std::uint32_t> lines) {
-    std::string value;
-    value.reserve(sizeof(std::uint64_t) + sizeof(std::uint32_t) +
-                  lines.size() * sizeof(std::uint32_t));
-    append_u64(value, lines.size());
-    append_line_numbers_blob(value, lines);
-    return value;
-}
-
-std::string encode_metadata_value(std::span<const std::uint32_t> lines) {
-    std::string value;
-    value.reserve(sizeof(std::uint32_t) + lines.size() * sizeof(std::uint32_t));
-    append_line_numbers_blob(value, lines);
-    return value;
-}
-
-std::string file_pids_key(int file_id) {
-    std::string key("P|");
-    key.reserve(2 + sizeof(std::uint32_t));
-    rocks::KeyCodec::append_be32(key, static_cast<std::uint32_t>(file_id));
-    return key;
-}
-
 std::string make_dimension_key(int file_id, std::string_view dimension) {
     std::string key("d|");
     key.reserve(2 + sizeof(std::uint32_t) + dimension.size());
     rocks::KeyCodec::append_be32(key, static_cast<std::uint32_t>(file_id));
     key.append(dimension);
+    return key;
+}
+
+std::string make_column_key(int file_id, std::string_view column) {
+    std::string key("c|");
+    key.reserve(2 + sizeof(std::uint32_t) + column.size());
+    rocks::KeyCodec::append_be32(key, static_cast<std::uint32_t>(file_id));
+    key.append(column);
     return key;
 }
 
@@ -206,6 +154,26 @@ std::string encode_chunk_statistics_value(
 
     auto ts_hist = stats.timestamp_histogram.serialize();
     append_blob(value, ts_hist);
+
+    append_u32(value, static_cast<std::uint32_t>(stats.sub_zonemaps.size()));
+    for (const auto& z : stats.sub_zonemaps) {
+        append_u64(value, z.event_count);
+        append_u64(value, z.min_timestamp_us);
+        append_u64(value, z.max_timestamp_us);
+        append_u64(value, z.min_duration_us);
+        append_u64(value, z.max_duration_us);
+    }
+
+    // Per-cat and per-pid duration aggregates (tail: decoders built before this
+    // stop after sub_zonemaps and leave these maps empty).
+    append_blob(
+        value, composites::dft::indexing::ChunkStatistics::serialize_sketch_map(
+                   stats.cat_duration_sketches));
+    append_string(value, stats.cat_duration_sums_json());
+    append_blob(
+        value, composites::dft::indexing::ChunkStatistics::serialize_sketch_map(
+                   stats.pid_duration_sketches));
+    append_string(value, stats.pid_duration_sums_json());
 
     return value;
 }
@@ -304,27 +272,6 @@ std::string hash_table_reverse_key(std::uint8_t type, std::string_view name) {
     key.push_back(static_cast<char>(type + 4));
     key.append(name);
     return key;
-}
-
-std::string encode_file_pids_value(
-    const std::unordered_set<std::uint64_t>& pids) {
-    std::vector<std::uint64_t> sorted_pids(pids.begin(), pids.end());
-    std::sort(sorted_pids.begin(), sorted_pids.end());
-
-    std::string value;
-    auto encode_varint = [&value](std::uint64_t v) {
-        while (v >= 0x80) {
-            value.push_back(static_cast<char>(v | 0x80));
-            v >>= 7;
-        }
-        value.push_back(static_cast<char>(v));
-    };
-
-    encode_varint(sorted_pids.size());
-    for (auto pid : sorted_pids) {
-        encode_varint(pid);
-    }
-    return value;
 }
 
 }  // namespace dftracer::utils::utilities::indexer::internal::encoding

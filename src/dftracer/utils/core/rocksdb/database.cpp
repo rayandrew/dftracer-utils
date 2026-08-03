@@ -3,15 +3,21 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/env.h>
 #include <dftracer/utils/core/rocksdb/database.h>
+#include <dftracer/utils/core/rocksdb/db_manager.h>
 #include <dftracer/utils/core/rocksdb/filesystem.h>
+#include <rocksdb/filter_policy.h>
 #include <rocksdb/slice.h>
 #include <rocksdb/table.h>
+#include <rocksdb/write_buffer_manager.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <functional>
+#include <mutex>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace dftracer::utils::rocksdb {
 
@@ -22,8 +28,26 @@ std::atomic<bool>& process_exiting_flag() {
     return flag;
 }
 
+std::mutex& pre_exit_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::vector<std::function<void()>>& pre_exit_cleanups() {
+    static std::vector<std::function<void()>> v;
+    return v;
+}
+
 const ::rocksdb::ReadOptions& read_options() {
-    static const ::rocksdb::ReadOptions options;
+    static const auto options = [] {
+        ::rocksdb::ReadOptions ro;
+        // Prefetch data blocks asynchronously ahead of the scan cursor (our FS
+        // implements ReadAsync); adaptive_readahead grows the window as the
+        // scan runs so short range reads do not over-read.
+        ro.async_io = true;
+        ro.adaptive_readahead = true;
+        return ro;
+    }();
     return options;
 }
 
@@ -53,7 +77,20 @@ void cleanup_failed_open(::rocksdb::DB*& db,
 
 }  // namespace
 
+void register_pre_exit_cleanup(std::function<void()> fn) {
+    std::lock_guard<std::mutex> lk(pre_exit_mutex());
+    pre_exit_cleanups().push_back(std::move(fn));
+}
+
 void mark_process_exiting_for_rocksdb() {
+    // Drop process-lifetime caches first so the DBs they hold reach a zero
+    // refcount and close cleanly here, while the flag below is still false.
+    {
+        std::lock_guard<std::mutex> lk(pre_exit_mutex());
+        for (auto& fn : pre_exit_cleanups())
+            if (fn) fn();
+    }
+    RocksDBManager::instance().shutdown();
     process_exiting_flag().store(true, std::memory_order_relaxed);
 }
 
@@ -90,6 +127,25 @@ const decltype(cf::ALL)& RocksDatabase::default_column_families() {
     return cf::ALL;
 }
 
+namespace {
+/// One cache for the process. Left unset, every column family gets its own
+/// 8 MB default, which no realistic working set fits in.
+std::shared_ptr<::rocksdb::Cache>& shared_block_cache() {
+    static std::shared_ptr<::rocksdb::Cache> cache =
+        ::rocksdb::NewLRUCache(constants::rocksdb::BLOCK_CACHE_BYTES);
+    return cache;
+}
+
+/// Caps total memtable memory across every column family and every DB in the
+/// process; without it each CF reserves its own write buffers.
+std::shared_ptr<::rocksdb::WriteBufferManager>& shared_write_buffer_manager() {
+    static std::shared_ptr<::rocksdb::WriteBufferManager> mgr =
+        std::make_shared<::rocksdb::WriteBufferManager>(
+            constants::rocksdb::WRITE_BUFFER_BYTES, shared_block_cache());
+    return mgr;
+}
+}  // namespace
+
 ::rocksdb::Options RocksDatabase::default_options() {
     ::rocksdb::Options options;
     options.create_if_missing = true;
@@ -97,10 +153,15 @@ const decltype(cf::ALL)& RocksDatabase::default_column_families() {
     options.allow_concurrent_memtable_write = true;
     options.enable_pipelined_write = true;
     options.max_open_files = Env::rocksdb_max_open_files();
+    // Skip the synchronous per-SST stats pass on open; expensive over Lustre.
+    // (open_files_async is not usable here: it background-opens SSTs by name
+    // and races our ingest/compaction file churn, hitting ENOENT.)
+    options.skip_stats_update_on_db_open = true;
     options.max_background_jobs = 8;
     options.max_subcompactions = 8;
     options.write_buffer_size = 256 * 1024 * 1024;
     options.max_write_buffer_number = 4;
+    options.write_buffer_manager = shared_write_buffer_manager();
     return options;
 }
 
@@ -109,8 +170,11 @@ const decltype(cf::ALL)& RocksDatabase::default_column_families() {
 
     ::rocksdb::BlockBasedTableOptions bbt;
     bbt.block_size = 32 * 1024;
-    bbt.format_version = 5;
+    bbt.format_version = 7;
     bbt.index_block_restart_interval = 16;
+    bbt.block_cache = shared_block_cache();
+    // Better compression and read CPU for the scanned CFs (fixed-layout blobs).
+    bbt.separate_key_value_in_data_block = true;
     options.table_factory.reset(::rocksdb::NewBlockBasedTableFactory(bbt));
 
 #ifdef DFTRACER_UTILS_ENABLE_ZSTD
@@ -139,6 +203,35 @@ const decltype(cf::ALL)& RocksDatabase::default_column_families() {
     return options;
 }
 
+::rocksdb::ColumnFamilyOptions
+RocksDatabase::point_lookup_column_family_options() {
+    auto options = default_column_family_options();
+
+    // Hash keys are uniformly distributed, so every SST's range covers almost
+    // every key: without a filter a get searches all of them. Large blocks
+    // also mean reading and decompressing 32 KB to return a few dozen bytes.
+    ::rocksdb::BlockBasedTableOptions bbt;
+    bbt.block_size = constants::rocksdb::POINT_LOOKUP_BLOCK_SIZE;
+    bbt.format_version = 7;
+    bbt.index_block_restart_interval = 16;
+    bbt.block_cache = shared_block_cache();
+    // Content-hash keys are uniformly distributed: interpolation search beats
+    // binary. Read-time only, works on any SST.
+    bbt.index_block_search_type =
+        ::rocksdb::BlockBasedTableOptions::kInterpolation;
+    bbt.filter_policy.reset(::rocksdb::NewBloomFilterPolicy(
+        constants::rocksdb::BLOOM_BITS_PER_KEY, false));
+    // Left in the table reader rather than the block cache: a scan streams
+    // enough data blocks through the cache to evict the filters it needs.
+    bbt.cache_index_and_filter_blocks = false;
+    options.table_factory.reset(::rocksdb::NewBlockBasedTableFactory(bbt));
+    return options;
+}
+
+bool RocksDatabase::is_point_lookup_cf(std::string_view name) noexcept {
+    return name == cf::HASH_TABLES || name == cf::NAME_DICTIONARY;
+}
+
 bool RocksDatabase::open(const std::string& db_path, OpenMode open_mode) {
     close();
     db_path_ = db_path;
@@ -153,6 +246,15 @@ bool RocksDatabase::open(const std::string& db_path, OpenMode open_mode) {
     if (open_mode_ == OpenMode::ReadOnly) {
         db_options.create_if_missing = false;
         db_options.create_missing_column_families = false;
+        // Read paths do heavy point lookups (e.g. dfanalyzer hash resolution);
+        // with a small table cache the SST readers get evicted and every lookup
+        // re-opens the file to re-read its filter/index blocks, which thrashes.
+        // There is no write-side fd pressure here, so keep every SST open
+        // unless an explicit env cap is set.
+        if (!Env::get<int>("DFTRACER_UTILS_ROCKSDB_MAX_OPEN_FILES")
+                 .has_value()) {
+            db_options.max_open_files = -1;
+        }
     }
     file_system_ = make_dftracer_file_system();
     env_ = make_dftracer_env(file_system_);
@@ -187,7 +289,9 @@ bool RocksDatabase::open(const std::string& db_path, OpenMode open_mode) {
     std::vector<::rocksdb::ColumnFamilyDescriptor> descriptors;
     descriptors.reserve(column_family_names.size());
     for (const auto& name : column_family_names) {
-        auto opts = cf_options;
+        auto opts = is_point_lookup_cf(name)
+                        ? point_lookup_column_family_options()
+                        : cf_options;
         if (cf_options_override_) {
             cf_options_override_(name, opts);
         }
@@ -196,19 +300,22 @@ bool RocksDatabase::open(const std::string& db_path, OpenMode open_mode) {
 
     std::vector<::rocksdb::ColumnFamilyHandle*> handles;
     ::rocksdb::Status status;
+    std::unique_ptr<::rocksdb::DB> opened;
     if (open_mode_ == OpenMode::ReadOnly) {
         status = ::rocksdb::DB::OpenForReadOnly(
-            db_options, db_path_, descriptors, &handles, &db_, false);
+            db_options, db_path_, descriptors, &handles, &opened, false);
     } else {
         status = ::rocksdb::DB::Open(db_options, db_path_, descriptors,
-                                     &handles, &db_);
+                                     &handles, &opened);
     }
     if (!status.ok()) {
-        cleanup_failed_open(db_, handles);
+        ::rocksdb::DB* raw = opened.release();
+        cleanup_failed_open(raw, handles);
         throw DFTUtilsException(ErrorCode::IO, "Failed to open RocksDB at '" +
                                                    db_path_ +
                                                    "': " + status.ToString());
     }
+    db_ = opened.release();
 
     column_families_.clear();
     for (std::size_t i = 0; i < descriptors.size(); ++i) {
@@ -364,13 +471,42 @@ std::unique_ptr<::rocksdb::Iterator> RocksDatabase::new_iterator(
         return ::rocksdb::Status::OK();
     }
     ::rocksdb::IngestExternalFileOptions opts;
-    opts.move_files = false;
-    opts.snapshot_consistency = true;
+    // Rename same-FS staged SSTs instead of copying; RocksDB copies on failure.
+    opts.move_files = true;
+    // Offline bulk build with no live readers, so skip the snapshot/seqno sync.
+    opts.snapshot_consistency = false;
     opts.allow_global_seqno = true;
+    // Keep the assigned seqno in the manifest instead of rewriting it into each
+    // SST (format_version 5 supports this), avoiding a per-SST write + fsync.
+    opts.write_global_seqno = false;
     opts.allow_blocking_flush = true;
     opts.ingest_behind = ingest_behind;
     return db_->IngestExternalFile(column_family_handle(column_family),
                                    external_files, opts);
+}
+
+::rocksdb::Status RocksDatabase::ingest_external_files_multi(
+    const std::vector<
+        std::pair<std::string_view, const std::vector<std::string>*>>& per_cf) {
+    ::rocksdb::IngestExternalFileOptions opts;
+    opts.move_files = true;
+    opts.snapshot_consistency = false;
+    opts.allow_global_seqno = true;
+    opts.write_global_seqno = false;
+    opts.allow_blocking_flush = true;
+
+    std::vector<::rocksdb::IngestExternalFileArg> args;
+    args.reserve(per_cf.size());
+    for (const auto& [cf_name, files] : per_cf) {
+        if (!files || files->empty()) continue;
+        ::rocksdb::IngestExternalFileArg arg;
+        arg.column_family = column_family_handle(cf_name);
+        arg.external_files = *files;
+        arg.options = opts;
+        args.push_back(std::move(arg));
+    }
+    if (args.empty()) return ::rocksdb::Status::OK();
+    return db_->IngestExternalFiles(args);
 }
 
 }  // namespace dftracer::utils::rocksdb

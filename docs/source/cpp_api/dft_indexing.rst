@@ -7,12 +7,12 @@ DFTracer Indexing System
    :doc:`API Reference <api/utilities/composites/dft/indexing>`.
 
 
-Bloom filter indexing and manifest building for fast event lookup in trace files.
+Bloom filter indexing for fast event lookup in trace files.
 All classes are in the ``dftracer::utils::utilities::composites::dft::indexing`` namespace.
 
 The indexing system writes into a single root-local ``.dftindex`` RocksDB
-store (index data and reorganization provenance share the same store) that
-enables sub-second event filtering without scanning entire trace files. Bloom
+store that enables sub-second event filtering without scanning entire trace
+files. Bloom
 filters provide probabilistic set membership testing per chunk, while chunk
 statistics enable predicate pushdown.
 
@@ -30,8 +30,7 @@ statistics enable predicate pushdown.
        end
 
        subgraph Storage[".dftindex RocksDB Store"]
-           IDX["Index column families<br/>(checkpoints, bloom, stats, manifest)"]
-           PIDX["Provenance column family"]
+           IDX["Index column families<br/>(checkpoints, bloom, stats)"]
        end
 
        subgraph Query["Query Path"]
@@ -46,9 +45,6 @@ statistics enable predicate pushdown.
        CI1 --> IDX
        CI2 --> IDX
        CIN --> IDX
-       CI1 --> PIDX
-       CI2 --> PIDX
-       CIN --> PIDX
        QP --> CP
        IDX --> CP
        Cache --> CP
@@ -138,7 +134,7 @@ ChunkIndexerConfig
 Configuration for per-chunk indexing.
 
 Controls which dimensions are indexed (name, category, PID, TID, hashes),
-bloom filter parameters, and whether to build manifest indices.
+and bloom filter parameters.
 
 .. code-block:: cpp
 
@@ -152,7 +148,6 @@ bloom filter parameters, and whether to build manifest indices.
     config.index_shash = true;   // string-hash dimension
     config.expected_entries_per_chunk = 2048;
     config.false_positive_rate = 0.01;
-    config.build_manifest = true;
     config.value_counts_cap = 4096;  // 0 disables dictionaries
 
     // Add custom dimensions (dot-path into JSON events)
@@ -168,8 +163,7 @@ ChunkIndexerUtility
 Per-chunk indexer (parallelizable).
 
 Reads events from a byte range, builds bloom filters for each configured
-dimension, computes chunk statistics, and optionally builds manifest
-line groups for event-level routing.
+dimension and computes chunk statistics.
 
 Supports incremental indexing: if ``existing_state`` is provided, only
 missing dimensions are indexed (detected via config hash comparison).
@@ -188,8 +182,7 @@ Multiple instances run concurrently across chunks.
                      .with_checkpoint_idx(0)
                      .with_config(config);
     ChunkIndexerOutput out = co_await indexer.process(input);
-    // out.bloom_filters (per-dimension), out.statistics (ChunkStatistics),
-    // out.event_line_groups / out.metadata_line_groups when build_manifest.
+    // out.bloom_filters (per-dimension), out.statistics (ChunkStatistics).
 
 Supporting Types
 ~~~~~~~~~~~~~~~~
@@ -211,51 +204,17 @@ Stores:
 Used by ``ChunkPrunerUtility`` for three-tier chunk skipping:
 dictionary lookup, range check, bloom filter fallback.
 
-Visitors
---------
+Index folds
+-----------
 
-The single-pass index builder decompresses each file once and fans the parsed
-events out to a set of ``DftEventVisitor`` instances via ``DftEventDispatcher``
-(see :doc:`dft_aggregators`). Each visitor implements ``on_event(const
-EventRecord&)`` and contributes one facet of the index. Both visitors below
-support ``create_parallel_slice`` / ``merge_parallel_slice`` so the dispatcher
-can parse slices of a chunk concurrently.
-
-BloomVisitor
-~~~~~~~~~~~~
-
-Builds the per-chunk bloom filters, ``ChunkStatistics``, and
-``ChunkDimensionStats`` for the fixed dimensions (name, cat, pid, tid, hhash,
-fhash, shash) plus any configured extra dimensions. Defined in
-``dft/visitors/bloom_visitor.h``.
-
-``finalize`` writes to a live RocksDB handle; the SST-build path uses the
-``*_to_sink`` overloads instead.
-
-.. code-block:: cpp
-
-    #include <dftracer/utils/utilities/composites/dft/visitors/bloom_visitor.h>
-
-    BloomVisitor bloom(config, config.extra_dimensions);
-    // driven by DftEventDispatcher: begin() -> on_checkpoint() -> on_event()...
-    bloom.finalize(writer_context, file_id);  // IndexDatabaseWriterContext&
-
-ManifestVisitor
-~~~~~~~~~~~~~~~
-
-Builds the manifest line groups: per-(cat, name) and per-metadata-type lists
-of line numbers, plus the set of observed pids, enabling event-level routing
-without a full rescan. Defined in ``dft/visitors/manifest_visitor.h``.
-
-``finalize`` writes through an ``IndexBatchSink`` (not a live DB handle).
-
-.. code-block:: cpp
-
-    #include <dftracer/utils/utilities/composites/dft/visitors/manifest_visitor.h>
-
-    ManifestVisitor manifest;
-    // driven by DftEventDispatcher across the file...
-    manifest.finalize(sink, file_id);         // IndexBatchSink&
+The index builder decompresses each file once and folds the parsed events
+through an ``IndexFoldDriver`` that steps a set of folds in a single pass:
+``BloomFold`` (per-chunk bloom filters, ``ChunkStatistics``, and
+``ChunkDimensionStats`` over the fixed dimensions name, cat, pid, tid, hhash,
+fhash, shash plus any configured extras), ``DictFold`` (the hash-table
+dictionary), and, when an aggregation index is requested, ``AggregationFold``.
+Each fold's ``write_to_sink`` emits its records into the shared index sink, so
+one parse feeds every tier.
 
 Query Language
 --------------
@@ -338,18 +297,14 @@ IndexDatabase
 ~~~~~~~~~~~~~
 RocksDB-backed handle over the root-local ``.dftindex`` store. Index data is
 spread across column families (checkpoints, bloom filters, statistics,
-dimension stats, manifest, hash tables, ...); ``init_schema()`` creates them
+dimension stats, hash tables, ...); ``init_schema()`` creates them
 idempotently.
 
-ProvenanceDatabase
-~~~~~~~~~~~~~~~~~~
-RocksDB-backed handle over the same shared ``.dftindex`` store, exposing the
-reorganization provenance data (its own column family, not a separate file).
-
-IndexBuilder
-~~~~~~~~~~~~
-Single-pass index builder that decompresses once and builds all index
-data (checkpoints, bloom filters, manifest) via the visitor pattern.
+IndexBatchBuilderUtility
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Single-pass index builder that decompresses each file once and builds all
+index data (checkpoints, bloom filters, dictionary, aggregation) by folding the
+parsed events through an ``IndexFoldDriver``.
 
 TraceReader
 ~~~~~~~~~~~

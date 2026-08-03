@@ -86,53 +86,6 @@ class LineFilterUtility
     }
 };
 
-/**
- * @brief Utility that filters multiple lines based on a predicate.
- *
- * This is a batch version that processes all lines at once.
- */
-class MultiLinesFilterUtility : public utilities::Utility<Lines, Lines> {
-   private:
-    std::function<bool(const Line&)> predicate_;
-
-   public:
-    explicit MultiLinesFilterUtility(std::function<bool(const Line&)> predicate)
-        : predicate_(std::move(predicate)) {}
-
-    ~MultiLinesFilterUtility() override = default;
-
-    /**
-     * @brief Set the predicate function.
-     */
-    void set_predicate(std::function<bool(const Line&)> predicate) {
-        predicate_ = std::move(predicate);
-    }
-
-    /**
-     * @brief Filter lines based on predicate.
-     *
-     * @param input Lines to filter
-     * @return Filtered lines (only those passing predicate)
-     */
-    coro::CoroTask<Lines> process(const Lines& input) override {
-        if (!predicate_) {
-            // No predicate = pass through all
-            co_return input;
-        }
-
-        std::vector<Line> filtered;
-        filtered.reserve(input.lines.size());
-
-        for (const auto& line : input.lines) {
-            if (predicate_(line)) {
-                filtered.push_back(line);
-            }
-        }
-
-        co_return Lines{std::move(filtered)};
-    }
-};
-
 }  // namespace dftracer::utils::utilities::text
 
 #endif  // DFTRACER_UTILS_UTILITIES_TEXT_LINE_FILTER_H

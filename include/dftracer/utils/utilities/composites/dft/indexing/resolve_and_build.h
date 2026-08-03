@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dftracer::utils::utilities::composites::dft::indexing {
@@ -24,7 +25,9 @@ struct ResolveAndBuildInput {
 
     bool require_checkpoints = true;
     bool require_bloom = false;
-    bool require_manifest = false;
+    /// Build the bloom/stats/dimension tier. Off for aggregation-only
+    /// consumers (dfanalyzer) that never read it.
+    bool build_bloom = true;
     bool require_aggregation = false;
 
     std::optional<aggregators::AggregationConfig> aggregation_config;
@@ -53,6 +56,19 @@ coro::CoroTask<void> ensure_indexes_fresh(CoroScope* scope,
 coro::CoroTask<void> ensure_index_fresh(CoroScope* scope, std::string directory,
                                         std::string file, std::string index_dir,
                                         bool force_rebuild = false);
+
+// Rewrite any single/oversized-member input to bounded multi-member gzip in a
+// sibling `split/` dir (non-destructive; the original is untouched), so index
+// and reader never hold a giant member. Returns the file list with those inputs
+// replaced by their split copies, plus the (original, split) pairs for a
+// warning. Call before indexing and read from the returned files so both agree.
+// `member_size` 0 = default checkpoint size.
+struct MemberNormalizeResult {
+    std::vector<std::string> files;
+    std::vector<std::pair<std::string, std::string>> split;
+};
+coro::CoroTask<MemberNormalizeResult> normalize_members_for_ingest(
+    std::vector<std::string> files, std::uint64_t member_size = 0);
 
 }  // namespace dftracer::utils::utilities::composites::dft::indexing
 

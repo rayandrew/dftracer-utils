@@ -4,7 +4,7 @@
 #include <dftracer/utils/core/common/transparent_string_hash.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
-#include <dftracer/utils/utilities/indexer/internal/checkpoint.h>
+#include <dftracer/utils/utilities/indexer/internal/gzip_member_record.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -27,7 +27,7 @@ namespace dftracer::utils::utilities::indexer {
 /// writes remain on the concrete type until their CFs are ported to SST.
 class IndexBatchSink {
    public:
-    using IndexerCheckpoint = internal::IndexerCheckpoint;
+    using GzipMemberRecord = internal::GzipMemberRecord;
     using ChunkStatistics = composites::dft::indexing::ChunkStatistics;
     using ChunkDimensionStats = composites::dft::indexing::ChunkDimensionStats;
 
@@ -38,19 +38,8 @@ class IndexBatchSink {
                                       std::uint64_t total_lines,
                                       std::uint64_t total_uc_size) = 0;
 
-    virtual void insert_checkpoint(int file_id,
-                                   const IndexerCheckpoint& checkpoint) = 0;
-
-    virtual void insert_event_range(
-        int file_id, std::uint64_t checkpoint_idx, std::string_view cat,
-        std::string_view name, std::span<const std::uint32_t> line_numbers) = 0;
-
-    virtual void insert_metadata_lines(
-        int file_id, std::uint64_t checkpoint_idx, std::string_view meta_type,
-        std::span<const std::uint32_t> line_numbers) = 0;
-
-    virtual void insert_file_pids(
-        int file_id, const std::unordered_set<std::uint64_t>& pids) = 0;
+    virtual void insert_gzip_member(int file_id,
+                                    const GzipMemberRecord& member) = 0;
 
     // Bloom / stats / dimension CFs --------------------------------------
 
@@ -83,6 +72,10 @@ class IndexBatchSink {
 
     virtual void insert_index_dimension(int file_id,
                                         std::string_view dimension) = 0;
+
+    // A groupable column name present in the file (top-level scalar field or
+    // args key). Not a pruning dimension; stored under the "c|" prefix.
+    virtual void insert_column(int file_id, std::string_view column) = 0;
 
     virtual void insert_chunk_dimension_stats(
         int file_id, std::uint64_t checkpoint_idx,
@@ -132,22 +125,6 @@ class IndexBatchSink {
     // intern dictionary sidecar).
     virtual void insert_system_metrics_merge(std::string_view key,
                                              std::string_view operand) = 0;
-
-    // Convenience overloads forwarding to span variants; concrete classes
-    // need not override.
-    void insert_event_range(int file_id, std::uint64_t checkpoint_idx,
-                            std::string_view cat, std::string_view name,
-                            const std::vector<std::uint32_t>& line_numbers) {
-        insert_event_range(file_id, checkpoint_idx, cat, name,
-                           std::span<const std::uint32_t>(line_numbers));
-    }
-
-    void insert_metadata_lines(int file_id, std::uint64_t checkpoint_idx,
-                               std::string_view meta_type,
-                               const std::vector<std::uint32_t>& line_numbers) {
-        insert_metadata_lines(file_id, checkpoint_idx, meta_type,
-                              std::span<const std::uint32_t>(line_numbers));
-    }
 };
 
 }  // namespace dftracer::utils::utilities::indexer

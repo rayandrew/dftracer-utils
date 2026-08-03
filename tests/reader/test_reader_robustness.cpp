@@ -99,7 +99,10 @@ class LargeTestEnvironment {
         }
         f.close();
 
-        bool success = compress_file_to_gzip(txt_file, gz_file);
+        // Multi-member output so mid-file reads seek to a member instead of
+        // re-inflating from the start of a single giant member.
+        bool success = compress_file_to_gzip_multimember(txt_file, gz_file,
+                                                         4 * 1024 * 1024);
         fs::remove(txt_file);
         return success ? gz_file : "";
     }
@@ -1379,10 +1382,10 @@ TEST_CASE("Robustness - Line-based reading stress tests") {
 
         // Verify we have line data - skip tests if indexer doesn't support line
         // reading
-        auto checkpoints = indexer->get_checkpoints();
+        auto members = indexer->get_members();
         std::size_t num_lines = indexer->get_num_lines();
 
-        printf("Checkpoints: %zu, Lines: %zu\n", checkpoints.size(), num_lines);
+        printf("Members: %zu, Lines: %zu\n", members.size(), num_lines);
 
         // Debug: Let's manually check the database file
         printf("DEBUG: Manually checking database file: %s\n",
@@ -1407,22 +1410,12 @@ TEST_CASE("Robustness - Line-based reading stress tests") {
             return;
         }
 
-        if (checkpoints.empty()) {
-            printf(
-                "INFO: Running line reading tests without traditional "
-                "checkpoints\n");
-            printf(
-                "This suggests the indexer uses direct line counting instead "
-                "of checkpoint-based indexing\n");
-        }
-
         printf(
-            "Line reading robustness test setup: %zu checkpoints, %zu total "
+            "Line reading robustness test setup: %zu members, %zu total "
             "lines\n",
-            checkpoints.size(), num_lines);
+            members.size(), num_lines);
         INFO("Line reading robustness test setup: "
-             << checkpoints.size() << " checkpoints, " << num_lines
-             << " total lines");
+             << members.size() << " members, " << num_lines << " total lines");
     }
 
     auto reader = ReaderFactory::create(gz_file, idx_file, mb_to_b(1.0));

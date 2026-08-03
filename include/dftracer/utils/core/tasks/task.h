@@ -149,18 +149,6 @@ class Task : public std::enable_shared_from_this<Task> {
     std::shared_ptr<Task> with_name(std::string name);
 
     /**
-     * Set initial input for this task
-     * This allows providing input directly to a task without using dependencies
-     * @tparam T Input type (automatically deduced)
-     * @param input The input value (will be converted to std::any internally)
-     */
-    template <typename T>
-    std::shared_ptr<Task> with_input(T&& input) {
-        initial_input_ = std::any(std::forward<T>(input));
-        return shared_from_this();
-    }
-
-    /**
      * Set timeout for this task
      * @param timeout Timeout duration (0 = no timeout, wait forever)
      * @return This task (for method chaining)
@@ -437,8 +425,6 @@ class Task : public std::enable_shared_from_this<Task> {
     /**
      * Validate type compatibility between tasks
      */
-    bool validate_connection(std::type_index from, std::type_index to) const;
-
     /**
      * Set result value (called by Executor on completion)
      */
@@ -479,7 +465,7 @@ class Task : public std::enable_shared_from_this<Task> {
 
     // Friends for internal access
     friend class Scheduler;
-    friend class Executor;
+    friend class ThreadPoolExecutor;
 };
 
 /**

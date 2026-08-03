@@ -262,22 +262,6 @@ FittedDistribution fit_weibull(const std::vector<double>& data,
 
 }  // namespace
 
-std::string_view distribution_name(DistributionKind k) {
-    switch (k) {
-        case DistributionKind::Normal:
-            return "Normal";
-        case DistributionKind::Lognormal:
-            return "Lognormal";
-        case DistributionKind::Gamma:
-            return "Gamma";
-        case DistributionKind::Exponential:
-            return "Exponential";
-        case DistributionKind::Weibull:
-            return "Weibull";
-    }
-    return "Unknown";
-}
-
 int free_parameter_count(DistributionKind kind) {
     switch (kind) {
         case DistributionKind::Normal:

@@ -48,12 +48,6 @@ PyObject *wrap_arrow_table(PyObject *batch_list) {
     return table;
 }
 
-PyObject *wrap_arrow_stream_table(PyObject *stream_obj) {
-    // dftracer.utils.arrow.ArrowTable accepts either a batch list or a stream
-    // object, so wrapping is identical for both.
-    return wrap_arrow_table(stream_obj);
-}
-
 PyObject *arrow_result_to_table(ArrowExportResult result) {
     PyObject *capsule = wrap_arrow_result(std::move(result));
     if (!capsule) return NULL;

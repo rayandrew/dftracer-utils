@@ -2,25 +2,23 @@
 #include <Python.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/logging.h>
+#include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/python/batch_indexer.h>
 #include <dftracer/utils/python/index_database.h>
 #include <dftracer/utils/python/indexer.h>
-#include <dftracer/utils/python/indexer_checkpoint.h>
 #include <dftracer/utils/python/json.h>
 #include <dftracer/utils/python/memoryview_batch.h>
 #include <dftracer/utils/python/py_errors.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/runtime.h>
 #include <dftracer/utils/python/sst_distribution.h>
 #include <dftracer/utils/python/task_handle.h>
-#include <dftracer/utils/python/trace_reader.h>
 #include <dftracer/utils/python/trace_reader_iterator.h>
+#include <dftracer/utils/python/trace_viewer.h>
 #include <dftracer/utils/python/utilities/aggregator.h>
 #include <dftracer/utils/python/utilities/comparator.h>
 #include <dftracer/utils/python/utilities/metadata_collector.h>
-#include <dftracer/utils/python/utilities/reconstruction_planner.h>
-#include <dftracer/utils/python/utilities/reorganization_planner.h>
-#include <dftracer/utils/python/utilities/statistics_aggregator.h>
-#include <dftracer/utils/python/utilities/statistics_query.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #include <dftracer/utils/python/arrow_stream_capsule.h>
 #include <dftracer/utils/python/streaming_iterator.h>
@@ -69,7 +67,36 @@ PyObject* py_set_log_color(PyObject*, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+PyObject* py_memory_budget_advice(PyObject*, PyObject* args, PyObject* kwds) {
+    unsigned long long required = 0, available = 0;
+    static const char* kwlist[] = {"required_bytes", "available_bytes",
+                                   nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "K|K",
+                                     const_cast<char**>(kwlist), &required,
+                                     &available))
+        return nullptr;
+    const auto a = dftracer::utils::memory_budget_advice(
+        static_cast<std::size_t>(required),
+        static_cast<std::size_t>(available));
+    const std::string warning =
+        dftracer::utils::format_memory_budget_warning(a);
+    return Py_BuildValue(
+        "{s:O,s:K,s:K,s:K,s:K,s:s}", "fits", a.fits ? Py_True : Py_False,
+        "required_bytes", (unsigned long long)a.required_bytes, "peak_bytes",
+        (unsigned long long)a.peak_bytes, "available_bytes",
+        (unsigned long long)a.available_bytes, "suggested_nodes",
+        (unsigned long long)a.suggested_nodes, "warning", warning.c_str());
+}
+
 PyMethodDef dftracer_utils_methods[] = {
+    {"memory_budget_advice", DFT_PYCFUNCTION(py_memory_budget_advice),
+     METH_VARARGS | METH_KEYWORDS,
+     "memory_budget_advice(required_bytes, available_bytes=0) -> dict\n\n"
+     "Whether an aggregated workload of `required_bytes` fits in process, and\n"
+     "advice if not. `available_bytes=0` detects it (cgroup-aware). Returns\n"
+     "{fits, required_bytes, peak_bytes, available_bytes, suggested_nodes,\n"
+     "warning}: peak is PEAK_MEMORY_FACTOR x required; `warning` is a ready\n"
+     "message (empty when it fits)."},
     {"set_log_level", py_set_log_level, METH_VARARGS,
      "set_log_level(level: str) -> None\n\n"
      "Set the C++ logger level (trace|debug|info|warn|error|off)."},
@@ -85,27 +112,33 @@ PyMethodDef dftracer_utils_methods[] = {
 
 static PyModuleDef dftracer_utils_module = {
     PyModuleDef_HEAD_INIT,
-    "dftracer_utils_ext",   /* m_name */
+    "dftracer_utils_ext",                        /* m_name */
     "DFTracer utils module with indexer, reader, "
-    "and utility bindings", /* m_doc */
-    -1,                     /* m_size */
-    dftracer_utils_methods, /* m_methods */
-    NULL,                   /* m_slots */
-    NULL,                   /* m_traverse */
-    NULL,                   /* m_clear */
-    NULL                    /* m_free */
+    "and utility bindings",                      /* m_doc */
+    -1,                                          /* m_size */
+    dftracer_utils_methods,                      /* m_methods */
+    NULL,                                        /* m_slots */
+    NULL,                                        /* m_traverse */
+    NULL,                                        /* m_clear */
+    NULL                                         /* m_free */
 };
+
+PyMODINIT_FUNC PyInit_dftracer_utils_ext(void);  // declared before use
 
 PyMODINIT_FUNC PyInit_dftracer_utils_ext(void) {
     PyObject* m;
     m = PyModule_Create(&dftracer_utils_module);
     if (m == NULL) return NULL;
+    // The aggregation CF shard count, so distributed callers split the shard
+    // space without hardcoding it (single source of truth).
+    PyModule_AddIntConstant(m, "NUM_SHARDS",
+                            dftracer::utils::utilities::composites::dft::
+                                aggregators::AGG_KEY_NUM_SHARDS);
     // Configure the C++ logger for the extension: picks up
     // DFTRACER_UTILS_LOG_LEVEL and auto color (on only when stderr is a TTY),
     // matching the CLI binaries. Without this the logger runs on bare defaults.
     dftracer::utils::logger::init();
     if (init_py_errors(m) < 0) return NULL;
-    if (init_indexer_checkpoint(m) < 0) return NULL;
     if (init_checkpoint_indexer(m) < 0) return NULL;
     if (init_indexer(m) < 0) return NULL;
     if (init_task_handle(m) < 0) return NULL;
@@ -121,12 +154,8 @@ PyMODINIT_FUNC PyInit_dftracer_utils_ext(void) {
 #ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
     if (dftracer::utils::python::init_arrow_parallel_reader(m) < 0) return NULL;
 #endif
-    if (init_trace_reader(m) < 0) return NULL;
-    if (init_statistics_query(m) < 0) return NULL;
-    if (init_statistics_aggregator(m) < 0) return NULL;
+    if (init_trace_viewer(m) < 0) return NULL;
     if (init_metadata_collector(m) < 0) return NULL;
-    if (init_reorganization_planner(m) < 0) return NULL;
-    if (init_reconstruction_planner(m) < 0) return NULL;
     if (init_aggregator(m) < 0) return NULL;
     if (init_comparator(m) < 0) return NULL;
     if (init_index_database(m) < 0) return NULL;

@@ -25,29 +25,20 @@ class GzipByteStream : public GzipStream {
                     std::size_t end_bytes,
                     dftracer::utils::utilities::indexer::internal::Indexer
                         &indexer) override {
-        DFTRACER_UTILS_LOG_DEBUG(
-            "GzipByteStream::initialize - start_bytes=%zu, end_bytes=%zu",
-            start_bytes, end_bytes);
         GzipStream::initialize(gz_path, start_bytes, end_bytes, indexer);
         current_position_ = start_bytes;
-        size_t current_pos = checkpoint_.uc_offset;
-        DFTRACER_UTILS_LOG_DEBUG(
-            "GzipByteStream::initialize - checkpoint uc_offset=%zu, "
-            "using_checkpoint=%s",
-            current_pos, use_checkpoint_ ? "true" : "false");
-        if (start_bytes > current_pos) {
-            DFTRACER_UTILS_LOG_DEBUG(
-                "GzipByteStream::initialize - skipping %zu bytes to reach "
-                "start_bytes",
-                start_bytes - current_pos);
-            skip(start_bytes);
+    }
+
+    coro::CoroTask<void> on_initialized() override {
+        if (is_finished_) co_return;
+        const std::size_t anchor = seek_anchor_offset();
+        if (start_bytes_ > anchor) {
+            co_await skip(start_bytes_);
         }
-        DFTRACER_UTILS_LOG_DEBUG(
-            "GzipByteStream::initialize - completed, current_position_=%zu",
-            current_position_);
     }
 
     coro::CoroTask<std::span<const char>> read_async() override {
+        co_await ensure_initialized();
         if (!decompression_initialized_) {
             throw ReaderError(ReaderError::INITIALIZATION_ERROR,
                               "Streaming session not properly initialized");

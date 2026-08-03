@@ -8,7 +8,6 @@
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/index_database_writer_context.h>
 #include <dftracer/utils/utilities/indexer/index_visitor.h>
-#include <dftracer/utils/utilities/indexer/internal/checkpoint.h>
 #include <dftracer/utils/utilities/indexer/internal/common/gzip_member_scanner.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer.h>
 
@@ -26,7 +25,7 @@ struct GzipBuildArtifacts {
     std::uint64_t checkpoint_size = 0;
     std::uint64_t total_lines = 0;
     std::uint64_t total_uc_size = 0;
-    std::vector<IndexerCheckpoint> checkpoints;
+    std::vector<GzipMemberRecord> members;
 };
 
 /// Optional slice of a multi-member gzip file. When set, the indexer
@@ -34,22 +33,18 @@ struct GzipBuildArtifacts {
 /// (byte range `[members[member_begin].c_offset, members[member_end-1]
 /// .c_offset + members[member_end-1].c_size)`). Used for cross-rank
 /// splitting of large files; uc_offsets/line numbers in emitted
-/// checkpoints are slice-local and `checkpoint_idx` is offset by
-/// `checkpoint_idx_base` so multiple ranks writing the same file_id
-/// produce disjoint keys.
+/// members are slice-local and member indices start at `member_begin`
+/// so multiple ranks writing the same file_id produce disjoint keys.
 struct GzipMemberSlice {
     const std::vector<internal::GzipMember> *members = nullptr;
     std::size_t member_begin = 0;
     std::size_t member_end = 0;  // exclusive
-    std::uint64_t checkpoint_idx_base = 0;
 };
 
-/// Build gzip index artifacts (checkpoints, dispatched visitor events).
+/// Build gzip index artifacts (member table, dispatched visitor events).
 ///
-/// When `scope` is non-null and the input is multi-member gzip (the
-/// dftracer runtime format), the inflate pass is parallelised across the
-/// scope's executor. On single-member files or when `scope` is null,
-/// falls back to the serial inflate loop with identical semantics.
+/// The inflate pass is parallelised across `scope`'s executor, one task per
+/// gzip member (single-member input runs as a single task).
 ///
 /// When `slice` is non-null, only the specified member range is
 /// processed. The caller is responsible for ensuring `slice->members`
@@ -95,11 +90,9 @@ class GzipIndexer : public Indexer {
 
     // Lookup
     int find_file_id(const std::string &gz_path) const;
-    bool find_checkpoint(std::size_t target_offset,
-                         IndexerCheckpoint &checkpoint) const override;
-    std::vector<IndexerCheckpoint> get_checkpoints() const override;
-    std::vector<IndexerCheckpoint> get_checkpoints_for_line_range(
-        std::uint64_t start_line, std::uint64_t end_line) const override;
+    bool find_member(std::size_t target_offset,
+                     GzipMemberRecord &member) const override;
+    std::vector<GzipMemberRecord> get_members() const override;
 
     inline ArchiveFormat get_format_type() const override {
         return ArchiveFormat::GZIP;
@@ -125,13 +118,18 @@ class GzipIndexer : public Indexer {
     mutable std::atomic<bool> cached_num_lines_ready{false};
     mutable std::atomic<std::uint64_t> cached_checkpoint_size{0};
     mutable std::atomic<bool> cached_checkpoint_size_ready{false};
-    mutable std::vector<IndexerCheckpoint> cached_checkpoints;
-    mutable std::mutex cached_checkpoints_mutex;
+    mutable std::vector<GzipMemberRecord> cached_members;
+    mutable std::mutex cached_members_mutex;
+    mutable std::atomic<bool> cached_loaded{false};
 
     // Internal methods
     void open();
     void close();
     bool is_valid() const;
+    // Open the index once and populate every read-path cache (file id, line
+    // count, byte count, checkpoint size, members). The per-getter opens it
+    // replaces were the dominant cost of streaming a file.
+    void ensure_loaded() const;
 };
 
 }  // namespace dftracer::utils::utilities::indexer::internal::gzip

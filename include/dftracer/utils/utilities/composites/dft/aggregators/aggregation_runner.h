@@ -7,7 +7,7 @@
 #include <dftracer/utils/core/pipeline/pipeline_config.h>
 #include <dftracer/utils/core/utils/timer.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_config.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/perfetto_trace_writer_utility.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/dftracer_trace_writer_utility.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +37,7 @@ struct AggregationRunInput {
     // open the CF directly. When set, the output is written in `output_format`.
     std::optional<std::string> output_file;
     std::string output_format = AggregationConfig::FORMAT_JSON;
-    PerfettoEventFormat event_format = PerfettoEventFormat::COUNTER;
+    TraceEventFormat event_format = TraceEventFormat::AGGREGATED;
     bool compress_output = false;
     int compression_level = 1;
 

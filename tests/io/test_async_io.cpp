@@ -4,6 +4,7 @@
 #include <dftracer/utils/core/io/io_backend.h>
 #include <dftracer/utils/core/pipeline/executor.h>
 #include <dftracer/utils/core/pipeline/scheduler.h>
+#include <dftracer/utils/core/pipeline/thread_pool_executor.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <doctest/doctest.h>
@@ -338,7 +339,7 @@ TEST_CASE("AsyncIO - async read with executor") {
     std::string data = "executor async read test data!";
     auto path = create_temp_file(data);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -378,7 +379,7 @@ TEST_CASE("AsyncIO - async write with executor") {
 
     std::string data = "executor async write test!";
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -419,7 +420,7 @@ TEST_CASE("AsyncIO - async pread with executor") {
     std::string data = "ABCDEFGHIJKLMNOP";
     auto path = create_temp_file(data);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -461,7 +462,7 @@ TEST_CASE("AsyncIO - async pwrite with executor") {
     REQUIRE(wr == static_cast<ssize_t>(initial.size()));
     ::close(tmpfd);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -503,7 +504,7 @@ TEST_CASE("AsyncIO - async write to pipe with executor") {
     int pipefd[2];
     REQUIRE(::pipe(pipefd) == 0);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::string data = "async pipe write";
@@ -539,7 +540,7 @@ TEST_CASE("AsyncIO - async open + pread + close lifecycle") {
     std::string data = "full lifecycle test";
     auto path = create_temp_file(data);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -587,7 +588,7 @@ TEST_CASE("AsyncIO - multiple concurrent async reads") {
         expected.push_back(content);
     }
 
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<int> completed{0};
@@ -643,7 +644,7 @@ TEST_CASE("AsyncIO - read error handling (invalid fd)") {
 }
 
 TEST_CASE("AsyncIO - IoBackend::name() reports backend type") {
-    Executor executor(ExecutorConfig{.num_threads = 1});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 1});
     Scheduler scheduler(&executor);
 
     std::string backend_name;
@@ -670,7 +671,7 @@ TEST_CASE("AsyncIO - IoBackend::name() reports backend type") {
 }
 
 TEST_CASE("AsyncIO - async read error handling with executor (invalid fd)") {
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<ssize_t> result{0};
@@ -700,7 +701,7 @@ TEST_CASE("AsyncIO - large pread with executor") {
     }
     auto path = create_temp_file(data);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -740,7 +741,7 @@ static void run_lifecycle_on_backend(io::IoBackendType type,
     std::string data = std::string("backend test: ") + type_name;
     auto path = create_temp_file(data);
 
-    Executor executor(
+    ThreadPoolExecutor executor(
         ExecutorConfig{.num_threads = 2, .io_backend_type = type});
     Scheduler scheduler(&executor);
 
@@ -790,7 +791,7 @@ static void run_pipe_write_on_backend(io::IoBackendType type,
     int pipefd[2];
     REQUIRE(::pipe(pipefd) == 0);
 
-    Executor executor(
+    ThreadPoolExecutor executor(
         ExecutorConfig{.num_threads = 2, .io_backend_type = type});
     Scheduler scheduler(&executor);
 
@@ -1128,7 +1129,7 @@ TEST_CASE("AsyncIO - async readv/writev with executor") {
     REQUIRE(tmpfd >= 0);
     ::close(tmpfd);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -1182,7 +1183,7 @@ TEST_CASE("AsyncIO - async lseek + read with executor") {
     std::string data = "ABCDEFGHIJ";
     auto path = create_temp_file(data);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> success{false};
@@ -1218,7 +1219,7 @@ TEST_CASE("AsyncIO - async sendfile with executor") {
     std::string data = "async sendfile test data";
     auto path = create_temp_file(data);
 
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     int pipefd[2];

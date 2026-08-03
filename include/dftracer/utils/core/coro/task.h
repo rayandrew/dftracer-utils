@@ -49,10 +49,7 @@ struct PromiseBase {
         ObjectPool::instance().deallocate(ptr, size);
     }
 
-    void set_awaited_task_id(TaskIndex id) { awaited_task_id_ = id; }
-    TaskIndex get_awaited_task_id() const { return awaited_task_id_; }
     void set_scheduler(Scheduler* s) { scheduler_ = s; }
-    Scheduler* get_scheduler() const { return scheduler_; }
     void set_executor(Executor* e) { executor_ = e; }
     Executor* get_executor() const { return executor_; }
     void set_root_promise(PromiseBase* p) { root_promise_ = p; }
@@ -315,10 +312,7 @@ class CoroTask {
      * @throws Exception if coroutine threw
      */
     T get() {
-        SyncScope sync;
-        while (coro_handle_ && !coro_handle_.done()) {
-            coro_handle_.resume();
-        }
+        drive_to_completion(coro_handle_);
         return await_resume();
     }
 
@@ -334,25 +328,6 @@ class CoroTask {
      */
     std::coroutine_handle<promise_type> handle() const noexcept {
         return coro_handle_;
-    }
-
-    /**
-     * Check if coroutine is suspended for async work
-     * If true, executor should NOT drive it synchronously
-     */
-    bool is_awaiting_async() const noexcept {
-        return coro_handle_ && coro_handle_.promise().awaiting_async_.load(
-                                   std::memory_order_acquire);
-    }
-
-    /**
-     * Set/clear async await flag (used by TaskFuture)
-     */
-    void set_awaiting_async(bool value) noexcept {
-        if (coro_handle_) {
-            coro_handle_.promise().awaiting_async_.store(
-                value, std::memory_order_release);
-        }
     }
 
     // ========================================================================

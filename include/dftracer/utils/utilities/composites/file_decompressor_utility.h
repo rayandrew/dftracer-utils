@@ -4,11 +4,14 @@
 #include <dftracer/utils/core/common/byte_view.h>
 #include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/common/filesystem.h>
+#include <dftracer/utils/core/common/scoped_fd.h>
 #include <dftracer/utils/core/coro/task.h>
+#include <dftracer/utils/core/io/io.h>
 #include <dftracer/utils/core/utilities/utility.h>
-#include <dftracer/utils/utilities/compression/zlib/streaming_decompressor_utility.h>
-#include <dftracer/utils/utilities/fileio/binary_file_reader_utility.h>
+#include <dftracer/utils/utilities/fileio/compress/gzip_member_reader.h>
 #include <dftracer/utils/utilities/fileio/streaming_file_writer_utility.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 #include <string>
 
@@ -21,10 +24,6 @@ struct FileDecompressionUtilityInput {
     std::string input_path;  // Input .gz file path
     std::string
         output_path;  // Output decompressed file path (empty = auto-generate)
-    std::size_t chunk_size;  // Chunk size for streaming (bytes)
-    // Decompression format (AUTO detects automatically)
-    compression::zlib::DecompressionFormat format =
-        compression::zlib::DecompressionFormat::AUTO;
 
     /**
      * @brief Create input with auto-generated output path.
@@ -32,7 +31,7 @@ struct FileDecompressionUtilityInput {
      * Strips .gz extension from input path to generate output path.
      */
     static FileDecompressionUtilityInput from_file(
-        const std::string& input_path, std::size_t chunk_size = 64 * 1024) {
+        const std::string& input_path) {
         std::string output = input_path;
 
         // Strip .gz extension if present
@@ -43,11 +42,7 @@ struct FileDecompressionUtilityInput {
             output += ".decompressed";
         }
 
-        return FileDecompressionUtilityInput{
-            input_path, output, chunk_size,
-            compression::zlib::DecompressionFormat::AUTO  // Default to AUTO
-                                                          // detection
-        };
+        return FileDecompressionUtilityInput{input_path, output};
     }
 
     /**
@@ -55,23 +50,6 @@ struct FileDecompressionUtilityInput {
      */
     FileDecompressionUtilityInput& with_output(const std::string& path) {
         output_path = path;
-        return *this;
-    }
-
-    /**
-     * @brief Fluent builder: Set chunk size.
-     */
-    FileDecompressionUtilityInput& with_chunk_size(std::size_t size) {
-        chunk_size = size;
-        return *this;
-    }
-
-    /**
-     * @brief Fluent builder: Set decompression format.
-     */
-    FileDecompressionUtilityInput& with_format(
-        compression::zlib::DecompressionFormat fmt) {
-        format = fmt;
         return *this;
     }
 };
@@ -104,44 +82,13 @@ struct FileDecompressionUtilityOutput {
         decompressed_size = decomp_size;
         return *this;
     }
-
-    FileDecompressionUtilityOutput& with_compressed_size(std::size_t size) {
-        compressed_size = size;
-        return *this;
-    }
-
-    FileDecompressionUtilityOutput& with_decompressed_size(std::size_t size) {
-        decompressed_size = size;
-        return *this;
-    }
-
-    FileDecompressionUtilityOutput& with_input_path(const std::string& path) {
-        input_path = path;
-        return *this;
-    }
-
-    FileDecompressionUtilityOutput& with_output_path(const std::string& path) {
-        output_path = path;
-        return *this;
-    }
-
-    /**
-     * @brief Get compression ratio of the original file.
-     */
-    double original_compression_ratio() const {
-        if (decompressed_size == 0) return 0.0;
-        return static_cast<double>(compressed_size) /
-               static_cast<double>(decompressed_size);
-    }
 };
 
 /**
- * @brief Workflow for decompressing gzip files using streaming decompression.
+ * @brief Workflow for decompressing a multi-member gzip file.
  *
- * This workflow:
- * 1. Reads compressed .gz file in chunks using StreamingFileReader
- * 2. Decompresses each chunk using StreamingDecompressor
- * 3. Writes decompressed data to output file using StreamingFileWriter
+ * Decodes the input a gzip member at a time with libdeflate and writes the
+ * decompressed bytes to the output file. Peak memory is one member.
  *
  * Usage:
  * @code
@@ -192,15 +139,25 @@ class FileDecompressorUtility
             // Get compressed file size
             compressed_size = fs::file_size(input.input_path);
 
-            compression::zlib::StreamingDecompressorUtility decompressor(
-                input.format);
-            fileio::StreamingFileWriterUtility writer(input.output_path);
+            ssize_t fd_result =
+                co_await io::open(input.input_path.c_str(), O_RDONLY);
+            if (fd_result < 0) {
+                co_return make_error(ErrorCode::IO,
+                                     "Cannot open file: " + input.input_path);
+            }
+            ScopedFd fd(static_cast<int>(fd_result));
 
-            auto gen =
-                fileio::read_binary_file(input.input_path, input.chunk_size) >>
-                [&](ByteView chunk) { return decompressor.decompress(chunk); };
-            while (auto out = co_await gen.next()) {
-                co_await writer.process(*out);
+            struct stat st;
+            if (::fstat(fd.get(), &st) != 0) {
+                co_return make_error(ErrorCode::IO,
+                                     "Cannot stat file: " + input.input_path);
+            }
+
+            fileio::StreamingFileWriterUtility writer(input.output_path);
+            auto gen = fileio::compress::decode_gzip_members(
+                fd.get(), static_cast<std::uint64_t>(st.st_size));
+            while (auto chunk = co_await gen.next()) {
+                co_await writer.process(ByteView(chunk->data(), chunk->size()));
             }
 
             writer.close();

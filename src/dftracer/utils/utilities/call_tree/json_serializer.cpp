@@ -1,5 +1,6 @@
 #include <dftracer/utils/call_tree/json_serializer.h>
 #include <dftracer/utils/utilities/composites/dft/args_map.h>
+#include <dftracer/utils/utilities/composites/dft/schema.h>
 
 #include <cstdio>
 #include <cstring>
@@ -7,6 +8,8 @@
 
 namespace dftracer::utils::call_tree {
 namespace internal {
+
+namespace dft = utilities::composites::dft;
 
 using dftracer::utils::utilities::composites::dft::ArgsValueProxy;
 
@@ -142,11 +145,14 @@ size_t JsonSerializer::serialize_node(char* buffer, int index,
     auto ct = node.get_category();
     size_t written_size = std::snprintf(
         buffer, 16384,
-        R"({"id":%d,"name":"%.*s","cat":"%.*s","pid":%u,"tid":%u,"ts":%llu,"dur":%llu,"ph":"X","args":{%s}})",
+        R"({"id":%d,"name":"%.*s","cat":"%.*s","pid":%u,"tid":%u,"ts":%llu,"dur":%llu,"ph":%d,"type":%d,"args":{%s}})",
         index, static_cast<int>(nm.size()), nm.data(),
         static_cast<int>(ct.size()), ct.data(), process_id, thread_id,
         static_cast<unsigned long long>(node.get_start_time()),
         static_cast<unsigned long long>(node.get_duration()),
+        dft::phase_to_int(dft::RecordPhase::COMPLETE),
+        dft::event_type_to_int(
+            dft::event_type_from_cat(std::string_view(ct.data(), ct.size()))),
         all_args.str().c_str());
 
     if (written_size > 0) {
@@ -165,18 +171,20 @@ size_t JsonSerializer::serialize_metadata(char* buffer, const std::string& name,
                                           bool is_string) {
     size_t written_size = 0;
 
+    const int ph_int = dft::phase_to_int(dft::phase_from_letter(ph));
+    const int type_int = dft::event_type_to_int(dft::EventType::DFTRACER);
     if (is_string) {
         written_size = std::snprintf(
             buffer, 8192,
-            R"({"name":"%s","cat":"call_tree","pid":%u,"tid":%u,"ph":"%s","args":{"hhash":"%s","name":"%s","value":"%s"}})",
-            ph, process_id, thread_id, ph, hostname_hash_.c_str(), name.c_str(),
-            value.c_str());
+            R"({"name":"%s","cat":"call_tree","pid":%u,"tid":%u,"ph":%d,"type":%d,"args":{"hhash":"%s","name":"%s","value":"%s"}})",
+            ph, process_id, thread_id, ph_int, type_int, hostname_hash_.c_str(),
+            name.c_str(), value.c_str());
     } else {
         written_size = std::snprintf(
             buffer, 8192,
-            R"({"name":"%s","cat":"call_tree","pid":%u,"tid":%u,"ph":"%s","args":{"hhash":"%s","name":"%s","value":%s}})",
-            ph, process_id, thread_id, ph, hostname_hash_.c_str(), name.c_str(),
-            value.c_str());
+            R"({"name":"%s","cat":"call_tree","pid":%u,"tid":%u,"ph":%d,"type":%d,"args":{"hhash":"%s","name":"%s","value":%s}})",
+            ph, process_id, thread_id, ph_int, type_int, hostname_hash_.c_str(),
+            name.c_str(), value.c_str());
     }
 
     if (written_size > 0) {

@@ -17,12 +17,14 @@ namespace rocks = dftracer::utils::rocksdb;
 
 static constexpr std::string_view TIME_BOUNDS_DB_KEY = "__time_bounds__";
 
-EventAggregator::EventAggregator() : rocksdb_mode_(false) {}
+EventAggregator::EventAggregator()
+    : rocksdb_mode_(false), intern_(make_intern_table()) {}
 
 EventAggregator::EventAggregator(std::shared_ptr<rocksdb::RocksDatabase> db,
                                  std::uint32_t config_hash)
     : rocksdb_mode_(true), db_(std::move(db)), config_hash_(config_hash) {
-    load_intern_dictionary(*db_);
+    intern_ = intern_for_index(db_->path());
+    load_intern_dictionary(*db_, *intern_);
 }
 
 void EventAggregator::merge_chunk(ChunkAggregationOutput&& chunk_output) {
@@ -81,7 +83,7 @@ void EventAggregator::merge_chunk_rocksdb(
 }
 
 void EventAggregator::add_observed_extra_key(const std::string& key) {
-    auto& intern = aggregation_intern();
+    auto& intern = intern_->intern;
     observed_extra_key_ids_.insert(intern.get_or_insert(key));
 }
 
@@ -92,6 +94,7 @@ void EventAggregator::add_observed_custom_metric(const std::string& name) {
 EventAggregatorOutput EventAggregator::finalize() {
     if (rocksdb_mode_) {
         EventAggregatorOutput output;
+        output.intern = intern_;
         output.total_events_processed = total_events_.load();
         output.total_bytes_processed = total_bytes_.load();
         output.total_files_processed = unique_files_.size();
@@ -133,6 +136,7 @@ EventAggregatorOutput EventAggregator::finalize() {
         return output;
     }
 
+    state_.intern = intern_;
     state_.total_files_processed = unique_files_.size();
     state_.success = true;
 
@@ -253,9 +257,9 @@ namespace {
 
 std::string serialize_observed_columns(
     const std::set<std::uint32_t>& extra_key_ids,
-    const std::set<std::string>& custom_metric_names) {
+    const std::set<std::string>& custom_metric_names,
+    const StringIntern& intern) {
     namespace rocks = dftracer::utils::rocksdb;
-    auto& intern = aggregation_intern();
     std::string out;
     auto put_str = [&](std::string_view s) {
         rocks::KeyCodec::append_be32(out, static_cast<std::uint32_t>(s.size()));
@@ -275,9 +279,9 @@ std::string serialize_observed_columns(
 
 void deserialize_observed_columns(std::string_view data,
                                   std::set<std::uint32_t>& extra_key_ids,
-                                  std::set<std::string>& custom_metric_names) {
+                                  std::set<std::string>& custom_metric_names,
+                                  StringIntern& intern) {
     namespace rocks = dftracer::utils::rocksdb;
-    auto& intern = aggregation_intern();
     std::size_t off = 0;
     auto read_u32 = [&]() -> std::uint32_t {
         if (off + 4 > data.size()) return 0;
@@ -316,11 +320,13 @@ EventAggregator::ObservedColumns EventAggregator::observed_columns() {
         if (db_->get(COLUMNS_DB_KEY, &val, rcf::AGGREGATION).ok() &&
             !val.empty()) {
             deserialize_observed_columns(val, observed_extra_key_ids_,
-                                         observed_custom_metric_names_);
+                                         observed_custom_metric_names_,
+                                         intern_->intern);
         }
 
         auto serialized = serialize_observed_columns(
-            observed_extra_key_ids_, observed_custom_metric_names_);
+            observed_extra_key_ids_, observed_custom_metric_names_,
+            intern_->intern);
         db_->put(COLUMNS_DB_KEY, serialized, rcf::AGGREGATION);
     }
 
@@ -330,11 +336,6 @@ EventAggregator::ObservedColumns EventAggregator::observed_columns() {
     result.custom_metric_names.assign(observed_custom_metric_names_.begin(),
                                       observed_custom_metric_names_.end());
     return result;
-}
-
-std::vector<std::shared_ptr<AssociationTracker>>
-EventAggregator::take_trackers() {
-    return std::move(trackers_);
 }
 
 static constexpr std::string_view TRACKER_DB_KEY = "__tracker__";
@@ -368,7 +369,24 @@ std::shared_ptr<rocksdb::RocksDatabase>
 EventAggregator::open_with_merge_operator(const std::string& index_path) {
     auto agg_merge_op = std::make_shared<AggregationMergeOperator>();
     auto sys_merge_op = std::make_shared<SystemMetricsMergeOperator>();
-    auto cf_override = [agg_merge_op, sys_merge_op](
+    // The aggregation DB is a write-once-read-once scratch store deleted after
+    // the run, so it is tuned for throughput, not on-disk size: a cheap codec
+    // (LZ4, no ZSTD dictionary training) keeps flush/compaction CPU low. The
+    // persistent trace index, tuned for size, is configured elsewhere.
+    auto fast_scratch_compression = [](::rocksdb::ColumnFamilyOptions& opts) {
+#ifdef DFTRACER_UTILS_ENABLE_LZ4
+        opts.compression = ::rocksdb::kLZ4Compression;
+        opts.bottommost_compression = ::rocksdb::kLZ4Compression;
+#elif defined(DFTRACER_UTILS_ENABLE_ZSTD)
+        // Default level, no dictionary training (the expensive part).
+        opts.compression = ::rocksdb::kZSTD;
+        opts.bottommost_compression = ::rocksdb::kZSTD;
+#else
+        opts.compression = ::rocksdb::kNoCompression;
+        opts.bottommost_compression = ::rocksdb::kNoCompression;
+#endif
+    };
+    auto cf_override = [agg_merge_op, sys_merge_op, fast_scratch_compression](
                            const std::string& cf_name,
                            ::rocksdb::ColumnFamilyOptions& opts) {
         if (cf_name == rcf::AGGREGATION) {
@@ -376,50 +394,19 @@ EventAggregator::open_with_merge_operator(const std::string& index_path) {
 
             ::rocksdb::BlockBasedTableOptions bbt;
             bbt.block_size = 32 * 1024;
-            bbt.format_version = 5;
+            bbt.format_version = 7;
             bbt.index_block_restart_interval = 16;
             bbt.whole_key_filtering = false;
+            bbt.separate_key_value_in_data_block = true;
             opts.table_factory.reset(::rocksdb::NewBlockBasedTableFactory(bbt));
 
             opts.level0_file_num_compaction_trigger = 2;
             opts.max_bytes_for_level_multiplier = 20;
 
-#ifdef DFTRACER_UTILS_ENABLE_ZSTD
-            opts.compression = ::rocksdb::kZSTD;
-            opts.compression_opts.level =
-                constants::rocksdb::ZSTD_COMPRESSION_LEVEL;
-            opts.compression_opts.max_dict_bytes =
-                constants::rocksdb::ZSTD_MAX_DICT_BYTES;
-            opts.compression_opts.zstd_max_train_bytes =
-                constants::rocksdb::ZSTD_MAX_TRAIN_BYTES;
-            opts.compression_opts.enabled = true;
-            opts.bottommost_compression = ::rocksdb::kZSTD;
-            opts.bottommost_compression_opts.level =
-                constants::rocksdb::ZSTD_COMPRESSION_LEVEL;
-            opts.bottommost_compression_opts.max_dict_bytes =
-                constants::rocksdb::ZSTD_MAX_DICT_BYTES;
-            opts.bottommost_compression_opts.zstd_max_train_bytes =
-                constants::rocksdb::ZSTD_MAX_TRAIN_BYTES;
-            opts.bottommost_compression_opts.enabled = true;
-#elif defined(DFTRACER_UTILS_ENABLE_LZ4)
-            opts.compression = ::rocksdb::kLZ4Compression;
-            opts.bottommost_compression = ::rocksdb::kLZ4Compression;
-#else
-            opts.compression = ::rocksdb::kZlibCompression;
-            opts.bottommost_compression = ::rocksdb::kZlibCompression;
-#endif
+            fast_scratch_compression(opts);
         } else if (cf_name == rcf::SYSTEM_METRICS) {
             opts.merge_operator = sys_merge_op;
-#ifdef DFTRACER_UTILS_ENABLE_ZSTD
-            opts.compression = ::rocksdb::kZSTD;
-            opts.bottommost_compression = ::rocksdb::kZSTD;
-#elif defined(DFTRACER_UTILS_ENABLE_LZ4)
-            opts.compression = ::rocksdb::kLZ4Compression;
-            opts.bottommost_compression = ::rocksdb::kLZ4Compression;
-#else
-            opts.compression = ::rocksdb::kZlibCompression;
-            opts.bottommost_compression = ::rocksdb::kZlibCompression;
-#endif
+            fast_scratch_compression(opts);
         }
     };
     auto& mgr = rocksdb::RocksDBManager::instance();

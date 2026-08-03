@@ -54,37 +54,6 @@ std::vector<std::vector<T>> partition_all(std::size_t n,
 }
 
 /**
- * Partition items by moving them (for non-copyable types)
- */
-template <typename T>
-std::vector<std::vector<T>> partition_all_move(std::size_t n,
-                                               std::vector<T>& items) {
-    if (n == 0) {
-        throw DFTUtilsException(ErrorCode::INVALID_ARGUMENT,
-                                "partition_all_move: n must be > 0");
-    }
-
-    std::vector<std::vector<T>> result;
-    if (items.empty()) {
-        return result;
-    }
-
-    result.reserve((items.size() + n - 1) / n);
-
-    for (std::size_t i = 0; i < items.size(); i += n) {
-        std::size_t group_size = std::min(n, items.size() - i);
-        std::vector<T> group;
-        group.reserve(group_size);
-        for (std::size_t j = 0; j < group_size; ++j) {
-            group.push_back(std::move(items[i + j]));
-        }
-        result.push_back(std::move(group));
-    }
-
-    return result;
-}
-
-/**
  * Calculate tree reduction depth for given number of items and split size
  *
  * @param num_items Number of items to reduce

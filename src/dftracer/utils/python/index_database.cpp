@@ -1,7 +1,9 @@
 #include <dftracer/utils/python/index_database.h>
 #include <dftracer/utils/python/py_errors.h>
 #include <dftracer/utils/python/py_list_helpers.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
+#include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/sst_distribution.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -32,8 +34,8 @@ static int IndexDatabase_init(IndexDatabaseObject *self, PyObject *args,
                               PyObject *kwds) {
     static const char *kwlist[] = {"index_path", NULL};
     const char *index_path;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s", (char **)kwlist,
-                                     &index_path)) {
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "s", const_cast<char **>(kwlist), &index_path)) {
         return -1;
     }
     try {
@@ -57,22 +59,17 @@ static PyObject *IndexDatabase_init_schema(IndexDatabaseObject *self,
 
 static PyObject *IndexDatabase_register_files(IndexDatabaseObject *self,
                                               PyObject *args, PyObject *kwds) {
-    static const char *kwlist[] = {"paths", "build_manifest", NULL};
+    static const char *kwlist[] = {"paths", NULL};
     PyObject *paths_obj;
-    int build_manifest = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|p", (char **)kwlist,
-                                     &paths_obj, &build_manifest)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O",
+                                     const_cast<char **>(kwlist), &paths_obj)) {
         return NULL;
     }
     std::vector<std::string> paths;
     if (!parse_str_list(paths_obj, "paths", paths)) return NULL;
 
     std::vector<int> ids;
-    if (!run_blocking_r(
-            [&] {
-                return self->db->register_files(paths, build_manifest != 0);
-            },
-            ids)) {
+    if (!run_blocking_r([&] { return self->db->register_files(paths); }, ids)) {
         return NULL;
     }
 
@@ -109,8 +106,9 @@ static PyObject *IndexDatabase_bulk_ingest(IndexDatabaseObject *self,
     static const char *kwlist[] = {"registry", "skip_cfs", NULL};
     PyObject *registry_obj;
     PyObject *skip_cfs_obj = NULL;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O", (char **)kwlist,
-                                     &registry_obj, &skip_cfs_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O",
+                                     const_cast<char **>(kwlist), &registry_obj,
+                                     &skip_cfs_obj)) {
         return NULL;
     }
 
@@ -129,7 +127,7 @@ static PyObject *IndexDatabase_bulk_ingest(IndexDatabaseObject *self,
         Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
         for (Py_ssize_t i = 0; i < n; ++i) {
             PyObject *item = PySequence_Fast_GET_ITEM(seq, i);
-            const char *s = PyUnicode_AsUTF8(item);
+            const char *s = as_utf8(item);
             if (!s) {
                 Py_DECREF(seq);
                 return NULL;
@@ -172,17 +170,20 @@ static PyObject *IndexDatabase_write_agg_file_markers(IndexDatabaseObject *self,
 
 static PyObject *IndexDatabase_write_agg_global_config(
     IndexDatabaseObject *self, PyObject *args, PyObject *kwds) {
-    static const char *kwlist[] = {"time_interval_us", "config_hash", NULL};
+    static const char *kwlist[] = {"time_interval_us", "config_hash",
+                                   "group_by_file", NULL};
     unsigned long long time_interval_us = 0;
     unsigned int config_hash = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "K|I", (char **)kwlist,
-                                     &time_interval_us, &config_hash)) {
+    int group_by_file = 1;
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "K|Ip", const_cast<char **>(kwlist), &time_interval_us,
+            &config_hash, &group_by_file)) {
         return NULL;
     }
     if (!run_blocking([&] {
             self->db->write_agg_global_config(
                 static_cast<std::uint64_t>(time_interval_us),
-                static_cast<std::uint32_t>(config_hash));
+                static_cast<std::uint32_t>(config_hash), group_by_file != 0);
         })) {
         return NULL;
     }
@@ -228,28 +229,13 @@ static PyObject *IndexDatabase_rebuild_root_summaries(IndexDatabaseObject *self,
     Py_RETURN_NONE;
 }
 
-static PyObject *build_str_list(const std::vector<std::string> &v) {
-    PyObject *lst = PyList_New(static_cast<Py_ssize_t>(v.size()));
-    if (!lst) return NULL;
-    for (Py_ssize_t i = 0; i < static_cast<Py_ssize_t>(v.size()); ++i) {
-        PyObject *s =
-            PyUnicode_FromString(v[static_cast<std::size_t>(i)].c_str());
-        if (!s) {
-            Py_DECREF(lst);
-            return NULL;
-        }
-        PyList_SET_ITEM(lst, i, s);
-    }
-    return lst;
-}
-
 static PyObject *IndexDatabase_find_stale_files(IndexDatabaseObject *self,
                                                 PyObject *args,
                                                 PyObject *kwds) {
     static const char *kwlist[] = {"paths", NULL};
     PyObject *paths_obj;
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O", (char **)kwlist,
-                                     &paths_obj)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O",
+                                     const_cast<char **>(kwlist), &paths_obj)) {
         return NULL;
     }
     std::vector<std::string> paths;
@@ -261,9 +247,9 @@ static PyObject *IndexDatabase_find_stale_files(IndexDatabaseObject *self,
         return NULL;
     }
 
-    PyObject *changed = build_str_list(result.changed);
-    PyObject *added = build_str_list(result.added);
-    PyObject *removed = build_str_list(result.removed);
+    PyObject *changed = str_list_from(result.changed);
+    PyObject *added = str_list_from(result.added);
+    PyObject *removed = str_list_from(result.removed);
     PyObject *d = PyDict_New();
     if (!changed || !added || !removed || !d) {
         Py_XDECREF(changed);
@@ -288,24 +274,24 @@ static PyObject *IndexDatabase_find_stale_files(IndexDatabaseObject *self,
 }
 
 static PyMethodDef IndexDatabase_methods[] = {
-    {"init_schema", (PyCFunction)IndexDatabase_init_schema, METH_NOARGS,
+    {"init_schema", DFT_PYCFUNCTION(IndexDatabase_init_schema), METH_NOARGS,
      "Idempotently initialise the schema version key."},
-    {"register_files", (PyCFunction)IndexDatabase_register_files,
+    {"register_files", DFT_PYCFUNCTION(IndexDatabase_register_files),
      METH_VARARGS | METH_KEYWORDS,
-     "register_files(paths, build_manifest=False) -> list[int]\n"
+     "register_files(paths) -> list[int]\n"
      "Register each path in the DEFAULT-CF file registry and return the "
      "assigned file_ids. Idempotent for files with matching hash."},
-    {"find_stale_files", (PyCFunction)IndexDatabase_find_stale_files,
+    {"find_stale_files", DFT_PYCFUNCTION(IndexDatabase_find_stale_files),
      METH_VARARGS | METH_KEYWORDS,
      "find_stale_files(paths) -> dict\n"
      "Stat-only (mtime + size) staleness check of the given trace paths "
      "against the index. Returns {changed, added, removed, schema_outdated, "
      "stale}."},
-    {"reserve_file_id_range", (PyCFunction)IndexDatabase_reserve_file_id_range,
-     METH_VARARGS,
+    {"reserve_file_id_range",
+     DFT_PYCFUNCTION(IndexDatabase_reserve_file_id_range), METH_VARARGS,
      "reserve_file_id_range(count) -> int\n"
      "Atomically reserve `count` contiguous file_ids, return the first."},
-    {"bulk_ingest", (PyCFunction)IndexDatabase_bulk_ingest,
+    {"bulk_ingest", DFT_PYCFUNCTION(IndexDatabase_bulk_ingest),
      METH_VARARGS | METH_KEYWORDS,
      "bulk_ingest(registry, skip_cfs=None) -> None\n"
      "Ingest all SSTs collected in the SstArtifactRegistry.\n"
@@ -313,25 +299,26 @@ static PyMethodDef IndexDatabase_methods[] = {
      "outside the unified DB (used by distributed builds to keep "
      "AGGREGATION/SYSTEM_METRICS SSTs addressable by manifest)."},
     {"rebuild_root_summaries",
-     (PyCFunction)IndexDatabase_rebuild_root_summaries, METH_NOARGS,
+     DFT_PYCFUNCTION(IndexDatabase_rebuild_root_summaries), METH_NOARGS,
      "Recompute ROOT_* summary column families from per-file CFs."},
     {"write_agg_global_config",
-     (PyCFunction)IndexDatabase_write_agg_global_config,
+     DFT_PYCFUNCTION(IndexDatabase_write_agg_global_config),
      METH_VARARGS | METH_KEYWORDS,
-     "write_agg_global_config(time_interval_us, config_hash=0) -> None\n"
+     "write_agg_global_config(time_interval_us, config_hash=0, "
+     "group_by_file=True) -> None\n"
      "Write the AGG_GLOBAL_CONFIG_KEY marker into the AGGREGATION CF. "
      "Required for `iter_arrow_dfanalyzer_all` on distributed builds "
      "(which never materialise the key via worker SSTs) or "
      "post-consolidate indices."},
     {"write_agg_file_markers",
-     (PyCFunction)IndexDatabase_write_agg_file_markers, METH_VARARGS,
+     DFT_PYCFUNCTION(IndexDatabase_write_agg_file_markers), METH_VARARGS,
      "write_agg_file_markers(file_ids) -> None\n"
      "Write per-file aggregation completion markers (\\xFF\\xFF + file_id) "
      "into the AGGREGATION CF. Required after distributed_index otherwise "
      "`ensure_indexed()` concludes aggregation is incomplete and re-runs "
      "the entire build."},
     {"write_aggregation_tracker",
-     (PyCFunction)IndexDatabase_write_aggregation_tracker, METH_VARARGS,
+     DFT_PYCFUNCTION(IndexDatabase_write_aggregation_tracker), METH_VARARGS,
      "write_aggregation_tracker(blobs) -> None\n"
      "Merge a list of serialized AssociationTracker bytes and write the "
      "result to the AGGREGATION CF under the `__tracker__` key."},

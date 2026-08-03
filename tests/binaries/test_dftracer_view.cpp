@@ -1,11 +1,16 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/filesystem.h>
+#include <dftracer/utils/utilities/fileio/compress/gzip_rechunker.h>
 #include <doctest/doctest.h>
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <testing_utilities.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -26,6 +31,20 @@ std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
     return pfw_path;
 }
 
+// Rechunk a single-member fixture into a multi-member trace whose members are
+// about `member_bytes` uncompressed, for exercising ingest member handling.
+std::string make_multimember_pfw_gz(dft_utils_test::TestEnvironment& env,
+                                    int num_events, std::size_t member_bytes,
+                                    int id) {
+    std::string single = create_pfw_gz(env, num_events, id);
+    if (single.empty()) return "";
+    std::string mm = env.get_dir() + "/mm_" + std::to_string(id) + ".pfw.gz";
+    namespace gzc = dftracer::utils::utilities::fileio::compress;
+    gzc::gzip_rechunk_to_members(single, mm, member_bytes, 6).get();
+    fs::remove(single);
+    return mm;
+}
+
 std::string find_view_binary() {
     const char* env_path = std::getenv("DFTRACER_VIEW_PATH");
     if (env_path != nullptr && ::access(env_path, X_OK) == 0) return env_path;
@@ -42,13 +61,13 @@ std::string find_view_binary() {
 }
 
 int run_view(const std::string& binary, const std::vector<std::string>& args) {
+    std::vector<const char*> argv;
+    argv.push_back(binary.c_str());
+    for (const auto& arg : args) argv.push_back(arg.c_str());
+    argv.push_back(nullptr);
     pid_t pid = ::fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        std::vector<const char*> argv;
-        argv.push_back(binary.c_str());
-        for (const auto& arg : args) argv.push_back(arg.c_str());
-        argv.push_back(nullptr);
         ::execv(binary.c_str(), const_cast<char* const*>(argv.data()));
         ::_exit(127);
     }
@@ -61,6 +80,60 @@ int run_view(const std::string& binary, const std::vector<std::string>& args) {
         return -(sig);
     }
     return -1;
+}
+
+// Run `binary`, capturing its stdout into `out`. The capture file is opened in
+// the parent; the child only calls async-signal-safe dup2/close/execv.
+int run_view_capture(const std::string& binary,
+                     const std::vector<std::string>& args,
+                     const std::string& capture_path, std::string& out) {
+    std::vector<const char*> argv;
+    argv.push_back(binary.c_str());
+    for (const auto& arg : args) argv.push_back(arg.c_str());
+    argv.push_back(nullptr);
+    int fd = ::open(capture_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        ::close(fd);
+        return -1;
+    }
+    if (pid == 0) {
+        ::dup2(fd, STDOUT_FILENO);
+        ::close(fd);
+        ::execv(binary.c_str(), const_cast<char* const*>(argv.data()));
+        ::_exit(127);
+    }
+    ::close(fd);
+    int status = 0;
+    ::waitpid(pid, &status, 0);
+    std::ifstream ifs(capture_path);
+    out.assign((std::istreambuf_iterator<char>(ifs)),
+               std::istreambuf_iterator<char>());
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+std::size_t count_lines(const std::string& s) {
+    return static_cast<std::size_t>(std::count(s.begin(), s.end(), '\n'));
+}
+
+// Split into non-empty lines and sort, so two aggregations can be compared
+// regardless of row emission order.
+std::vector<std::string> sorted_lines(const std::string& s) {
+    std::vector<std::string> lines;
+    std::string cur;
+    for (char c : s) {
+        if (c == '\n') {
+            if (!cur.empty()) lines.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    if (!cur.empty()) lines.push_back(cur);
+    std::sort(lines.begin(), lines.end());
+    return lines;
 }
 
 }  // namespace
@@ -128,6 +201,30 @@ TEST_SUITE("DFTracerView") {
         CHECK(rc == 0);
     }
 
+    TEST_CASE("percentile and shape aggregations") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        auto f = create_pfw_gz(env, 50, 0);
+        REQUIRE(!f.empty());
+
+        int rc = run_view(binary, {"--group-by", "cat", "--agg",
+                                   "p99:dur,pct:dur:0.95,skew:dur,kurt:dur",
+                                   "-d", env.get_dir()});
+        CHECK(rc == 0);
+
+        // pct without a quantile and pNN without a field are rejected.
+        CHECK(run_view(binary, {"--group-by", "cat", "--agg", "pct:dur", "-d",
+                                env.get_dir()}) != 0);
+        CHECK(run_view(binary, {"--group-by", "cat", "--agg", "p99", "-d",
+                                env.get_dir()}) != 0);
+    }
+
     TEST_CASE("output to file") {
         auto binary = find_view_binary();
         if (binary.empty()) {
@@ -141,14 +238,46 @@ TEST_SUITE("DFTracerView") {
         auto f = create_pfw_gz(env, 50, 0);
         REQUIRE(!f.empty());
 
-        std::string output = env.get_dir() + "/view_output.ndjson";
-        int rc = run_view(binary,
-                          {"--query", R"(cat == "POSIX")", "--stream",
-                           "--no-metadata", "-d", env.get_dir(), "-o", output});
+        // File output is always a compressed (.gz) trace.
+        std::string output = env.get_dir() + "/view_output.pfw";
+        int rc =
+            run_view(binary, {"--query", R"(cat == "POSIX")", "--no-metadata",
+                              "--no-index", "-d", env.get_dir(), "-o", output});
         CHECK(rc == 0);
-        REQUIRE(fs::exists(output));
-        // Output file must be non-empty (events were matched).
-        CHECK(fs::file_size(output) > 0);
+        REQUIRE(fs::exists(output + ".gz"));
+        CHECK(fs::file_size(output + ".gz") > 0);
+    }
+
+    TEST_CASE("fused index round-trips (--merge --verify)") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+
+        // Inputs in their own dir so the .pfw.gz output is not rescanned as
+        // input on a subsequent run.
+        std::string in = env.get_dir() + "/in";
+        fs::create_directories(in);
+        auto trace_gz = env.create_dft_test_gzip_file(50);
+        REQUIRE(!trace_gz.empty());
+        fs::rename(trace_gz, in + "/trace_0.pfw.gz");
+
+        // Default write path builds the index during the write (fused).
+        // --verify re-scans the written+indexed trace via that index and checks
+        // the event count round-trips, so rc==0 proves the fused member index
+        // is correct.
+        std::string output = env.get_dir() + "/merged.pfw";
+        int rc = run_view(binary, {"-d", in, "--merge", "--verify",
+                                   "--no-metadata", "-o", output});
+        CHECK(rc == 0);
+        REQUIRE(fs::exists(output + ".gz"));
+        // The index was built by the write, not a separate pass: its .dftindex
+        // directory must exist next to the output.
+        CHECK(fs::exists(env.get_dir() + "/.dftindex"));
     }
 
     TEST_CASE("query with name filter") {
@@ -169,5 +298,249 @@ TEST_SUITE("DFTracerView") {
             {"--query", R"(cat == "POSIX" and name in ["pread", "pwrite"])",
              "--stream", "-d", env.get_dir()});
         CHECK(rc == 0);
+    }
+
+    // Fixture ts = 1000000000 + i*100000 for i=1..N, so a window that ends at
+    // 1000200000 keeps only i=1,2. --time-range must filter per-event, not just
+    // prune whole chunks.
+    TEST_CASE("time-range filters events exactly") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!create_pfw_gz(env, 50, 0).empty());
+
+        std::string cap = env.get_dir() + "/cap.txt";
+        std::string full, narrow;
+        CHECK(run_view_capture(binary,
+                               {"--query", "ts >= 0", "--stream",
+                                "--no-metadata", "-d", env.get_dir()},
+                               cap, full) == 0);
+        CHECK(run_view_capture(binary,
+                               {"--stream", "--no-metadata", "--time-range",
+                                "0,1000200000", "-d", env.get_dir()},
+                               cap, narrow) == 0);
+        // The window keeps only i=1,2; the unfiltered stream keeps them all.
+        CHECK(count_lines(narrow) == 2);
+        CHECK(count_lines(full) > count_lines(narrow));
+    }
+
+    TEST_CASE("agg-numeric-args aggregates numeric args") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!create_pfw_gz(env, 50, 0).empty());
+
+        std::string cap = env.get_dir() + "/cap.txt";
+        std::string plain, numeric;
+        CHECK(run_view_capture(
+                  binary,
+                  {"--group-by", "cat", "--agg", "count", "-d", env.get_dir()},
+                  cap, plain) == 0);
+        CHECK(run_view_capture(binary,
+                               {"--group-by", "cat", "--agg-numeric-args", "-d",
+                                env.get_dir()},
+                               cap, numeric) == 0);
+        CHECK(!numeric.empty());
+        // The fixture carries a numeric arg, so --agg-numeric-args adds a value
+        // column that a bare count does not.
+        CHECK(numeric.size() > plain.size());
+    }
+
+    // A 1-byte budget forces a spill; the result must match the in-memory run.
+    TEST_CASE("memory-budget spill matches --no-spill") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!create_pfw_gz(env, 50, 0).empty());
+
+        std::string cap = env.get_dir() + "/cap.txt";
+        std::string spilled, in_mem;
+        std::vector<std::string> agg = {"--group-by", "name", "--agg",
+                                        "count,sum:dur"};
+        std::vector<std::string> a1 = agg;
+        a1.insert(a1.end(), {"--memory-budget", "1", "-d", env.get_dir()});
+        std::vector<std::string> a2 = agg;
+        a2.insert(a2.end(), {"--no-spill", "-d", env.get_dir()});
+        CHECK(run_view_capture(binary, a1, cap, spilled) == 0);
+        CHECK(run_view_capture(binary, a2, cap, in_mem) == 0);
+        CHECK(!spilled.empty());
+        CHECK(sorted_lines(spilled) == sorted_lines(in_mem));
+    }
+
+    TEST_CASE("time-scale runs") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!create_pfw_gz(env, 50, 0).empty());
+
+        CHECK(run_view(binary, {"--group-by", "cat", "--agg", "sum:dur",
+                                "--time-scale", "1000", "-d", env.get_dir()}) ==
+              0);
+    }
+
+    TEST_CASE("select projects out unselected columns") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!create_pfw_gz(env, 50, 0).empty());
+
+        std::string cap = env.get_dir() + "/cap.txt";
+        std::string full, projected;
+        std::vector<std::string> agg = {"--group-by", "cat", "--agg",
+                                        "count,sum:dur"};
+        std::vector<std::string> a1 = agg;
+        a1.insert(a1.end(), {"-d", env.get_dir()});
+        std::vector<std::string> a2 = agg;
+        a2.insert(a2.end(), {"--select", "cat,count", "-d", env.get_dir()});
+        CHECK(run_view_capture(binary, a1, cap, full) == 0);
+        CHECK(run_view_capture(binary, a2, cap, projected) == 0);
+        CHECK(full.find("sum_dur") != std::string::npos);
+        CHECK(projected.find("sum_dur") == std::string::npos);  // dropped
+        CHECK(projected.find("count") != std::string::npos);    // kept
+    }
+
+    // --materialize persists a rollup; the identical query must then return the
+    // same rows (served from the rollup instead of a scan).
+    TEST_CASE("materialize persists a reusable rollup") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!create_pfw_gz(env, 50, 0).empty());
+
+        std::string cap = env.get_dir() + "/cap.txt";
+        std::vector<std::string> q = {"--group-by",    "cat", "--agg",
+                                      "count,sum:dur", "-d",  env.get_dir()};
+        std::string baseline, requery;
+        CHECK(run_view_capture(binary, q, cap, baseline) == 0);
+
+        std::vector<std::string> mat = {
+            "--group-by",    "cat", "--agg",      "count,sum:dur",
+            "--materialize", "-d",  env.get_dir()};
+        CHECK(run_view(binary, mat) == 0);
+
+        CHECK(run_view_capture(binary, q, cap, requery) == 0);
+        CHECK(!baseline.empty());
+        CHECK(sorted_lines(baseline) == sorted_lines(requery));
+    }
+
+    // No aggregation-index tier in this fixture, so the families are empty, but
+    // the --collect-typed terminal must still run cleanly.
+    TEST_CASE("collect-typed runs") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!create_pfw_gz(env, 50, 0).empty());
+
+        CHECK(run_view(binary, {"--group-by", "cat", "--agg", "count",
+                                "--collect-typed", "-d", env.get_dir()}) == 0);
+    }
+
+    // --materialize is meaningless without an aggregation and must be rejected.
+    TEST_CASE("materialize without aggregation is rejected") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!create_pfw_gz(env, 50, 0).empty());
+
+        CHECK(run_view(binary, {"--query", R"(cat == "POSIX")", "--materialize",
+                                "-d", env.get_dir()}) != 0);
+    }
+
+    // A single-member input is normalized to bounded multi-member gzip in a
+    // sibling split/ dir; the original file is never touched. A tiny
+    // --checkpoint-size forces the rechunk on the small fixture.
+    TEST_CASE("single-member input auto-splits non-destructively") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        std::string orig = create_pfw_gz(env, 50, 0);
+        REQUIRE(!orig.empty());
+        const auto orig_size = fs::file_size(orig);
+
+        int rc = run_view(
+            binary, {"--group-by", "cat", "--agg", "count", "--checkpoint-size",
+                     "2048", "-d", env.get_dir()});
+        CHECK(rc == 0);
+
+        const std::string split_copy =
+            env.get_dir() + "/split/" + fs::path(orig).filename().string();
+        CHECK(fs::exists(split_copy));            // multi-member copy created
+        CHECK(fs::file_size(orig) == orig_size);  // original untouched
+    }
+
+    // A multi-member input whose members already fit under the checkpoint size
+    // is left alone (no split/ dir).
+    TEST_CASE("multi-member input under the cap is not re-split") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        REQUIRE(!make_multimember_pfw_gz(env, 200, 4096, 0).empty());
+
+        int rc = run_view(
+            binary, {"--group-by", "cat", "--agg", "count", "--checkpoint-size",
+                     "1048576", "-d", env.get_dir()});
+        CHECK(rc == 0);
+        CHECK_FALSE(fs::exists(env.get_dir() + "/split"));
+    }
+
+    // A multi-member input whose members exceed the checkpoint size is
+    // re-normalized to bounded members in split/.
+    TEST_CASE("multi-member input over the cap is re-split") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found, skipping.");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        std::string mm = make_multimember_pfw_gz(env, 200, 8192, 0);
+        REQUIRE(!mm.empty());
+
+        int rc = run_view(
+            binary, {"--group-by", "cat", "--agg", "count", "--checkpoint-size",
+                     "2048", "-d", env.get_dir()});
+        CHECK(rc == 0);
+        CHECK(fs::exists(env.get_dir() + "/split/" +
+                         fs::path(mm).filename().string()));
     }
 }

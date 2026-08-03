@@ -166,14 +166,6 @@ struct PipelineConfig {
     }
 
     /**
-     * Set coroutine timeslice duration (0 = disable automatic yielding)
-     */
-    PipelineConfig& with_timeslice(std::chrono::microseconds duration) {
-        timeslice_duration = duration;
-        return *this;
-    }
-
-    /**
      * Set I/O thread pool size (used by thread pool and epoll backends)
      */
     PipelineConfig& with_io_threads(std::size_t count) {

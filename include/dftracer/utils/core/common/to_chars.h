@@ -43,6 +43,12 @@ inline char* to_chars_u64(char* first, char* last, std::uint64_t v) noexcept {
     return ec == std::errc{} ? p : nullptr;
 }
 
+/// Signed sibling of to_chars_u64; the integer overload is always available.
+inline char* to_chars_i64(char* first, char* last, std::int64_t v) noexcept {
+    auto [p, ec] = std::to_chars(first, last, v);
+    return ec == std::errc{} ? p : nullptr;
+}
+
 }  // namespace dftracer::utils
 
 #endif

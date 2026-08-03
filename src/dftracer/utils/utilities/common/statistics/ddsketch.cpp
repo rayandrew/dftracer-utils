@@ -169,6 +169,21 @@ void DDSketch::collapse_to_fit(int new_max_key) {
     collapsed_ = true;
 }
 
+std::vector<HistogramBin> DDSketch::bins() const {
+    std::vector<HistogramBin> out;
+    if (zero_count_ > 0)
+        out.push_back({0.0, 0.0, static_cast<std::uint64_t>(zero_count_)});
+    if (initialized_) {
+        for (int i = 0; i < num_bins_ && i < MAX_BINS; ++i) {
+            if (store_[i] == 0) continue;
+            const int idx = i + offset_;
+            out.push_back({bin_lower_bound(idx), bin_upper_bound(idx),
+                           static_cast<std::uint64_t>(store_[i])});
+        }
+    }
+    return out;
+}
+
 void DDSketch::add(double value, double weight) {
     if (weight <= 0.0) return;
 

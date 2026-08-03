@@ -1,8 +1,6 @@
 #ifndef DFTRACER_UTILS_UTILITIES_READER_INTERNAL_STREAMS_GZIP_STREAM_H
 #define DFTRACER_UTILS_UTILITIES_READER_INTERNAL_STREAMS_GZIP_STREAM_H
 
-#include <dftracer/utils/core/common/checkpointer.h>
-#include <dftracer/utils/utilities/indexer/internal/checkpoint.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer.h>
 #include <dftracer/utils/utilities/reader/error.h>
 #include <dftracer/utils/utilities/reader/internal/inflater.h>
@@ -28,13 +26,13 @@ class GzipStream : public StreamBase {
     bool is_active_;
     bool is_finished_;
     bool decompression_initialized_;
-    bool use_checkpoint_;
+    bool use_member_;
 
     // Less frequently accessed members
     std::string current_gz_path_;
+    dftracer::utils::utilities::indexer::internal::Indexer *indexer_ = nullptr;
     std::size_t start_bytes_;
-    dftracer::utils::utilities::indexer::internal::IndexerCheckpoint
-        checkpoint_;
+    dftracer::utils::utilities::indexer::internal::GzipMemberRecord member_;
 
     // Backing buffer and copy-based read cursor, shared by the copy-drain
     // read_async(char*, size_t) below. Derived classes fill buffer_ via their
@@ -55,7 +53,7 @@ class GzipStream : public StreamBase {
           is_active_(false),
           is_finished_(false),
           decompression_initialized_(false),
-          use_checkpoint_(false),
+          use_member_(false),
           start_bytes_(0),
           buffer_(buffer_size, 0),
           valid_bytes_(0),
@@ -121,6 +119,7 @@ class GzipStream : public StreamBase {
 
     void reset() override {
         current_gz_path_.clear();
+        indexer_ = nullptr;
         start_bytes_ = 0;
         current_position_ = 0;
         target_end_bytes_ = 0;
@@ -133,8 +132,9 @@ class GzipStream : public StreamBase {
         }
         file_offset_ = 0;
         inflater_.reset();
-        checkpoint_ =
-            dftracer::utils::utilities::indexer::internal::IndexerCheckpoint();
+        member_ =
+            dftracer::utils::utilities::indexer::internal::GzipMemberRecord();
+        use_member_ = false;
         decompression_initialized_ = false;
     }
 
@@ -151,6 +151,9 @@ class GzipStream : public StreamBase {
         return fd;
     }
 
+    /// Records the request only. Opening and seeking happen on the first
+    /// read, so a stream is built without blocking a caller who is going to
+    /// await the data anyway.
     void initialize(const std::string &gz_path, std::size_t start_bytes,
                     std::size_t end_bytes,
                     dftracer::utils::utilities::indexer::internal::Indexer
@@ -161,68 +164,79 @@ class GzipStream : public StreamBase {
         current_gz_path_ = gz_path;
         start_bytes_ = start_bytes;
         target_end_bytes_ = end_bytes;
+        indexer_ = &indexer;
         max_file_bytes_ = indexer.get_max_bytes();
         is_active_ = true;
         is_finished_ = false;
+    }
 
-        fd_ = open_file(gz_path);
+    coro::CoroTask<void> ensure_initialized() {
+        if (decompression_initialized_ || !is_active_) co_return;
+
+        fd_ = open_file(current_gz_path_);
         file_offset_ = 0;
 
-        use_checkpoint_ = try_initialize_with_checkpoint(start_bytes, indexer);
+        // Share member decodes across concurrent readers when a process-level
+        // cache is configured (server). Keyed by a stable per-path token so
+        // different fds to the same file coalesce.
+        if (auto *cache = global_member_decode_cache()) {
+            inflater_.set_cache(cache,
+                                std::hash<std::string>{}(current_gz_path_));
+        }
 
-        if (!use_checkpoint_) {
-            checkpoint_ = dftracer::utils::utilities::indexer::internal::
-                IndexerCheckpoint();
-            if (!inflater_
-                     .initialize(fd_, file_offset_, 0,
-                                 constants::indexer::ZLIB_GZIP_WINDOW_BITS)
-                     .get()) {
+        // A range starting past the end of the file yields nothing, so skip
+        // the seek entirely rather than decoding up to EOF to discover that.
+        if (max_file_bytes_ > 0 && start_bytes_ >= max_file_bytes_) {
+            is_finished_ = true;
+            decompression_initialized_ = true;
+            co_return;
+        }
+
+        use_member_ = co_await try_initialize_with_member(start_bytes_);
+
+        if (!use_member_) {
+            if (!co_await inflater_.initialize(
+                    fd_, file_offset_, 0,
+                    constants::indexer::ZLIB_GZIP_WINDOW_BITS)) {
                 throw ReaderError(ReaderError::COMPRESSION_ERROR,
                                   "Failed to initialize inflater");
             }
         }
 
         decompression_initialized_ = true;
+        co_await on_initialized();
     }
 
-    bool try_initialize_with_checkpoint(
-        std::size_t start_bytes,
-        dftracer::utils::utilities::indexer::internal::Indexer &indexer) {
-        bool should_use_first_checkpoint =
-            start_bytes < indexer.get_checkpoint_size();
+    /// Hook for derived streams to seek to their own start once the base
+    /// stream is positioned.
+    virtual coro::CoroTask<void> on_initialized() { co_return; }
 
-        if (should_use_first_checkpoint) {
-            if (indexer.find_checkpoint(0, checkpoint_)) {
-                if (inflate_init_from_checkpoint()) {
-                    DFTRACER_UTILS_LOG_DEBUG(
-                        "Using first checkpoint at uncompressed offset %" PRIu64
-                        " for "
-                        "early "
-                        "target %zu",
-                        checkpoint_.uc_offset, start_bytes);
-                    return true;
-                }
-            }
-        } else {
-            if (indexer.find_checkpoint(start_bytes, checkpoint_)) {
-                if (inflate_init_from_checkpoint()) {
-                    DFTRACER_UTILS_LOG_DEBUG(
-                        "Using checkpoint at uncompressed offset %" PRIu64
-                        " for target %zu",
-                        checkpoint_.uc_offset, start_bytes);
-                    return true;
-                }
-            }
+    // A member start is a self-contained gzip stream, so the seek needs no
+    // dictionary and no bit priming. Files with no member table (never
+    // indexed) decode from the beginning instead.
+    coro::CoroTask<bool> try_initialize_with_member(std::size_t start_bytes) {
+        if (!indexer_ || !indexer_->find_member(start_bytes, member_))
+            co_return false;
+        if (!co_await inflater_.seek_to_member(fd_, file_offset_, member_)) {
+            co_return false;
         }
-        return false;
+        DFTRACER_UTILS_LOG_DEBUG(
+            "Using member %" PRIu64 " at uncompressed offset %" PRIu64
+            " for target %zu",
+            member_.member_idx, member_.uc_offset, start_bytes);
+        co_return true;
     }
 
-    void skip(std::size_t target_position) {
-        std::size_t current_pos = checkpoint_.uc_offset;
+    /// Uncompressed offset the stream sits at right after a seek, and the
+    /// base every skip measures from. Derived streams must ask here rather
+    /// than reach for the member record directly.
+    std::size_t seek_anchor_offset() const { return member_.uc_offset; }
+
+    coro::CoroTask<void> skip(std::size_t target_position) {
+        std::size_t current_pos = seek_anchor_offset();
         if (target_position > current_pos) {
-            inflater_
-                .skip_bytes(fd_, file_offset_, target_position - current_pos)
-                .get();
+            co_await inflater_.skip_bytes(fd_, file_offset_,
+                                          target_position - current_pos);
         }
     }
 
@@ -230,28 +244,22 @@ class GzipStream : public StreamBase {
         return current_position_ >= target_end_bytes_;
     }
 
-    void restart_compression() {
+    coro::CoroTask<void> restart_compression() {
         inflater_.reset();
-        if (use_checkpoint_) {
-            if (!inflate_init_from_checkpoint()) {
+        if (use_member_) {
+            if (!co_await inflater_.seek_to_member(fd_, file_offset_,
+                                                   member_)) {
                 throw ReaderError(ReaderError::COMPRESSION_ERROR,
-                                  "Failed to reinitialize from checkpoint");
+                                  "Failed to reinitialize from member");
             }
         } else {
-            if (!inflater_
-                     .initialize(fd_, file_offset_, 0,
-                                 constants::indexer::ZLIB_GZIP_WINDOW_BITS)
-                     .get()) {
+            if (!co_await inflater_.initialize(
+                    fd_, file_offset_, 0,
+                    constants::indexer::ZLIB_GZIP_WINDOW_BITS)) {
                 throw ReaderError(ReaderError::COMPRESSION_ERROR,
                                   "Failed to initialize inflater");
             }
         }
-    }
-
-   private:
-    bool inflate_init_from_checkpoint() const {
-        return inflater_.restore_from_checkpoint(fd_, file_offset_, checkpoint_)
-            .get();
     }
 };
 

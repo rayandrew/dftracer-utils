@@ -72,8 +72,16 @@ class CallTreeImpl {
             return false;
         }
 
-        // Recursively find matching files
-        for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+        // Recursively find matching files, skipping index-artifact dirs
+        // (`.dftindex*`) so a view's own output is never taken as input.
+        fs::recursive_directory_iterator it(dir), rend;
+        for (; it != rend; ++it) {
+            const auto& entry = *it;
+            if (entry.is_directory() &&
+                entry.path().filename().string().rfind(".dftindex", 0) == 0) {
+                it.disable_recursion_pending();
+                continue;
+            }
             if (entry.is_regular_file()) {
                 std::string filename = entry.path().filename().string();
 

@@ -70,7 +70,7 @@ const char* test_environment_get_dir(test_environment_handle_t env);
 /**
  * Archive formats supported by the test environment
  */
-typedef enum { TEST_FORMAT_GZIP = 0, TEST_FORMAT_TAR_GZIP = 1 } test_format_t;
+typedef enum { TEST_FORMAT_GZIP = 0 } test_format_t;
 
 /**
  * Create a test gzip file and return the path
@@ -84,38 +84,6 @@ char* test_environment_create_test_gzip_file(test_environment_handle_t env);
  */
 char* test_environment_create_test_file_with_format(
     test_environment_handle_t env, test_format_t format);
-
-/**
- * Create a tar.gz archive with multiple files
- * Returns allocated string - caller must free
- */
-char* test_environment_create_test_tar_gzip_file(test_environment_handle_t env);
-
-/**
- * Create a tar archive and then compress it to gzip
- * Returns 1 on success, 0 on failure
- */
-int create_tar_archive_and_compress(const char** file_paths, size_t num_files,
-                                    const char* output_file);
-
-/**
- * Extract a specific file from tar.gz archive
- * Returns 1 on success, 0 on failure
- */
-int extract_file_from_tar_gz(const char* tar_gz_path, const char* file_path,
-                             const char* output_path);
-
-/**
- * Get list of files in tar archive
- * Returns allocated array of strings - caller must free each string and the
- * array
- */
-char** get_tar_file_list(const char* tar_path, size_t* num_files);
-
-/**
- * Free file list returned by get_tar_file_list
- */
-void free_tar_file_list(char** file_list, size_t num_files);
 
 /**
  * Get the `.dftindex` path for a given gzip file
@@ -143,7 +111,7 @@ char* test_make_unique_test_path(const char* name);
 
 namespace dft_utils_test {
 
-enum class Format { GZIP = 0, TAR_GZIP = 1 };
+enum class Format { GZIP = 0 };
 
 inline std::size_t valgrind_scale(std::size_t n, std::size_t divisor = 10) {
 #ifdef DFTRACER_UTILS_VALGRIND_MODE
@@ -164,33 +132,48 @@ inline int valgrind_threads(int n) {
 
 inline fs::path make_unique_test_path(const std::string& name) {
     static std::atomic<unsigned long long> counter{0};
+    // The pid is what keeps concurrently running test processes apart. None
+    // of the other components do: steady_clock reads the same on processes
+    // started in the same tick, the main thread's id hashes identically in
+    // every process, and the counter restarts at 0. Two processes agreeing on
+    // a path means one TestEnvironment destructor removes the other's fixture
+    // mid-test, which surfaces as a file that was just written having
+    // vanished.
+    const auto pid = static_cast<unsigned long long>(::getpid());
     const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
                          std::chrono::steady_clock::now().time_since_epoch())
                          .count();
     const auto tid = std::hash<std::thread::id>{}(std::this_thread::get_id());
     const auto unique_id =
-        std::to_string(now) + "_" + std::to_string(tid) + "_" +
+        std::to_string(pid) + "_" + std::to_string(now) + "_" +
+        std::to_string(tid) + "_" +
         std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
     return fs::temp_directory_path() / (name + "_" + unique_id);
 }
 
-struct TarFileInfo {
-    std::string filename;
-    std::string content;
-    std::size_t num_lines;
-};
+/// Write `content` as a gzip trace at `path` and return that path. Traces
+/// must be gzip, so fixtures that used to be written as plain .pfw go
+/// through this.
+std::string write_gz_trace(const std::string& path, const std::string& content);
 
 bool compress_file_to_gzip(const std::string& input_file,
                            const std::string& output_file);
 
-bool create_tar_archive(const std::vector<TarFileInfo>& files,
-                        const std::string& output_path);
-bool create_tar_gz_archive(const std::vector<TarFileInfo>& files,
-                           const std::string& output_path);
-std::vector<std::string> list_tar_contents(const std::string& tar_path);
-bool extract_from_tar_gz(const std::string& tar_gz_path,
-                         const std::string& file_path,
-                         const std::string& output_path);
+/// Like compress_file_to_gzip but emits a multi-member gzip: the input is
+/// split into `member_bytes`-sized uncompressed chunks, each written as an
+/// independent gzip stream and concatenated. The reader seeks random access
+/// by member, so multi-member output keeps a read from re-inflating the whole
+/// file to reach a mid-file offset.
+bool compress_file_to_gzip_multimember(const std::string& input_file,
+                                       const std::string& output_file,
+                                       std::size_t member_bytes);
+
+/// Build the index for a single gzip trace via the batch pipeline, blocking.
+/// Returns true if indexed or already up to date. Empty `index_dir` writes
+/// next to the trace; a 0 argument means "default" for the sizing knobs.
+bool build_index(const std::string& gz, const std::string& index_dir = "",
+                 std::size_t sub_chunk_events = 0,
+                 std::size_t checkpoint_size = 0);
 
 class TestEnvironment {
    public:
@@ -205,7 +188,6 @@ class TestEnvironment {
     bool is_valid() const;
     std::string create_test_file();  // Format-aware file creation
     std::string create_test_gzip_file();
-    std::string create_test_tar_gzip_file();
     std::string get_index_path(const std::string& gz_file);
     Format get_format() const { return format_; }
 
@@ -225,7 +207,6 @@ class TestEnvironment {
     Format format_;
 
     std::string create_test_gzip_file_impl();
-    std::string create_test_tar_gzip_file_impl();
 };
 
 #ifdef DFTRACER_UTILS_MPI_ENABLED
@@ -234,13 +215,13 @@ class TestEnvironment {
 // Run `binary` with `args` (no shell). Returns the exit code, or -1 on failure.
 inline int run_process(const std::string& binary,
                        const std::vector<std::string>& args) {
+    std::vector<const char*> argv;
+    argv.push_back(binary.c_str());
+    for (const auto& a : args) argv.push_back(a.c_str());
+    argv.push_back(nullptr);
     pid_t pid = ::fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        std::vector<const char*> argv;
-        argv.push_back(binary.c_str());
-        for (const auto& a : args) argv.push_back(a.c_str());
-        argv.push_back(nullptr);
         ::execv(binary.c_str(), const_cast<char* const*>(argv.data()));
         ::_exit(127);
     }

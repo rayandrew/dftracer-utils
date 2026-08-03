@@ -17,11 +17,6 @@ std::string determine_index_path(const std::string& path,
     return indexer::internal::normalize_index_root(root.string());
 }
 
-std::string determine_provenance_index_path(const std::string& data_path,
-                                            const std::string& index_dir) {
-    return determine_index_path(data_path, index_dir);
-}
-
 std::string_view to_lower_ascii(std::string_view s, std::string& storage) {
     bool has_upper = false;
     for (char c : s) {

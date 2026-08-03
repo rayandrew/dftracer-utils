@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/coro/yield.h>
 #include <dftracer/utils/core/pipeline/executor.h>
 #include <dftracer/utils/core/pipeline/scheduler.h>
+#include <dftracer/utils/core/pipeline/thread_pool_executor.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <doctest/doctest.h>
@@ -22,7 +23,7 @@ TEST_CASE("Yield - Executor::current() is nullptr outside worker") {
 }
 
 TEST_CASE("Yield - Executor::current() is set inside worker task") {
-    Executor executor(ExecutorConfig{.num_threads = 1});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 1});
     Scheduler scheduler(&executor);
 
     std::atomic<Executor*> observed{nullptr};
@@ -45,7 +46,7 @@ TEST_CASE("Yield - Executor::current() is set inside worker task") {
 // ============================================================================
 
 TEST_CASE("Yield - maybe_yield() does not hang with executor") {
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<int> counter{0};
@@ -71,7 +72,7 @@ TEST_CASE("Yield - maybe_yield() does not hang with executor") {
 // ============================================================================
 
 TEST_CASE("Yield - yield() does not hang with executor") {
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     std::atomic<int> counter{0};
@@ -115,7 +116,7 @@ TEST_CASE("Yield - timeslice duration 0 disables yielding") {
 // ============================================================================
 
 TEST_CASE("Yield - Multiple coroutines yielding concurrently") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     constexpr int NUM_TASKS = 20;
@@ -149,7 +150,7 @@ TEST_CASE("Yield - Multiple coroutines yielding concurrently") {
 }
 
 TEST_CASE("Yield - Forced yield re-enqueues on executor") {
-    Executor executor(ExecutorConfig{.num_threads = 2});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});
     Scheduler scheduler(&executor);
 
     // Two tasks that yield() back and forth.  Each increments a counter.

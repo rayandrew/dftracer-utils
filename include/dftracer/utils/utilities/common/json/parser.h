@@ -66,8 +66,6 @@ class JsonParser {
     /**
      * @brief Parse from pre-padded string (avoids copy).
      */
-    bool parse_padded(simdjson::padded_string_view json);
-
     /**
      * @brief Check if current document is valid (last parse succeeded).
      */
@@ -81,6 +79,12 @@ class JsonParser {
     std::optional<double> get_double(std::string_view key);
     std::optional<bool> get_bool(std::string_view key);
     std::optional<std::string_view> get_string(std::string_view key);
+
+    /// The raw field value, for callers that must inspect its type before
+    /// choosing an accessor (e.g. a field that may be an int or a string). One
+    /// lookup; do not also call a typed get_* for the same key on the same
+    /// parse.
+    std::optional<simdjson::ondemand::value> get_value(std::string_view key);
 
     /**
      * @brief Iterate over all fields in the root object.
@@ -135,7 +139,7 @@ class JsonParser {
 
    private:
     simdjson::ondemand::parser parser_;
-    simdjson::padded_string padded_json_;
+    std::string padbuf_;  // reused across parse() calls; grows to fit + padding
     simdjson::ondemand::document doc_;
     simdjson::ondemand::document_reference active_;
     bool valid_ = false;

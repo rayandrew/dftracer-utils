@@ -5,7 +5,7 @@
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/utilities/tags/needs_context.h>
 #include <dftracer/utils/core/utilities/utility.h>
-#include <dftracer/utils/utilities/composites/dft/dft_event_visitor.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_drain.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_indexer_utility.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
 #include <dftracer/utils/utilities/indexer/internal/common/gzip_member_scanner.h>
@@ -21,7 +21,12 @@
 
 namespace dftracer::utils {
 class CoroScope;
+class StringIntern;
 }  // namespace dftracer::utils
+
+namespace dftracer::utils::utilities::composites::dft::views::detail {
+class AggregationFold;
+}  // namespace dftracer::utils::utilities::composites::dft::views::detail
 
 namespace dftracer::utils::utilities::indexer {
 
@@ -33,27 +38,6 @@ inline constexpr std::array<std::string_view, 7> DEFAULT_BLOOM_DIMENSIONS = {
 
 inline constexpr std::array<std::string_view, 5> DEFAULT_EXTRA_DIMENSIONS = {
     "ret", "count", "offset", "epoch", "step",
-};
-
-struct IndexBuildConfig {
-    std::string file_path;
-    std::string index_dir;
-    std::size_t checkpoint_size = constants::indexer::DEFAULT_CHECKPOINT_SIZE;
-    bool force_rebuild = false;
-    bool build_manifest = false;
-    composites::dft::indexing::ChunkIndexerConfig bloom_config;
-    std::vector<std::string> bloom_dimensions;
-    std::vector<std::reference_wrapper<composites::dft::DftEventVisitor>>
-        extra_dft_visitors;
-
-    static IndexBuildConfig for_file(const std::string& path);
-    IndexBuildConfig& with_index_dir(const std::string& dir);
-    IndexBuildConfig& with_checkpoint_size(std::size_t size);
-    IndexBuildConfig& with_force_rebuild(bool force);
-    IndexBuildConfig& with_manifest(bool enable = true);
-    IndexBuildConfig& with_bloom_config(
-        const composites::dft::indexing::ChunkIndexerConfig& config);
-    IndexBuildConfig& with_bloom_dimensions(std::vector<std::string> dims);
 };
 
 struct IndexBuildResult {
@@ -74,10 +58,12 @@ struct IndexBuildBatchConfig {
     std::size_t checkpoint_size = constants::indexer::DEFAULT_CHECKPOINT_SIZE;
     std::size_t parallelism = 1;
     bool force_rebuild = false;
-    bool build_manifest = false;
+    /// Build the bloom/stats/dimension tier. Off skips the bloom tier, which is
+    /// the biggest per-event cost; only the raw-trace query path reads it, so
+    /// an aggregation-only index (dfanalyzer) does not need it.
+    bool build_bloom = true;
     composites::dft::indexing::ChunkIndexerConfig bloom_config;
     std::vector<std::string> bloom_dimensions;
-    bool use_batch_write = true;
     bool rebuild_root_summaries = true;
 
     /// If > 0, process files in sub-batches of this size, flushing parsed
@@ -86,22 +72,19 @@ struct IndexBuildBatchConfig {
     /// (all files parsed before any write).
     std::size_t flush_every_files = 0;
 
-    /// Factory for creating per-file DftEventVisitors during the parse phase.
-    /// Called once per file with the file path. Caller owns the returned
-    /// visitors and can extract results after the batch completes.
-    using DftVisitorFactory = std::function<
-        std::vector<std::unique_ptr<composites::dft::DftEventVisitor>>(
-            const std::string& file_path)>;
-    DftVisitorFactory dft_visitor_factory;
+    /// Factory for the aggregation-tier fold, created once per file with the
+    /// fused-scan intern that produced its events. When set, the batch build
+    /// steps an AggregationFold in the same single parse as bloom/dict and its
+    /// per-file out-of-band outputs land in IndexBuildBatchResult::agg_outputs.
+    using AggFoldFactory = std::function<
+        std::unique_ptr<composites::dft::views::detail::AggregationFold>(
+            dftracer::utils::StringIntern& build_intern)>;
+    AggFoldFactory agg_fold_factory;
 
-    /// Optional drain callback invoked once per sub-batch with the extra
-    /// visitors for that sub-batch's files. Lets the caller consume and
-    /// release visitor state immediately, keeping memory bounded by
-    /// flush_every_files instead of accumulating across the whole pipeline.
-    using ExtraVisitorsDrainFn = std::function<void(
-        std::vector<
-            std::vector<std::unique_ptr<composites::dft::DftEventVisitor>>>)>;
-    ExtraVisitorsDrainFn extra_visitors_drain;
+    /// Optional callback with (files_done, total_files) as files finish
+    /// parsing. Called from worker threads (throttled); must be thread-safe.
+    using ProgressFn = std::function<void(std::size_t done, std::size_t total)>;
+    ProgressFn progress;
 
     /// If non-empty, parallel to `file_paths`: use these file_ids instead
     /// of allocating via `get_or_create_file_info`. Used by the distributed
@@ -118,8 +101,7 @@ struct IndexBuildBatchConfig {
         const std::vector<internal::GzipMember>* members = nullptr;
         std::size_t member_begin = 0;
         std::size_t member_end = 0;
-        std::uint64_t checkpoint_idx_base = 0;
-        /// When true, this file's file-scoped data (checkpoints,
+        /// When true, this file's file-scoped data (member table,
         /// bloom/manifest/hashtable, file_metadata) is NOT persisted by
         /// the write phase. Aggregation/system-metrics SSTs produced by
         /// extra visitors are still collected. Set by the MPI driver for
@@ -158,18 +140,10 @@ struct IndexBuildBatchResult {
     std::uint64_t total_events = 0;
     IndexBuildBatchMetrics metrics;
 
-    /// Per-file extra visitors created by dft_visitor_factory during parsing.
-    /// Index corresponds to the file index in the original file_paths vector.
-    /// Empty vectors for files that failed or had no factory.
-    std::vector<std::vector<std::unique_ptr<composites::dft::DftEventVisitor>>>
-        extra_visitors;
-};
-
-class IndexBuilderUtility
-    : public Utility<IndexBuildConfig, IndexBuildResult, tags::NeedsContext> {
-   public:
-    coro::CoroTask<IndexBuildResult> process(
-        const IndexBuildConfig& config) override;
+    /// Per-file aggregation-fold out-of-band outputs (observed keys, tracker,
+    /// time bounds), for callers using agg_fold_factory. Drained via
+    /// aggregators::merge_aggregation_folds.
+    std::vector<composites::dft::aggregators::AggFoldOutput> agg_outputs;
 };
 
 class IndexBatchBuilderUtility {

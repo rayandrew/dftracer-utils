@@ -39,7 +39,6 @@ struct ResolveGroupInput {
     std::vector<PendingFile> files;
     bool require_checkpoints;
     bool require_bloom;
-    bool require_manifest;
     bool require_aggregation;
     std::optional<aggregators::AggregationConfig> aggregation_config;
 };
@@ -47,7 +46,6 @@ struct ResolveGroupInput {
 struct ResolveGroupOutput {
     std::vector<FileWorkItem> needs_checkpoint;
     std::vector<FileWorkItem> needs_bloom;
-    std::vector<FileWorkItem> needs_manifest;
     std::vector<FileWorkItem> needs_aggregation;
     std::vector<ResolvedFile> cached;
 
@@ -71,7 +69,7 @@ ResolveGroupOutput resolve_group_sync(ResolveGroupInput input) {
     try {
         IndexDatabase db(
             input.index_path,
-            dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+            dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
         auto registry = db.query_all_file_registry();
 
         // Check global aggregation config first
@@ -165,12 +163,10 @@ ResolveGroupOutput resolve_group_sync(ResolveGroupInput input) {
 
             auto caps = reg.capabilities;
             bool has_checkpoints =
-                has_capability(caps, IndexFileEntryCapability::CHECKPOINTS) ||
+                has_capability(caps, IndexFileEntryCapability::MEMBERS) ||
                 has_capability(caps, IndexFileEntryCapability::FILE_SUMMARY);
             bool has_bloom =
                 has_capability(caps, IndexFileEntryCapability::BLOOM);
-            bool has_manifest =
-                has_capability(caps, IndexFileEntryCapability::MANIFEST);
 
             if (input.require_checkpoints && !has_checkpoints) {
                 result.needs_checkpoint.push_back(FileWorkItem{
@@ -180,12 +176,6 @@ ResolveGroupOutput resolve_group_sync(ResolveGroupInput input) {
 
             if (input.require_bloom && !has_bloom) {
                 result.needs_bloom.push_back(FileWorkItem{
-                    f.file_index, std::move(f.file_path), reg.file_id});
-                continue;
-            }
-
-            if (input.require_manifest && !has_manifest) {
-                result.needs_manifest.push_back(FileWorkItem{
                     f.file_index, std::move(f.file_path), reg.file_id});
                 continue;
             }
@@ -283,7 +273,6 @@ coro::CoroTask<ResolverResult> IndexResolverUtility::process(
             group_input.files = std::move(files);
             group_input.require_checkpoints = input.require_checkpoints;
             group_input.require_bloom = input.require_bloom;
-            group_input.require_manifest = input.require_manifest;
             group_input.require_aggregation = input.require_aggregation;
             group_input.aggregation_config = input.aggregation_config;
 
@@ -304,7 +293,6 @@ coro::CoroTask<ResolverResult> IndexResolverUtility::process(
             group_input.files = std::move(files);
             group_input.require_checkpoints = input.require_checkpoints;
             group_input.require_bloom = input.require_bloom;
-            group_input.require_manifest = input.require_manifest;
             group_input.require_aggregation = input.require_aggregation;
             group_input.aggregation_config = input.aggregation_config;
 
@@ -319,9 +307,6 @@ coro::CoroTask<ResolverResult> IndexResolverUtility::process(
         }
         for (auto& item : out.needs_bloom) {
             result.needs_bloom.push_back(std::move(item));
-        }
-        for (auto& item : out.needs_manifest) {
-            result.needs_manifest.push_back(std::move(item));
         }
         for (auto& item : out.needs_aggregation) {
             result.needs_aggregation.push_back(std::move(item));
@@ -343,10 +328,10 @@ coro::CoroTask<ResolverResult> IndexResolverUtility::process(
 
     DFTRACER_UTILS_LOG_INFO(
         "Resolver: %zu total, %zu cached, %zu need checkpoint, %zu need bloom, "
-        "%zu need manifest, %zu need aggregation",
+        "%zu need aggregation",
         result.all_files.size(), result.cached.size(),
         result.needs_checkpoint.size(), result.needs_bloom.size(),
-        result.needs_manifest.size(), result.needs_aggregation.size());
+        result.needs_aggregation.size());
 
     co_return result;
 }

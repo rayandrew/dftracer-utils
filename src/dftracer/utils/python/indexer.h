@@ -12,7 +12,6 @@ typedef struct {
     PyObject *index_path;
     std::uint64_t checkpoint_size;
     int build_bloom;
-    int build_manifest;
     PyObject *runtime_obj;  // RuntimeObject* or NULL (uses default)
 } CheckpointIndexerObject;
 

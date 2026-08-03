@@ -5,6 +5,7 @@
 #include <ankerl/unordered_dense.h>
 #include <dftracer/utils/core/utils/string.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/utilities/composites/dft/schema.h>
 
 #include <cctype>
 #include <cstdint>
@@ -76,23 +77,6 @@ bool str_iequal(std::string_view a, const char *b) {
             return false;
     }
     return true;
-}
-
-bool str_contains_lower(std::string_view s, const char *needle) {
-    std::size_t nlen = std::strlen(needle);
-    if (s.size() < nlen) return false;
-    for (std::size_t i = 0; i <= s.size() - nlen; ++i) {
-        bool match = true;
-        for (std::size_t j = 0; j < nlen; ++j) {
-            if (std::tolower(static_cast<unsigned char>(s[i + j])) !=
-                static_cast<unsigned char>(needle[j])) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return true;
-    }
-    return false;
 }
 
 // Fields extracted from a row's "args" object in a single pass.
@@ -191,17 +175,19 @@ void append_system_columns(
 // output schema.  Appends one row to `builder` with the full set of output
 // columns.  Returns false if the row should be skipped (no valid name).
 bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
-                   JsonParser &parser) {
+                   JsonParser &parser, TimeScaleState &time_scale) {
     using SVH = JsonValueHelper;
     // --- Single-pass extraction: capture top-level fields and args in one
     // member walk (dispatch on key, any field order). ---
-    std::string_view ph, name_sv, cat_sv;
+    namespace dft = dftracer::utils::utilities::composites::dft;
+    dft::RecordPhase phase = dft::RecordPhase::UNKNOWN;
+    std::string_view name_sv, cat_sv;
     std::optional<std::int64_t> pid_opt, tid_opt, ts_opt, dur_opt;
     ParsedArgs args;
     parser.for_each_field(
         [&](std::string_view key, simdjson::ondemand::value val) {
             if (key == "ph") {
-                if (auto s = SVH::get_string(val)) ph = *s;
+                phase = dft::read_phase(val);
             } else if (key == "name") {
                 if (auto s = SVH::get_string(val)) name_sv = *s;
             } else if (key == "cat") {
@@ -220,9 +206,14 @@ bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
         });
 
     // --- Type classification ---
-    bool is_M = (ph == "M");
-    bool is_C = (ph == "C");
+    bool is_M = (phase == dft::RecordPhase::METADATA);
+    bool is_C = (phase == dft::RecordPhase::COUNTER);
     bool is_event = !is_M && !is_C;
+
+    if (is_M && name_sv == "CM" && args.name && *args.name == "time_metric" &&
+        args.value) {
+        time_scale.metric = composites::dft::parse_time_metric(*args.value);
+    }
 
     std::int8_t row_type = ROW_EVENT;
     if (is_M) {
@@ -316,12 +307,21 @@ bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
     bool has_ts = (is_event || is_C) && ts_opt.has_value();
     bool has_dur = dur_opt.has_value();
     std::int64_t ts_val = 0, dur_val = 0;
+    const bool scale_time =
+        time_scale.target && *time_scale.target != time_scale.metric;
+    auto scaled = [&](std::int64_t v) {
+        return static_cast<std::int64_t>(composites::dft::scale_between(
+            time_scale.metric, *time_scale.target,
+            static_cast<std::uint64_t>(v)));
+    };
     if (has_ts) {
         ts_val = *ts_opt;
+        if (scale_time) ts_val = scaled(ts_val);
         builder.append_int64(ci_ts, ts_val);
     }
     if (is_event && has_ts && has_dur) {
         dur_val = *dur_opt;
+        if (scale_time) dur_val = scaled(dur_val);
         builder.append_int64(ci_dur, dur_val);
         builder.append_int64(ci_te, ts_val + dur_val);
     }
@@ -330,25 +330,24 @@ bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
     if (is_event) {
         bool is_posix_stdio =
             str_iequal(cat_sv, "posix") || str_iequal(cat_sv, "stdio");
-        std::int8_t io_cat = IO_OTHER;
-
-        // size priority: size_sum > POSIX ret > image_size
-        if (args.size_sum) {
-            builder.append_int64(ci_size, *args.size_sum);
-            if (is_posix_stdio) io_cat = get_io_cat(out_name);
-        } else if (is_posix_stdio) {
-            io_cat = get_io_cat(out_name);
-            if (args.ret && *args.ret > 0 &&
-                (io_cat == IO_READ || io_cat == IO_WRITE))
-                builder.append_int64(ci_size, *args.ret);
-            if (args.offset && *args.offset >= 0)
-                builder.append_int64(ci_offset, *args.offset);
-        } else {
-            if (args.image_idx && *args.image_idx > 0)
+        std::int8_t io_cat = is_posix_stdio
+                                 ? get_io_cat(out_name)
+                                 : static_cast<std::int8_t>(IO_OTHER);
+        // Size uses the shared io-cat rule (size_sum > posix/stdio read|write
+        // ret > image_size) so the reader and the View aggregator's "size"
+        // cannot drift.
+        if (auto sz = dft::internal::derive_io_size(
+                cat_sv, out_name, args.size_sum, args.ret, args.image_size))
+            builder.append_int64(ci_size, *sz);
+        // Offset / image-id side outputs stay on their original branches (not
+        // part of the size rule).
+        if (!args.size_sum) {
+            if (is_posix_stdio) {
+                if (args.offset && *args.offset >= 0)
+                    builder.append_int64(ci_offset, *args.offset);
+            } else if (args.image_idx && *args.image_idx > 0) {
                 builder.append_int64(ci_image_id, *args.image_idx);
-            if (args.image_size && *args.image_size > 0 &&
-                !str_contains_lower(out_name, "open"))
-                builder.append_int64(ci_size, *args.image_size);
+            }
         }
         builder.append_int64(ci_io_cat, io_cat);
     }
@@ -375,121 +374,24 @@ bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
 
 }  // namespace
 
-// Flatten a simdjson object into "prefix.key" columns using native types.
-// On type mismatch (same key, different type across rows), appends null.
-void flatten_object_into(RecordBatchBuilder &builder, StringArena &arena,
-                         std::string_view prefix,
-                         simdjson::ondemand::object obj) {
-    using SVH = JsonValueHelper;
-    char key_buf[512];
-
-    for (auto field : obj) {
-        if (field.error()) continue;
-
-        auto key_result = field.unescaped_key();
-        if (key_result.error()) continue;
-        std::string_view sk = key_result.value_unsafe();
-
-        auto val_result = field.value();
-        if (val_result.error()) continue;
-        auto sub_val = val_result.value_unsafe();
-
-        std::size_t needed = prefix.size() + 1 + sk.size();
-        if (needed >= sizeof(key_buf)) continue;
-        std::memcpy(key_buf, prefix.data(), prefix.size());
-        key_buf[prefix.size()] = '.';
-        std::memcpy(key_buf + prefix.size() + 1, sk.data(), sk.size());
-        std::string_view full_key(key_buf, needed);
-
-        auto type_result = sub_val.type();
-        if (type_result.error()) continue;
-        auto json_type = type_result.value_unsafe();
-
-        switch (json_type) {
-            case simdjson::ondemand::json_type::number: {
-                auto num_result = sub_val.get_number();
-                if (num_result.error()) break;
-                auto num = num_result.value_unsafe();
-                if (num.is_int64()) {
-                    auto idx =
-                        builder.add_or_get_column(full_key, ColumnType::INT64);
-                    if (builder.column_type(idx) == ColumnType::INT64)
-                        builder.append_int64(idx, num.get_int64());
-                    else
-                        builder.append_null(idx);
-                } else if (num.is_uint64()) {
-                    auto idx =
-                        builder.add_or_get_column(full_key, ColumnType::UINT64);
-                    if (builder.column_type(idx) == ColumnType::UINT64)
-                        builder.append_uint64(idx, num.get_uint64());
-                    else
-                        builder.append_null(idx);
-                } else {
-                    auto idx =
-                        builder.add_or_get_column(full_key, ColumnType::DOUBLE);
-                    if (builder.column_type(idx) == ColumnType::DOUBLE)
-                        builder.append_double(idx, num.get_double());
-                    else
-                        builder.append_null(idx);
-                }
-                break;
-            }
-            case simdjson::ondemand::json_type::string: {
-                auto str_result = sub_val.get_string();
-                if (str_result.error()) break;
-                auto str = str_result.value_unsafe();
-                auto idx =
-                    builder.add_or_get_column(full_key, ColumnType::STRING);
-                if (builder.column_type(idx) == ColumnType::STRING)
-                    builder.append_string(idx, str);
-                else
-                    builder.append_null(idx);
-                break;
-            }
-            case simdjson::ondemand::json_type::boolean: {
-                auto bool_result = sub_val.get_bool();
-                if (bool_result.error()) break;
-                auto b = bool_result.value_unsafe();
-                auto idx =
-                    builder.add_or_get_column(full_key, ColumnType::BOOL);
-                if (builder.column_type(idx) == ColumnType::BOOL)
-                    builder.append_bool(idx, b);
-                else
-                    builder.append_null(idx);
-                break;
-            }
-            case simdjson::ondemand::json_type::null: {
-                auto existing = builder.find_column(full_key);
-                if (existing) builder.append_null(*existing);
-                break;
-            }
-            case simdjson::ondemand::json_type::object:
-            case simdjson::ondemand::json_type::array: {
-                // Serialize nested object/array to JSON string
-                auto json_str = SVH::to_json_string(sub_val);
-                auto idx =
-                    builder.add_or_get_column(full_key, ColumnType::STRING);
-                if (json_str) {
-                    builder.append_string(
-                        idx, arena.push(json_str->data(), json_str->size()));
-                } else {
-                    builder.append_null(idx);
-                }
-                break;
-            }
-            default:
-                break;
-        }
-    }
+// Membership test for the projection (linear over a handful of kept keys, so
+// no per-field allocation).
+static bool keep_key(const RowBuildOptions &opts, std::string_view key) {
+    if (!opts.keep || opts.keep->empty()) return true;
+    for (const auto &k : *opts.keep)
+        if (k == key) return true;
+    return false;
 }
 
 bool build_arrow_row(RecordBatchBuilder &builder, JsonParser &parser,
-                     StringArena &arena, bool normalize) {
-    if (normalize) return normalize_row(builder, arena, parser);
+                     StringArena &arena, bool normalize,
+                     TimeScaleState &time_scale, const RowBuildOptions &opts) {
+    if (normalize) return normalize_row(builder, arena, parser, time_scale);
 
     using SVH = JsonValueHelper;
     parser.for_each_field([&](std::string_view key_sv,
                               simdjson::ondemand::value val) {
+        if (!keep_key(opts, key_sv)) return;
         auto type_result = val.type();
         if (type_result.error()) return;
         auto json_type = type_result.value_unsafe();
@@ -498,10 +400,17 @@ bool build_arrow_row(RecordBatchBuilder &builder, JsonParser &parser,
                 auto num_result = val.get_number();
                 if (num_result.error()) break;
                 auto num = num_result.value_unsafe();
+                const bool time_key =
+                    opts.time_scale != 1.0 &&
+                    (key_sv == "ts" || key_sv == "dur" || key_sv == "te");
                 if (num.is_int64()) {
+                    std::int64_t v = num.get_int64();
+                    if (time_key)
+                        v = static_cast<std::int64_t>(static_cast<double>(v) *
+                                                      opts.time_scale);
                     std::size_t idx =
                         builder.add_or_get_column(key_sv, ColumnType::INT64);
-                    builder.append_int64(idx, num.get_int64());
+                    builder.append_int64(idx, v);
                 } else if (num.is_uint64()) {
                     std::size_t idx =
                         builder.add_or_get_column(key_sv, ColumnType::UINT64);
@@ -517,6 +426,12 @@ bool build_arrow_row(RecordBatchBuilder &builder, JsonParser &parser,
                 auto str_result = val.get_string();
                 if (str_result.error()) break;
                 auto str = str_result.value_unsafe();
+                if (opts.dict_strings) {
+                    std::size_t idx = builder.add_or_get_column(
+                        key_sv, ColumnType::DICT_STRING);
+                    builder.append_dict_string(idx, str);
+                    break;
+                }
                 std::size_t idx =
                     builder.add_or_get_column(key_sv, ColumnType::STRING);
                 builder.append_string(idx, str);
@@ -559,14 +474,15 @@ bool build_arrow_row(RecordBatchBuilder &builder, JsonParser &parser,
 
 bool process_json_line(RecordBatchBuilder &builder, JsonParser &parser,
                        StringArena &arena, std::string_view content,
-                       bool normalize) {
+                       bool normalize, TimeScaleState &time_scale,
+                       const RowBuildOptions &opts) {
     const char *trimmed;
     std::size_t trimmed_length;
     if (!dftracer::utils::json_trim_and_validate_with_comma(
             content.data(), content.size(), trimmed, trimmed_length))
         return false;
     if (!parser.parse(std::string_view(trimmed, trimmed_length))) return false;
-    return build_arrow_row(builder, parser, arena, normalize);
+    return build_arrow_row(builder, parser, arena, normalize, time_scale, opts);
 }
 
 }  // namespace dftracer::utils::utilities::reader::internal

@@ -1,16 +1,13 @@
 #ifndef DFTRACER_UTILS_UTILITIES_FILEIO_LINES_STREAMING_LINE_READER_H
 #define DFTRACER_UTILS_UTILITIES_FILEIO_LINES_STREAMING_LINE_READER_H
 
+#include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/fileio/lines/line_bytes_range.h>
-#include <dftracer/utils/utilities/fileio/lines/line_range.h>
 #include <dftracer/utils/utilities/fileio/lines/line_types.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_indexed_file_bytes_generator.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_indexed_file_line_generator.h>
-#include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_bytes_generator.h>
-#include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_line_generator.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/reader/internal/reader_factory.h>
 
@@ -29,7 +26,6 @@ namespace dftracer::utils::utilities::fileio::lines {
  *     .with_index("trace-root/.dftindex")
  *     .with_line_range(1, 100);
  *
- * auto range = StreamingLineReader::read(config);
  * @endcode
  */
 class StreamingLineReaderConfig {
@@ -66,111 +62,13 @@ class StreamingLineReaderConfig {
 };
 
 /**
- * @brief Composable utility for streaming line reading from various sources.
+ * @brief Async streaming line reader for gzip traces.
  *
- * This utility automatically detects the file format and creates the
- * appropriate line iterator. It supports:
- * - Indexed compressed files (.gz, .tar.gz) via Reader
- * - Plain text files
- * - Automatic `.dftindex` detection for compressed files
- *
- * Usage:
- * @code
- * // Auto-detect format
- * auto range = StreamingLineReader::read("data.gz");  // Uses index if
- * available while (range.has_next()) { Line line = range.next();
- *     // Process line...
- * }
- *
- * // Explicit line range
- * auto range2 = StreamingLineReader::read("data.gz", 100, 200);
- *
- * // Force plain file reading (no decompression)
- * auto range3 = StreamingLineReader::read_plain("data.txt");
- * @endcode
+ * Opens an indexed compressed trace via the Reader when a `.dftindex`
+ * exists, else streams the gzip file directly.
  */
 class StreamingLineReader {
    public:
-    /**
-     * @brief Read lines from a file, auto-detecting format and `.dftindex`.
-     *
-     * This method automatically:
-     * 1. Detects if a `.dftindex` store exists
-     * 2. Creates appropriate reader (indexed or plain)
-     * 3. Returns a LineRange for streaming iteration
-     *
-     * @param config Configuration for the line reader
-     * @return LineRange for streaming iteration
-     */
-    static LineRange read(const StreamingLineReaderConfig& config) {
-        const std::string& file_path = config.file_path();
-        std::size_t start_line = config.start_line();
-        std::size_t end_line = config.end_line();
-        const std::string& index_path = config.index_path();
-        std::string actual_index_path = index_path;
-        if (actual_index_path.empty()) {
-            actual_index_path =
-                composites::dft::internal::determine_index_path(file_path, "");
-        }
-        bool has_index = fs::exists(actual_index_path);
-
-        DFTRACER_UTILS_LOG_DEBUG(
-            "StreamingLineReader::read - file=%s, index_path_param=%s, "
-            "actual_index=%s, has_index=%d",
-            file_path.c_str(), index_path.c_str(), actual_index_path.c_str(),
-            has_index);
-
-        // Check file extension to determine if it's compressed
-        bool is_compressed = is_compressed_format(file_path);
-
-        if (is_compressed && has_index) {
-            auto iter_config =
-                sources::IndexedFileLineIteratorConfig().with_file(
-                    file_path, actual_index_path);
-            if (start_line > 0 && end_line > 0) {
-                iter_config.with_line_range(start_line, end_line);
-            }
-            return LineRange::from_indexed_file(iter_config);
-        } else {
-            // Use plain file reader
-            if (start_line > 0 && end_line > 0) {
-                return LineRange::from_plain_file(file_path, start_line,
-                                                  end_line);
-            } else {
-                return LineRange::from_plain_file(file_path);
-            }
-        }
-    }
-
-    /**
-     * @brief Read lines from a file using indexed reader.
-     *
-     * @param config Indexed reader configuration
-     * @return LineRange for streaming iteration
-     */
-    static LineRange read_indexed(
-        sources::IndexedFileLineIteratorConfig& config) {
-        return LineRange::from_indexed_file(config);
-    }
-
-    /**
-     * @brief Read lines from a plain text file (no decompression).
-     *
-     * @param file_path Path to the plain text file
-     * @param start_line Starting line (1-based, inclusive), 0 means start
-     * @param end_line Ending line (1-based, inclusive), 0 means end
-     * @return LineRange for streaming iteration
-     */
-    static LineRange read_plain(const std::string& file_path,
-                                std::size_t start_line = 0,
-                                std::size_t end_line = 0) {
-        if (start_line > 0 && end_line > 0) {
-            return LineRange::from_plain_file(file_path, start_line, end_line);
-        } else {
-            return LineRange::from_plain_file(file_path);
-        }
-    }
-
     /**
      * @brief Async read lines from a file, auto-detecting format.
      *
@@ -208,43 +106,9 @@ class StreamingLineReader {
                                             config.end_line());
             }
             return sources::async_indexed_file_lines(iter_config);
-        } else if (is_compressed) {
-            return sources::async_streaming_gz_lines(
-                file_path, config.start_line(), config.end_line());
-        } else {
-            return sources::async_plain_file_lines(
-                file_path, config.start_line(), config.end_line());
         }
-    }
-
-    /**
-     * @brief Async read lines from indexed file.
-     */
-    static coro::AsyncGenerator<Line> read_indexed_async(
-        sources::IndexedFileLineIteratorConfig config) {
-        return sources::async_indexed_file_lines(std::move(config));
-    }
-
-    /**
-     * @brief Async read lines from plain text file.
-     */
-    static coro::AsyncGenerator<Line> read_plain_async(
-        const std::string& file_path, std::size_t start_line = 0,
-        std::size_t end_line = 0) {
-        return sources::async_plain_file_lines(file_path, start_line, end_line);
-    }
-
-    /**
-     * @brief Async read lines from compressed file without an index.
-     *
-     * Stream-decompresses the file and splits into lines in a single
-     * pass, avoiding the overhead of building a `.dftindex` store.
-     */
-    static coro::AsyncGenerator<Line> read_streaming_gz_async(
-        const std::string& file_path, std::size_t start_line = 0,
-        std::size_t end_line = 0) {
-        return sources::async_streaming_gz_lines(file_path, start_line,
-                                                 end_line);
+        return sources::async_streaming_gz_lines(file_path, config.start_line(),
+                                                 config.end_line());
     }
 
    private:
@@ -255,25 +119,7 @@ class StreamingLineReader {
         fs::path p(file_path);
         std::string ext = p.extension().string();
 
-        // Check for .gz extension
-        if (ext == ".gz") {
-            return true;
-        }
-
-        // Check for .tar.gz or .tgz
-        std::string stem = p.stem().string();
-        if (!stem.empty()) {
-            fs::path stem_path(stem);
-            if (stem_path.extension().string() == ".tar") {
-                return true;
-            }
-        }
-
-        if (ext == ".tgz") {
-            return true;
-        }
-
-        return false;
+        return ext == ".gz";
     }
 };
 

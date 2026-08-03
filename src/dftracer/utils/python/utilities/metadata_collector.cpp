@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/python/py_dict_helpers.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
@@ -24,8 +25,9 @@ static PyObject *MetadataCollector_collect(MetadataCollectorObject *self,
     static const char *kwlist[] = {"file_path", "index_dir", NULL};
     const char *file_path;
     const char *index_dir = "";
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|s", (char **)kwlist,
-                                     &file_path, &index_dir))
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "s|s",
+                                     const_cast<char **>(kwlist), &file_path,
+                                     &index_dir))
         return NULL;
 
     std::string file_path_str(file_path);
@@ -88,7 +90,7 @@ static PyObject *MetadataCollector_call(PyObject *self, PyObject *args,
 }
 
 static PyMethodDef MetadataCollector_methods[] = {
-    {"process", (PyCFunction)MetadataCollector_collect,
+    {"process", DFT_PYCFUNCTION(MetadataCollector_collect),
      METH_VARARGS | METH_KEYWORDS,
      "Collect metadata from a trace file.\n"
      "\n"

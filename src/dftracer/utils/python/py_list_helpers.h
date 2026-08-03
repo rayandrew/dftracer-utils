@@ -33,4 +33,21 @@ inline bool parse_str_list(PyObject *obj, const char *argname,
     return true;
 }
 
+// New Python list from a vector of strings. NULL with the error set on
+// failure. Each element reference is stolen into the list, so nothing leaks.
+inline PyObject *str_list_from(const std::vector<std::string> &v) {
+    PyObject *list = PyList_New(static_cast<Py_ssize_t>(v.size()));
+    if (!list) return nullptr;
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        PyObject *s = PyUnicode_FromStringAndSize(
+            v[i].data(), static_cast<Py_ssize_t>(v[i].size()));
+        if (!s) {
+            Py_DECREF(list);
+            return nullptr;
+        }
+        PyList_SET_ITEM(list, static_cast<Py_ssize_t>(i), s);  // steals s
+    }
+    return list;
+}
+
 #endif  // DFTRACER_UTILS_PYTHON_PY_LIST_HELPERS_H

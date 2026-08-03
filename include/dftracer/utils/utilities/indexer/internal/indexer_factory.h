@@ -17,11 +17,9 @@ namespace dftracer::utils::utilities::indexer::internal {
 class IndexerFactory {
    public:
     /**
-     * Create an indexer for the given archive file.
-     * Automatically detects the format (GZIP vs TAR.GZ) and creates the
-     * appropriate indexer.
+     * Create an indexer for the given gzip file.
      *
-     * @param archive_path Path to the archive file (.gz or .tar.gz)
+     * @param archive_path Path to the gzip file (.gz)
      * @param index_path Path to the `.dftindex` store (optional - will be
      * auto-generated if empty)
      * @param checkpoint_size Checkpoint size in bytes

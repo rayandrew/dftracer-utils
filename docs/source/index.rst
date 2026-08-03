@@ -12,7 +12,7 @@ Features
 
 - **High-performance trace file reading**: Efficient reading of compressed trace files
 - **Arrow data interchange**: Columnar Arrow output via nanoarrow for zero-copy access from pyarrow, polars, and DuckDB
-- **Utility bindings**: Python bindings for statistics, views, aggregation, bloom queries, and reorganization
+- **Utility bindings**: Python bindings for statistics, views, aggregation, and bloom queries
 - **Indexing capabilities**: Fast indexing and searching of trace data with bloom filters
 - **Pipeline processing**: Parallel data processing with tasks, coroutines, and channels
 - **Arrow IPC file output**: Write results as Arrow IPC files for pyarrow, polars, and DuckDB
@@ -26,6 +26,7 @@ Features
 
     installation
     quickstart
+    tutorials/index
     pipeline
     cli
     server

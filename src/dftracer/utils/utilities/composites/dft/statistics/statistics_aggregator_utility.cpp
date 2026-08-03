@@ -2,6 +2,7 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/utilities/common/json/json_value.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/utilities/composites/dft/schema.h>
 #include <dftracer/utils/utilities/composites/dft/statistics/statistics_aggregator_utility.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -121,9 +122,8 @@ coro::CoroTask<TraceStatistics> StatisticsAggregatorUtility::process(
 
             try {
                 JsonValue json(root);
-                std::string_view ph = json["ph"].get<std::string_view>();
 
-                if (ph != "M") {
+                if (read_phase(json["ph"]) != RecordPhase::METADATA) {
                     std::string_view name =
                         json["name"].get<std::string_view>();
                     std::string_view cat = json["cat"].get<std::string_view>();
@@ -181,7 +181,7 @@ StatisticsAggregatorUtility::process_batch(
     try {
         IndexDatabase db(
             index_path,
-            dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+            dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
 
         std::vector<int> file_ids(files.size(), -1);
         for (std::size_t i = 0; i < files.size(); ++i) {

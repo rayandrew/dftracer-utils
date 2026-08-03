@@ -3,6 +3,7 @@
 Test cases for DFTracer indexer Python bindings
 """
 
+import glob
 import os
 
 import pytest
@@ -66,64 +67,8 @@ class TestCheckpointIndexer:
                     f"checkpoint_size={checkpoint_size}"
                 )
 
-                checkpoints = cp_indexer.get_checkpoints()
-                assert isinstance(checkpoints, list)
-                print(f"Number of checkpoints created: {len(checkpoints)}")
-
-                for checkpoint in checkpoints:
-                    assert hasattr(checkpoint, "checkpoint_idx")
-                    assert hasattr(checkpoint, "uc_offset")
-                    assert hasattr(checkpoint, "uc_size")
-                    assert hasattr(checkpoint, "c_offset")
-                    assert hasattr(checkpoint, "c_size")
-                    assert hasattr(checkpoint, "bits")
-                    assert hasattr(checkpoint, "num_lines")
-
-                    assert isinstance(checkpoint.checkpoint_idx, int)
-                    assert isinstance(checkpoint.uc_offset, int)
-                    assert isinstance(checkpoint.num_lines, int)
-                    assert checkpoint.checkpoint_idx >= 0
-                    assert checkpoint.uc_offset >= 0
-                    assert checkpoint.num_lines >= 0
-
-    def test_checkpoint_indexer_find_checkpoint(self):
-        """Test checkpoint indexer single checkpoint search"""
-        with Environment(lines=valgrind_scale(2000)) as env:
-            gz_file = env.create_test_gzip_file(bytes_per_line=2048)
-            checkpoint_size = 512 * 1024  # 512KB
-
-            with dft_utils.Indexer(
-                files=[gz_file],
-                checkpoint_size=checkpoint_size,
-            ) as indexer:
-                indexer.ensure_indexed()
-                cp_indexer = indexer.get_checkpoint_indexer(gz_file)
-
-                max_bytes = cp_indexer.get_max_bytes()
-                checkpoints = cp_indexer.get_checkpoints()
-
-                print(f"File has {max_bytes} bytes and {len(checkpoints)} checkpoints")
-
-                target_offset = max_bytes // 2 if max_bytes > 0 else 0
-                checkpoint = cp_indexer.find_checkpoint(target_offset)
-
-                if checkpoint is not None:
-                    assert hasattr(checkpoint, "uc_offset")
-                    assert hasattr(checkpoint, "uc_size")
-                    assert hasattr(checkpoint, "num_lines")
-                    assert checkpoint.uc_offset <= target_offset
-                    assert isinstance(checkpoint.uc_offset, int)
-                    assert isinstance(checkpoint.uc_size, int)
-                    assert isinstance(checkpoint.num_lines, int)
-
-                # find_checkpoint(0) should return None per implementation
-                checkpoint_0 = cp_indexer.find_checkpoint(0)
-                assert checkpoint_0 is None
-
-                if max_bytes > 0:
-                    checkpoint_beyond = cp_indexer.find_checkpoint(max_bytes + 1000)
-                    if checkpoint_beyond is not None:
-                        assert checkpoint_beyond.uc_offset <= max_bytes
+                assert isinstance(max_bytes, int) and max_bytes > 0
+                assert isinstance(num_lines, int) and num_lines > 0
 
 
 class TestNativeIndexerDirect:
@@ -171,50 +116,35 @@ class TestNativeIndexerDirect:
                 indexer.build()
                 assert indexer.has_bloom
 
-    @pytest.mark.valgrind
-    def test_native_indexer_build_manifest(self):
-        """Test building with manifest=True"""
-        with Environment() as env:
-            gz_file = env.create_test_gzip_file()
-            index_path = env.get_index_path(gz_file)
-            with NativeIndexer(gz_file, index_path, build_manifest=True) as indexer:
-                indexer.build()
-                assert indexer.has_manifest
-
 
 class TestCheckpointIndexerIntegration:
     """Integration tests for checkpoint indexer with reader"""
 
-    def test_checkpoint_indexer_with_reader_creation(self):
-        """Test creating readers from checkpoint indexer"""
+    def test_checkpoint_indexer_with_viewer_creation(self):
+        """A TraceViewer reads back the events from a freshly built index."""
         with Environment() as env:
             gz_file = env.create_test_gzip_file()
 
             with dft_utils.Indexer(files=[gz_file]) as indexer:
                 indexer.ensure_indexed()
 
-                reader = dft_utils.TraceReader(gz_file)
-                assert reader.get_max_bytes() > 0
-                assert reader.path == gz_file
+                viewer = dft_utils.TraceViewer(gz_file)
+                assert viewer.statistics()["duration_count"] > 0
 
     @pytest.mark.valgrind
-    def test_multiple_readers_same_index(self):
-        """Test creating multiple readers from the same index"""
+    def test_multiple_viewers_same_index(self):
+        """Multiple viewers over one index agree on the event count."""
         with Environment() as env:
             gz_file = env.create_test_gzip_file()
 
             with dft_utils.Indexer(files=[gz_file]) as indexer:
                 indexer.ensure_indexed()
 
-                readers = []
-                for i in range(3):
-                    reader = dft_utils.TraceReader(gz_file)
-                    assert reader.get_max_bytes() > 0
-                    readers.append(reader)
-
-                max_bytes = readers[0].get_max_bytes()
-                for reader in readers[1:]:
-                    assert reader.get_max_bytes() == max_bytes
+                counts = [
+                    dft_utils.TraceViewer(gz_file).statistics()["duration_count"] for _ in range(3)
+                ]
+                assert counts[0] > 0
+                assert all(c == counts[0] for c in counts)
 
 
 class TestCheckpointIndexerLifetime:
@@ -251,8 +181,8 @@ class TestCheckpointIndexerLifetime:
 
             assert os.path.exists(index_path)
 
-            reader = dft_utils.TraceReader(gz_file)
-            assert reader.get_num_lines() > 0
+            viewer = dft_utils.TraceViewer(gz_file)
+            assert viewer.statistics()["duration_count"] > 0
 
 
 class TestDirectoryIndexer:
@@ -332,15 +262,6 @@ class TestDirectoryIndexer:
                 status = indexer.ensure_indexed()
                 assert len(status.ready) >= 1
 
-    def test_indexer_with_require_manifest(self):
-        """Test indexer with manifest requirement"""
-        with Environment() as env:
-            env.create_test_gzip_file()
-
-            with dft_utils.Indexer(env.temp_dir, require_manifest=True) as indexer:
-                status = indexer.ensure_indexed()
-                assert len(status.ready) >= 1
-
     def test_indexer_with_aggregation_config(self):
         """Test indexer with aggregation config"""
         with Environment() as env:
@@ -406,11 +327,14 @@ class TestDirectoryIndexer:
                 indexer.ensure_indexed()
                 status = indexer.resolve()
                 assert status.aggregation_interval_us == 1_000_000
-                rows = sum(
-                    pa.record_batch(b).num_rows
-                    for b in indexer.iter_arrow_dfanalyzer_all().get("events", [])
+                files = sorted(glob.glob(os.path.join(directory, "*.pfw.gz")))
+                tbl = (
+                    dft_utils.TraceViewer(files, index_path=directory)
+                    .group_by("name")
+                    .agg("count")
+                    .collect()
                 )
-                assert rows > 0
+                assert tbl is not None and pa.table(tbl).num_rows > 0
 
     def test_aggregation_config_dataclass(self):
         """Test AggregationConfig dataclass"""
@@ -467,8 +391,6 @@ class TestDirectoryIndexer:
                 assert cp_indexer.gz_path == gz_file
                 assert cp_indexer.get_max_bytes() > 0
                 assert cp_indexer.get_num_lines() > 0
-                checkpoints = cp_indexer.get_checkpoints()
-                assert isinstance(checkpoints, list)
 
     def test_indexer_get_checkpoint_indexer_uses_index_dir(self):
         """Test that get_checkpoint_indexer uses the same index_dir"""
@@ -488,7 +410,7 @@ class TestDirectoryIndexer:
 
 
 class TestIndexerDfanalyzerAPIs:
-    """Test cases for dfanalyzer integration APIs (hash tables, PID manifest)"""
+    """Test cases for dfanalyzer integration APIs (hash tables, PIDs)"""
 
     def test_get_hash_table_file(self):
         """Test get_hash_table returns file hash mappings"""
@@ -498,7 +420,6 @@ class TestIndexerDfanalyzerAPIs:
             with dft_utils.Indexer(
                 files=[gz_file],
                 require_bloom=True,
-                require_manifest=True,
             ) as indexer:
                 indexer.ensure_indexed()
 
@@ -513,7 +434,6 @@ class TestIndexerDfanalyzerAPIs:
             with dft_utils.Indexer(
                 files=[gz_file],
                 require_bloom=True,
-                require_manifest=True,
             ) as indexer:
                 indexer.ensure_indexed()
 
@@ -528,7 +448,6 @@ class TestIndexerDfanalyzerAPIs:
             with dft_utils.Indexer(
                 files=[gz_file],
                 require_bloom=True,
-                require_manifest=True,
             ) as indexer:
                 indexer.ensure_indexed()
 
@@ -543,7 +462,6 @@ class TestIndexerDfanalyzerAPIs:
             with dft_utils.Indexer(
                 files=[gz_file],
                 require_bloom=True,
-                require_manifest=True,
             ) as indexer:
                 indexer.ensure_indexed()
 
@@ -557,7 +475,7 @@ class TestIndexerDfanalyzerAPIs:
 
             with dft_utils.Indexer(
                 files=[gz_file],
-                require_manifest=True,
+                require_bloom=True,
             ) as indexer:
                 indexer.ensure_indexed()
 
@@ -575,7 +493,7 @@ class TestIndexerDfanalyzerAPIs:
 
             with dft_utils.Indexer(
                 files=[gz_file],
-                require_manifest=True,
+                require_bloom=True,
             ) as indexer:
                 indexer.ensure_indexed()
 
@@ -591,7 +509,7 @@ class TestIndexerDfanalyzerAPIs:
 
             with dft_utils.Indexer(
                 files=[gz_file1, gz_file2],
-                require_manifest=True,
+                require_bloom=True,
             ) as indexer:
                 indexer.ensure_indexed()
 
@@ -611,9 +529,8 @@ class TestIndexerDfanalyzerAPIs:
 
             with dft_utils.Indexer(
                 files=[gz_file],
-                require_manifest=False,
+                require_bloom=True,
             ) as indexer:
-                # Only checkpoint tier, no manifest
                 indexer.ensure_indexed()
 
                 all_pids = indexer.query_all_file_pids()
@@ -628,7 +545,6 @@ class TestIndexerDfanalyzerAPIs:
             with dft_utils.Indexer(
                 files=[gz_file],
                 require_bloom=True,
-                require_manifest=True,
             ) as indexer:
                 indexer.ensure_indexed()
 
@@ -645,126 +561,112 @@ class TestIndexerDfanalyzerAPIs:
                 assert isinstance(all_pids, dict)
 
 
-class TestQueryFilter:
-    """Test cases for query filter parameter in iter_arrow_dfanalyzer APIs"""
+class TestAggTierQueryFilter:
+    """Query-filter semantics on the aggregation-tier typed read (the View's
+    filter over the AGG CF, which replaced the indexer's iter_arrow scan)."""
 
-    def _make_indexer(self, directory):
-        return dft_utils.Indexer(
-            directory=directory,
-            require_aggregation=dft_utils.AggregationConfig(time_interval_ms=5000),
-        )
+    def _viewer(self, directory, query=None):
+        files = sorted(glob.glob(os.path.join(directory, "*.pfw.gz")))
+        tv = dft_utils.TraceViewer(files, index_path=directory)
+        if query:
+            tv = tv.filter(query)
+        return tv.group_by("name", "pid").agg("count")
 
-    def test_iter_arrow_dfanalyzer_all_no_query(self):
+    def _event_count(self, directory, pa, query=None):
+        reg = self._viewer(directory, query).collect_typed()["regular"]
+        if reg is None:
+            return 0
+        t = pa.table(reg)
+        if "count" not in t.column_names:
+            return 0
+        return int(pa.compute.sum(t["count"]).as_py() or 0)
+
+    def test_no_query(self):
         pa = pytest.importorskip("pyarrow")
         with Environment() as env:
             directory = env.create_indexed_traces(pids=[1])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
-                result = indexer.iter_arrow_dfanalyzer_all()
-                rows = sum(pa.record_batch(b).num_rows for b in result.get("events", []))
-                assert rows > 0
+            assert self._event_count(directory, pa) > 0
 
     @pytest.mark.valgrind
-    def test_iter_arrow_dfanalyzer_all_pid_filter(self):
+    def test_pid_filter(self):
         pa = pytest.importorskip("pyarrow")
         with Environment() as env:
             directory = env.create_indexed_traces(pids=[1])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
-                result = indexer.iter_arrow_dfanalyzer_all(query="pid == 1")
-                rows = sum(pa.record_batch(b).num_rows for b in result.get("events", []))
-                assert rows > 0
+            assert self._event_count(directory, pa, "pid == 1") > 0
 
-    def test_iter_arrow_dfanalyzer_all_pid_filter_reduces_rows(self):
+    def test_pid_filter_reduces_rows(self):
         pa = pytest.importorskip("pyarrow")
         with Environment() as env:
             directory = env.create_indexed_traces(pids=[1, 2])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
+            all_rows = self._event_count(directory, pa)
+            filtered = self._event_count(directory, pa, "pid == 1")
+            assert 0 < filtered < all_rows
 
-                all_rows = sum(
-                    pa.record_batch(b).num_rows
-                    for b in indexer.iter_arrow_dfanalyzer_all().get("events", [])
-                )
-                filtered_rows = sum(
-                    pa.record_batch(b).num_rows
-                    for b in indexer.iter_arrow_dfanalyzer_all(query="pid == 1").get("events", [])
-                )
-                assert 0 < filtered_rows < all_rows
-
-    def test_iter_arrow_dfanalyzer_all_invalid_query(self):
+    def test_invalid_query(self):
         with Environment() as env:
             directory = env.create_indexed_traces(pids=[1])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
-                with pytest.raises((ValueError, RuntimeError)):
-                    indexer.iter_arrow_dfanalyzer_all(query="invalid ==")
+            with pytest.raises((ValueError, RuntimeError)):
+                self._viewer(directory, "invalid ==").collect_typed()
 
-    def test_iter_arrow_dfanalyzer_query_param(self):
-        pa = pytest.importorskip("pyarrow")
-        with Environment() as env:
-            directory = env.create_indexed_traces(pids=[1])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
-                batches = list(indexer.iter_arrow_dfanalyzer("events", query="pid == 1"))
-                rows = sum(pa.record_batch(b).num_rows for b in batches)
-                assert rows > 0
-
-    def test_iter_arrow_dfanalyzer_query_matches_all(self):
-        pa = pytest.importorskip("pyarrow")
-        with Environment() as env:
-            directory = env.create_indexed_traces(pids=[1])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
-
-                single_rows = sum(
-                    pa.record_batch(b).num_rows
-                    for b in indexer.iter_arrow_dfanalyzer("events", query="pid == 1")
-                )
-                all_rows = sum(
-                    pa.record_batch(b).num_rows
-                    for b in indexer.iter_arrow_dfanalyzer_all(query="pid == 1").get("events", [])
-                )
-                assert single_rows == all_rows
-
-    def test_iter_arrow_dfanalyzer_all_multi_pid_filter(self):
+    def test_multi_pid_filter(self):
         pa = pytest.importorskip("pyarrow")
         with Environment() as env:
             directory = env.create_indexed_traces(pids=[10, 20, 30])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
+            filtered = self._event_count(directory, pa, "pid == 10 or pid == 20")
+            all_rows = self._event_count(directory, pa)
+            assert 0 < filtered < all_rows
 
-                filtered_rows = sum(
-                    pa.record_batch(b).num_rows
-                    for b in indexer.iter_arrow_dfanalyzer_all(query="pid == 10 or pid == 20").get(
-                        "events", []
+    def test_string_filter(self):
+        pa = pytest.importorskip("pyarrow")
+        with Environment() as env:
+            directory = env.create_indexed_traces(pids=[1])
+            assert self._event_count(directory, pa, 'name == "read"') > 0
+
+    def test_no_match(self):
+        pa = pytest.importorskip("pyarrow")
+        with Environment() as env:
+            directory = env.create_indexed_traces(pids=[1])
+            assert self._event_count(directory, pa, "pid == 999999") == 0
+
+
+class TestShardPartitionCompleteness:
+    """Disjoint shard ranges must union to the full scan - no dropped or
+    double-counted events. Regression guard for the multi-worker typed read
+    that silently lost events when shard ranges did not cover the keyspace."""
+
+    def _viewer(self, directory):
+        files = sorted(glob.glob(os.path.join(directory, "*.pfw.gz")))
+        return dft_utils.TraceViewer(files, index_path=directory).group_by("name").agg("count")
+
+    @staticmethod
+    def _count(reg, pa):
+        if reg is None:
+            return 0
+        return int(pa.compute.sum(pa.table(reg)["count"]).as_py() or 0)
+
+    def test_shard_ranges_union_to_full_scan(self):
+        pa = pytest.importorskip("pyarrow")
+        import pyarrow.compute  # noqa: F401
+
+        from dftracer.utils.dftracer_utils_ext import NUM_SHARDS
+
+        with Environment() as env:
+            directory = env.create_indexed_traces(pids=[1, 2, 3, 4])
+            tv = self._viewer(directory)
+            full = self._count(tv.collect_typed()["regular"], pa)
+            assert full > 0
+            for parts in (2, 4, 8):
+                span = (NUM_SHARDS + parts - 1) // parts
+                total = 0
+                for i in range(parts):
+                    begin = min(NUM_SHARDS, i * span)
+                    end = min(NUM_SHARDS, begin + span)
+                    if begin >= end:
+                        continue
+                    total += self._count(
+                        tv.collect_typed(shard_begin=begin, shard_end=end)["regular"], pa
                     )
-                )
-                all_rows = sum(
-                    pa.record_batch(b).num_rows
-                    for b in indexer.iter_arrow_dfanalyzer_all().get("events", [])
-                )
-                assert 0 < filtered_rows < all_rows
-
-    def test_iter_arrow_dfanalyzer_all_string_filter(self):
-        pa = pytest.importorskip("pyarrow")
-        with Environment() as env:
-            directory = env.create_indexed_traces(pids=[1])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
-                result = indexer.iter_arrow_dfanalyzer_all(query='cat == "posix"')
-                rows = sum(pa.record_batch(b).num_rows for b in result.get("events", []))
-                assert rows > 0
-
-    def test_iter_arrow_dfanalyzer_all_no_match(self):
-        pa = pytest.importorskip("pyarrow")
-        with Environment() as env:
-            directory = env.create_indexed_traces(pids=[1])
-            with self._make_indexer(directory) as indexer:
-                indexer.ensure_indexed()
-                result = indexer.iter_arrow_dfanalyzer_all(query="pid == 999999")
-                rows = sum(pa.record_batch(b).num_rows for b in result.get("events", []))
-                assert rows == 0
+                assert total == full, f"{parts}-way shard split summed {total}, full scan {full}"
 
 
 if __name__ == "__main__":

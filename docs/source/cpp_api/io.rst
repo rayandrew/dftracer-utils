@@ -219,8 +219,8 @@ Parallel File Writers
 ---------------------
 
 The ``dftracer/utils/utilities/fileio/parallel/`` module provides
-high-throughput multi-stream file writers used by the reorganization and
-aggregation pipelines. ``ParallelWriter`` is an abstract interface; concrete
+high-throughput multi-stream file writers used by the aggregation
+pipeline. ``ParallelWriter`` is an abstract interface; concrete
 writers are created via factory functions. The ``FileLayout`` enum
 (``parallel/layout.h``) has two values, ``STRIPED`` and ``SHARDED``:
 

@@ -26,14 +26,5 @@ typedef struct {
 extern PyTypeObject TaskHandleType;
 int init_task_handle(PyObject *m);
 
-// Create a TaskHandle Python object from a C++ void TaskHandle.
-PyObject *create_task_handle(dftracer::utils::TaskHandle handle);
-
 // Create a TaskHandle Python object for a typed task (result stored as
-// std::any).
-PyObject *create_typed_task_handle(std::shared_future<void> void_future,
-                                   std::shared_future<std::any> typed_future,
-                                   dftracer::utils::TaskIndex id,
-                                   std::string name);
-
 #endif  // DFTRACER_UTILS_PYTHON_TASK_HANDLE_H

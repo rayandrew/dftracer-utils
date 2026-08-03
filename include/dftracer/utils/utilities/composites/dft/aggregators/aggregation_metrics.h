@@ -1,8 +1,11 @@
 #ifndef DFTRACER_UTILS_UTILITIES_COMPOSITES_DFT_AGGREGATORS_AGGREGATION_METRICS_H
 #define DFTRACER_UTILS_UTILITIES_COMPOSITES_DFT_AGGREGATORS_AGGREGATION_METRICS_H
 
+#include <ankerl/unordered_dense.h>
 #include <dftracer/utils/core/common/transparent_string_hash.h>
 #include <dftracer/utils/utilities/common/statistics/ddsketch.h>
+#include <dftracer/utils/utilities/common/statistics/distinct_sketch.h>
+#include <dftracer/utils/utilities/common/statistics/field_stat.h>
 
 #include <cstdint>
 #include <limits>
@@ -16,15 +19,12 @@ namespace dftracer::utils::utilities::composites::dft::aggregators {
 // Import DDSketch from common statistics
 using common::statistics::DDSketch;
 
+// One metric's aggregate: the shared FieldStat atom plus an optional DDSketch.
+// The sketch stays beside the POD atom (never inside it) so FieldStat merges
+// stay trivially-copyable/vectorizable. Read the atom via the accessors below;
+// write it through `stat` directly.
 struct MetricStats {
-    std::uint64_t count = 0;
-    std::uint64_t total = 0;
-    std::uint64_t min = std::numeric_limits<std::uint64_t>::max();
-    std::uint64_t max = 0;
-    double mean = 0.0;
-    double m2 = 0.0;
-    double m3 = 0.0;
-    double m4 = 0.0;
+    common::statistics::FieldStat stat;
     std::unique_ptr<DDSketch> sketch;
     double sketch_accuracy_ = 0.01;
 
@@ -32,28 +32,14 @@ struct MetricStats {
         : sketch_accuracy_(relative_accuracy) {}
 
     MetricStats(const MetricStats& other)
-        : count(other.count),
-          total(other.total),
-          min(other.min),
-          max(other.max),
-          mean(other.mean),
-          m2(other.m2),
-          m3(other.m3),
-          m4(other.m4),
+        : stat(other.stat),
           sketch(other.sketch ? std::make_unique<DDSketch>(*other.sketch)
                               : nullptr),
           sketch_accuracy_(other.sketch_accuracy_) {}
 
     MetricStats& operator=(const MetricStats& other) {
         if (this != &other) {
-            count = other.count;
-            total = other.total;
-            min = other.min;
-            max = other.max;
-            mean = other.mean;
-            m2 = other.m2;
-            m3 = other.m3;
-            m4 = other.m4;
+            stat = other.stat;
             sketch = other.sketch ? std::make_unique<DDSketch>(*other.sketch)
                                   : nullptr;
             sketch_accuracy_ = other.sketch_accuracy_;
@@ -64,7 +50,18 @@ struct MetricStats {
     MetricStats(MetricStats&&) = default;
     MetricStats& operator=(MetricStats&&) = default;
 
-    void update(std::uint64_t value, bool compute_percentiles = false);
+    std::uint64_t count() const { return stat.n; }
+    double total() const { return stat.sum; }
+    double min() const { return stat.min; }
+    double max() const { return stat.max; }
+    double mean() const {
+        return stat.n ? stat.sum / static_cast<double>(stat.n) : 0.0;
+    }
+    double m2() const { return stat.sumsq; }
+    double m3() const { return stat.m3; }
+    double m4() const { return stat.m4; }
+
+    void update(double value, bool compute_percentiles = false);
     void merge_from(const MetricStats& other);
     double get_stddev() const;
     double get_skewness() const;
@@ -72,8 +69,8 @@ struct MetricStats {
 };
 
 using CustomMetricsMap =
-    std::unordered_map<std::string, MetricStats, TransparentStringHash,
-                       TransparentStringEqual>;
+    ankerl::unordered_dense::map<std::string, MetricStats,
+                                 TransparentStringHash, TransparentStringEqual>;
 
 // Return the entry for `name`, inserting a value constructed from `accuracy`
 // if absent. Works for any transparent-lookup map whose mapped_type is
@@ -105,6 +102,9 @@ struct AggregationMetrics {
 
     std::unique_ptr<CustomMetricsMap> custom_metrics;
 
+    // Only populated when the file hash is out of the key.
+    common::statistics::DistinctSketch distinct_files;
+
     double sketch_accuracy = 0.01;
 
     explicit AggregationMetrics(double relative_accuracy = 0.01)
@@ -131,6 +131,7 @@ struct AggregationMetrics {
               other.custom_metrics
                   ? std::make_unique<CustomMetricsMap>(*other.custom_metrics)
                   : nullptr),
+          distinct_files(other.distinct_files),
           sketch_accuracy(other.sketch_accuracy) {}
 
     AggregationMetrics& operator=(const AggregationMetrics& other) {

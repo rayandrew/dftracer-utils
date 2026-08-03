@@ -5,11 +5,9 @@
 #include <dftracer/utils/core/rocksdb/db_manager.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/queries/manifest_queries.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/queries/queries.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
 #include <dftracer/utils/utilities/indexer/index_file_entry_capability.h>
-#include <dftracer/utils/utilities/indexer/internal/checkpoint.h>
 
 #include <cstdint>
 #include <memory>
@@ -29,17 +27,6 @@ class IndexDatabaseWriterContext : public IndexBatchSink {
    public:
     using IndexBatchSink::ChunkDimensionStats;
     using IndexBatchSink::ChunkStatistics;
-    using IndexBatchSink::IndexerCheckpoint;
-    using IndexBatchSink::insert_event_range;
-    using IndexBatchSink::insert_metadata_lines;
-    struct TarFileRecord {
-        std::string file_name;
-        std::uint64_t file_size = 0;
-        std::uint64_t file_mtime = 0;
-        char typeflag = '\0';
-        std::uint64_t data_offset = 0;
-        std::uint64_t uncompressed_offset = 0;
-    };
 
     IndexDatabaseWriterContext(IndexDatabaseWriterContext&&) noexcept;
     IndexDatabaseWriterContext& operator=(
@@ -101,7 +88,6 @@ class IndexDatabaseWriterContext : public IndexBatchSink {
         int file_id, const StringViewMap<std::uint64_t>& counts) override;
     void insert_file_name_counts(
         int file_id, const StringViewMap<std::uint64_t>& counts) override;
-    std::uint64_t get_or_create_name_id(std::string_view name);
     void insert_name_dictionary_entry(std::uint64_t name_id,
                                       std::string_view name) override;
     void insert_name_file_posting(std::uint64_t name_id, int file_id) override;
@@ -112,11 +98,12 @@ class IndexDatabaseWriterContext : public IndexBatchSink {
         bool had_existing_file_summary, std::uint64_t file_lines = 0,
         std::uint64_t file_uncompressed_bytes = 0);
     void rebuild_root_summaries();
-    void insert_checkpoint(int file_id,
-                           const IndexerCheckpoint& checkpoint) override;
+    void insert_gzip_member(int file_id,
+                            const GzipMemberRecord& member) override;
 
     void insert_index_dimension(int file_id,
                                 std::string_view dimension) override;
+    void insert_column(int file_id, std::string_view column) override;
 
     /// Insert a hash table entry with bidirectional storage.
     /// Forward: [type][hash] -> name  (for output resolution)
@@ -139,35 +126,9 @@ class IndexDatabaseWriterContext : public IndexBatchSink {
         int file_id, std::uint64_t checkpoint_idx,
         const ChunkDimensionStats& stats,
         std::size_t value_counts_cap = 4096) override;
-    void insert_tar_archive_metadata(int file_id, std::string_view archive_name,
-                                     std::uint64_t checkpoint_size,
-                                     std::uint64_t total_lines,
-                                     std::uint64_t total_uc_size,
-                                     std::uint64_t total_files);
-    void insert_tar_file(int file_id, const TarFileRecord& record);
 
-    // Deletes
-    void delete_chunk_bloom_filters(int file_id, std::string_view dimension);
-    void delete_file_bloom_filter(int file_id, std::string_view dimension);
     void delete_chunk_statistics(int file_id);
-    void delete_chunk_dimension_stats(int file_id);
     void delete_file_contents(int file_id);
-    void delete_event_ranges(int file_id);
-    void delete_metadata_lines(int file_id);
-
-    // Manifest inserts
-    void insert_event_range(
-        int file_id, std::uint64_t checkpoint_idx, std::string_view cat,
-        std::string_view name,
-        std::span<const std::uint32_t> line_numbers) override;
-
-    void insert_metadata_lines(
-        int file_id, std::uint64_t checkpoint_idx, std::string_view meta_type,
-        std::span<const std::uint32_t> line_numbers) override;
-
-    /// Insert the set of PIDs observed in a file (for distributed aggregation)
-    void insert_file_pids(
-        int file_id, const std::unordered_set<std::uint64_t>& pids) override;
 
    private:
     friend class IndexDatabase;

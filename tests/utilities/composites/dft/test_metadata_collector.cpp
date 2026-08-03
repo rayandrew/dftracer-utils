@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <sstream>
 
 #include "testing_utilities.h"
 
@@ -16,8 +17,8 @@ using namespace dftracer::utils::utilities::composites::dft;
 // Helper to create a test trace file
 static std::string create_test_trace_file(const std::string& dir,
                                           int num_events) {
-    std::string file_path = dir + "/test.trace";
-    std::ofstream ofs(file_path);
+    std::string file_path = dir + "/test.trace.gz";
+    std::ostringstream ofs;
 
     const char* io_names[] = {"pread", "pwrite", "read",
                               "write", "fread",  "fwrite"};
@@ -38,12 +39,11 @@ static std::string create_test_trace_file(const std::string& dir,
             << R"(,"args":{"ret":)" << size << R"(})"
             << R"(})" << "\n";
     }
-    ofs.close();
-    return file_path;
+    return dft_utils_test::write_gz_trace(file_path, ofs.str());
 }
 
 TEST_SUITE("MetadataCollector") {
-    TEST_CASE("MetadataCollector - Collect from plain trace file") {
+    TEST_CASE("MetadataCollector - Collect from a gzip trace file") {
         // Create temp directory
         std::string test_dir =
             dft_utils_test::make_unique_test_path("test_metadata_collector")
@@ -91,9 +91,12 @@ TEST_SUITE("MetadataCollector") {
             CHECK(output.size_mb > 0);
         }
 
-        SUBCASE("Extended metadata fields - plain file") {
-            // Create a test trace file
-            std::string trace_file = create_test_trace_file(test_dir, 100);
+        SUBCASE("Extended metadata fields") {
+            const std::string own_dir =
+                dft_utils_test::make_unique_test_path("metadata_no_index")
+                    .string();
+            fs::create_directories(own_dir);
+            std::string trace_file = create_test_trace_file(own_dir, 100);
 
             // Create input
             auto input = MetadataCollectorUtilityInput::from_file(trace_file)
@@ -108,18 +111,13 @@ TEST_SUITE("MetadataCollector") {
             CHECK(output.file_path == trace_file);
             CHECK(output.valid_events == 100);
 
-            // Extended fields for plain files
-            CHECK(output.format == ArchiveFormat::UNKNOWN);  // Plain text
-            CHECK(output.has_index == false);
-            CHECK(output.index_valid == false);
+            // Collecting metadata for a gzip trace builds its index.
+            CHECK(output.format == ArchiveFormat::GZIP);
+            CHECK(output.has_index == true);
             CHECK(output.compressed_size > 0);
             CHECK(output.uncompressed_size > 0);
-            CHECK(output.compressed_size ==
-                  output.uncompressed_size);  // No compression
+            CHECK(output.compressed_size < output.uncompressed_size);
             CHECK(output.num_lines == 100);
-            CHECK(output.checkpoint_size ==
-                  0);                         // No checkpoints for plain files
-            CHECK(output.num_checkpoints == 0);
             CHECK(output.error_message.empty());
         }
 
@@ -135,14 +133,7 @@ TEST_SUITE("MetadataCollector") {
         fs::create_directories(test_dir);
 
         SUBCASE("Compressed file with index - extended metadata") {
-            // Create a plain trace file first
-            std::string trace_file = create_test_trace_file(test_dir, 50);
-
-            // Compress it using gzip
-            std::string gz_file = trace_file + ".gz";
-            std::string cmd = "gzip -c " + trace_file + " > " + gz_file;
-            int result = std::system(cmd.c_str());
-            REQUIRE(result == 0);
+            std::string gz_file = create_test_trace_file(test_dir, 50);
             REQUIRE(fs::exists(gz_file));
 
             // Create input with index
@@ -181,12 +172,7 @@ TEST_SUITE("MetadataCollector") {
         }
 
         SUBCASE("Reuse existing index") {
-            // Create and compress a trace file
-            std::string trace_file = create_test_trace_file(test_dir, 25);
-            std::string gz_file = trace_file + ".gz";
-            std::string cmd = "gzip -c " + trace_file + " > " + gz_file;
-            int result = std::system(cmd.c_str());
-            REQUIRE(result == 0);
+            std::string gz_file = create_test_trace_file(test_dir, 25);
 
             std::string index_path =
                 internal::determine_index_path(gz_file, "");

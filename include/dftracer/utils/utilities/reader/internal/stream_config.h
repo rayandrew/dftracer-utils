@@ -192,15 +192,6 @@ class StreamConfig {
     // ========================================================================
 
     /**
-     * @brief Convert to C API config.
-     */
-    dft_stream_config_t to_c() const {
-        return dft_stream_config_t{static_cast<dft_stream_type_t>(stream_type_),
-                                   static_cast<dft_range_type_t>(range_type_),
-                                   start_, end_, buffer_size_};
-    }
-
-    /**
      * @brief Create from C API config.
      */
     static StreamConfig from_c(const dft_stream_config_t& c_config) {

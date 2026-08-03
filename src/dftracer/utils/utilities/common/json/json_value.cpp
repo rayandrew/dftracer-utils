@@ -1,6 +1,4 @@
-#include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/utilities/common/json/json_value.h>
-#include <dftracer/utils/utilities/fileio/file_reader_utility.h>
 
 #include <cstring>
 
@@ -23,7 +21,24 @@ JsonValue JsonValue::at(const char* path) const {
         }
 
         std::string_view key_sv(start, key_len);
-        current = current[key_sv];
+        JsonValue next = current[key_sv];
+
+        // A numeric segment addresses an array element when the object-key
+        // lookup found nothing and the current node is an array (e.g.
+        // "tags.0.name").
+        if (!next.exists() && current.is_array()) {
+            bool all_digits = true;
+            std::size_t idx = 0;
+            for (char c : key_sv) {
+                if (c < '0' || c > '9') {
+                    all_digits = false;
+                    break;
+                }
+                idx = idx * 10 + static_cast<std::size_t>(c - '0');
+            }
+            if (all_digits) next = current[idx];
+        }
+        current = next;
 
         if (!current.exists()) {
             return JsonValue();
@@ -43,40 +58,5 @@ JsonValue JsonValue::at(std::string_view path) const {
     std::string path_str(path);
     return at(path_str.c_str());
 }
-
-coro::CoroTask<StringJsonParserInput> StringJsonParserInput::from_file_async(
-    const std::string& file_path) {
-    StringJsonParserInput input;
-    utilities::fileio::FileReaderUtility file_reader;
-    utilities::filesystem::FileEntry file_entry{file_path};
-    input.content = co_await file_reader.process(file_entry);
-    co_return input;
-}
-
-StringJsonParserInput StringJsonParserInput::from_file(
-    const std::string& file_path) {
-    return from_file_async(file_path).get();
-}
-
-StringJsonParserInput StringJsonParserInput::from_string(
-    const std::string& json_str) {
-    StringJsonParserInput input;
-    input.content.content = json_str;
-    return input;
-}
-
-coro::CoroTask<JsonParserOutput> StringJsonParserUtility::process(
-    const StringJsonParserInput& input) {
-    content_ = input.content;
-
-    auto result =
-        parser_.parse(content_.content.data(), content_.content.size());
-    if (result.error()) {
-        co_return JsonValue();
-    }
-    co_return JsonValue(result.value_unsafe());
-}
-
-void StringJsonParserUtility::reset() { content_ = utilities::text::Text{}; }
 
 }  // namespace dftracer::utils::utilities::common::json

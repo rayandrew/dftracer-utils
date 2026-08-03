@@ -20,12 +20,14 @@
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/utilities/replay/replay.h>
 #include <doctest/doctest.h>
+#include <testing_utilities.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -41,9 +43,8 @@ namespace {
 // dominated by apply_timing sleep.
 void write_evenly_spaced_trace(const std::string& path, std::size_t n,
                                std::uint64_t step_us) {
-    std::ofstream f(path);
-    REQUIRE(f.is_open());
     const std::uint64_t base_ts = 1'000'000;
+    std::ostringstream f;
     f << "[\n";
     for (std::size_t i = 0; i < n; ++i) {
         f << R"({"id":)" << i
@@ -53,6 +54,7 @@ void write_evenly_spaced_trace(const std::string& path, std::size_t n,
         f << "\n";
     }
     f << "]";
+    REQUIRE(!dft_utils_test::write_gz_trace(path, f.str()).empty());
 }
 
 struct DispatchSample {
@@ -178,7 +180,7 @@ TEST_CASE("Replay fidelity - sync path") {
 
     fs::path temp_dir = fs::temp_directory_path() / "dftracer_replay_fid_sync";
     fs::create_directories(temp_dir);
-    std::string trace_file = (temp_dir / "fid.pfw").string();
+    std::string trace_file = (temp_dir / "fid.pfw.gz").string();
 
     constexpr std::size_t N = 40;
     constexpr std::uint64_t STEP_US = 5'000;
@@ -210,7 +212,7 @@ TEST_CASE("Replay fidelity - pipelined path") {
     fs::path temp_dir =
         fs::temp_directory_path() / "dftracer_replay_fid_pipelined";
     fs::create_directories(temp_dir);
-    std::string trace_file = (temp_dir / "fid.pfw").string();
+    std::string trace_file = (temp_dir / "fid.pfw.gz").string();
 
     constexpr std::size_t N = 40;
     constexpr std::uint64_t STEP_US = 5'000;
@@ -252,7 +254,7 @@ TEST_CASE("Replay fidelity - first-event anchor reset survives warmup gap") {
     fs::path temp_dir =
         fs::temp_directory_path() / "dftracer_replay_fid_anchor";
     fs::create_directories(temp_dir);
-    std::string trace_file = (temp_dir / "fid.pfw").string();
+    std::string trace_file = (temp_dir / "fid.pfw.gz").string();
 
     constexpr std::size_t N = 20;
     constexpr std::uint64_t STEP_US = 5'000;  // 95ms span

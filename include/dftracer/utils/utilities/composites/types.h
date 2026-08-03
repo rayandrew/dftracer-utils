@@ -28,17 +28,6 @@ struct DirectoryProcessInput {
           recursive(recurse),
           extensions(std::move(exts)) {}
 
-    static DirectoryProcessInput from_directory(std::string path) {
-        DirectoryProcessInput input;
-        input.directory_path = std::move(path);
-        return input;
-    }
-
-    DirectoryProcessInput& with_extensions(std::vector<std::string> exts) {
-        extensions = std::move(exts);
-        return *this;
-    }
-
     DirectoryProcessInput& with_recursive(bool rec) {
         recursive = rec;
         return *this;
@@ -158,16 +147,6 @@ struct FileProcessOutput {
           success(succ),
           items_processed(items),
           error_message(std::move(error)) {}
-
-    static FileProcessOutput success_output(const std::string& path,
-                                            std::size_t items) {
-        return FileProcessOutput(path, true, items, "");
-    }
-
-    static FileProcessOutput error_output(const std::string& path,
-                                          const std::string& error) {
-        return FileProcessOutput(path, false, 0, error);
-    }
 };
 
 /**

@@ -4,7 +4,7 @@
 #include <dftracer/utils/core/rocksdb/key_codec.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
-#include <dftracer/utils/utilities/indexer/internal/checkpoint.h>
+#include <dftracer/utils/utilities/indexer/internal/gzip_member_record.h>
 #include <dftracer/utils/utilities/indexer/internal/payload_codec.h>
 
 #include <cstddef>
@@ -25,33 +25,26 @@ inline constexpr std::string_view NEXT_FILE_ID_KEY = "_next_file_id";
 
 std::string metadata_key(int file_id);
 
-std::string checkpoint_key(int file_id, std::uint64_t uc_offset,
-                           std::uint64_t checkpoint_idx);
+// Member record keys in the MEMBERS CF. The "m|" tag is a historical
+// artifact from when this CF also held checkpoint records; it is harmless
+// now that members are the only occupant.
+std::string gzip_member_key(int file_id, std::uint64_t member_idx);
 
-std::string manifest_event_key(int file_id, std::uint64_t checkpoint_idx,
-                               std::string_view cat, std::string_view name);
+std::string gzip_member_prefix(int file_id);
 
-std::string manifest_metadata_key(int file_id, std::uint64_t checkpoint_idx,
-                                  std::string_view meta_type);
+std::string encode_gzip_member_value(const GzipMemberRecord& member);
 
 std::string encode_metadata_record(std::uint64_t checkpoint_size,
                                    std::uint64_t total_lines,
                                    std::uint64_t total_uc_size);
 
-std::string encode_checkpoint_value(const IndexerCheckpoint& checkpoint);
-
-std::string encode_event_range_value(std::span<const std::uint32_t> lines);
-
-std::string encode_metadata_value(std::span<const std::uint32_t> lines);
-
-std::string file_pids_key(int file_id);
-
-std::string encode_file_pids_value(
-    const std::unordered_set<std::uint64_t>& pids);
-
 // Bloom / stats / dimension CFs --------------------------------------------
 
 std::string make_dimension_key(int file_id, std::string_view dimension);
+
+// Groupable column names present in a file. Shares the DIMENSIONS CF with a
+// distinct "c|" prefix so no separate column family is needed.
+std::string make_column_key(int file_id, std::string_view column);
 
 std::string chunk_bloom_key(int file_id, std::string_view dimension,
                             std::uint64_t checkpoint_idx);

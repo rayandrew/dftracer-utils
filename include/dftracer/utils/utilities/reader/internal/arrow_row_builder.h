@@ -8,11 +8,29 @@
 #include <dftracer/utils/core/common/string_arena.h>
 #include <dftracer/utils/utilities/common/arrow/column_builder.h>
 #include <dftracer/utils/utilities/common/json/parser.h>
+#include <dftracer/utils/utilities/composites/dft/time_metric.h>
 #include <simdjson.h>
 
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace dftracer::utils::utilities::reader::internal {
+
+using composites::dft::TimeScaleState;
+
+// Opt-in tuning for the native (non-normalized) row build. Defaults reproduce
+// the historical pass-through behaviour.
+struct RowBuildOptions {
+    // Top-level keys to keep (nullptr/empty = all). "args" gates whether the
+    // args object is flattened at all, so dropping it skips that work entirely.
+    const std::vector<std::string> *keep = nullptr;
+    // Dictionary-encode string columns (big win for low-cardinality fields like
+    // cat/name that repeat across most rows).
+    bool dict_strings = false;
+    // Multiply ts/dur/te by this to normalize the time unit (1.0 = none).
+    double time_scale = 1.0;
+};
 
 // Build one Arrow row from a parsed JSON row. When `normalize` is true, the
 // row is mapped into the semantic output schema (see normalize_row); otherwise
@@ -20,17 +38,15 @@ namespace dftracer::utils::utilities::reader::internal {
 // row should be skipped.
 bool build_arrow_row(common::arrow::RecordBatchBuilder &builder,
                      common::json::JsonParser &parser, StringArena &arena,
-                     bool normalize);
+                     bool normalize, TimeScaleState &time_scale,
+                     const RowBuildOptions &opts = {});
 
 // Flatten a simdjson object into "prefix.key" columns using native types.
-// On type mismatch (same key, different type across rows), appends null.
-void flatten_object_into(common::arrow::RecordBatchBuilder &builder,
-                         StringArena &arena, std::string_view prefix,
-                         simdjson::ondemand::object obj);
-
 bool process_json_line(common::arrow::RecordBatchBuilder &builder,
                        common::json::JsonParser &parser, StringArena &arena,
-                       std::string_view content, bool normalize);
+                       std::string_view content, bool normalize,
+                       TimeScaleState &time_scale,
+                       const RowBuildOptions &opts = {});
 
 }  // namespace dftracer::utils::utilities::reader::internal
 

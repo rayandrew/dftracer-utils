@@ -17,7 +17,7 @@ struct IndexerObject {
     // Tier requirements
     int require_checkpoint;
     int require_bloom;
-    int require_manifest;
+    int build_bloom;
     int require_aggregation;
 
     // Aggregation config (stored for rebuild)
@@ -25,6 +25,7 @@ struct IndexerObject {
     PyObject* group_keys;            // Python list or None
     PyObject* custom_metric_fields;  // Python list or None
     int compute_percentiles;
+    int group_by_file;
 
     std::size_t checkpoint_size;
     std::size_t parallelism;

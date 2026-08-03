@@ -37,7 +37,6 @@ class TaskResult {
 
     void set_value(std::any value);
     void set_exception(std::exception_ptr ex);
-    void set_cancelled();
     void mark_running();
 
     // === Smart Value Release (push-model memory optimization) ===

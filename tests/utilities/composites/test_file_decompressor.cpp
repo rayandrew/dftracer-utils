@@ -180,7 +180,7 @@ TEST_SUITE("FileDecompressor") {
                 compressor
                     .process(
                         FileCompressionUtilityInput::from_file(original_file)
-                            .with_chunk_size(1024))
+                            .with_member_size(1024))
                     .get();
             REQUIRE(compress_result.has_value());
 
@@ -190,8 +190,7 @@ TEST_SUITE("FileDecompressor") {
             auto decompress_result =
                 decompressor
                     .process(FileDecompressionUtilityInput::from_file(
-                                 compressed_file)
-                                 .with_chunk_size(4096))
+                        compressed_file))
                     .get();
             REQUIRE(decompress_result.has_value());
 

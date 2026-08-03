@@ -73,13 +73,15 @@
 #define DFTRACER_ALIGNED_BUFFER(type, name, size) \
     alignas(DFTRACER_OPTIMAL_ALIGNMENT) type name[size]
 
-// std::thread::hardware_concurrency() may return 0 on some platforms.
-// Use this wrapper to guarantee at least 1 thread.
 #include <cstddef>
 #include <cstdlib>
 #include <thread>
 
-inline std::size_t dftracer_utils_hardware_concurrency() {
+namespace dftracer::utils {
+
+/// Cores this machine reports, never 0. Overridable with
+/// DFTRACER_UTILS_HW_CONCURRENCY.
+inline std::size_t hardware_concurrency() {
     if (const char *env = std::getenv("DFTRACER_UTILS_HW_CONCURRENCY")) {
         char *end = nullptr;
         unsigned long v = std::strtoul(env, &end, 10);
@@ -88,6 +90,13 @@ inline std::size_t dftracer_utils_hardware_concurrency() {
     auto n = std::thread::hardware_concurrency();
     return n == 0 ? 1u : static_cast<std::size_t>(n);
 }
+
+/// Worker threads available to the calling thread, 1 when it is not running
+/// on an executor. This is what the runtime was configured with, not what
+/// the machine has; size a fan-out with this.
+std::size_t available_parallelism() noexcept;
+
+}  // namespace dftracer::utils
 
 // ThreadSanitizer annotations for custom synchronization primitives.
 #if defined(__SANITIZE_THREAD__)

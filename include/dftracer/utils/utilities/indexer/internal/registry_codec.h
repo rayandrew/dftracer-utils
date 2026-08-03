@@ -34,10 +34,6 @@ inline std::string root_category_counts_key() { return "_root"; }
 inline std::string root_name_counts_key() { return "_root"; }
 inline std::string root_pid_tid_counts_key() { return "_root"; }
 
-inline std::string tar_archive_key(int file_id) {
-    return encoding::prefix_for_file(file_id);
-}
-
 inline IndexFileEntryCapability decode_file_capabilities(
     std::string_view record) {
     if (record.size() < 5) {

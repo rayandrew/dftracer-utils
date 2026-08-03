@@ -2,7 +2,8 @@
 #define DFTRACER_UTILS_UTILITIES_INDEXER_INTERNAL_INDEXER_H
 
 #include <dftracer/utils/core/common/constants.h>
-#include <dftracer/utils/utilities/indexer/internal/checkpoint.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,12 +21,6 @@ int dft_indexer_need_rebuild(dft_indexer_handle_t indexer);
 int dft_indexer_exists(dft_indexer_handle_t indexer);
 uint64_t dft_indexer_get_max_bytes(dft_indexer_handle_t indexer);
 uint64_t dft_indexer_get_num_lines(dft_indexer_handle_t indexer);
-int dft_indexer_find_checkpoint(dft_indexer_handle_t indexer,
-                                size_t target_offset,
-                                dft_indexer_checkpoint_t *checkpoint);
-int dft_indexer_get_checkpoints(dft_indexer_handle_t indexer,
-                                dft_indexer_checkpoint_t **checkpoints,
-                                size_t *count);
 void dft_indexer_destroy(dft_indexer_handle_t indexer);
 
 #ifdef __cplusplus
@@ -34,6 +29,7 @@ void dft_indexer_destroy(dft_indexer_handle_t indexer);
 #include <dftracer/utils/core/common/archive_format.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/utilities/indexer/index_visitor.h>
+#include <dftracer/utils/utilities/indexer/internal/gzip_member_record.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -56,6 +52,7 @@ class Indexer {
 
     // Core indexer operations
     virtual coro::CoroTask<void> build_async() const = 0;
+
     void build() const { build_async().get(); }
     virtual bool need_rebuild() const = 0;
     virtual bool exists() const = 0;
@@ -71,12 +68,14 @@ class Indexer {
     virtual std::uint64_t get_max_bytes() const = 0;
     virtual std::uint64_t get_num_lines() const = 0;
 
-    // Checkpoint-related functionality
-    virtual bool find_checkpoint(std::size_t target_offset,
-                                 IndexerCheckpoint &checkpoint) const = 0;
-    virtual std::vector<IndexerCheckpoint> get_checkpoints() const = 0;
-    virtual std::vector<IndexerCheckpoint> get_checkpoints_for_line_range(
-        std::uint64_t start_line, std::uint64_t end_line) const = 0;
+    /// Member containing `target_offset` (uncompressed). A gzip member is a
+    /// self-contained stream, so seeking to one needs neither an inflate
+    /// dictionary nor bit priming.
+    virtual bool find_member(std::size_t target_offset,
+                             GzipMemberRecord &member) const = 0;
+
+    /// Every member in file order. Empty when the file was never indexed.
+    virtual std::vector<GzipMemberRecord> get_members() const = 0;
 
     // Archive format identification
     virtual ArchiveFormat get_format_type() const = 0;

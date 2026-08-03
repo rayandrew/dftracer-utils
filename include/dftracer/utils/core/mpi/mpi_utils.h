@@ -63,15 +63,8 @@ class MPIUtils {
     void finalize();
 
     /**
-     * Check if MPI is initialized and available
-     */
-    bool is_initialized() const { return initialized_; }
-
-    /**
      * Check if MPI is enabled (compiled with MPI support)
      */
-    bool is_mpi_enabled() const;
-
     /**
      * Get MPI rank (0 if MPI not initialized)
      */
@@ -101,32 +94,22 @@ class MPIUtils {
      * @param str String to broadcast (modified on non-root ranks)
      * @param root Root rank (default 0)
      */
-    void broadcast_string(std::string& str, int root = 0);
-
     /**
      * Broadcast a vector of uint32_t from root to all ranks
      * @param values Vector to broadcast (modified on non-root ranks)
      * @param root Root rank (default 0)
      */
-    void broadcast_uint32_vector(std::vector<std::uint32_t>& values,
-                                 int root = 0);
-
     /**
      * Broadcast a single integer from root to all ranks
      * @param value Integer to broadcast (modified on non-root ranks)
      * @param root Root rank (default 0)
      */
-    void broadcast_int(int& value, int root = 0);
-
     /**
      * Gather integers from all ranks to root
      * @param send_value Value to send from this rank
      * @param recv_values Vector to receive values (only valid on root)
      * @param root Root rank (default 0)
      */
-    void gather_int(int send_value, std::vector<int>& recv_values,
-                    int root = 0);
-
     /**
      * Gatherv - gather variable-sized data from all ranks to root
      * @param send_data Data to send from this rank
@@ -135,18 +118,11 @@ class MPIUtils {
      * @param displacements Displacements for each rank (only valid on root)
      * @param root Root rank (default 0)
      */
-    void gatherv_uint32(const std::vector<std::uint32_t>& send_data,
-                        std::vector<std::uint32_t>& recv_data,
-                        std::vector<int>& recv_counts,
-                        std::vector<int>& displacements, int root = 0);
-
     /**
      * Allgather - gather data from all ranks to all ranks
      * @param send_value Value to send from this rank
      * @param recv_values Vector to receive all values (resized to world_size)
      */
-    void allgather_int(int send_value, std::vector<int>& recv_values);
-
     /**
      * Allgatherv - gather variable-sized data from all ranks to all ranks
      * @param send_data Data to send from this rank
@@ -154,28 +130,18 @@ class MPIUtils {
      * @param recv_sizes Number of elements from each rank
      * @param displacements Displacements for each rank
      */
-    void allgatherv_char(const std::vector<char>& send_data,
-                         std::vector<char>& recv_data,
-                         std::vector<int>& recv_sizes,
-                         std::vector<int>& displacements);
-
     /**
      * Reduce to root - sum operation
      * @param send_value Value to reduce from this rank
      * @param recv_value Result (only valid on root)
      * @param root Root rank (default 0)
      */
-    void reduce_sum_size_t(std::size_t send_value, std::size_t& recv_value,
-                           int root = 0);
-
     /**
      * Reduce to root - max operation for double
      * @param send_value Value to reduce from this rank
      * @param recv_value Result (only valid on root)
      * @param root Root rank (default 0)
      */
-    void reduce_max_double(double send_value, double& recv_value, int root = 0);
-
    private:
     /**
      * Private constructor for singleton

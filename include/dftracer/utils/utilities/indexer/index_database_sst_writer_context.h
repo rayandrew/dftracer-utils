@@ -30,7 +30,7 @@ class IndexDatabaseSstWriterContext : public IndexBatchSink {
    public:
     struct Artifacts {
         std::optional<std::string> metadata_sst;
-        std::optional<std::string> checkpoints_sst;
+        std::optional<std::string> members_sst;
         std::optional<std::string> manifest_sst;
         std::optional<std::string> chunk_bloom_sst;
         std::optional<std::string> file_bloom_sst;
@@ -49,7 +49,7 @@ class IndexDatabaseSstWriterContext : public IndexBatchSink {
         std::optional<std::string> system_metrics_sst;
 
         bool empty() const noexcept {
-            return !metadata_sst.has_value() && !checkpoints_sst.has_value() &&
+            return !metadata_sst.has_value() && !members_sst.has_value() &&
                    !manifest_sst.has_value() && !chunk_bloom_sst.has_value() &&
                    !file_bloom_sst.has_value() &&
                    !chunk_stats_sst.has_value() &&
@@ -94,27 +94,12 @@ class IndexDatabaseSstWriterContext : public IndexBatchSink {
 
     ~IndexDatabaseSstWriterContext() override;
 
-    using IndexBatchSink::insert_event_range;
-    using IndexBatchSink::insert_metadata_lines;
-
     void insert_file_metadata(int file_id, std::uint64_t checkpoint_size,
                               std::uint64_t total_lines,
                               std::uint64_t total_uc_size) override;
 
-    void insert_checkpoint(int file_id,
-                           const IndexerCheckpoint& checkpoint) override;
-
-    void insert_event_range(
-        int file_id, std::uint64_t checkpoint_idx, std::string_view cat,
-        std::string_view name,
-        std::span<const std::uint32_t> line_numbers) override;
-
-    void insert_metadata_lines(
-        int file_id, std::uint64_t checkpoint_idx, std::string_view meta_type,
-        std::span<const std::uint32_t> line_numbers) override;
-
-    void insert_file_pids(
-        int file_id, const std::unordered_set<std::uint64_t>& pids) override;
+    void insert_gzip_member(int file_id,
+                            const GzipMemberRecord& member) override;
 
     void insert_chunk_bloom_filter(int file_id, std::uint64_t checkpoint_idx,
                                    std::string_view dimension,
@@ -142,6 +127,7 @@ class IndexDatabaseSstWriterContext : public IndexBatchSink {
 
     void insert_index_dimension(int file_id,
                                 std::string_view dimension) override;
+    void insert_column(int file_id, std::string_view column) override;
 
     void insert_chunk_dimension_stats(
         int file_id, std::uint64_t checkpoint_idx,
@@ -189,7 +175,7 @@ class IndexDatabaseSstWriterContext : public IndexBatchSink {
     bool committed_ = false;
 
     std::vector<KeyValue> metadata_buf_;
-    std::vector<KeyValue> checkpoints_buf_;
+    std::vector<KeyValue> members_buf_;
     std::vector<KeyValue> manifest_buf_;
     std::vector<KeyValue> chunk_bloom_buf_;
     std::vector<KeyValue> file_bloom_buf_;
@@ -220,7 +206,7 @@ class SstArtifactRegistry {
             if (src) dst.push_back(std::move(*src));
         };
         move_into(metadata_, artifacts.metadata_sst);
-        move_into(checkpoints_, artifacts.checkpoints_sst);
+        move_into(members_, artifacts.members_sst);
         move_into(manifest_, artifacts.manifest_sst);
         move_into(chunk_bloom_, artifacts.chunk_bloom_sst);
         move_into(file_bloom_, artifacts.file_bloom_sst);
@@ -240,7 +226,7 @@ class SstArtifactRegistry {
     }
 
     const std::vector<std::string>& metadata() const { return metadata_; }
-    const std::vector<std::string>& checkpoints() const { return checkpoints_; }
+    const std::vector<std::string>& members() const { return members_; }
     const std::vector<std::string>& manifest() const { return manifest_; }
     const std::vector<std::string>& chunk_bloom() const { return chunk_bloom_; }
     const std::vector<std::string>& file_bloom() const { return file_bloom_; }
@@ -279,7 +265,7 @@ class SstArtifactRegistry {
    private:
     std::mutex mutex_;
     std::vector<std::string> metadata_;
-    std::vector<std::string> checkpoints_;
+    std::vector<std::string> members_;
     std::vector<std::string> manifest_;
     std::vector<std::string> chunk_bloom_;
     std::vector<std::string> file_bloom_;

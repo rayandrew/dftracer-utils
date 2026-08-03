@@ -65,8 +65,8 @@ TEST_SUITE("trace_gen::TraceWriter") {
         std::size_t event_lines = 0;
         bool saw_metadata = false;
         for (const auto& l : lines) {
-            if (l.find(R"("ph":"X")") != std::string::npos) ++event_lines;
-            if (l.find(R"("ph":"M")") != std::string::npos) saw_metadata = true;
+            if (l.find(R"("ph":1)") != std::string::npos) ++event_lines;
+            if (l.find(R"("ph":4)") != std::string::npos) saw_metadata = true;
         }
         CHECK(event_lines == NUM_EVENTS);
         CHECK(saw_metadata);

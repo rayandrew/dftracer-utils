@@ -98,6 +98,9 @@ class CoroScope {
     }
 
    public:
+    /// Binds to the executor driving this thread.
+    CoroScope() : executor_(Executor::current()) {}
+
     explicit CoroScope(Executor* executor) : executor_(executor) {}
 
     /// Construct with an inherited cancellation token (for child scopes
@@ -503,8 +506,6 @@ class CoroScope {
     coro::CoroTask<void> join_all() { return join(); }
 
     std::size_t size() const { return coroutines_.size(); }
-    bool is_joined() const { return joined_; }
-
     // ====================================================================
     // Accessor / Utility
     // ====================================================================
@@ -546,10 +547,6 @@ class CoroScope {
         return cancellation_requested_->load(std::memory_order_acquire);
     }
 
-    void request_cancellation() {
-        cancellation_requested_->store(true, std::memory_order_release);
-    }
-
     std::shared_ptr<std::atomic<bool>> get_cancellation_token() const {
         return cancellation_requested_;
     }
@@ -577,6 +574,16 @@ inline coro::CoroTask<void> run_coro_scope(Executor* executor, Func scope_func,
         rethrow_and_clear(error);
     }
     co_return;
+}
+
+/// Same, on the executor already driving this thread. Lets a utility fan
+/// out without naming an executor or a runtime.
+template <typename Func, typename... Args>
+    requires std::is_invocable_r_v<coro::CoroTask<void>, Func, CoroScope&,
+                                   Args...>
+inline coro::CoroTask<void> run_coro_scope(Func scope_func, Args... args) {
+    return run_coro_scope(Executor::current(), std::move(scope_func),
+                          std::move(args)...);
 }
 
 }  // namespace dftracer::utils

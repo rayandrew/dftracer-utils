@@ -3,11 +3,12 @@
 
 #include <dftracer/utils/core/common/byte_view.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/compression/zlib/streaming_compressor_utility.h>
+#include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
-#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,8 +18,18 @@ struct ChunkWriterConfig {
     std::string output_dir;
     std::string base_name;
     std::size_t chunk_size_bytes = 256 * 1024 * 1024;
+    // Uncompressed bytes per gzip member within a compressed chunk. A positive
+    // value emits multi-member gzip (closed at line boundaries once the member
+    // exceeds this size) so readers can inflate/index members in parallel, and
+    // bounds peak memory to one member. 0 keeps a single member per chunk,
+    // which buffers the whole chunk (up to chunk_size_bytes) before
+    // compressing.
+    std::size_t member_size_bytes = 0;
+    // Coalesce output into writes of this many bytes so I/O granularity suits a
+    // parallel filesystem (Lustre/GPFS) instead of many tiny writes.
+    std::size_t io_flush_bytes = 16 * 1024 * 1024;
     bool compress = true;
-    int compression_level = Z_DEFAULT_COMPRESSION;
+    int compression_level = 6;
     bool json_array_wrapper = true;
 
     using ChunkRotationCallback = std::function<void(
@@ -30,12 +41,8 @@ struct ChunkWriterConfig {
         output_dir = std::move(dir);
         return *this;
     }
-    ChunkWriterConfig& with_base_name(std::string name) {
-        base_name = std::move(name);
-        return *this;
-    }
-    ChunkWriterConfig& with_chunk_size(std::size_t bytes) {
-        chunk_size_bytes = bytes;
+    ChunkWriterConfig& with_member_size(std::size_t bytes) {
+        member_size_bytes = bytes;
         return *this;
     }
     ChunkWriterConfig& with_compression(bool enabled) {
@@ -44,14 +51,6 @@ struct ChunkWriterConfig {
     }
     ChunkWriterConfig& with_compression_level(int level) {
         compression_level = level;
-        return *this;
-    }
-    ChunkWriterConfig& with_json_array_wrapper(bool enabled) {
-        json_array_wrapper = enabled;
-        return *this;
-    }
-    ChunkWriterConfig& with_on_chunk_complete(ChunkRotationCallback callback) {
-        on_chunk_complete = std::move(callback);
         return *this;
     }
 };
@@ -78,13 +77,17 @@ class ChunkWriter {
 
     std::size_t total_bytes_written() const { return total_bytes_; }
     std::size_t total_events_written() const { return total_events_; }
-    int current_chunk_index() const { return chunk_index_; }
     const std::vector<ChunkInfo>& chunks() const { return chunks_; }
     bool is_open() const { return open_; }
 
    private:
-    coro::CoroTask<void> flush_buffer();
-    coro::CoroTask<void> flush_raw(const char* data, std::size_t len);
+    // Emits the accumulated buffer as one gzip member, or raw when compression
+    // is off.
+    coro::CoroTask<void> flush_member();
+    void append_member(const char* data, std::size_t len);
+    // Coalesce writes to `io_flush_bytes` granularity for the PFS.
+    coro::CoroTask<void> write_out(const char* data, std::size_t size);
+    coro::CoroTask<void> flush_io();
     coro::CoroTask<void> finalize_current_chunk();
     coro::CoroTask<void> open_next_chunk();
     std::string chunk_path(int index) const;
@@ -95,14 +98,18 @@ class ChunkWriter {
     int chunk_index_ = 0;
     std::size_t current_chunk_bytes_ = 0;
     std::size_t current_chunk_events_ = 0;
+    std::size_t current_member_bytes_ = 0;
     std::size_t total_bytes_ = 0;
     std::size_t total_events_ = 0;
 
     static constexpr std::size_t WRITE_BUFFER_SIZE = 256 * 1024;
-    std::vector<char> write_buffer_;
+    // Uncompressed bytes of the current gzip member (or the coalescing buffer
+    // for the uncompressed path).
+    std::vector<char> member_buffer_;
+    std::vector<char> io_buffer_;
+    std::vector<std::uint8_t> compressed_scratch_;
 
-    std::unique_ptr<compression::zlib::ManualStreamingCompressorUtility>
-        compressor_;
+    std::optional<compress::GzipMemberCompressor> compressor_;
 
     std::vector<ChunkInfo> chunks_;
 };

@@ -2,7 +2,6 @@
 #define DFTRACER_UTILS_UTILITIES_COMPOSITES_DFT_PARSE_INFLATED_H
 
 #include <dftracer/utils/utilities/common/json/json.h>
-#include <dftracer/utils/utilities/composites/dft/dft_event_visitor.h>
 #include <dftracer/utils/utilities/composites/dft/event.h>
 #include <simdjson.h>
 
@@ -13,10 +12,9 @@
 
 namespace dftracer::utils::utilities::composites::dft {
 
-// Replace "[\n" / "]\n" delimiter lines with spaces in-place. Mirrors the
-// behaviour used by DftEventDispatcher so parse_buffer can consume the
-// stripped buffer with parse_many. Public so the direct-organize path can
-// reuse it on inflated buffers it accumulates itself.
+// Replace "[\n" / "]\n" delimiter lines with spaces in-place so parse_buffer
+// can consume the stripped buffer with parse_many. Public so the
+// direct-organize path can reuse it on inflated buffers it accumulates itself.
 inline void strip_array_delimiters(char* buf, std::size_t len) {
     for (std::size_t i = 0; i < len;) {
         std::size_t line_start = i;

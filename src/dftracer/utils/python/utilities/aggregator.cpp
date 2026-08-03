@@ -7,6 +7,7 @@
 #include <dftracer/utils/python/arrow_helpers.h>
 #include <dftracer/utils/python/py_dict_helpers.h>
 #include <dftracer/utils/python/py_list_helpers.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
@@ -114,11 +115,11 @@ static int parse_aggregator_args(PyObject *args, PyObject *kwds,
     PyObject *query_obj = Py_None;
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "s|dOOOsnpnnOpnO", (char **)kwlist, &directory,
-            &time_interval_ms, &group_keys_obj, &categories_obj, &names_obj,
-            &index_dir, &checkpoint_size, &force_rebuild, &parallelism,
-            &event_batch_size, &custom_metrics_obj, &compute_percentiles,
-            &buffer_size, &query_obj))
+            args, kwds, "s|dOOOsnpnnOpnO", const_cast<char **>(kwlist),
+            &directory, &time_interval_ms, &group_keys_obj, &categories_obj,
+            &names_obj, &index_dir, &checkpoint_size, &force_rebuild,
+            &parallelism, &event_batch_size, &custom_metrics_obj,
+            &compute_percentiles, &buffer_size, &query_obj))
         return -1;
 
     if (buffer_size_out) {
@@ -168,17 +169,17 @@ static bool run_aggregator_pipeline(
         rt->submit(run_coro_scope(
                        rt->executor(),
                        [](CoroScope &scope, std::vector<ArrowExportResult> *out,
-                          AggregatorInput input,
-                          std::optional<Query> query) -> CoroTask<void> {
+                          AggregatorInput agg_input,
+                          std::optional<Query> agg_query) -> CoroTask<void> {
                            AggregatorUtility util;
                            util.bind_context(scope);
                            try {
-                               auto gen = util.process(input);
+                               auto gen = util.process(agg_input);
                                while (auto batch = co_await gen.next()) {
                                    if (batch->entries.empty()) continue;
                                    AggregationBatch filtered;
-                                   if (query) {
-                                       filtered = batch->filter(*query);
+                                   if (agg_query) {
+                                       filtered = batch->filter(*agg_query);
                                        if (filtered.entries.empty()) continue;
                                    } else {
                                        filtered = std::move(*batch);
@@ -480,11 +481,12 @@ static PyObject *Aggregator_write_arrow(AggregatorObject *self, PyObject *args,
     const char *compression_str = "zstd";
 
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "ss|dOOOsnpnnOpOis", (char **)kwlist, &directory,
-            &output_path, &time_interval_ms, &group_keys_obj, &categories_obj,
-            &names_obj, &index_dir, &checkpoint_size, &force_rebuild,
-            &parallelism, &event_batch_size, &custom_metrics_obj,
-            &compute_percentiles, &views_obj, &chunk_size_mb, &compression_str))
+            args, kwds, "ss|dOOOsnpnnOpOis", const_cast<char **>(kwlist),
+            &directory, &output_path, &time_interval_ms, &group_keys_obj,
+            &categories_obj, &names_obj, &index_dir, &checkpoint_size,
+            &force_rebuild, &parallelism, &event_batch_size,
+            &custom_metrics_obj, &compute_percentiles, &views_obj,
+            &chunk_size_mb, &compression_str))
         return NULL;
 
     // Parse views
@@ -536,7 +538,8 @@ static PyObject *Aggregator_write_arrow(AggregatorObject *self, PyObject *args,
     IpcCompression compression = IpcCompression::ZSTD;
     if (compression_str) {
         std::string comp_lower(compression_str);
-        for (auto &c : comp_lower) c = std::tolower(c);
+        for (auto &c : comp_lower)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         if (comp_lower == "none") {
             compression = IpcCompression::NONE;
         } else if (comp_lower == "zstd") {
@@ -694,7 +697,8 @@ static PyObject *Aggregator_call(PyObject *self, PyObject *args,
 }
 
 static PyMethodDef Aggregator_methods[] = {
-    {"process", (PyCFunction)Aggregator_process, METH_VARARGS | METH_KEYWORDS,
+    {"process", DFT_PYCFUNCTION(Aggregator_process),
+     METH_VARARGS | METH_KEYWORDS,
      "process(directory, time_interval_ms=5000.0, group_keys=None,\n"
      "        categories=None, names=None, index_dir='',\n"
      "        checkpoint_size=33554432, force_rebuild=False,\n"
@@ -726,7 +730,7 @@ static PyMethodDef Aggregator_methods[] = {
      "\n"
      "Returns:\n"
      "    ArrowTable: Aggregated results.\n"},
-    {"iter_arrow", (PyCFunction)Aggregator_iter_arrow,
+    {"iter_arrow", DFT_PYCFUNCTION(Aggregator_iter_arrow),
      METH_VARARGS | METH_KEYWORDS,
      "iter_arrow(directory, time_interval_ms=5000.0, group_keys=None,\n"
      "           categories=None, names=None, index_dir='',\n"
@@ -767,7 +771,7 @@ static PyMethodDef Aggregator_methods[] = {
      "    _ArrowStreamingIterator: Streaming iterator yielding Arrow record\n"
      "        batches. Supports cancel() to stop early.\n"},
 #ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
-    {"write_arrow", (PyCFunction)Aggregator_write_arrow,
+    {"write_arrow", DFT_PYCFUNCTION(Aggregator_write_arrow),
      METH_VARARGS | METH_KEYWORDS,
      "write_arrow(directory, path, time_interval_ms=5000.0, ..., views=None)\n"
      "--\n"

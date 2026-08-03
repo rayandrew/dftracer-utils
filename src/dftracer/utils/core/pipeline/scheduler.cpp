@@ -13,7 +13,7 @@
 
 namespace dftracer::utils {
 
-Scheduler::Scheduler(Executor* executor) : executor_(executor) {
+Scheduler::Scheduler(TaskExecutor* executor) : executor_(executor) {
     if (!executor_) {
         throw PipelineError(PipelineError::VALIDATION_ERROR,
                             "Executor cannot be null");
@@ -43,7 +43,7 @@ Scheduler::Scheduler(Executor* executor) : executor_(executor) {
     }
 }
 
-Scheduler::Scheduler(Executor* executor, Watchdog* watchdog,
+Scheduler::Scheduler(TaskExecutor* executor, Watchdog* watchdog,
                      const PipelineConfig& config)
     : executor_(executor),
       watchdog_(watchdog),
@@ -495,10 +495,8 @@ void Scheduler::submit_task_to_executor(std::shared_ptr<Task> task,
 
     // Determine parent task ID for tracking
     TaskIndex parent_id = -1;
-    auto* worker_context =
-        static_cast<Executor::WorkerContext*>(get_current_worker_context());
-    if (worker_context) {
-        parent_id = worker_context->current_task_id.load();
+    if (executor_) {
+        parent_id = executor_->current_worker_task_id();
     }
 
     // Submit via Coro-based path

@@ -4,13 +4,13 @@
 #include <dftracer/utils/utilities/common/json/json_value.h>
 #include <dftracer/utils/utilities/common/query/query.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_pruner_utility.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/resolved_field_rewriter.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_bytes_generator.h>
-#include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_line_generator.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
+#include <dftracer/utils/utilities/reader/error.h>
 #include <dftracer/utils/utilities/reader/internal/reader.h>
 #include <dftracer/utils/utilities/reader/internal/reader_factory.h>
 #include <dftracer/utils/utilities/reader/internal/stream.h>
@@ -31,6 +31,7 @@
 namespace dftracer::utils::utilities::reader {
 
 namespace dft_internal = composites::dft::internal;
+namespace indexing = composites::dft::indexing;
 using common::json::JsonValue;
 using common::query::Query;
 using composites::dft::indexing::ChunkPrunerInput;
@@ -46,6 +47,16 @@ using internal::strip_ndjson_bookends;
 namespace {
 
 thread_local simdjson::dom::parser tl_parser;
+
+/// Traces must be gzip. A bare .pfw is rejected rather than read, so a file
+/// that was never compressed fails at the reader instead of silently taking
+/// a path with no index, no pruning and no random access.
+void reject_unless_gzip(ArchiveFormat format, const std::string& file_path) {
+    if (format == ArchiveFormat::GZIP) return;
+    throw ReaderError(ReaderError::INVALID_ARGUMENT,
+                      "Not a gzip trace: " + file_path +
+                          " (dftracer traces must be gzip-compressed)");
+}
 
 bool line_matches_query(const Query& q, std::string_view content) {
     auto result = tl_parser.parse(content.data(), content.size());
@@ -173,8 +184,9 @@ coro::AsyncGenerator<Line> read_lines_indexed(
     std::optional<indexer::IndexDatabase> db_keep_alive;
     if (!index_path.empty()) {
         try {
-            db_keep_alive.emplace(index_path,
-                                  rocksdb::RocksDatabase::OpenMode::ReadOnly);
+            db_keep_alive.emplace(
+                index_path,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
         } catch (...) {
         }
     }
@@ -211,25 +223,20 @@ coro::AsyncGenerator<Line> read_lines_indexed(
             pruner_out.candidate_checkpoints.size() <
                 pruner_out.total_checkpoints) {
             indexer::IndexDatabase idx_db(
-                index_path, rocksdb::RocksDatabase::OpenMode::ReadOnly);
+                index_path,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
             auto logical = indexer::internal::get_logical_path(file_path);
             int fid = idx_db.get_file_info_id(logical);
 
             if (fid >= 0) {
-                auto all_ckpts = idx_db.query_checkpoints(fid);
-                std::unordered_map<std::uint64_t, indexer::IndexerCheckpoint>
-                    ckpt_map;
-                for (auto& ckpt : all_ckpts) {
-                    ckpt_map.emplace(ckpt.checkpoint_idx, std::move(ckpt));
-                }
+                auto spans = idx_db.query_chunk_spans(fid);
 
                 std::vector<LineRange> ranges;
                 std::uint64_t prev_idx = UINT64_MAX;
 
                 for (auto ckpt_idx : pruner_out.candidate_checkpoints) {
-                    auto it = ckpt_map.find(ckpt_idx);
-                    if (it == ckpt_map.end()) continue;
-                    const auto& ckpt = it->second;
+                    if (ckpt_idx >= spans.size()) continue;
+                    const auto& ckpt = spans[ckpt_idx];
 
                     if (ranges.empty() || ckpt_idx != prev_idx + 1) {
                         ranges.push_back(
@@ -273,38 +280,22 @@ coro::AsyncGenerator<Line> read_lines_gz(std::string file_path,
                                          bool chunk_prune_only = false) {
     std::size_t start = config.has_line_range() ? config.start_line : 0;
     std::size_t end = config.has_line_range() ? config.end_line : 0;
+    const bool byte_range = config.has_byte_range();
+    // Offsets are into the uncompressed stream, as everywhere else. A line
+    // starting before the range is a partial and is dropped; one starting
+    // inside it is emitted whole, so the range completes its last line.
+    std::size_t byte_pos = 0;
+
     auto gen =
         fileio::lines::sources::async_streaming_gz_lines(file_path, start, end);
     while (auto opt = co_await gen.next()) {
-        if (chunk_prune_only || !query ||
-            line_matches_query(*query, opt->content)) {
-            co_yield *opt;
-        }
-    }
-}
+        const std::size_t line_start = byte_pos;
+        byte_pos += opt->content.size() + 1;
 
-coro::AsyncGenerator<Line> read_lines_plain_bytes(
-    std::string file_path, ReadConfig config, std::optional<Query> query,
-    bool chunk_prune_only = false) {
-    auto gen = fileio::lines::sources::async_plain_file_bytes(
-        file_path, config.start_byte, config.end_byte, config.buffer_size);
-    while (auto opt = co_await gen.next()) {
-        if (chunk_prune_only || !query ||
-            line_matches_query(*query, opt->content)) {
-            co_yield *opt;
+        if (byte_range) {
+            if (line_start < config.start_byte) continue;
+            if (config.end_byte > 0 && line_start >= config.end_byte) break;
         }
-    }
-}
-
-coro::AsyncGenerator<Line> read_lines_plain(std::string file_path,
-                                            ReadConfig config,
-                                            std::optional<Query> query,
-                                            bool chunk_prune_only = false) {
-    std::size_t start = config.has_line_range() ? config.start_line : 0;
-    std::size_t end = config.has_line_range() ? config.end_line : 0;
-    auto gen =
-        fileio::lines::sources::async_plain_file_lines(file_path, start, end);
-    while (auto opt = co_await gen.next()) {
         if (chunk_prune_only || !query ||
             line_matches_query(*query, opt->content)) {
             co_yield *opt;
@@ -325,8 +316,9 @@ coro::AsyncGenerator<std::span<const char>> read_chunks_indexed(
     std::optional<indexer::IndexDatabase> db_keep_alive;
     if (!index_path.empty()) {
         try {
-            db_keep_alive.emplace(index_path,
-                                  rocksdb::RocksDatabase::OpenMode::ReadOnly);
+            db_keep_alive.emplace(
+                index_path,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
         } catch (...) {
         }
     }
@@ -362,26 +354,21 @@ coro::AsyncGenerator<std::span<const char>> read_chunks_indexed(
             pruner_out.candidate_checkpoints.size() <
                 pruner_out.total_checkpoints) {
             indexer::IndexDatabase idx_db(
-                index_path, rocksdb::RocksDatabase::OpenMode::ReadOnly);
+                index_path,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
             auto logical = indexer::internal::get_logical_path(file_path);
             int fid = idx_db.get_file_info_id(logical);
 
             if (fid >= 0) {
-                auto all_ckpts = idx_db.query_checkpoints(fid);
-                std::unordered_map<std::uint64_t, indexer::IndexerCheckpoint>
-                    ckpt_map;
-                for (auto& ckpt : all_ckpts) {
-                    ckpt_map.emplace(ckpt.checkpoint_idx, std::move(ckpt));
-                }
+                auto spans = idx_db.query_chunk_spans(fid);
 
                 std::vector<LineRange> ranges;
                 std::uint64_t prev_idx = UINT64_MAX;
                 for (auto ckpt_idx : pruner_out.candidate_checkpoints) {
-                    auto it = ckpt_map.find(ckpt_idx);
-                    if (it == ckpt_map.end()) continue;
-                    const auto& ckpt = it->second;
+                    if (ckpt_idx >= spans.size()) continue;
+                    const auto& ckpt = spans[ckpt_idx];
                     // Intersect with the caller's window (byte or line) so
-                    // checkpoint-level parallel work items stay disjoint.
+                    // chunk-level parallel work items stay disjoint.
                     if (range_type == internal::RangeType::BYTE_RANGE) {
                         std::size_t ckpt_start = ckpt.uc_offset;
                         std::size_t ckpt_end = ckpt.uc_offset + ckpt.uc_size;
@@ -445,16 +432,15 @@ void TraceReader::probe_index() {
     format_ = IndexerFactory::detect_format(config_.file_path);
     index_path_ = dft_internal::determine_index_path(config_.file_path,
                                                      config_.index_dir);
-    has_index_ =
-        (format_ == ArchiveFormat::GZIP || format_ == ArchiveFormat::TAR_GZ) &&
-        fs::exists(index_path_);
+    has_index_ = format_ == ArchiveFormat::GZIP && fs::exists(index_path_);
     // Do not trust an index whose source changed since it was built; fall back
     // to a raw read rather than serving stale data. Records predating stat
     // tracking have no stored stat and keep the prior trust-on-existence path.
     if (has_index_) {
         try {
             indexer::IndexDatabase db(
-                index_path_, rocksdb::RocksDatabase::OpenMode::ReadOnly);
+                index_path_,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
             auto stored = db.get_file_stat(
                 indexer::internal::get_logical_path(config_.file_path));
             if (stored) {
@@ -480,17 +466,39 @@ void TraceReader::ensure_metadata_cached() {
         auto reader = create_indexed_reader();
         cached_max_bytes_ = reader->get_max_bytes();
         cached_num_lines_ = reader->get_num_lines();
-    } else if (format_ == ArchiveFormat::GZIP ||
-               format_ == ArchiveFormat::TAR_GZ) {
-        cached_max_bytes_ = 0;
-        cached_num_lines_ = 0;
     } else {
-        std::error_code ec;
-        auto size = fs::file_size(config_.file_path, ec);
-        cached_max_bytes_ = ec ? 0 : static_cast<std::size_t>(size);
+        cached_max_bytes_ = 0;
         cached_num_lines_ = 0;
     }
     metadata_cached_ = true;
+}
+
+coro::CoroTask<composites::dft::TimeMetric> TraceReader::read_time_metric(
+    std::size_t max_lines) {
+    using composites::dft::DFTracerEvent;
+    using composites::dft::TimeMetric;
+
+    ReadConfig probe;
+    probe.end_line = max_lines;
+    auto gen = read_lines(probe);
+    simdjson::dom::parser parser;
+    TimeMetric metric = TimeMetric::US;
+    while (auto line_opt = co_await gen.next()) {
+        const char* start = nullptr;
+        std::size_t len = 0;
+        if (!json_trim_and_validate(line_opt->content.data(),
+                                    line_opt->content.size(), start, len))
+            continue;
+        auto doc = parser.parse(start, len);
+        if (doc.error()) continue;
+        DFTracerEvent event;
+        if (!DFTracerEvent::parse(common::json::JsonValue(doc.value()), event))
+            continue;
+        if (composites::dft::extract_time_metric(event, metric)) break;
+        // CM precedes timeline events; stop once past the metadata header.
+        if (event.is_event()) break;
+    }
+    co_return metric;
 }
 
 std::size_t TraceReader::get_max_bytes() {
@@ -537,16 +545,9 @@ coro::AsyncGenerator<Line> TraceReader::read_lines(ReadConfig config) {
                                   config_.file_path, std::move(config),
                                   std::move(query), cpo);
     }
-    if (format_ == ArchiveFormat::GZIP || format_ == ArchiveFormat::TAR_GZ) {
-        return read_lines_gz(config_.file_path, std::move(config),
-                             std::move(query), cpo);
-    }
-    if (config.has_byte_range()) {
-        return read_lines_plain_bytes(config_.file_path, std::move(config),
-                                      std::move(query), cpo);
-    }
-    return read_lines_plain(config_.file_path, std::move(config),
-                            std::move(query), cpo);
+    reject_unless_gzip(format_, config_.file_path);
+    return read_lines_gz(config_.file_path, std::move(config), std::move(query),
+                         cpo);
 }
 
 coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
@@ -555,6 +556,23 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
         auto parsed = Query::from_string(config.query);
         if (!parsed) throw common::query::QueryParseError(parsed.error());
         query = std::move(*parsed);
+    }
+
+    // Resolve virtual fields (resolved.*/r.*) to concrete hash in-clauses via
+    // the index before either the pruner or the per-event evaluator sees the
+    // query, so both operate on plain fhash/hhash/shash predicates.
+    if (query && has_index_ && !index_path_.empty() &&
+        indexing::has_resolved_fields(*query)) {
+        try {
+            indexer::IndexDatabase db(
+                index_path_,
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
+            if (auto rewritten =
+                    indexing::rewrite_resolved_fields(*query, db)) {
+                query = std::move(*rewritten);
+            }
+        } catch (...) {
+        }
     }
 
     // chunk_prune_only path: dim_stats already proved every event with the
@@ -566,6 +584,11 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
         const auto& fset = query->fields();
         presence_check_paths.assign(fset.begin(), fset.end());
     }
+
+    // Whether any nested field is referenced by dotted path (e.g. "args.ret"),
+    // in which case the ValueMap builders store the dotted key too.
+    const bool query_has_dotted =
+        query && internal::query_references_dotted(*query);
 
     // Fast path: indexed gz files go through a chunk generator with
     // simdjson iterate_many. Query is evaluated on the ondemand document
@@ -633,10 +656,9 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
                                 if (nk_r.error()) continue;
                                 auto nv_r = nf.value();
                                 if (nv_r.error()) continue;
-                                auto nk = nk_r.value();
-                                if (!query->references(nk)) continue;
-                                fields[std::string(nk)] =
-                                    ondemand_to_literal(nv_r.value());
+                                internal::store_referenced_nested(
+                                    fields, *query, query_has_dotted, key,
+                                    nk_r.value(), nv_r.value());
                             }
                         } else if (query->references(key)) {
                             fields[std::string(key)] = ondemand_to_literal(val);
@@ -688,9 +710,8 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
                 parser.rewind();
                 parser.for_each_field(nk, [&](std::string_view key,
                                               simdjson::ondemand::value val) {
-                    if (query->references(key)) {
-                        fields[std::string(key)] = ondemand_to_literal(val);
-                    }
+                    internal::store_referenced_nested(
+                        fields, *query, query_has_dotted, nk, key, val);
                 });
             }
             if (!query->evaluate(fields)) continue;
@@ -709,8 +730,9 @@ coro::AsyncGenerator<std::span<const char>> TraceReader::read_raw(
         std::optional<indexer::IndexDatabase> db_keep_alive;
         if (!index_path_.empty()) {
             try {
-                db_keep_alive.emplace(
-                    index_path_, rocksdb::RocksDatabase::OpenMode::ReadOnly);
+                db_keep_alive.emplace(index_path_,
+                                      dftracer::utils::utilities::indexer::
+                                          IndexOpenMode::ReadOnly);
             } catch (...) {
             }
         }
@@ -758,24 +780,9 @@ coro::AsyncGenerator<std::span<const char>> TraceReader::read_raw(
             if (chunk.empty()) break;
             co_yield chunk;
         }
-    } else if (format_ == ArchiveFormat::GZIP ||
-               format_ == ArchiveFormat::TAR_GZ) {
+    } else if (format_ == ArchiveFormat::GZIP) {
         auto gen =
             fileio::lines::sources::async_streaming_gz_lines(config_.file_path);
-        std::size_t byte_pos = 0;
-        while (auto opt = co_await gen.next()) {
-            const auto& line = *opt;
-            std::size_t line_end = byte_pos + line.content.size() + 1;
-            if (config.end_byte > 0 && byte_pos >= config.end_byte) break;
-            if (line_end > config.start_byte) {
-                co_yield std::span<const char>(line.content.data(),
-                                               line.content.size());
-            }
-            byte_pos = line_end;
-        }
-    } else {
-        auto gen =
-            fileio::lines::sources::async_plain_file_lines(config_.file_path);
         std::size_t byte_pos = 0;
         while (auto opt = co_await gen.next()) {
             const auto& line = *opt;

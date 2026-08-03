@@ -18,10 +18,7 @@
 #include <dftracer/utils/utilities/composites/directory_file_processor_utility.h>
 #include <dftracer/utils/utilities/composites/file_compressor_utility.h>
 #include <dftracer/utils/utilities/composites/file_decompressor_utility.h>
-#include <dftracer/utils/utilities/composites/file_merger_utility.h>
 #include <dftracer/utils/utilities/composites/indexed_file_reader_utility.h>
-#include <dftracer/utils/utilities/composites/line_batch_processor_utility.h>
-#include <dftracer/utils/utilities/composites/streaming_file_merger_utility.h>
 
 // General-purpose composites
 #include <dftracer/utils/utilities/common/json/json_value.h>

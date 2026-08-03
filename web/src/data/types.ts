@@ -1,4 +1,4 @@
-// Chrome Trace Event as returned (raw) by /api/v1/viz/events. Timestamps are
+// Chrome Trace Event as returned (raw) by /api/viz/events. Timestamps are
 // normalized to the global minimum by the server, so ts is 0-based microseconds.
 export interface TraceEvent {
   name: string;
@@ -33,6 +33,7 @@ export interface VizResponse {
 
 // One aggregated block of sub-pixel events (Perfetto-style density LOD).
 export interface DensityBlock {
+  group?: string; // group_by value; absent when grouping is off or value missing
   name: string;
   pid: number;
   tid: number;
@@ -41,15 +42,23 @@ export interface DensityBlock {
   count: number;
   total: number;
   depth?: number; // server-computed containment depth (live path only)
+  // ph="C" counter blocks: aggregated numeric args.* over the bucket. `value` is
+  // the mean reading; distinct counters (name.arg) each get their own block.
+  counter?: boolean;
+  value?: number;
 }
 
 export interface VizDensityResponse {
   events: TraceEvent[];
   density: DensityBlock[];
-  metadata: VizMetadata & { density_count?: number };
+  // group_names maps raw group values (e.g. fhash) to display names.
+  metadata: VizMetadata & {
+    density_count?: number;
+    group_names?: Record<string, string>;
+  };
 }
 
-// Per-bucket I/O counters for bandwidth/IOPS tracks (GET /api/v1/viz/counters).
+// Per-bucket I/O counters for bandwidth/IOPS tracks (GET /api/viz/counters).
 export interface VizCounters {
   begin: number;
   end: number;
@@ -79,9 +88,10 @@ export interface VizQuery {
   limit?: number;
   lookback?: number; // scan back this far to catch events that overlap the window
   width?: number; // canvas width in px; sets the server's 1px fold cutoff
+  groupBy?: string; // density grouping column (server group_by)
 }
 
-// One process in the inferred fork hierarchy (GET /api/v1/viz/proctree).
+// One process in the inferred fork hierarchy (GET /api/viz/proctree).
 export interface ProcTreeNode {
   pid: number;
   parent: number; // -1 for a root
@@ -94,7 +104,7 @@ export interface ProcTreeNode {
   rank?: string; // MPI/process rank from "PR" metadata, if present
 }
 
-// One node of the merged call tree (GET /api/v1/viz/calltree). `total` is
+// One node of the merged call tree (GET /api/viz/calltree). `total` is
 // inclusive us, `self` is total minus nested children, `count` is folded events.
 export interface FlameNode {
   name: string;
@@ -109,7 +119,7 @@ export interface CallTreeResponse {
   tree: FlameNode;
 }
 
-// GET /api/v1/viz/histogram: duration distribution of the matched events.
+// GET /api/viz/histogram: duration distribution of the matched events.
 export interface HistBucket {
   lo: number;
   hi: number;
@@ -138,7 +148,7 @@ export interface NameStat {
   max: number;
 }
 
-// Response of GET /api/v1/viz/stats (aggregated server-side).
+// Response of GET /api/viz/stats (aggregated server-side).
 export interface SelectionStats {
   count: number;
   total_dur: number;

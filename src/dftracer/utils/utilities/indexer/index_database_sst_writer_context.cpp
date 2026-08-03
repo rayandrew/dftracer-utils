@@ -1,5 +1,7 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/rocksdb/database.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_merge_operator.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/system_metrics_merge_operator.h>
 #include <dftracer/utils/utilities/indexer/error.h>
 #include <dftracer/utils/utilities/indexer/index_database_sst_writer_context.h>
 #include <dftracer/utils/utilities/indexer/internal/db_error.h>
@@ -57,12 +59,18 @@ std::string emit_sst(const std::string& path,
 }
 
 /// Emit a mixed Put+Merge SST for the AGGREGATION / SYSTEM_METRICS CFs.
-/// Entries are sorted by key; each entry's `is_merge` decides whether to
-/// call SstFileWriter::Merge (operand, combined by merge_operator at
-/// read/compaction time) or ::Put (overrides prior values).
+/// Entries are sorted by key. SstFileWriter requires strictly ascending keys,
+/// so operands that share a key (e.g. two files' folds writing the same
+/// aggregation key into one batch sink) must be pre-combined: `merge_op`
+/// PartialMerge-folds a run of same-key merge operands into one before the
+/// single ::Merge, associativity making the read result identical to writing
+/// them separately. Same-key Put entries collapse to the last (deterministic
+/// values, e.g. the intern dictionary). `merge_op` may be null when no run can
+/// share a key.
 std::string emit_mixed_sst(
     const std::string& path,
-    std::vector<IndexDatabaseSstWriterContext::MergeableKeyValue>& buffer) {
+    std::vector<IndexDatabaseSstWriterContext::MergeableKeyValue>& buffer,
+    const ::rocksdb::MergeOperator* merge_op) {
     std::sort(buffer.begin(), buffer.end(),
               [](const auto& a, const auto& b) { return a.key < b.key; });
 
@@ -76,12 +84,35 @@ std::string emit_mixed_sst(
     if (!status.ok()) {
         throw_db_error("Failed to open SST writer at '" + path + "'", status);
     }
-    for (const auto& entry : buffer) {
-        status = entry.is_merge ? writer.Merge(entry.key, entry.value)
-                                : writer.Put(entry.key, entry.value);
+    std::size_t i = 0;
+    while (i < buffer.size()) {
+        std::size_t j = i + 1;
+        while (j < buffer.size() && buffer[j].key == buffer[i].key) ++j;
+        if (buffer[i].is_merge && j - i > 1 && merge_op) {
+            std::string combined = buffer[i].value;
+            for (std::size_t k = i + 1; k < j; ++k) {
+                std::string next;
+                if (merge_op->PartialMerge(buffer[i].key, combined,
+                                           buffer[k].value, &next, nullptr)) {
+                    combined = std::move(next);
+                } else {
+                    throw_db_error(
+                        "PartialMerge failed combining SST operands for '" +
+                            path + "'",
+                        ::rocksdb::Status::Corruption("PartialMerge"));
+                }
+            }
+            status = writer.Merge(buffer[i].key, combined);
+        } else {
+            // Single entry, or same-key Puts (collapse to the last).
+            const auto& e = buffer[j - 1];
+            status = e.is_merge ? writer.Merge(e.key, e.value)
+                                : writer.Put(e.key, e.value);
+        }
         if (!status.ok()) {
             throw_db_error("Failed to append to SST '" + path + "'", status);
         }
+        i = j;
     }
     status = writer.Finish();
     if (!status.ok()) {
@@ -137,7 +168,7 @@ IndexDatabaseSstWriterContext::Artifacts::move_to(
 
     Artifacts out;
     move_one(dir, metadata_sst, out.metadata_sst);
-    move_one(dir, checkpoints_sst, out.checkpoints_sst);
+    move_one(dir, members_sst, out.members_sst);
     move_one(dir, manifest_sst, out.manifest_sst);
     move_one(dir, chunk_bloom_sst, out.chunk_bloom_sst);
     move_one(dir, file_bloom_sst, out.file_bloom_sst);
@@ -184,34 +215,11 @@ void IndexDatabaseSstWriterContext::insert_file_metadata(
                                          total_uc_size));
 }
 
-void IndexDatabaseSstWriterContext::insert_checkpoint(
-    int file_id, const IndexerCheckpoint& checkpoint) {
-    checkpoints_buf_.emplace_back(
-        encoding::checkpoint_key(file_id, checkpoint.uc_offset,
-                                 checkpoint.checkpoint_idx),
-        encoding::encode_checkpoint_value(checkpoint));
-}
-
-void IndexDatabaseSstWriterContext::insert_event_range(
-    int file_id, std::uint64_t checkpoint_idx, std::string_view cat,
-    std::string_view name, std::span<const std::uint32_t> line_numbers) {
-    manifest_buf_.emplace_back(
-        encoding::manifest_event_key(file_id, checkpoint_idx, cat, name),
-        encoding::encode_event_range_value(line_numbers));
-}
-
-void IndexDatabaseSstWriterContext::insert_metadata_lines(
-    int file_id, std::uint64_t checkpoint_idx, std::string_view meta_type,
-    std::span<const std::uint32_t> line_numbers) {
-    manifest_buf_.emplace_back(
-        encoding::manifest_metadata_key(file_id, checkpoint_idx, meta_type),
-        encoding::encode_metadata_value(line_numbers));
-}
-
-void IndexDatabaseSstWriterContext::insert_file_pids(
-    int file_id, const std::unordered_set<std::uint64_t>& pids) {
-    manifest_buf_.emplace_back(encoding::file_pids_key(file_id),
-                               encoding::encode_file_pids_value(pids));
+void IndexDatabaseSstWriterContext::insert_gzip_member(
+    int file_id, const GzipMemberRecord& member) {
+    members_buf_.emplace_back(
+        encoding::gzip_member_key(file_id, member.member_idx),
+        encoding::encode_gzip_member_value(member));
 }
 
 void IndexDatabaseSstWriterContext::insert_chunk_bloom_filter(
@@ -270,6 +278,12 @@ void IndexDatabaseSstWriterContext::insert_index_dimension(
     int file_id, std::string_view dimension) {
     dimensions_buf_.emplace_back(
         encoding::make_dimension_key(file_id, dimension), std::string{});
+}
+
+void IndexDatabaseSstWriterContext::insert_column(int file_id,
+                                                  std::string_view column) {
+    dimensions_buf_.emplace_back(encoding::make_column_key(file_id, column),
+                                 std::string{});
 }
 
 void IndexDatabaseSstWriterContext::insert_chunk_dimension_stats(
@@ -352,7 +366,7 @@ IndexDatabaseSstWriterContext::commit() {
     };
 
     emit_into("metadata.sst", metadata_buf_, out.metadata_sst);
-    emit_into("checkpoints.sst", checkpoints_buf_, out.checkpoints_sst);
+    emit_into("members.sst", members_buf_, out.members_sst);
     emit_into("manifest.sst", manifest_buf_, out.manifest_sst);
     emit_into("chunk_bloom.sst", chunk_bloom_buf_, out.chunk_bloom_sst);
     emit_into("file_bloom.sst", file_bloom_buf_, out.file_bloom_sst);
@@ -378,15 +392,19 @@ IndexDatabaseSstWriterContext::commit() {
 
     auto emit_mixed_into = [&](const char* name,
                                std::vector<MergeableKeyValue>& buf,
-                               std::optional<std::string>& slot) {
+                               std::optional<std::string>& slot,
+                               const ::rocksdb::MergeOperator* merge_op) {
         if (buf.empty()) return;
-        slot = emit_mixed_sst((batch_dir / name).string(), buf);
+        slot = emit_mixed_sst((batch_dir / name).string(), buf, merge_op);
         buf.clear();
         buf.shrink_to_fit();
     };
-    emit_mixed_into("aggregation.sst", aggregation_buf_, out.aggregation_sst);
+    composites::dft::aggregators::AggregationMergeOperator agg_merge_op;
+    composites::dft::aggregators::SystemMetricsMergeOperator sys_merge_op;
+    emit_mixed_into("aggregation.sst", aggregation_buf_, out.aggregation_sst,
+                    &agg_merge_op);
     emit_mixed_into("system_metrics.sst", system_metrics_buf_,
-                    out.system_metrics_sst);
+                    out.system_metrics_sst, &sys_merge_op);
 
     return out;
 }

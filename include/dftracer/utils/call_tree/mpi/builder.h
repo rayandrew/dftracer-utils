@@ -57,11 +57,6 @@ class MPICallTreeBuilder {
 
     const std::vector<std::string>& trace_files() const { return trace_files_; }
     const std::set<std::uint32_t>& all_pids() const { return all_pids_; }
-    const std::set<std::uint32_t>& assigned_pids() const {
-        return assigned_pids_;
-    }
-    internal::CallTree& local_tree() { return *call_tree_; }
-    const internal::CallTree& local_tree() const { return *call_tree_; }
 
    private:
     MPICallTreeConfig config_;

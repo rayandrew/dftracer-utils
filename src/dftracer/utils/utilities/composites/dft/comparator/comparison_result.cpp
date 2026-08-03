@@ -15,7 +15,8 @@
 
 namespace dftracer::utils::utilities::composites::dft::comparator {
 
-TraceMetadata extract_metadata(const AggregationMap& aggregations,
+TraceMetadata extract_metadata(const StringIntern& intern,
+                               const AggregationMap& aggregations,
                                std::size_t file_count) {
     TraceMetadata meta;
 
@@ -23,7 +24,7 @@ TraceMetadata extract_metadata(const AggregationMap& aggregations,
     // Use pid+tid combined as unique thread identifier
     std::unordered_set<std::uint64_t> tids;
     // Distinct data files (fhash_id) and per-process accesses (pid | fhash_id).
-    std::unordered_set<std::uint32_t> fhashes;
+    std::unordered_set<std::uint64_t> fhashes;
     std::unordered_set<std::uint64_t> pid_fhashes;
     // Bounded by the number of aggregation keys; reserve to avoid rehashing.
     fhashes.reserve(aggregations.size());
@@ -37,17 +38,16 @@ TraceMetadata extract_metadata(const AggregationMap& aggregations,
         std::uint64_t ptid = (key.pid << 32) | (key.tid & 0xFFFFFFFF);
         tids.insert(ptid);
 
-        // fhash_id == 0 means no associated file (e.g. metadata events).
-        if (key.fhash_id != 0) {
-            fhashes.insert(key.fhash_id);
-            pid_fhashes.insert((static_cast<std::uint64_t>(key.pid) << 32) |
-                               static_cast<std::uint64_t>(key.fhash_id));
+        // 0 means no associated file (e.g. metadata events).
+        if (key.fhash != 0) {
+            fhashes.insert(key.fhash);
+            pid_fhashes.insert(key.fhash ^ (key.pid * 0x9E3779B97F4A7C15ULL));
         }
 
-        meta.total_io_time_us += static_cast<double>(metrics.duration.total);
+        meta.total_io_time_us += static_cast<double>(metrics.duration.total());
 
-        if (internal::is_data_transfer_op(key.cat(), key.name())) {
-            meta.total_bytes += static_cast<double>(metrics.size.total);
+        if (internal::is_data_transfer_op(key.cat(intern), key.name(intern))) {
+            meta.total_bytes += static_cast<double>(metrics.size.total());
         }
 
         if (metrics.ts < earliest_ts) earliest_ts = metrics.ts;
@@ -112,15 +112,15 @@ double compute_cohens_d(const MetricStats& base, std::uint64_t n_base,
     // Convert to population variance: Var = (sum_x^2 - (sum_x)^2 / n) / n.
     auto pop_var = [](const MetricStats& ms, std::uint64_t n) {
         const double nd = static_cast<double>(n);
-        const double sx = static_cast<double>(ms.total);
-        const double central = ms.m2 - sx * sx / nd;
+        const double sx = static_cast<double>(ms.total());
+        const double central = ms.m2() - sx * sx / nd;
         return (central > 0.0 ? central : 0.0) / nd;
     };
     double var_base = pop_var(base, n_base);
     double var_var = pop_var(var, n_var);
     double pooled = std::sqrt((var_base + var_var) / 2.0);
     if (pooled < 1e-15) return 0.0;
-    return (var.mean - base.mean) / pooled;
+    return (var.mean() - base.mean()) / pooled;
 }
 
 Significance classify_significance(double d) {
@@ -183,25 +183,26 @@ double safe_div(double a, double b) { return b > 0.0 ? a / b : 0.0; }
 
 }  // anonymous namespace
 
-CollapsedMap collapse_by_group(const AggregationMap& aggregations) {
+CollapsedMap collapse_by_group(const AggregationMap& aggregations,
+                               const StringIntern& src, StringIntern& dst) {
     // Step 1: For each (cat, name, time_bucket), take max across pids.
     std::unordered_map<WindowKey, WindowMax, WindowKeyHash> windows;
 
     for (const auto& [key, m] : aggregations) {
-        WindowKey wk{key.cat(), key.name(), key.time_bucket};
+        WindowKey wk{key.cat(src), key.name(src), key.time_bucket};
         auto& w = windows[wk];
 
         double cnt = static_cast<double>(m.count);
-        double dm = std::isnan(m.duration.mean) ? 0.0 : m.duration.mean;
-        double sm = std::isnan(m.size.mean) ? 0.0 : m.size.mean;
+        double dm = std::isnan(m.duration.mean()) ? 0.0 : m.duration.mean();
+        double sm = std::isnan(m.size.mean()) ? 0.0 : m.size.mean();
         if (cnt > w.count) w.count = cnt;
         if (dm > w.dur_mean) w.dur_mean = dm;
         if (sm > w.size_mean) w.size_mean = sm;
 
         // Only compute transfer_size/bandwidth for actual I/O ops
-        if (internal::is_data_transfer_op(key.cat(), key.name())) {
-            double total_bytes = static_cast<double>(m.size.total);
-            double total_dur_us = static_cast<double>(m.duration.total);
+        if (internal::is_data_transfer_op(key.cat(src), key.name(src))) {
+            double total_bytes = static_cast<double>(m.size.total());
+            double total_dur_us = static_cast<double>(m.duration.total());
             double xfer = safe_div(total_bytes, cnt);
             double bw = safe_div(total_bytes, total_dur_us / 1e6);
             if (xfer > w.xfer_size) w.xfer_size = xfer;
@@ -225,8 +226,8 @@ CollapsedMap collapse_by_group(const AggregationMap& aggregations) {
 
     for (auto& [wk, w] : windows) {
         AggregationKey gk;
-        gk.cat_id = aggregators::aggregation_intern().get_or_insert(wk.cat);
-        gk.name_id = aggregators::aggregation_intern().get_or_insert(wk.name);
+        gk.cat_id = dst.get_or_insert(wk.cat);
+        gk.name_id = dst.get_or_insert(wk.name);
         gk.pid = 0;
         gk.tid = 0;
         gk.time_bucket = 0;

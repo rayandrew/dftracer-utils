@@ -95,7 +95,7 @@ TEST_CASE("Runtime - threads returns configured count") {
 
 TEST_CASE("Runtime - default threads uses hardware_concurrency") {
     Runtime rt;
-    CHECK(rt.threads() == dftracer_utils_hardware_concurrency());
+    CHECK(rt.threads() == hardware_concurrency());
 }
 
 TEST_CASE("Runtime - is_responsive after submit") {

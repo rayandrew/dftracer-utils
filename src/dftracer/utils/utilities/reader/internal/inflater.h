@@ -1,242 +1,287 @@
 #ifndef DFTRACER_UTILS_UTILITIES_READER_INTERNAL_INFLATER_H
 #define DFTRACER_UTILS_UTILITIES_READER_INTERNAL_INFLATER_H
 
-#include <dftracer/utils/core/common/checkpointer.h>
-#include <dftracer/utils/core/common/constants.h>
-#include <dftracer/utils/core/common/inflater.h>
+#include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/common/logging.h>
-#include <dftracer/utils/core/common/platform_compat.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/io/io.h>
-#include <dftracer/utils/utilities/indexer/internal/checkpoint.h>
-#include <fcntl.h>
+#include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
+#include <dftracer/utils/utilities/indexer/internal/gzip_member_record.h>
+#include <dftracer/utils/utilities/reader/internal/member_decode_cache.h>
+#include <sys/stat.h>
 
+#include <algorithm>
 #include <cinttypes>
+#include <cstddef>
+#include <cstring>
+#include <optional>
+#include <vector>
 
 namespace dftracer::utils::utilities::reader::internal {
 
+namespace compress = dftracer::utils::utilities::fileio::compress;
+
 /**
- * Inflater specialized for reading operations with checkpoint support.
- * Handles checkpoint restoration, continuous reading, and efficient skipping.
+ * Random-access gzip reader backed by libdeflate.
+ *
+ * A gzip member is a self-contained stream, so each is decoded whole with a
+ * single libdeflate call and served from memory. Reads walk members forward
+ * from the seek point using libdeflate's consumed-byte count for boundaries,
+ * so no header scan or streaming state machine is needed. Peak memory is one
+ * decoded member (plus its compressed bytes) rather than a small streaming
+ * window.
+ *
+ * When a MemberDecodeCache is attached, each member is fetched through it
+ * keyed by (file_token, compressed offset), so concurrent readers of the same
+ * member share one decode. Without a cache the member is decoded into a reused
+ * local buffer.
  */
-class ReaderInflater : public Inflater {
+class ReaderInflater {
    public:
-    ReaderInflater() {}
+    ReaderInflater() = default;
 
-    /**
-     * Initialize for reading from the beginning of a stream
-     */
-    coro::CoroTask<bool> initialize(
-        int /*fd*/, off_t& offset, std::uint64_t file_offset = 0,
-        int window_bits = constants::indexer::ZLIB_GZIP_WINDOW_BITS) {
-        if (!initialize_stream(window_bits)) {
-            co_return false;
-        }
-
-        offset = static_cast<off_t>(file_offset);
-
-        co_return true;
+    /// Route member decodes through `cache`, keyed by `file_token`. Pass
+    /// nullptr to decode locally. Set once before reads.
+    void set_cache(MemberDecodeCache* cache, std::uint64_t file_token) {
+        cache_ = cache;
+        file_token_ = file_token;
     }
 
-    /**
-     * Restore inflater state from a checkpoint for random access
-     */
-    coro::CoroTask<bool> restore_from_checkpoint(
-        int fd, off_t& offset,
-        const dftracer::utils::utilities::indexer::internal::IndexerCheckpoint&
-            checkpoint) {
-        DFTRACER_UTILS_LOG_DEBUG("Restoring from checkpoint: c_offset=%" PRIu64
-                                 ", uc_offset=%" PRIu64 ", bits=%d",
-                                 checkpoint.c_offset, checkpoint.uc_offset,
-                                 checkpoint.bits);
-
-        // Calculate seek position (go back one byte if we have partial bits)
-        off_t seek_pos = static_cast<off_t>(checkpoint.c_offset);
-        if (checkpoint.bits != 0) {
-            seek_pos -= 1;
-        }
-
-        offset = seek_pos;
-
-        // Reset and initialize with RAW deflate mode
+    /// Start reading from `file_offset` (0 = start of file).
+    coro::CoroTask<bool> initialize(int fd, off_t& offset,
+                                    std::uint64_t file_offset = 0,
+                                    int /*window_bits*/ = 0) {
         reset();
-        if (!initialize_stream(-15)) {
-            DFTRACER_UTILS_LOG_ERROR(
-                "%s", "Failed to initialize inflater in raw mode");
-            co_return false;
-        }
-
-        // Decompress and set the dictionary
-        unsigned char window[constants::indexer::ZLIB_WINDOW_SIZE];
-        std::size_t window_size = constants::indexer::ZLIB_WINDOW_SIZE;
-
-        if (!Checkpointer::decompress(checkpoint.dict_compressed.data(),
-                                      checkpoint.dict_compressed.size(), window,
-                                      &window_size)) {
-            DFTRACER_UTILS_LOG_ERROR(
-                "%s", "Failed to decompress checkpoint dictionary");
-            co_return false;
-        }
-
-        if (!set_dictionary(window, window_size)) {
-            DFTRACER_UTILS_LOG_ERROR("%s", "Failed to set dictionary");
-            co_return false;
-        }
-
-        // Handle partial byte if necessary
-        if (checkpoint.bits != 0) {
-            unsigned char ch;
-            ssize_t n =
-                co_await ::dftracer::utils::io::pread(fd, &ch, 1, offset);
-            if (n <= 0) {
-                DFTRACER_UTILS_LOG_ERROR(
-                    "%s", "Failed to read byte at checkpoint position");
-                co_return false;
-            }
-            offset += 1;
-
-            int prime_value = ch >> (8 - checkpoint.bits);
-            DFTRACER_UTILS_LOG_DEBUG(
-                "Applying inflatePrime with %d bits, value: %d (ch=0x%02x)",
-                checkpoint.bits, prime_value, ch);
-
-            if (!prime(checkpoint.bits, prime_value)) {
-                DFTRACER_UTILS_LOG_ERROR("%s", "inflatePrime failed");
-                co_return false;
-            }
-        }
-
-        // Prime with initial input
-        if (!co_await read_input(fd, offset)) {
-            DFTRACER_UTILS_LOG_ERROR(
-                "%s",
-                "Failed to read initial input after checkpoint restoration");
-            co_return false;
-        }
-
-        DFTRACER_UTILS_LOG_DEBUG("%s", "Checkpoint restoration successful");
-        co_return true;
+        co_return co_await begin_at(fd, offset, file_offset);
     }
 
-    /**
-     * Read data continuously (for stream operations)
-     */
+    /// Seek to a member for random access. A member header is a member
+    /// boundary, so this just restarts the forward walk at member.c_offset.
+    coro::CoroTask<bool> seek_to_member(
+        int fd, off_t& offset,
+        const dftracer::utils::utilities::indexer::internal::GzipMemberRecord&
+            member) {
+        DFTRACER_UTILS_LOG_DEBUG("Seeking to member %" PRIu64
+                                 ": c_offset=%" PRIu64 ", uc_offset=%" PRIu64,
+                                 member.member_idx, member.c_offset,
+                                 member.uc_offset);
+        reset();
+        co_return co_await begin_at(fd, offset, member.c_offset);
+    }
+
+    /// Fill up to `len` uncompressed bytes into `buf`. `bytes_out` is the
+    /// amount produced; 0 means end of stream.
     coro::CoroTask<bool> read(int fd, off_t& offset, unsigned char* buf,
                               std::size_t len, std::size_t& bytes_out) {
-        stream.next_out = buf;
-        stream.avail_out = static_cast<uInt>(len);
         bytes_out = 0;
-
-        while (stream.avail_out > 0) {
-            if (stream.avail_in == 0) {
-                if (!co_await read_input(fd, offset)) {
-                    co_return false;
-                }
-                if (stream.avail_in == 0) {
-                    break;  // EOF
-                }
-            }
-
-            int ret = inflate(&stream, Z_NO_FLUSH);
-
-            if (ret == Z_STREAM_END) {
-                // In raw mode (-15), inflate only processes deflate data;
-                // the 8-byte gzip trailer (CRC32 + ISIZE) is NOT consumed.
-                // Skip it before switching to gzip auto-detect mode so
-                // subsequent members in concatenated gzip are handled.
-                if (window_bits_ < 0) {
-                    std::size_t trailer = 8;
-                    while (trailer > 0) {
-                        if (stream.avail_in == 0) {
-                            if (!co_await read_input(fd, offset)) {
-                                co_return false;
-                            }
-                            if (stream.avail_in == 0) break;
-                        }
-                        auto n = std::min(
-                            trailer, static_cast<std::size_t>(stream.avail_in));
-                        stream.next_in += n;
-                        stream.avail_in -= static_cast<uInt>(n);
-                        trailer -= n;
-                    }
-                    if (trailer != 0) {
-                        DFTRACER_UTILS_LOG_DEBUG(
-                            "Incomplete gzip trailer: %zu bytes remaining",
-                            trailer);
-                        co_return false;
-                    }
-                    window_bits_ = constants::indexer::ZLIB_GZIP_WINDOW_BITS;
-                }
-                if (inflateReset2(&stream,
-                                  constants::indexer::ZLIB_GZIP_WINDOW_BITS) !=
-                    Z_OK) {
-                    DFTRACER_UTILS_LOG_DEBUG(
-                        "Failed to reset inflater for next stream: %s",
-                        stream.msg ? stream.msg : "no message");
+        while (bytes_out < len) {
+            if (member_pos_ >= member_len_) {
+                if (exhausted_) break;
+                if (!co_await decode_next_member(fd, offset)) co_return false;
+                if (member_len_ == 0) {
+                    exhausted_ = true;
                     break;
                 }
-                continue;
             }
-            if (ret != Z_OK) {
-                DFTRACER_UTILS_LOG_DEBUG(
-                    "Continuous read failed: %d (%s)", ret,
-                    stream.msg ? stream.msg : "no message");
-                co_return false;
-            }
+            const std::size_t avail = member_len_ - member_pos_;
+            const std::size_t take = std::min(len - bytes_out, avail);
+            std::memcpy(buf + bytes_out, member_data_ + member_pos_, take);
+            member_pos_ += take;
+            bytes_out += take;
         }
-
-        bytes_out = len - stream.avail_out;
         co_return true;
     }
 
-    /**
-     * Skip bytes efficiently by reading and discarding data
-     */
+    /// Discard `bytes_to_skip` uncompressed bytes.
     coro::CoroTask<bool> skip_bytes(int fd, off_t& offset,
                                     std::size_t bytes_to_skip) {
-        DFTRACER_UTILS_LOG_DEBUG(
-            "ReaderInflater::skip_bytes - bytes_to_skip=%zu", bytes_to_skip);
-
-        if (bytes_to_skip == 0) co_return true;
-
-        unsigned char skip_buffer[BUFFER_SIZE];
-        std::size_t remaining_skip = bytes_to_skip;
-        std::size_t total_skipped = 0;
-        (void)total_skipped;
-
-        while (remaining_skip > 0) {
-            std::size_t to_skip = std::min(remaining_skip, sizeof(skip_buffer));
-            std::size_t skipped;
-
-            if (!co_await read(fd, offset, skip_buffer, to_skip, skipped)) {
-                DFTRACER_UTILS_LOG_DEBUG(
-                    "Skip failed at total_skipped=%zu, remaining=%zu",
-                    total_skipped, remaining_skip);
-                co_return false;
+        while (bytes_to_skip > 0) {
+            if (member_pos_ >= member_len_) {
+                if (exhausted_) break;
+                if (!co_await decode_next_member(fd, offset)) co_return false;
+                if (member_len_ == 0) {
+                    exhausted_ = true;
+                    break;
+                }
             }
+            const std::size_t avail = member_len_ - member_pos_;
+            const std::size_t take = std::min(bytes_to_skip, avail);
+            member_pos_ += take;
+            bytes_to_skip -= take;
+        }
+        co_return bytes_to_skip == 0;
+    }
 
-            if (skipped == 0) {
-                DFTRACER_UTILS_LOG_DEBUG(
-                    "Skip reached EOF at total_skipped=%zu", total_skipped);
-                break;
+    void reset() {
+        comp_.clear();
+        member_shared_.reset();
+        member_data_ = nullptr;
+        member_len_ = 0;
+        member_pos_ = 0;
+        comp_off_ = 0;
+        next_read_ = 0;
+        file_size_ = 0;
+        exhausted_ = false;
+    }
+
+    bool is_at_end() const { return exhausted_ && member_pos_ >= member_len_; }
+
+   private:
+    static constexpr std::size_t READ_CHUNK = 1u << 20;
+    static constexpr std::size_t INIT_OUT = 1u << 20;
+
+    coro::CoroTask<bool> begin_at(int fd, off_t& offset,
+                                  std::uint64_t file_offset) {
+        struct stat st;
+        if (::fstat(fd, &st) != 0) co_return false;
+        file_size_ = static_cast<std::uint64_t>(st.st_size);
+        comp_off_ = file_offset;
+        next_read_ = file_offset;
+        offset = static_cast<off_t>(file_offset);
+        if (!cache_ && member_owned_.size() < INIT_OUT) {
+            member_owned_.resize(INIT_OUT);
+        }
+        co_return dec_.valid();
+    }
+
+    coro::CoroTask<bool> decode_next_member(int fd, off_t& offset) {
+        if (cache_) co_return co_await decode_next_member_cached(fd, offset);
+        co_return co_await decode_next_member_local(fd, offset);
+    }
+
+    /// Fetch the member at comp_off_ through the cache (one decode shared
+    /// across concurrent readers) and point the read window at it.
+    coro::CoroTask<bool> decode_next_member_cached(int fd, off_t& offset) {
+        member_len_ = 0;
+        member_pos_ = 0;
+        member_data_ = nullptr;
+        member_shared_.reset();
+        if (comp_off_ >= file_size_) co_return true;  // clean EOF
+
+        const std::uint64_t off = comp_off_;
+        const std::uint64_t fsize = file_size_;
+        MemberDecodeCache::Producer produce =
+            [fd, off, fsize]() -> coro::CoroTask<MemberDecodeCache::Bytes> {
+            auto decoded = co_await decode_member_at(fd, off, fsize);
+            if (!decoded) {
+                throw DFTUtilsException(ErrorCode::COMPRESSION,
+                                        "gzip member decode failed");
             }
+            co_return std::make_shared<const DecodedMember>(
+                std::move(*decoded));
+        };
 
-            remaining_skip -= skipped;
-            total_skipped += skipped;
+        try {
+            member_shared_ =
+                co_await cache_->get_or_decode(file_token_, off, produce);
+        } catch (...) {
+            co_return false;
+        }
+        if (!member_shared_) co_return false;
+
+        member_data_ = member_shared_->data.data();
+        member_len_ = member_shared_->data.size();
+        comp_off_ += member_shared_->compressed_size;
+        offset = static_cast<off_t>(comp_off_);
+        co_return true;
+    }
+
+    /// Decode the member at comp_off_ into the reused local buffer, or leave
+    /// member_len_ == 0 at a clean end of file.
+    coro::CoroTask<bool> decode_next_member_local(int fd, off_t& offset) {
+        member_len_ = 0;
+        member_pos_ = 0;
+        member_data_ = nullptr;
+        if (comp_off_ >= file_size_) co_return true;  // clean EOF
+
+        compress::DecompressResult res{};
+        while (true) {
+            if (!comp_.empty()) {
+                const compress::GzipDecode status = dec_.decompress_status(
+                    comp_.data(), comp_.size(), member_owned_.data(),
+                    member_owned_.size(), res);
+                if (status == compress::GzipDecode::Ok) break;
+                if (status == compress::GzipDecode::InsufficientSpace) {
+                    member_owned_.resize(member_owned_.size() * 2);
+                    continue;
+                }
+                // BadData can just mean the member is not fully buffered yet;
+                // pull more input before treating it as corrupt.
+            }
+            if (next_read_ >= file_size_) co_return false;  // truncated member
+            const std::size_t want = static_cast<std::size_t>(
+                std::min<std::uint64_t>(READ_CHUNK, file_size_ - next_read_));
+            const std::size_t old = comp_.size();
+            comp_.resize(old + want);
+            const ssize_t n = co_await dftracer::utils::io::pread(
+                fd, comp_.data() + old, want, static_cast<off_t>(next_read_));
+            if (n <= 0) co_return false;
+            comp_.resize(old + static_cast<std::size_t>(n));
+            next_read_ += static_cast<std::uint64_t>(n);
         }
 
-        DFTRACER_UTILS_LOG_DEBUG(
-            "Skip completed: total_skipped=%zu, success=%s", total_skipped,
-            remaining_skip == 0 ? "true" : "false");
-        co_return remaining_skip == 0;
+        member_data_ = member_owned_.data();
+        member_len_ = res.out_bytes;
+        comp_off_ += res.in_bytes;
+        comp_.erase(comp_.begin(),
+                    comp_.begin() + static_cast<std::ptrdiff_t>(res.in_bytes));
+        offset = static_cast<off_t>(comp_off_);
+        co_return true;
     }
 
-    /**
-     * Check if the stream has reached the end
-     */
-    bool is_at_end() const {
-        return stream.avail_in == 0 && stream.avail_out == BUFFER_SIZE;
+    /// Decode the single gzip member starting at `off`, returning its bytes
+    /// and the compressed size it consumed. nullopt on read/decode failure.
+    /// Self-contained (own decompressor and buffers) so it is safe to run as a
+    /// cache producer independent of any reader's state.
+    static coro::CoroTask<std::optional<DecodedMember>> decode_member_at(
+        int fd, std::uint64_t off, std::uint64_t file_size) {
+        compress::GzipMemberDecompressor dec;
+        if (!dec.valid()) co_return std::nullopt;
+        std::vector<unsigned char> comp;
+        std::vector<std::uint8_t> out(INIT_OUT);
+        std::uint64_t next_read = off;
+        compress::DecompressResult res{};
+
+        while (true) {
+            if (!comp.empty()) {
+                const compress::GzipDecode status = dec.decompress_status(
+                    comp.data(), comp.size(), out.data(), out.size(), res);
+                if (status == compress::GzipDecode::Ok) break;
+                if (status == compress::GzipDecode::InsufficientSpace) {
+                    out.resize(out.size() * 2);
+                    continue;
+                }
+            }
+            if (next_read >= file_size) co_return std::nullopt;
+            const std::size_t want = static_cast<std::size_t>(
+                std::min<std::uint64_t>(READ_CHUNK, file_size - next_read));
+            const std::size_t old = comp.size();
+            comp.resize(old + want);
+            const ssize_t n = co_await dftracer::utils::io::pread(
+                fd, comp.data() + old, want, static_cast<off_t>(next_read));
+            if (n <= 0) co_return std::nullopt;
+            comp.resize(old + static_cast<std::size_t>(n));
+            next_read += static_cast<std::uint64_t>(n);
+        }
+
+        out.resize(res.out_bytes);
+        co_return DecodedMember{std::move(out), res.in_bytes};
     }
+
+    compress::GzipMemberDecompressor dec_;
+    std::vector<unsigned char> comp_;
+    std::vector<unsigned char> member_owned_;
+    MemberDecodeCache::Bytes member_shared_;
+    const unsigned char* member_data_ = nullptr;
+    std::size_t member_len_ = 0;
+    std::size_t member_pos_ = 0;
+    std::uint64_t comp_off_ = 0;
+    std::uint64_t next_read_ = 0;
+    std::uint64_t file_size_ = 0;
+    bool exhausted_ = false;
+
+    MemberDecodeCache* cache_ = nullptr;
+    std::uint64_t file_token_ = 0;
 };
 
 }  // namespace dftracer::utils::utilities::reader::internal

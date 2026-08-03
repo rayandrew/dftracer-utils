@@ -1,13 +1,57 @@
 #include <dftracer/utils/core/common/error.h>
+#include <dftracer/utils/core/env.h>
 #include <dftracer/utils/core/rocksdb/db_manager.h>
 
-#include <stdexcept>
+#include <cstdlib>
+#include <mutex>
 
 namespace dftracer::utils::rocksdb {
+
+namespace {
+// Close retained handles at exit while RocksDB's globals are still alive.
+void ensure_exit_cleanup() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::atexit([] { RocksDBManager::instance().shutdown(); });
+    });
+}
+}  // namespace
 
 RocksDBManager& RocksDBManager::instance() {
     static RocksDBManager manager;
     return manager;
+}
+
+std::size_t RocksDBManager::retain_cap() {
+    if (retain_cap_ == 0) {
+        auto v = Env::get<int>("DFTRACER_UTILS_ROCKSDB_CACHE");
+        retain_cap_ = (v && *v > 0) ? static_cast<std::size_t>(*v) : 64;
+    }
+    return retain_cap_;
+}
+
+void RocksDBManager::retain_locked(const std::string& db_path,
+                                   const std::shared_ptr<RocksDatabase>& db) {
+    if (!db || !db->is_read_only()) return;
+    ensure_exit_cleanup();
+    if (auto it = retained_index_.find(db_path); it != retained_index_.end()) {
+        it->second->second = db;
+        retained_.splice(retained_.begin(), retained_, it->second);
+        return;
+    }
+    retained_.emplace_front(db_path, db);
+    retained_index_[db_path] = retained_.begin();
+    while (retained_.size() > retain_cap()) {
+        retained_index_.erase(retained_.back().first);
+        retained_.pop_back();
+    }
+}
+
+void RocksDBManager::drop_retained_locked(const std::string& db_path) {
+    if (auto it = retained_index_.find(db_path); it != retained_index_.end()) {
+        retained_.erase(it->second);
+        retained_index_.erase(it);
+    }
 }
 
 std::shared_ptr<RocksDatabase> RocksDBManager::get_or_open(
@@ -30,6 +74,7 @@ std::shared_ptr<RocksDatabase> RocksDBManager::get_or_open(
                     }
                     if (!(current->is_read_only() &&
                           open_mode == RocksDatabase::OpenMode::ReadWrite)) {
+                        retain_locked(db_path, current);
                         return current;
                     }
 
@@ -39,6 +84,9 @@ std::shared_ptr<RocksDatabase> RocksDBManager::get_or_open(
                         continue;
                     }
 
+                    // Drop our retained ref so the count reflects only external
+                    // holders before deciding an upgrade is safe.
+                    drop_retained_locked(db_path);
                     if (current.use_count() != 1) {
                         throw DFTUtilsException(
                             ErrorCode::INVALID_ARGUMENT,
@@ -91,6 +139,7 @@ std::shared_ptr<RocksDatabase> RocksDBManager::get_or_open(
 
             if (it == databases_.end()) {
                 databases_[db_path] = database;
+                retain_locked(db_path, database);
                 opening_.erase(db_path);
                 cv_.notify_all();
                 return database;
@@ -99,6 +148,7 @@ std::shared_ptr<RocksDatabase> RocksDBManager::get_or_open(
             auto current = it->second.lock();
             if (!current) {
                 databases_[db_path] = database;
+                retain_locked(db_path, database);
                 opening_.erase(db_path);
                 cv_.notify_all();
                 return database;
@@ -106,11 +156,13 @@ std::shared_ptr<RocksDatabase> RocksDBManager::get_or_open(
 
             if (!(current->is_read_only() &&
                   open_mode == RocksDatabase::OpenMode::ReadWrite)) {
+                retain_locked(db_path, current);
                 opening_.erase(db_path);
                 cv_.notify_all();
                 return current;
             }
 
+            drop_retained_locked(db_path);
             if (current.use_count() != 1) {
                 opening_.erase(db_path);
                 cv_.notify_all();
@@ -122,6 +174,7 @@ std::shared_ptr<RocksDatabase> RocksDBManager::get_or_open(
             }
 
             databases_[db_path] = database;
+            retain_locked(db_path, database);
             opening_.erase(db_path);
             cv_.notify_all();
             return database;
@@ -134,20 +187,16 @@ void RocksDBManager::reset(const std::string& db_path) {
 
     cv_.wait(lock, [&] { return !opening_.contains(db_path); });
 
-    auto it = databases_.find(db_path);
-    if (it == databases_.end()) {
-        return;
-    }
-
-    databases_.erase(it);
+    drop_retained_locked(db_path);
+    databases_.erase(db_path);
 }
 
 void RocksDBManager::shutdown() {
-    {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [&] { return opening_.empty(); });
-        databases_.clear();
-    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [&] { return opening_.empty(); });
+    retained_index_.clear();
+    retained_.clear();
+    databases_.clear();
 }
 
 }  // namespace dftracer::utils::rocksdb

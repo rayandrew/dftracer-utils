@@ -1,6 +1,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <dftracer/utils/python/json.h>
+#include <dftracer/utils/python/py_method.h>
+#include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 
 using dftracer::utils::utilities::composites::dft::ArgsValueProxy;
@@ -51,7 +53,7 @@ static Py_ssize_t JsonDictValue_length(JsonDictValueObject *self) {
 
 static PyObject *JsonDictValue_subscript(JsonDictValueObject *self,
                                          PyObject *key) {
-    const char *key_str = PyUnicode_AsUTF8(key);
+    const char *key_str = as_utf8(key);
     if (!key_str) return NULL;
 
     std::string_view k(key_str);
@@ -201,7 +203,7 @@ static PyObject *JsonDictValue_get(JsonDictValueObject *self, PyObject *args) {
     PyObject *default_val = Py_None;
     if (!PyArg_ParseTuple(args, "O|O", &key, &default_val)) return NULL;
 
-    const char *key_str = PyUnicode_AsUTF8(key);
+    const char *key_str = as_utf8(key);
     if (!key_str) return NULL;
 
     std::string_view k(key_str);
@@ -232,7 +234,7 @@ static PyObject *JsonDictValue_get(JsonDictValueObject *self, PyObject *args) {
 }
 
 static int JsonDictValue_contains(JsonDictValueObject *self, PyObject *key) {
-    const char *key_str = PyUnicode_AsUTF8(key);
+    const char *key_str = as_utf8(key);
     if (!key_str) return -1;
 
     std::string_view k(key_str);
@@ -309,15 +311,15 @@ static PySequenceMethods JsonDictValue_as_sequence = {
 };
 
 static PyMethodDef JsonDictValue_methods[] = {
-    {"keys", (PyCFunction)JsonDictValue_keys, METH_NOARGS,
+    {"keys", DFT_PYCFUNCTION(JsonDictValue_keys), METH_NOARGS,
      "Return list of keys."},
-    {"values", (PyCFunction)JsonDictValue_values, METH_NOARGS,
+    {"values", DFT_PYCFUNCTION(JsonDictValue_values), METH_NOARGS,
      "Return list of values."},
-    {"items", (PyCFunction)JsonDictValue_items, METH_NOARGS,
+    {"items", DFT_PYCFUNCTION(JsonDictValue_items), METH_NOARGS,
      "Return list of (key, value) pairs."},
-    {"get", (PyCFunction)JsonDictValue_get, METH_VARARGS,
+    {"get", DFT_PYCFUNCTION(JsonDictValue_get), METH_VARARGS,
      "Get value by key with optional default."},
-    {"to_dict", (PyCFunction)JsonDictValue_to_dict, METH_NOARGS,
+    {"to_dict", DFT_PYCFUNCTION(JsonDictValue_to_dict), METH_NOARGS,
      "Convert to a regular Python dict."},
     {NULL}};
 

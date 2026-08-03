@@ -3,6 +3,7 @@
 #include <dftracer/utils/utilities/common/json/parser.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_indexer_utility.h>
 #include <dftracer/utils/utilities/composites/dft/internal/chunk_line_scanner.h>
+#include <dftracer/utils/utilities/composites/dft/schema.h>
 #include <dftracer/utils/utilities/composites/indexed_file_reader_utility.h>
 #include <dftracer/utils/utilities/composites/types.h>
 #include <dftracer/utils/utilities/reader/internal/stream_config.h>
@@ -116,8 +117,8 @@ coro::CoroTask<ChunkIndexerOutput> ChunkIndexerUtility::process(
 
     // Initialize bloom filters for missing dimensions
     auto make_bloom = [&]() {
-        return BloomFilter(input.config.expected_entries_per_chunk,
-                           input.config.false_positive_rate);
+        return ScalableBloomFilter(input.config.expected_entries_per_chunk,
+                                   input.config.false_positive_rate);
     };
 
     // Create bloom filters only for dimensions that need indexing
@@ -127,8 +128,7 @@ coro::CoroTask<ChunkIndexerOutput> ChunkIndexerUtility::process(
 
     // If we have existing bloom filters, we need to read the chunk data
     // to populate the missing ones
-    bool collect_manifest = input.config.build_manifest;
-    bool need_rescan = !missing_dims.empty() || collect_manifest;
+    bool need_rescan = !missing_dims.empty();
 
     // Create reader if needed
     std::shared_ptr<reader::internal::Reader> reader;
@@ -184,10 +184,6 @@ coro::CoroTask<ChunkIndexerOutput> ChunkIndexerUtility::process(
         co_return output;
     }
 
-    std::map<std::pair<std::string, std::string>, std::vector<std::uint32_t>>
-        event_lines;
-    std::map<std::string, std::vector<std::uint32_t>> metadata_lines;
-
     // On-Demand parser for lazy field access - only parses what we use
     JsonParser parser;
 
@@ -203,19 +199,20 @@ coro::CoroTask<ChunkIndexerOutput> ChunkIndexerUtility::process(
 
     co_await dft::internal::scan_chunk_lines(*stream, [&](std::string_view
                                                               line_sv,
-                                                          std::uint32_t
-                                                              line_number) {
+                                                          [[maybe_unused]] std::
+                                                              uint32_t
+                                                                  line_number) {
         if (!parser.parse(line_sv)) {
             return;
         }
 
         // Extract ph first to determine event type
-        auto ph = parser.get_string("ph");
-        if (!ph) {
+        RecordPhase phase = read_phase(parser);
+        if (phase == RecordPhase::UNKNOWN) {
             return;
         }
 
-        bool is_metadata = (*ph == "M");
+        bool is_metadata = (phase == RecordPhase::METADATA);
 
         if (is_metadata) {
             // Metadata event: extract name and args in single pass
@@ -265,9 +262,6 @@ coro::CoroTask<ChunkIndexerOutput> ChunkIndexerUtility::process(
                 }
             }
 
-            if (collect_manifest) {
-                metadata_lines[event_name].push_back(line_number);
-            }
         } else {
             // Regular event: re-parse for fresh state and extract
             // fields
@@ -280,10 +274,12 @@ coro::CoroTask<ChunkIndexerOutput> ChunkIndexerUtility::process(
             auto pid = parser.get_uint64("pid").value_or(0);
             auto tid = parser.get_uint64("tid").value_or(0);
             auto ts = parser.get_uint64("ts").value_or(0);
-            auto dur = parser.get_uint64("dur").value_or(0);
+            auto dur_opt = parser.get_uint64("dur");
+            auto dur = dur_opt.value_or(0);
 
             // Update statistics
-            output.statistics.update_from_event(name, cat, pid, tid, ts, dur);
+            output.statistics.update_from_event(name, cat, pid, tid, ts, dur,
+                                                dur_opt.has_value());
 
             // Add to bloom filters
             if (need_name && !name.empty()) {
@@ -377,31 +373,9 @@ coro::CoroTask<ChunkIndexerOutput> ChunkIndexerUtility::process(
                 });
             }
 
-            if (collect_manifest) {
-                event_lines[{std::string(cat), std::string(name)}].push_back(
-                    line_number);
-            }
             output.events_processed++;
         }
     });
-
-    if (collect_manifest) {
-        output.event_line_groups.reserve(event_lines.size());
-        for (auto& [key, lines] : event_lines) {
-            EventLineGroup g;
-            g.cat = key.first;
-            g.name = key.second;
-            g.line_numbers = std::move(lines);
-            output.event_line_groups.push_back(std::move(g));
-        }
-        output.metadata_line_groups.reserve(metadata_lines.size());
-        for (auto& [meta_type, lines] : metadata_lines) {
-            MetadataLineGroup g;
-            g.meta_type = meta_type;
-            g.line_numbers = std::move(lines);
-            output.metadata_line_groups.push_back(std::move(g));
-        }
-    }
 
     output.success = true;
     co_return output;

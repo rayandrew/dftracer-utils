@@ -67,10 +67,6 @@ class UtilityExecutor {
             throw;
         }
     }
-
-    std::shared_ptr<Utility<I, O, Tags...>> get_utility() const {
-        return utility_;
-    }
 };
 
 }  // namespace behaviors

@@ -9,7 +9,6 @@
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_pruner_utility.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
 #include <dftracer/utils/utilities/composites/dft/metadata_collector_utility.h>
-#include <dftracer/utils/utilities/compression/zlib/streaming_compressor_utility.h>
 #include <dftracer/utils/utilities/fileio/streaming_file_writer_utility.h>
 #include <dftracer/utils/utilities/hash/hasher_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
@@ -88,7 +87,6 @@ static coro::CoroTask<int> run_verify(
         batch_config->file_paths = std::move(abs_paths);
         batch_config->checkpoint_size = ckpt_size;
         batch_config->parallelism = file_paths.size();
-        batch_config->use_batch_write = true;
         batch_config->rebuild_root_summaries = true;
 
         co_await IndexBatchBuilderUtility::process(&scope,
@@ -151,7 +149,7 @@ static coro::CoroTask<int> run_verify(
                 }
             }
 
-            std::unordered_map<std::string, BloomFilter> file_blooms;
+            std::unordered_map<std::string, ScalableBloomFilter> file_blooms;
             HashResolutions all_hr;
             std::size_t total_events = 0;
 

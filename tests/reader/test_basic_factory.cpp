@@ -54,38 +54,6 @@ TEST_CASE("Factory Pattern - Basic GZIP functionality") {
     }
 }
 
-TEST_CASE("Factory Pattern - Basic TAR.GZ functionality") {
-    TestEnvironment env(100, Format::TAR_GZIP);
-    REQUIRE(env.is_valid());
-
-    std::string tar_gz_file = env.create_test_file();
-    REQUIRE(!tar_gz_file.empty());
-
-    std::string idx_file = env.get_index_path(tar_gz_file);
-    std::string db_root = determine_index_path(tar_gz_file, "");
-
-    SUBCASE("IndexerFactory creates valid TAR.GZ indexer") {
-        auto indexer =
-            IndexerFactory::create(tar_gz_file, idx_file, 1024 * 1024);
-        REQUIRE(indexer != nullptr);
-        CHECK(indexer->get_archive_path() == tar_gz_file);
-        CHECK(indexer->get_index_path() == db_root);
-    }
-
-    SUBCASE("ReaderFactory creates valid TAR.GZ reader") {
-        auto indexer =
-            IndexerFactory::create(tar_gz_file, idx_file, 1024 * 1024);
-        REQUIRE(indexer != nullptr);
-        indexer->build();
-
-        auto reader = ReaderFactory::create(indexer);
-        REQUIRE(reader != nullptr);
-        CHECK(reader->is_valid());
-        CHECK(reader->get_archive_path() == tar_gz_file);
-        CHECK(reader->get_index_path() == db_root);
-    }
-}
-
 TEST_CASE("Basic Reading Operations") {
     TestEnvironment env(50, Format::GZIP);
     REQUIRE(env.is_valid());

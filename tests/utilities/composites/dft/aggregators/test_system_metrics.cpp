@@ -8,46 +8,44 @@
 
 using namespace dftracer::utils::utilities::composites::dft::aggregators;
 
-TEST_SUITE("FloatMetricStats") {
+TEST_SUITE("MetricStats double path") {
     TEST_CASE("default construction") {
-        FloatMetricStats stats;
-        CHECK(stats.count == 0);
-        CHECK(stats.total == 0.0);
-        CHECK(stats.min == std::numeric_limits<double>::max());
-        CHECK(stats.max == std::numeric_limits<double>::lowest());
-        CHECK(stats.mean == 0.0);
-        CHECK(stats.m2 == 0.0);
+        MetricStats stats;
+        CHECK(stats.count() == 0);
+        CHECK(stats.total() == 0.0);
+        CHECK(stats.mean() == 0.0);
+        CHECK(stats.m2() == 0.0);
         CHECK(stats.sketch == nullptr);
     }
 
     TEST_CASE("single value update") {
-        FloatMetricStats stats;
+        MetricStats stats;
         stats.update(42.5);
 
-        CHECK(stats.count == 1);
-        CHECK(stats.total == doctest::Approx(42.5));
-        CHECK(stats.min == doctest::Approx(42.5));
-        CHECK(stats.max == doctest::Approx(42.5));
-        CHECK(stats.mean == doctest::Approx(42.5));
+        CHECK(stats.count() == 1);
+        CHECK(stats.total() == doctest::Approx(42.5));
+        CHECK(stats.min() == doctest::Approx(42.5));
+        CHECK(stats.max() == doctest::Approx(42.5));
+        CHECK(stats.mean() == doctest::Approx(42.5));
         CHECK(stats.get_stddev() == doctest::Approx(0.0));
     }
 
     TEST_CASE("multiple values update") {
-        FloatMetricStats stats;
+        MetricStats stats;
         stats.update(10.0);
         stats.update(20.0);
         stats.update(30.0);
 
-        CHECK(stats.count == 3);
-        CHECK(stats.total == doctest::Approx(60.0));
-        CHECK(stats.min == doctest::Approx(10.0));
-        CHECK(stats.max == doctest::Approx(30.0));
-        CHECK(stats.mean == doctest::Approx(20.0));
+        CHECK(stats.count() == 3);
+        CHECK(stats.total() == doctest::Approx(60.0));
+        CHECK(stats.min() == doctest::Approx(10.0));
+        CHECK(stats.max() == doctest::Approx(30.0));
+        CHECK(stats.mean() == doctest::Approx(20.0));
         CHECK(stats.get_stddev() == doctest::Approx(10.0));
     }
 
     TEST_CASE("update with percentiles") {
-        FloatMetricStats stats;
+        MetricStats stats;
         stats.update(10.0, true);
         stats.update(20.0, true);
         stats.update(30.0, true);
@@ -58,29 +56,29 @@ TEST_SUITE("FloatMetricStats") {
     }
 
     TEST_CASE("merge_from empty into empty") {
-        FloatMetricStats a, b;
+        MetricStats a, b;
         a.merge_from(b);
 
-        CHECK(a.count == 0);
-        CHECK(a.total == 0.0);
+        CHECK(a.count() == 0);
+        CHECK(a.total() == 0.0);
     }
 
     TEST_CASE("merge_from populated into empty") {
-        FloatMetricStats a, b;
+        MetricStats a, b;
         b.update(10.0);
         b.update(20.0);
 
         a.merge_from(b);
 
-        CHECK(a.count == 2);
-        CHECK(a.total == doctest::Approx(30.0));
-        CHECK(a.min == doctest::Approx(10.0));
-        CHECK(a.max == doctest::Approx(20.0));
-        CHECK(a.mean == doctest::Approx(15.0));
+        CHECK(a.count() == 2);
+        CHECK(a.total() == doctest::Approx(30.0));
+        CHECK(a.min() == doctest::Approx(10.0));
+        CHECK(a.max() == doctest::Approx(20.0));
+        CHECK(a.mean() == doctest::Approx(15.0));
     }
 
     TEST_CASE("merge_from two populated stats") {
-        FloatMetricStats a, b;
+        MetricStats a, b;
         a.update(10.0);
         a.update(20.0);
         b.update(30.0);
@@ -88,15 +86,15 @@ TEST_SUITE("FloatMetricStats") {
 
         a.merge_from(b);
 
-        CHECK(a.count == 4);
-        CHECK(a.total == doctest::Approx(100.0));
-        CHECK(a.min == doctest::Approx(10.0));
-        CHECK(a.max == doctest::Approx(40.0));
-        CHECK(a.mean == doctest::Approx(25.0));
+        CHECK(a.count() == 4);
+        CHECK(a.total() == doctest::Approx(100.0));
+        CHECK(a.min() == doctest::Approx(10.0));
+        CHECK(a.max() == doctest::Approx(40.0));
+        CHECK(a.mean() == doctest::Approx(25.0));
     }
 
     TEST_CASE("merge_from with sketches") {
-        FloatMetricStats a, b;
+        MetricStats a, b;
         a.update(10.0, true);
         a.update(20.0, true);
         b.update(30.0, true);
@@ -105,21 +103,21 @@ TEST_SUITE("FloatMetricStats") {
         a.merge_from(b);
 
         CHECK(a.sketch != nullptr);
-        CHECK(a.count == 4);
+        CHECK(a.count() == 4);
     }
 
     TEST_CASE("copy construction") {
-        FloatMetricStats original;
+        MetricStats original;
         original.update(10.0, true);
         original.update(20.0, true);
 
-        FloatMetricStats copy(original);
+        MetricStats copy(original);
 
-        CHECK(copy.count == original.count);
-        CHECK(copy.total == original.total);
-        CHECK(copy.min == original.min);
-        CHECK(copy.max == original.max);
-        CHECK(copy.mean == original.mean);
+        CHECK(copy.count() == original.count());
+        CHECK(copy.total() == original.total());
+        CHECK(copy.min() == original.min());
+        CHECK(copy.max() == original.max());
+        CHECK(copy.mean() == original.mean());
         CHECK(copy.sketch != nullptr);
         CHECK(copy.sketch != original.sketch);
     }
@@ -140,8 +138,8 @@ TEST_SUITE("SystemAggregationMetrics") {
 
         CHECK(metrics.metrics != nullptr);
         CHECK(metrics.metrics->size() == 1);
-        CHECK(metrics.metrics->at("cpu_usage").count == 1);
-        CHECK(metrics.metrics->at("cpu_usage").mean == doctest::Approx(50.0));
+        CHECK(metrics.metrics->at("cpu_usage").count() == 1);
+        CHECK(metrics.metrics->at("cpu_usage").mean() == doctest::Approx(50.0));
     }
 
     TEST_CASE("update_metric multiple metrics") {
@@ -151,9 +149,9 @@ TEST_SUITE("SystemAggregationMetrics") {
         metrics.update_metric("cpu_usage", 60.0);
 
         CHECK(metrics.metrics->size() == 2);
-        CHECK(metrics.metrics->at("cpu_usage").count == 2);
-        CHECK(metrics.metrics->at("cpu_usage").mean == doctest::Approx(55.0));
-        CHECK(metrics.metrics->at("memory_usage").count == 1);
+        CHECK(metrics.metrics->at("cpu_usage").count() == 2);
+        CHECK(metrics.metrics->at("cpu_usage").mean() == doctest::Approx(55.0));
+        CHECK(metrics.metrics->at("memory_usage").count() == 1);
     }
 
     TEST_CASE("update_timestamp") {
@@ -187,7 +185,7 @@ TEST_SUITE("SystemAggregationMetrics") {
         CHECK(a.ts == 100);
         CHECK(a.te == 200);
         CHECK(a.metrics != nullptr);
-        CHECK(a.metrics->at("cpu").count == 1);
+        CHECK(a.metrics->at("cpu").count() == 1);
     }
 
     TEST_CASE("merge_from two populated metrics") {
@@ -210,8 +208,8 @@ TEST_SUITE("SystemAggregationMetrics") {
         CHECK(a.ts == 50);
         CHECK(a.te == 250);
         CHECK(a.metrics->size() == 2);
-        CHECK(a.metrics->at("cpu").count == 3);
-        CHECK(a.metrics->at("memory").count == 1);
+        CHECK(a.metrics->at("cpu").count() == 3);
+        CHECK(a.metrics->at("memory").count() == 1);
     }
 
     TEST_CASE("copy construction") {
@@ -228,7 +226,7 @@ TEST_SUITE("SystemAggregationMetrics") {
         CHECK(copy.te == original.te);
         CHECK(copy.metrics != nullptr);
         CHECK(copy.metrics != original.metrics);
-        CHECK(copy.metrics->at("cpu").count == 1);
+        CHECK(copy.metrics->at("cpu").count() == 1);
     }
 }
 
@@ -281,18 +279,18 @@ TEST_SUITE("SystemMetricsSerialization") {
         CHECK(deserialized.metrics->size() == 3);
 
         auto& cpu_user = deserialized.metrics->at("cpu_user");
-        CHECK(cpu_user.count == 2);
-        CHECK(cpu_user.mean == doctest::Approx(27.75));
-        CHECK(cpu_user.min == doctest::Approx(25.5));
-        CHECK(cpu_user.max == doctest::Approx(30.0));
+        CHECK(cpu_user.count() == 2);
+        CHECK(cpu_user.mean() == doctest::Approx(27.75));
+        CHECK(cpu_user.min() == doctest::Approx(25.5));
+        CHECK(cpu_user.max() == doctest::Approx(30.0));
 
         auto& cpu_system = deserialized.metrics->at("cpu_system");
-        CHECK(cpu_system.count == 1);
-        CHECK(cpu_system.mean == doctest::Approx(5.0));
+        CHECK(cpu_system.count() == 1);
+        CHECK(cpu_system.mean() == doctest::Approx(5.0));
 
         auto& memory = deserialized.metrics->at("memory_available");
-        CHECK(memory.count == 1);
-        CHECK(memory.mean == doctest::Approx(8000000.0));
+        CHECK(memory.count() == 1);
+        CHECK(memory.mean() == doctest::Approx(8000000.0));
     }
 
     TEST_CASE("value serialization preserves variance") {

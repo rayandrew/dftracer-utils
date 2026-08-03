@@ -1,6 +1,7 @@
 #ifndef DFTRACER_UTILS_UTILITIES_COMPOSITES_DFT_AGGREGATORS_EVENT_AGGREGATOR_H
 #define DFTRACER_UTILS_UTILITIES_COMPOSITES_DFT_AGGREGATORS_EVENT_AGGREGATOR_H
 
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_intern.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_output.h>
 
 #include <atomic>
@@ -25,6 +26,11 @@ class EventAggregator {
     EventAggregator(std::shared_ptr<rocksdb::RocksDatabase> db,
                     std::uint32_t config_hash);
 
+    /// The table its keys resolve against, shared with anything else holding
+    /// this index open.
+    const AggInternPtr& intern_table() const { return intern_; }
+    StringIntern& intern() const { return intern_->intern; }
+
     void merge_chunk(ChunkAggregationOutput&& chunk_output);
 
     EventAggregatorOutput finalize();
@@ -48,16 +54,6 @@ class EventAggregator {
     std::size_t scan_system_metrics_raw_fn(RawScanCallbackFn fn,
                                            void* ctx) const;
 
-    template <typename F>
-    std::size_t scan_system_metrics_raw(F&& callback) const {
-        auto adapter =
-            +[](void* ctx, std::string_view k, std::string_view v) -> bool {
-            return (*static_cast<std::decay_t<F>*>(ctx))(k, v);
-        };
-        return scan_system_metrics_raw_fn(adapter,
-                                          static_cast<void*>(&callback));
-    }
-
     /// Template wrapper: forwards any callable `(sv, sv) -> bool` into the
     /// raw scan with zero heap allocations. The adapter lambda is a captureless
     /// `+[]` so it decays to a plain function pointer.
@@ -72,9 +68,6 @@ class EventAggregator {
         return scan_shard_range_raw_fn(shard_begin, shard_end, adapter,
                                        static_cast<void*>(&callback));
     }
-
-    /// Move trackers out without materializing the full aggregation map.
-    std::vector<std::shared_ptr<AssociationTracker>> take_trackers();
 
     /// Merge fresh trackers with any persisted tracker from the DB,
     /// persist the result, and return the merged tracker.
@@ -109,7 +102,6 @@ class EventAggregator {
     /// merge_chunk().
     void persist_time_bounds();
 
-    bool is_rocksdb_mode() const { return rocksdb_mode_; }
     std::shared_ptr<rocksdb::RocksDatabase> db() const { return db_; }
     std::uint32_t config_hash() const { return config_hash_; }
 
@@ -134,6 +126,7 @@ class EventAggregator {
     std::unordered_set<std::string> unique_files_;
 
     // RocksDB state
+    AggInternPtr intern_;
     std::shared_ptr<rocksdb::RocksDatabase> db_;
     std::uint32_t config_hash_ = 0;
     std::atomic<std::size_t> total_events_{0};

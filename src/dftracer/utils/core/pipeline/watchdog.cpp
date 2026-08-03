@@ -105,7 +105,7 @@ void Watchdog::set_warning_callback(WarningCallback callback) {
     warning_callback_ = std::move(callback);
 }
 
-void Watchdog::set_executor(Executor* executor) { executor_ = executor; }
+void Watchdog::set_executor(TaskExecutor* executor) { executor_ = executor; }
 
 void Watchdog::set_global_timeout(std::chrono::milliseconds timeout) {
     global_timeout_ = timeout;

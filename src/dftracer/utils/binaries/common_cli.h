@@ -5,7 +5,9 @@
 #include <dftracer/utils/core/common/constants.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/logging.h>
+#include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/platform_compat.h>
+#include <dftracer/utils/core/common/str_format.h>
 #include <dftracer/utils/core/coro/channel.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
@@ -208,14 +210,13 @@ struct PipelineArgs : CliSchema {
                 "Number of worker threads for parallel processing "
                 "(default: number of CPU cores)")
             .scan<'d', std::size_t>()
-            .default_value(static_cast<std::size_t>(
-                dftracer_utils_hardware_concurrency()));
+            .default_value(static_cast<std::size_t>(hardware_concurrency()));
         p.add_argument("--io-threads")
             .help(
                 "Number of I/O threads "
                 "(default: number of CPU cores)")
             .scan<'d', std::size_t>()
-            .default_value(dftracer_utils_hardware_concurrency());
+            .default_value(hardware_concurrency());
         p.add_argument("--time-profiling")
             .help("Print stage timing breakdown to stderr")
             .flag();
@@ -403,30 +404,27 @@ inline std::vector<std::string> split_csv(const std::string& str) {
     return out;
 }
 
-// Append suffix unless path already ends with it.
-inline std::string ensure_suffix(const std::string& path,
-                                 const std::string& suffix) {
-    if (path.size() >= suffix.size() &&
-        path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0) {
-        return path;
-    }
-    return path + suffix;
-}
-
-// Human-readable byte count, e.g. "1.5 MB" or "3.0 MB/s". per_suffix appends a
-// rate unit (e.g. "/s"); precision controls the fractional digits.
+// Human-readable byte count, e.g. "1.5 MB" or "3.0 MB/s"; see
+// dftracer::utils::human_bytes.
 inline std::string human_bytes(double value, const char* per_suffix = "",
                                int precision = 1) {
-    static const char* const UNITS[] = {"B", "KB", "MB", "GB", "TB"};
-    int i = 0;
-    while (value >= 1024.0 && i < 4) {
-        value /= 1024.0;
-        ++i;
+    return dftracer::utils::human_bytes(value, per_suffix, precision);
+}
+
+// Warn when an aggregated workload of `required_bytes` will not fit in one
+// process (peak is ~PEAK_MEMORY_FACTOR x that); the message says how much
+// memory or how many nodes it needs. `available_bytes = 0` detects it
+// (cgroup-aware). The Python/dfanalyzer path emits the same message via
+// memory_budget_advice.
+inline void warn_if_memory_tight(std::size_t required_bytes,
+                                 std::size_t available_bytes = 0) {
+    const auto advice =
+        dftracer::utils::memory_budget_advice(required_bytes, available_bytes);
+    if (!advice.fits) {
+        DFTRACER_UTILS_LOG_WARN(
+            "%s",
+            dftracer::utils::format_memory_budget_warning(advice).c_str());
     }
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.*f %s%s", precision, value, UNITS[i],
-                  per_suffix);
-    return buf;
 }
 
 // Parallel per-subdirectory scan of `directory` for .pfw/.pfw.gz files via

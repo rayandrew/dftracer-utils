@@ -340,8 +340,6 @@ class ReplayEngine {
     /**
      * Get file path for replay (handles output directory override)
      */
-    std::string get_replay_file_path(const std::string& original_path) const;
-
     /**
      * Replay from call tree structure (hierarchical replay)
      */

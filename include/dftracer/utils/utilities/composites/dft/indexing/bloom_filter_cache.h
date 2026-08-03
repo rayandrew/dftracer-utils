@@ -1,7 +1,7 @@
 #ifndef DFTRACER_UTILS_UTILITIES_COMPOSITES_DFT_INDEXING_BLOOM_FILTER_CACHE_H
 #define DFTRACER_UTILS_UTILITIES_COMPOSITES_DFT_INDEXING_BLOOM_FILTER_CACHE_H
 
-#include <dftracer/utils/utilities/composites/dft/indexing/bloom_filter.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/scalable_bloom_filter.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -25,9 +25,9 @@ class BloomFilterCache {
         : max_entries_(max_entries) {}
 
     /// Look up a cached bloom filter. Returns nullopt on miss.
-    std::optional<BloomFilter> get(const std::string& index_path,
-                                   const std::string& dimension,
-                                   std::uint64_t checkpoint_idx) const {
+    std::optional<ScalableBloomFilter> get(const std::string& index_path,
+                                           const std::string& dimension,
+                                           std::uint64_t checkpoint_idx) const {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = cache_.find(make_key(index_path, dimension, checkpoint_idx));
         if (it == cache_.end()) return std::nullopt;
@@ -36,7 +36,7 @@ class BloomFilterCache {
 
     /// Insert a bloom filter into the cache. Evicts all entries if full.
     void put(const std::string& index_path, const std::string& dimension,
-             std::uint64_t checkpoint_idx, const BloomFilter& bloom) {
+             std::uint64_t checkpoint_idx, const ScalableBloomFilter& bloom) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (cache_.size() >= max_entries_) {
             cache_.clear();
@@ -65,7 +65,7 @@ class BloomFilterCache {
 
     std::size_t max_entries_;
     mutable std::mutex mutex_;
-    std::unordered_map<std::string, BloomFilter> cache_;
+    std::unordered_map<std::string, ScalableBloomFilter> cache_;
 };
 
 }  // namespace dftracer::utils::utilities::composites::dft::indexing

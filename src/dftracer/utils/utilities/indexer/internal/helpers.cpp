@@ -116,8 +116,4 @@ std::uint64_t file_size_bytes(const std::string &path) {
     return static_cast<std::uint64_t>(pos);
 }
 
-bool index_exists_and_valid(const std::string &index_path) {
-    return fs::exists(index_path) && fs::is_directory(index_path);
-}
-
 }  // namespace dftracer::utils::utilities::indexer::internal

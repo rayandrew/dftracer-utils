@@ -2,6 +2,7 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/string_intern.h>
+#include <dftracer/utils/core/coro/when_all.h>
 #include <dftracer/utils/utilities/common/json/parser.h>
 #include <dftracer/utils/utilities/composites/dft/event.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
@@ -69,7 +70,9 @@ coro::AsyncGenerator<Trace> ReplayEngine::stream_traces(
     for (const auto& file : files) {
         TraceReaderConfig cfg;
         cfg.file_path = file;
-        cfg.auto_build_index = true;
+        // Replay streams every event in order, so it needs no index; skip the
+        // auto-build to stay on the plain sequential read path.
+        cfg.auto_build_index = false;
         TraceReader rdr(std::move(cfg));
         auto gen = rdr.read_json(ReadConfig{});
         while (auto opt = co_await gen.next()) {
@@ -85,37 +88,34 @@ coro::AsyncGenerator<Trace> ReplayEngine::stream_traces(
 coro::CoroTask<void> ReplayEngine::run_pipelined(
     dftracer::utils::CoroScope& scope, const std::vector<std::string>& files,
     ReplayResult& result, std::size_t channel_capacity) {
+    (void)scope;
     coro::Channel<Trace> ch_instance(channel_capacity);
     auto* channel = &ch_instance;
 
-    co_await scope.scope([this, channel, &files,
-                          &result](dftracer::utils::CoroScope& child)
-                             -> coro::CoroTask<void> {
-        // Producer
-        child.spawn([this, channel, &files](
-                        dftracer::utils::CoroScope&) -> coro::CoroTask<void> {
-            auto producer = channel->producer();
-            auto guard = producer.guard();
-            auto gen = stream_traces(files);
-            while (auto trace = co_await gen.next()) {
-                if (!co_await producer.send(std::move(*trace))) {
-                    co_return;
-                }
+    // Run producer and consumer concurrently via when_all rather than spawning
+    // them inside a nested scope: the extra spawn-and-return coroutine layer
+    // let the scope report completion before the consumer had drained the
+    // channel, dropping every buffered event under load.
+    auto producer = [this, channel, &files]() -> coro::CoroTask<void> {
+        auto p = channel->producer();
+        auto guard = p.guard();
+        auto gen = stream_traces(files);
+        while (auto trace = co_await gen.next()) {
+            if (!co_await p.send(std::move(*trace))) {
+                co_return;
             }
-            co_return;
-        });
-
-        // Consumer
-        child.spawn([this, channel, &result](
-                        dftracer::utils::CoroScope&) -> coro::CoroTask<void> {
-            auto consumer = channel->consumer();
-            while (auto item = co_await consumer.receive()) {
-                dispatch_trace(*item, result);
-            }
-            co_return;
-        });
+        }
         co_return;
-    });
+    };
+    auto consumer = [this, channel, &result]() -> coro::CoroTask<void> {
+        auto c = channel->consumer();
+        while (auto item = co_await c.receive()) {
+            dispatch_trace(*item, result);
+        }
+        co_return;
+    };
+
+    co_await coro::when_all(producer(), consumer());
 
     co_return;
 }
@@ -334,7 +334,7 @@ bool ReplayEngine::parse_trace_json(common::json::JsonParser& parser,
     trace.offset =
         ev.args["offset"].get<std::int64_t>(static_cast<std::int64_t>(-1));
 
-    if (ev.ph == "M") {
+    if (ev.is_metadata()) {
         if (trace.func_name == "FH") {
             trace.type = TraceType::FileHash;
         } else if (trace.func_name == "HH") {
@@ -519,20 +519,6 @@ TraceExecutor* ReplayEngine::find_executor(const Trace& trace) {
         }
     }
     return nullptr;
-}
-
-std::string ReplayEngine::get_replay_file_path(
-    const std::string& original_path) const {
-    if (config_.output_directory.empty()) {
-        return original_path;
-    }
-
-    std::size_t last_slash = original_path.find_last_of('/');
-    std::string filename = (last_slash != std::string::npos)
-                               ? original_path.substr(last_slash + 1)
-                               : original_path;
-
-    return config_.output_directory + "/" + filename;
 }
 
 // =============================================================================

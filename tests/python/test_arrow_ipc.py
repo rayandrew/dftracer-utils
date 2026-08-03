@@ -43,9 +43,9 @@ class TestArrowIpcReadback:
         "te",
     }
 
-    def test_aggregator_cli_arrow_output(self):
-        """dftracer_aggregator --format arrow produces a valid IPC file."""
-        binary = shutil.which("dftracer_aggregator")
+    def test_view_cli_arrow_output(self):
+        """dftracer_view --format arrow produces a valid IPC file."""
+        binary = shutil.which("dftracer_view")
         if binary is None:
             return  # CLI not installed
 
@@ -60,12 +60,16 @@ class TestArrowIpcReadback:
                 subprocess.run(
                     [
                         binary,
-                        "-d",
+                        "--directory",
                         directory,
-                        "-o",
-                        output_path,
+                        "--group-by",
+                        "name",
+                        "--agg",
+                        "mean:dur",
                         "--format",
                         "arrow",
+                        "--output",
+                        output_path,
                     ],
                     capture_output=True,
                     text=True,
@@ -80,10 +84,10 @@ class TestArrowIpcReadback:
                 table = reader.read_all()
 
                 assert table.num_rows > 0
-                assert table.num_columns == len(self.EXPECTED_BASE_COLUMNS)
-
+                # View aggregate table: group columns + aggregated value columns.
                 col_names = set(table.column_names)
-                assert col_names == self.EXPECTED_BASE_COLUMNS
+                assert "name" in col_names
+                assert "mean_dur" in col_names
 
             finally:
                 if os.path.exists(output_path):
@@ -109,27 +113,17 @@ class TestArrowIpcReadback:
                 assert schema.field("count").type == pa.uint64()
                 assert schema.field("dur_mean").type == pa.float64()
 
-    def test_trace_reader_arrow_roundtrip(self):
-        """TraceReader Arrow output is readable by pyarrow."""
+    def test_trace_viewer_stream_roundtrip(self):
+        """TraceViewer.stream Arrow output is readable by pyarrow."""
         with Environment(lines=20) as env:
             gz_file = env.create_test_gzip_file()
-            reader = dft_utils.TraceReader(gz_file)
-            table = reader.read_arrow()
+            with dft_utils.Indexer(files=[gz_file], index_dir=env.temp_dir) as ix:
+                ix.ensure_indexed()
 
-            if table.num_rows > 0:
-                for batch in table.batches():
-                    pa_batch = pa.record_batch(batch)
-                    assert pa_batch.num_rows > 0
-                    assert pa_batch.num_columns >= 1
-
-    def test_trace_reader_roundtrip(self):
-        """TraceReader Arrow output is readable by pyarrow."""
-        with Environment(lines=10) as env:
-            gz_file = env.create_test_gzip_file()
-            reader = dft_utils.TraceReader(gz_file)
-
-            for batch in reader.iter_arrow(batch_size=100):
-                pa_batch = pa.record_batch(batch)
+            viewer = dft_utils.TraceViewer(gz_file, index_path=env.temp_dir)
+            batches = [pa.record_batch(c) for c in viewer.stream(batch_size=100)]
+            assert batches
+            for pa_batch in batches:
                 assert pa_batch.num_rows > 0
                 col_names = set(pa_batch.schema.names)
                 assert "name" in col_names or "cat" in col_names

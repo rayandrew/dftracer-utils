@@ -74,21 +74,6 @@ std::any Task::apply_combiner(const std::vector<std::any>& inputs) const {
     return input_combiner_(inputs);
 }
 
-bool Task::validate_connection(std::type_index from, std::type_index to) const {
-    // Void can connect to anything (synchronization)
-    if (from == typeid(void)) {
-        return true;
-    }
-
-    // std::any can accept any type (for tap, logging, etc.)
-    if (to == typeid(std::any)) {
-        return true;
-    }
-
-    // Exact type match
-    return from == to;
-}
-
 std::shared_ptr<Task> Task::operator&(std::shared_ptr<Task> other) {
     // Create a combiner task that depends on both this and other
     // When a task has multiple parents, it receives a vector<any> as input

@@ -1097,9 +1097,8 @@ passing a positive integer caps the in-flight bytes across the underlying
 ``flush_every_files`` for Batched Index Writes
 ----------------------------------------------
 
-``dftracer_organize`` exposes the underlying batched-index control via
-``--memory-budget-mb``: the binary derives a ``flush_every_files`` value
-from the budget and feeds it to ``IndexBuildBatchConfig``. Each batch of
+The batched indexer derives a ``flush_every_files`` value from a memory
+budget and feeds it to ``IndexBuildBatchConfig``. Each batch of
 ``flush_every_files`` files is fully indexed and flushed before the next
 batch begins, capping peak memory regardless of trace count.
 

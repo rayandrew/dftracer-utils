@@ -23,24 +23,21 @@ using dftracer::utils::utilities::composites::dft::indexing::ChunkStatistics;
 using dftracer::utils::utilities::indexer::IndexDatabase;
 using dftracer::utils::utilities::indexer::IndexDatabaseSstWriterContext;
 using dftracer::utils::utilities::indexer::SstArtifactRegistry;
-using dftracer::utils::utilities::indexer::internal::IndexerCheckpoint;
+using dftracer::utils::utilities::indexer::internal::GzipMemberRecord;
 
 namespace {
 
-IndexerCheckpoint make_checkpoint(std::uint64_t idx, std::uint64_t uc_offset,
-                                  std::uint64_t num_lines) {
-    IndexerCheckpoint cp{};
-    cp.checkpoint_idx = idx;
-    cp.uc_offset = uc_offset;
-    cp.uc_size = 64 * 1024;
-    cp.c_offset = uc_offset / 2;
-    cp.c_size = 32 * 1024;
-    cp.bits = 8;
-    cp.dict_compressed = std::vector<unsigned char>{0xAA, 0xBB, 0xCC};
-    cp.num_lines = num_lines;
-    cp.first_line_num = idx * num_lines + 1;
-    cp.last_line_num = (idx + 1) * num_lines;
-    return cp;
+GzipMemberRecord make_member(std::uint64_t idx, std::uint64_t uc_offset,
+                             std::uint64_t num_lines) {
+    GzipMemberRecord m{};
+    m.member_idx = idx;
+    m.uc_offset = uc_offset;
+    m.uc_size = 64 * 1024;
+    m.c_offset = uc_offset / 2;
+    m.c_size = 32 * 1024;
+    m.first_line_num = idx * num_lines + 1;
+    m.last_line_num = (idx + 1) * num_lines;
+    return m;
 }
 
 ChunkStatistics make_chunk_stats(std::uint64_t total_events) {
@@ -68,13 +65,8 @@ ChunkDimensionStats make_dim_stats(std::string_view dim, std::uint64_t distinct,
 }
 
 struct Fixture {
-    IndexerCheckpoint cp_a = make_checkpoint(0, 0, 100);
-    IndexerCheckpoint cp_b = make_checkpoint(1, 64 * 1024, 100);
-
-    std::vector<std::uint32_t> read_lines{1, 5, 17, 42};
-    std::vector<std::uint32_t> write_lines{2, 8, 23};
-    std::vector<std::uint32_t> md_proc_lines{3, 9};
-    std::unordered_set<std::uint64_t> pids{101, 102, 103};
+    GzipMemberRecord cp_a = make_member(0, 0, 100);
+    GzipMemberRecord cp_b = make_member(1, 64 * 1024, 100);
 
     std::vector<unsigned char> bloom_blob_a{0x11, 0x22, 0x33, 0x44};
     std::vector<unsigned char> bloom_blob_b{0x55, 0x66, 0x77, 0x88};
@@ -90,33 +82,24 @@ struct Fixture {
 
     template <typename Sink>
     void populate(Sink& sink, int file_id) {
-        sink.insert_checkpoint(file_id, cp_a);
-        sink.insert_checkpoint(file_id, cp_b);
+        sink.insert_gzip_member(file_id, cp_a);
+        sink.insert_gzip_member(file_id, cp_b);
         sink.insert_file_metadata(file_id, /*checkpoint_size=*/64 * 1024,
                                   /*total_lines=*/200,
                                   /*total_uc_size=*/128 * 1024);
-        sink.insert_event_range(file_id, cp_a.checkpoint_idx, "posix", "read",
-                                read_lines);
-        sink.insert_event_range(file_id, cp_b.checkpoint_idx, "posix", "write",
-                                write_lines);
-        sink.insert_metadata_lines(file_id, cp_a.checkpoint_idx, "PR",
-                                   md_proc_lines);
-        sink.insert_file_pids(file_id, pids);
 
         sink.insert_chunk_bloom_filter(
-            file_id, cp_a.checkpoint_idx, "name",
+            file_id, cp_a.member_idx, "name",
             std::span<const unsigned char>(bloom_blob_a), /*num_entries=*/4);
         sink.insert_chunk_bloom_filter(
-            file_id, cp_b.checkpoint_idx, "name",
+            file_id, cp_b.member_idx, "name",
             std::span<const unsigned char>(bloom_blob_b), /*num_entries=*/5);
         sink.insert_file_bloom_filter(
             file_id, "name", std::span<const unsigned char>(bloom_blob_a),
             /*num_entries=*/8);
 
-        sink.insert_chunk_statistics(file_id, cp_a.checkpoint_idx,
-                                     chunk_stats_a);
-        sink.insert_chunk_statistics(file_id, cp_b.checkpoint_idx,
-                                     chunk_stats_b);
+        sink.insert_chunk_statistics(file_id, cp_a.member_idx, chunk_stats_a);
+        sink.insert_chunk_statistics(file_id, cp_b.member_idx, chunk_stats_b);
         sink.insert_file_scalar_stats(file_id, file_stats, /*num_chunks=*/2);
         sink.insert_file_category_counts(file_id, file_stats.category_counts);
         sink.insert_file_pid_tid_counts(file_id, file_stats.pid_tid_counts);
@@ -124,9 +107,9 @@ struct Fixture {
 
         sink.insert_index_dimension(file_id, "name");
         sink.insert_index_dimension(file_id, "cat");
-        sink.insert_chunk_dimension_stats(file_id, cp_a.checkpoint_idx,
+        sink.insert_chunk_dimension_stats(file_id, cp_a.member_idx,
                                           dim_stats_a);
-        sink.insert_chunk_dimension_stats(file_id, cp_b.checkpoint_idx,
+        sink.insert_chunk_dimension_stats(file_id, cp_b.member_idx,
                                           dim_stats_b);
 
         using dftracer::utils::utilities::hash::fnv1a_hash;
@@ -136,8 +119,8 @@ struct Fixture {
         sink.insert_name_dictionary_entry(write_id, "write");
         sink.insert_name_file_posting(read_id, file_id);
         sink.insert_name_file_posting(write_id, file_id);
-        sink.insert_name_chunk_posting(read_id, file_id, cp_a.checkpoint_idx);
-        sink.insert_name_chunk_posting(write_id, file_id, cp_b.checkpoint_idx);
+        sink.insert_name_chunk_posting(read_id, file_id, cp_a.member_idx);
+        sink.insert_name_chunk_posting(write_id, file_id, cp_b.member_idx);
 
         sink.insert_hash_table_entry(
             static_cast<std::uint8_t>(IndexDatabase::HashType::FILE), "fh_1",
@@ -151,9 +134,9 @@ struct Fixture {
 
         // Aggregation / system_metrics sink writes. SstFileWriter requires
         // strictly ascending keys within a single SST, so the raw sink
-        // API here exercises one merge per key. Cross-flush merges
-        // targeting the same key are the AggregationVisitor's concern: it
-        // rotates its SstWriterContext per flush so each SST is key-unique.
+        // API here exercises one merge per key. Cross-file merges targeting
+        // the same key are pre-combined by emit_mixed_sst before the SST is
+        // written, so each SST stays key-unique.
         sink.insert_aggregation_put("\xFF\xFD\x01", "name-one");
         sink.insert_aggregation_put("\xFF\xFD\x02", "name-two");
         sink.insert_aggregation_merge("agg-key-1", "operand-1");
@@ -173,40 +156,18 @@ void check_round_trip(const IndexDatabase& db_a, const IndexDatabase& db_b,
     CHECK(db_a.get_num_lines(file_id) == db_b.get_num_lines(file_id));
     CHECK(db_a.get_max_bytes(file_id) == db_b.get_max_bytes(file_id));
 
-    auto cps_a = db_a.query_checkpoints(file_id);
-    auto cps_b = db_b.query_checkpoints(file_id);
+    auto cps_a = db_a.query_gzip_members(file_id);
+    auto cps_b = db_b.query_gzip_members(file_id);
     REQUIRE(cps_a.size() == cps_b.size());
     for (std::size_t i = 0; i < cps_a.size(); ++i) {
-        CHECK(cps_a[i].checkpoint_idx == cps_b[i].checkpoint_idx);
+        CHECK(cps_a[i].member_idx == cps_b[i].member_idx);
         CHECK(cps_a[i].uc_offset == cps_b[i].uc_offset);
         CHECK(cps_a[i].uc_size == cps_b[i].uc_size);
         CHECK(cps_a[i].c_offset == cps_b[i].c_offset);
         CHECK(cps_a[i].c_size == cps_b[i].c_size);
-        CHECK(cps_a[i].num_lines == cps_b[i].num_lines);
         CHECK(cps_a[i].first_line_num == cps_b[i].first_line_num);
         CHECK(cps_a[i].last_line_num == cps_b[i].last_line_num);
     }
-
-    auto er_a = db_a.query_event_ranges(file_id);
-    auto er_b = db_b.query_event_ranges(file_id);
-    REQUIRE(er_a.size() == er_b.size());
-    for (std::size_t i = 0; i < er_a.size(); ++i) {
-        CHECK(er_a[i].checkpoint_idx == er_b[i].checkpoint_idx);
-        CHECK(er_a[i].cat == er_b[i].cat);
-        CHECK(er_a[i].name == er_b[i].name);
-        CHECK(er_a[i].line_numbers == er_b[i].line_numbers);
-    }
-
-    auto md_a = db_a.query_metadata_lines(file_id);
-    auto md_b = db_b.query_metadata_lines(file_id);
-    REQUIRE(md_a.size() == md_b.size());
-    for (std::size_t i = 0; i < md_a.size(); ++i) {
-        CHECK(md_a[i].checkpoint_idx == md_b[i].checkpoint_idx);
-        CHECK(md_a[i].meta_type == md_b[i].meta_type);
-        CHECK(md_a[i].line_numbers == md_b[i].line_numbers);
-    }
-
-    CHECK(db_a.query_file_pids(file_id) == db_b.query_file_pids(file_id));
 
     auto cbf_a = db_a.query_chunk_bloom_filters(file_id, "name");
     auto cbf_b = db_b.query_chunk_bloom_filters(file_id, "name");
@@ -395,8 +356,7 @@ TEST_SUITE("IndexDatabaseSstWriterContext") {
         }
 
         CHECK(registry.metadata().size() == 1);
-        CHECK(registry.checkpoints().size() == 1);
-        CHECK(registry.manifest().size() == 1);
+        CHECK(registry.members().size() == 1);
 
         db_b.bulk_ingest(registry);
 
@@ -421,9 +381,7 @@ TEST_SUITE("IndexDatabaseSstWriterContext") {
         Fixture f1;
         Fixture f2;
         // Vary the second fixture so the comparison covers distinct data.
-        f2.read_lines = {7, 11, 13};
-        f2.write_lines = {4};
-        f2.pids = {201, 202};
+        f2.chunk_stats_b = make_chunk_stats(90);
 
         IndexDatabase db_a((root_a / ".dftindex").string());
         {
@@ -454,8 +412,7 @@ TEST_SUITE("IndexDatabaseSstWriterContext") {
         }
 
         CHECK(registry.metadata().size() == 2);
-        CHECK(registry.checkpoints().size() == 2);
-        CHECK(registry.manifest().size() == 2);
+        CHECK(registry.members().size() == 2);
 
         db_b.bulk_ingest(registry);
 

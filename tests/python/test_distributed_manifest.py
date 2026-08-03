@@ -15,12 +15,22 @@ try:
 except ImportError:
     DASK_AVAILABLE = False
 
-from dftracer.utils import AggregationConfig, Indexer
+from dftracer.utils import AggregationConfig, Indexer, TraceViewer
 from dftracer.utils.dask import distributed_index
 
 from .common import Environment
 
 AGG_CFG = AggregationConfig(time_interval_ms=5000)
+
+
+def _agg_event_count(files, index_dir):
+    """Total aggregated event count read from the index via the View tier."""
+    import pyarrow as pa
+
+    tbl = TraceViewer(files, index_path=index_dir).group_by("name").agg("count").collect()
+    if tbl is None:
+        return 0
+    return int(pa.compute.sum(pa.table(tbl)["count"]).as_py() or 0)
 
 
 def _build_distributed(env, pids, num_events=100, rebuild_root=True):
@@ -67,35 +77,9 @@ class TestDistributedIndexUnified:
                 force_rebuild=True,
             )
             uni_indexer.ensure_indexed()
-            uni_batches = uni_indexer.iter_arrow_dfanalyzer_all(
-                time_granularity=5.0,
-                time_resolution=1_000_000.0,
-            )
 
-            dist_indexer = Indexer(
-                files=files_dist,
-                index_dir=os.path.dirname(dist_index_path),
-                require_aggregation=AGG_CFG,
-                force_rebuild=False,
-            )
-            dist_batches = dist_indexer.iter_arrow_dfanalyzer_all(
-                time_granularity=5.0,
-                time_resolution=1_000_000.0,
-            )
-
-            import pyarrow as pa
-
-            def _total_count(batches_dict, key):
-                batches = [pa.record_batch(b) for b in batches_dict.get(key, [])]
-                if not batches:
-                    return 0
-                table = pa.Table.from_batches(batches)
-                if "count" in table.column_names:
-                    return int(pa.compute.sum(table["count"]).as_py() or 0)
-                return table.num_rows
-
-            uni_count = _total_count(uni_batches, "events")
-            dist_count = _total_count(dist_batches, "events")
+            uni_count = _agg_event_count(files_dist, uni_index_dir)
+            dist_count = _agg_event_count(files_dist, os.path.dirname(dist_index_path))
             assert uni_count == dist_count, (
                 f"event count mismatch: unified={uni_count} distributed={dist_count}"
             )
@@ -125,23 +109,8 @@ class TestDistributedIndexUnified:
                 aggregation_config=AGG_CFG,
             )
 
-            indexer = Indexer(
-                files=files,
-                index_dir=os.path.dirname(index_path),
-                require_aggregation=AGG_CFG,
-                force_rebuild=False,
-            )
-            batches = indexer.iter_arrow_dfanalyzer_all(
-                time_granularity=5.0,
-                time_resolution=1_000_000.0,
-            )
-            import pyarrow as pa
-
-            event_batches = [pa.record_batch(b) for b in batches.get("events", [])]
-            assert event_batches, "no events: per-file SSTs likely clobbered each other"
-            table = pa.Table.from_batches(event_batches)
-            total = int(pa.compute.sum(table["count"]).as_py() or 0)
-            assert total > 0
+            total = _agg_event_count(files, os.path.dirname(index_path))
+            assert total > 0, "no events: per-file SSTs likely clobbered each other"
 
     def test_ensure_indexed_is_noop_after_distributed_build(self):
         import time as _time
@@ -155,7 +124,6 @@ class TestDistributedIndexUnified:
                 index_dir=os.path.dirname(index_path),
                 require_checkpoint=True,
                 require_bloom=True,
-                require_manifest=True,
                 require_aggregation=AGG_CFG,
                 force_rebuild=False,
             )

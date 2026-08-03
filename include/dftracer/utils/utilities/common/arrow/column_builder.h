@@ -6,6 +6,7 @@
 
 #include <dftracer/utils/core/common/transparent_string_hash.h>
 #include <dftracer/utils/utilities/common/arrow/arrow_export.h>
+#include <dftracer/utils/utilities/common/statistics/ddsketch.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +20,17 @@
 
 namespace dftracer::utils::utilities::common::arrow {
 
-enum class ColumnType { INT64, UINT64, DOUBLE, STRING, BOOL, DICT_STRING };
+// HIST is a list<struct<lo:double, hi:double, count:uint64>> column: one raw
+// histogram (a list of buckets) per row.
+enum class ColumnType {
+    INT64,
+    UINT64,
+    DOUBLE,
+    STRING,
+    BOOL,
+    DICT_STRING,
+    HIST
+};
 
 struct ColumnSpec {
     std::string name;
@@ -44,6 +55,11 @@ struct ColumnData {
     std::deque<std::string> dict_values;     // unique strings (dictionary)
     std::unordered_map<std::string_view, std::int32_t>
         dict_map;                            // string -> index
+
+    // HIST support: flattened buckets across rows, plus each row's end offset
+    // into hist_bins (parallel to string_offsets).
+    std::vector<statistics::HistogramBin> hist_bins;
+    std::vector<std::int32_t> hist_offsets;
 };
 
 /**
@@ -89,6 +105,9 @@ class RecordBatchBuilder {
     void append_string(std::size_t col_idx, std::string_view value);
     void append_dict_string(std::size_t col_idx, std::string_view value);
     void append_bool(std::size_t col_idx, bool value);
+    // Append one row's histogram (a list of buckets) to a HIST column.
+    void append_hist(std::size_t col_idx,
+                     const std::vector<statistics::HistogramBin>& bins);
     void append_null(std::size_t col_idx);
 
     // End current row. In dynamic mode, backfills nulls for untouched

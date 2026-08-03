@@ -7,8 +7,8 @@ All compression operates in streaming mode using zero-copy ``ByteView`` chunks.
 .. note::
 
    The default gzip level used by the writer pipeline (``dftracer_aggregator``,
-   ``dftracer_organize``, parallel writers) is ``1`` (fastest); previous
-   releases defaulted to ``Z_DEFAULT_COMPRESSION`` (6). Override per-call with
+   parallel writers) is ``1`` (fastest); previous releases defaulted to
+   ``Z_DEFAULT_COMPRESSION`` (6). Override per-call with
    the ``compression_level`` field on ``ManualStreamingCompressorUtility``.
 
 .. note::
@@ -77,9 +77,8 @@ Yields compressed chunks as ``ByteView`` references into an internal buffer.
 Buffered Compression
 --------------------
 
-Writer pipelines (parallel writer, perfetto trace writer, organize group
-writers) buffer compressed payloads and flush at a configurable
-``flush_threshold``. The threshold is computed by
+Writer pipelines (parallel writer, perfetto trace writer) buffer compressed
+payloads and flush at a configurable ``flush_threshold``. The threshold is computed by
 ``compute_writer_sizing()`` from the detected filesystem layout
 (``LayoutInfo``): on Lustre/GPFS the threshold is sized to the PFS stripe
 so each compressed flush fits one stripe; on local FS it is ``max(default,

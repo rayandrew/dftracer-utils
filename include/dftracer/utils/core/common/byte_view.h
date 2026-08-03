@@ -44,8 +44,6 @@ class ByteView {
         return reinterpret_cast<const T*>(data_);
     }
 
-    std::string_view as_string_view() const { return {as<char>(), size_}; }
-
     ByteView subspan(std::size_t offset, std::size_t count) const {
         return {data_ + offset, count};
     }

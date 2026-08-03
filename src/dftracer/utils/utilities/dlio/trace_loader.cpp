@@ -74,7 +74,7 @@ void synthesize_samples(const agg::AggregationMetrics& metrics,
         max_samples == 0 ? metrics.count : std::min(metrics.count, max_samples);
     if (desired == 0) return;
 
-    const double mean_s = metrics.duration.mean * US_TO_S;
+    const double mean_s = metrics.duration.mean() * US_TO_S;
     if (metrics.duration.sketch) {
         std::uniform_real_distribution<double> u01(0.0, 1.0);
         out.reserve(out.size() + desired);
@@ -128,7 +128,9 @@ AggregatedTraces load_aggregated_traces(const std::string& db_path,
     auto& db = *db_handle;
 
     // The intern dictionary must be populated before any key parsing happens.
-    agg::load_intern_dictionary(db);
+    auto intern_table = agg::intern_for_index(db_path);
+    agg::load_intern_dictionary(db, *intern_table);
+    const auto& intern = intern_table->intern;
 
     AggregatedTraces out;
 
@@ -163,7 +165,7 @@ AggregatedTraces load_aggregated_traces(const std::string& db_path,
         if (is_system_key(key_sv)) continue;
 
         agg::AggKeyView kv;
-        if (!agg::parse_agg_key_view(key_sv, kv)) continue;
+        if (!agg::parse_agg_key_view(key_sv, intern, kv)) continue;
 
         ComponentAccumulator* target = nullptr;
         if (matches(kv.cat, CATEGORY_DATALOADER) &&
@@ -198,10 +200,10 @@ AggregatedTraces load_aggregated_traces(const std::string& db_path,
 
         // Accumulate component-level state.
         target->accumulated_time_s +=
-            static_cast<double>(metrics.duration.total) * US_TO_S;
+            static_cast<double>(metrics.duration.total()) * US_TO_S;
         target->total_count += metrics.count;
-        apply_minmax(*target, static_cast<double>(metrics.duration.min),
-                     static_cast<double>(metrics.duration.max));
+        apply_minmax(*target, static_cast<double>(metrics.duration.min()),
+                     static_cast<double>(metrics.duration.max()));
 
         // Real per-entry (ts, te) interval for trace-side union time.
         if (metrics.te > metrics.ts) {
@@ -340,7 +342,7 @@ AggregatedTraces load_aggregated_traces(const std::string& db_path,
         std::fprintf(stderr,
                      "dlio: warning - AGGREGATION CF has no DDSketch data. "
                      "Distribution fitting will use mean-replication samples; "
-                     "re-run dftracer_aggregator with --compute-percentiles "
+                     "re-index with percentile aggregation enabled "
                      "for higher-fidelity DLIO configs.\n");
     }
 

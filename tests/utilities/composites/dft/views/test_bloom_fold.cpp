@@ -1,0 +1,296 @@
+#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/utilities/composites/dft/indexing/scalable_bloom_filter.h>
+#include <dftracer/utils/utilities/composites/dft/views/bloom_fold.h>
+#include <dftracer/utils/utilities/composites/dft/views/dict_fold.h>
+#include <dftracer/utils/utilities/composites/dft/views/fold.h>
+#include <dftracer/utils/utilities/composites/dft/views/fold_event.h>
+#include <dftracer/utils/utilities/composites/dft/views/index_fold_driver.h>
+#include <dftracer/utils/utilities/indexer/index_database.h>
+#include <dftracer/utils/utilities/indexer/index_database_writer_context.h>
+#include <dftracer/utils/utilities/indexer/internal/helpers.h>
+#include <doctest/doctest.h>
+#include <simdjson.h>
+
+#include <span>
+#include <string>
+#include <vector>
+
+#include "test_view_common.h"
+
+using namespace dftracer::utils::utilities::composites::dft::views::detail;
+using dftracer::utils::StringIntern;
+namespace idx = dftracer::utils::utilities::indexer;
+using dftracer::utils::utilities::composites::dft::indexing::
+    ScalableBloomFilter;
+
+namespace {
+
+std::string create_bloom_trace(TestEnvironment& env, int n,
+                               std::size_t member_bytes) {
+    std::string pfw = env.get_dir() + "/bloom.pfw";
+    {
+        std::ofstream ofs(pfw);
+        for (int i = 0; i < n; ++i) {
+            ofs << R"({"ph":"X","name":")" << (i % 2 ? "read" : "write")
+                << R"(","cat":")" << (i % 3 ? "POSIX" : "STDIO")
+                << R"(","pid":)" << (1 + i % 4) << R"(,"tid":)" << (1 + i % 7)
+                << R"(,"ts":)" << (1000 + i * 100) << R"(,"dur":)" << (10 + i)
+                << R"(,"args":{"fhash":"fh)" << (i % 5)
+                << R"(","hhash":"hh1"}})"
+                << "\n";
+        }
+    }
+    std::string gz = pfw + ".gz";
+    dft_utils_test::compress_file_to_gzip_multimember(pfw, gz, member_bytes);
+    fs::remove(pfw);
+    return gz;
+}
+
+int file_id_of(idx::IndexDatabase& db, const std::string& gz) {
+    return db.get_file_info_id(idx::internal::get_logical_path(gz));
+}
+
+bool file_bloom_contains(idx::IndexDatabase& db, int fid, std::string_view dim,
+                         std::string_view value) {
+    auto fb = db.query_file_bloom_filter(fid, dim);
+    REQUIRE(fb.has_value());
+    auto bloom = ScalableBloomFilter::from_blob(fb->bloom_data.data(),
+                                                fb->bloom_data.size());
+    return bloom.possibly_contains(value);
+}
+
+std::string padded(std::string s) {
+    s.resize(s.size() + simdjson::SIMDJSON_PADDING, '\0');
+    return s;
+}
+
+std::vector<FoldEvent> events_of(const std::vector<std::string>& lines,
+                                 StringIntern& intern) {
+    std::vector<FoldEvent> out;
+    out.reserve(lines.size());
+    simdjson::dom::parser parser;
+    for (const auto& l : lines) {
+        std::string buf = padded(l);
+        auto doc = parser.parse(buf.data(), l.size(), false);
+        REQUIRE_FALSE(doc.error());
+        out.push_back(extract_fold_event(doc.value_unsafe(), intern, true));
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_SUITE("BloomFold") {
+    // An unfiltered export rides the fold along, so the pruner index it could
+    // not build before is now a byproduct: has_bloom flips and the written
+    // filters contain every value the trace carried (no false negatives).
+    TEST_CASE("builds a functional pruner index lazily") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_bloom_trace(env, 60, /*member_bytes=*/900);
+        std::string index_path = determine_index_path(gz, "");
+        {
+            StringSink s;
+            View::from_file(gz, index_path)
+                .emit_all_metadata(true)
+                .export_json(s)
+                .get();
+        }
+
+        idx::IndexDatabase db(index_path, idx::IndexOpenMode::ReadOnly);
+        int fid = file_id_of(db, gz);
+        REQUIRE(db.has_bloom_data(fid));
+
+        for (auto v : {"read", "write"})
+            CHECK(file_bloom_contains(db, fid, "name", v));
+        for (auto v : {"POSIX", "STDIO"})
+            CHECK(file_bloom_contains(db, fid, "cat", v));
+        for (auto v : {"1", "2", "3", "4"})
+            CHECK(file_bloom_contains(db, fid, "pid", v));
+        for (auto v : {"fh0", "fh1", "fh2", "fh3", "fh4"})
+            CHECK(file_bloom_contains(db, fid, "fhash", v));
+        CHECK(file_bloom_contains(db, fid, "hhash", "hh1"));
+
+        auto name_chunks = db.query_chunk_bloom_filters(fid, "name");
+        REQUIRE(name_chunks.size() > 1);
+        for (const auto& c : name_chunks) CHECK(c.num_entries <= 2);
+    }
+
+    // Only a file the scan read whole may publish a pruner index, and an index
+    // that already has one is authoritative.
+    TEST_CASE("coverage gate and single write") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_bloom_trace(env, 20, /*member_bytes=*/2000);
+        std::string index_path = determine_index_path(gz, "");
+        {
+            // A filtered export builds the members but attaches no index fold,
+            // so the index starts without a bloom for the fold to establish.
+            StringSink s;
+            View::from_file(gz, index_path)
+                .query(R"(cat == "POSIX")")
+                .export_json(s)
+                .get();
+            idx::IndexDatabase db(index_path, idx::IndexOpenMode::ReadOnly);
+            REQUIRE_FALSE(db.has_bloom_data(file_id_of(db, gz)));
+        }
+
+        ScanUnit unit;
+        unit.file_path = gz;
+        unit.index_path = index_path;
+        unit.checkpoint_idx = 0;
+
+        std::vector<std::string> lines;
+        for (int i = 0; i < 8; ++i)
+            lines.push_back(R"({"ph":"X","name":"read","cat":"POSIX","pid":)" +
+                            std::to_string(1 + i % 3) + R"(,"tid":1,"ts":)" +
+                            std::to_string(i) +
+                            R"(,"dur":1,"args":{"fhash":"fh1"}})");
+
+        auto drive = [&](CoverageSet cov) {
+            StringIntern intern;
+            auto events = events_of(lines, intern);
+            BloomFold fold(intern);
+            FoldBatch batch{std::span<const FoldEvent>(events), unit};
+            fold.step(batch);
+            fold.seal_unit(unit);
+            return fold.finalize(cov).get();
+        };
+
+        CoverageSet member_only;
+        member_only.add(gz, 0);
+        CHECK_FALSE(drive(member_only));
+        {
+            idx::IndexDatabase db(index_path, idx::IndexOpenMode::ReadOnly);
+            CHECK_FALSE(db.has_bloom_data(file_id_of(db, gz)));
+        }
+
+        CoverageSet whole_file;
+        whole_file.add_file(gz);
+        CHECK(drive(whole_file));
+        {
+            idx::IndexDatabase db(index_path, idx::IndexOpenMode::ReadOnly);
+            CHECK(db.has_bloom_data(file_id_of(db, gz)));
+        }
+
+        // Already present: a second ride-along writes nothing.
+        CHECK_FALSE(drive(whole_file));
+    }
+
+    // The streaming index build owns its write transaction, so the folds write
+    // into a caller-provided sink (here a RocksDB writer) rather than opening
+    // their own index. Both artifacts must come back queryable.
+    TEST_CASE("write_to_sink writes queryable bloom and hash") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_bloom_trace(env, 20, /*member_bytes=*/2000);
+        std::string index_path = determine_index_path(gz, "");
+        {
+            StringSink s;
+            View::from_file(gz, index_path)
+                .query(R"(cat == "POSIX")")
+                .export_json(s)
+                .get();
+        }
+
+        ScanUnit unit;
+        unit.file_path = gz;
+        unit.index_path = index_path;
+        unit.checkpoint_idx = 0;
+
+        std::vector<std::string> lines = {
+            R"({"name":"FH","cat":"dftracer","pid":1,"tid":1,"ph":"M","args":{"name":"/data/a.bin","value":"fh1"}})",
+            R"({"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,"ts":1,"dur":1,"args":{"fhash":"fh1"}})",
+            R"({"ph":"X","name":"write","cat":"STDIO","pid":2,"tid":3,"ts":2,"dur":1,"args":{"fhash":"fh1"}})",
+        };
+        StringIntern intern;
+        auto events = events_of(lines, intern);
+        BloomFold bloom(intern);
+        DictFold dict(intern);
+        FoldBatch fb{std::span<const FoldEvent>(events), unit};
+        bloom.step(fb);
+        dict.step(fb);
+        bloom.seal_unit(unit);
+        dict.seal_unit(unit);
+
+        int fid = -1;
+        {
+            idx::IndexDatabase db(index_path);
+            fid = db.get_file_info_id(idx::internal::get_logical_path(gz));
+            REQUIRE(fid >= 0);
+            auto w = db.begin_write();
+            bloom.write_to_sink(*w, fid);
+            dict.write_to_sink(*w);
+            w->commit();
+        }
+
+        idx::IndexDatabase rd(index_path, idx::IndexOpenMode::ReadOnly);
+        CHECK(file_bloom_contains(rd, fid, "name", "read"));
+        CHECK(file_bloom_contains(rd, fid, "name", "write"));
+        CHECK(file_bloom_contains(rd, fid, "fhash", "fh1"));
+        auto file_hashes =
+            rd.query_hash_table(idx::IndexDatabase::HashType::FILE);
+        REQUIRE(file_hashes.count("fh1") == 1);
+        CHECK(file_hashes.at("fh1") == "/data/a.bin");
+    }
+
+    // IndexFoldDriver parses member plaintext into the folds. Feeding it split
+    // across two on_chunk calls (mid-line) exercises the cross-chunk reassembly
+    // it inherits from parse_buffer: no event may be lost at the seam.
+    TEST_CASE("IndexFoldDriver harvests folds across a chunk boundary") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_bloom_trace(env, 20, /*member_bytes=*/2000);
+        std::string index_path = determine_index_path(gz, "");
+        {
+            StringSink s;
+            View::from_file(gz, index_path)
+                .query(R"(cat == "POSIX")")
+                .export_json(s)
+                .get();
+        }
+
+        std::string text =
+            std::string(
+                R"({"name":"FH","cat":"dftracer","pid":1,"tid":1,"ph":"M","args":{"name":"/data/a.bin","value":"fh1"}})") +
+            "\n" +
+            R"({"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,"ts":1,"dur":1,"args":{"fhash":"fh1"}})" +
+            "\n" +
+            R"({"ph":"X","name":"write","cat":"STDIO","pid":2,"tid":3,"ts":2,"dur":1,"args":{"fhash":"fh1"}})" +
+            "\n";
+
+        StringIntern intern;
+        BloomFold bloom(intern);
+        DictFold dict(intern);
+        std::array<Fold*, 2> fp{&bloom, &dict};
+        IndexFoldDriver drv(intern, fp, gz, index_path);
+        // Split mid-way (lands inside the "read" line) to force reassembly.
+        std::size_t half = text.size() / 2;
+        drv.on_chunk(text.data(), half, /*cp=*/0).get();
+        drv.on_chunk(text.data() + half, text.size() - half, /*cp=*/0).get();
+        drv.seal();
+
+        int fid = -1;
+        {
+            idx::IndexDatabase db(index_path);
+            fid = db.get_file_info_id(idx::internal::get_logical_path(gz));
+            REQUIRE(fid >= 0);
+            auto w = db.begin_write();
+            bloom.write_to_sink(*w, fid);
+            dict.write_to_sink(*w);
+            w->commit();
+        }
+
+        idx::IndexDatabase rd(index_path, idx::IndexOpenMode::ReadOnly);
+        // All three events survived the seam: both names, both cats, the fhash,
+        // and the FH dictionary entry.
+        CHECK(file_bloom_contains(rd, fid, "name", "read"));
+        CHECK(file_bloom_contains(rd, fid, "name", "write"));
+        CHECK(file_bloom_contains(rd, fid, "cat", "STDIO"));
+        CHECK(file_bloom_contains(rd, fid, "fhash", "fh1"));
+        auto file_hashes =
+            rd.query_hash_table(idx::IndexDatabase::HashType::FILE);
+        REQUIRE(file_hashes.count("fh1") == 1);
+        CHECK(file_hashes.at("fh1") == "/data/a.bin");
+    }
+}

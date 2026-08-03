@@ -52,8 +52,6 @@ std::string format_name(Format format) {
     switch (format) {
         case Format::GZIP:
             return "gzip";
-        case Format::TAR_GZIP:
-            return "tar.gz";
         default:
             return "unknown";
     }
@@ -66,11 +64,9 @@ struct FormatWrapper {
 };
 
 using GZIPFormat = FormatWrapper<Format::GZIP>;
-using TARGZIPFormat = FormatWrapper<Format::TAR_GZIP>;
 
 // Parameterized tests using doctest's approach
-TEST_CASE_TEMPLATE("Indexer creation and destruction", FormatType, GZIPFormat,
-                   TARGZIPFormat) {
+TEST_CASE_TEMPLATE("Indexer creation and destruction", FormatType, GZIPFormat) {
     FormatTestFixture fixture(FormatType::value);
 
     SUBCASE("Basic indexer creation") {
@@ -89,7 +85,7 @@ TEST_CASE_TEMPLATE("Indexer creation and destruction", FormatType, GZIPFormat,
     }
 }
 
-TEST_CASE_TEMPLATE("Index building", FormatType, GZIPFormat, TARGZIPFormat) {
+TEST_CASE_TEMPLATE("Index building", FormatType, GZIPFormat) {
     FormatTestFixture fixture(FormatType::value);
 
     SUBCASE("Basic index building") {
@@ -124,7 +120,7 @@ TEST_CASE_TEMPLATE("Index building", FormatType, GZIPFormat, TARGZIPFormat) {
 }
 
 TEST_CASE_TEMPLATE("Reader creation and basic functionality", FormatType,
-                   GZIPFormat, TARGZIPFormat) {
+                   GZIPFormat) {
     FormatTestFixture fixture(FormatType::value);
 
     auto indexer = IndexerFactory::create(
@@ -146,8 +142,7 @@ TEST_CASE_TEMPLATE("Reader creation and basic functionality", FormatType,
     }
 }
 
-TEST_CASE_TEMPLATE("Data reading operations", FormatType, GZIPFormat,
-                   TARGZIPFormat) {
+TEST_CASE_TEMPLATE("Data reading operations", FormatType, GZIPFormat) {
     FormatTestFixture fixture(FormatType::value);
 
     auto indexer = IndexerFactory::create(fixture.get_test_file(),
@@ -228,8 +223,7 @@ TEST_CASE_TEMPLATE("Data reading operations", FormatType, GZIPFormat,
     }
 }
 
-TEST_CASE_TEMPLATE("JSON boundary detection", FormatType, GZIPFormat,
-                   TARGZIPFormat) {
+TEST_CASE_TEMPLATE("JSON boundary detection", FormatType, GZIPFormat) {
     FormatTestFixture fixture(FormatType::value);
 
     auto indexer = IndexerFactory::create(fixture.get_test_file(),
@@ -273,8 +267,7 @@ TEST_CASE_TEMPLATE("JSON boundary detection", FormatType, GZIPFormat,
     }
 }
 
-TEST_CASE_TEMPLATE("Line-based reading", FormatType, GZIPFormat,
-                   TARGZIPFormat) {
+TEST_CASE_TEMPLATE("Line-based reading", FormatType, GZIPFormat) {
     FormatTestFixture fixture(FormatType::value);
 
     // Create a larger test environment for line testing
@@ -343,129 +336,5 @@ TEST_CASE_TEMPLATE("Line-based reading", FormatType, GZIPFormat,
                 // Skip lines that can't be read
             }
         }
-    }
-}
-
-// Format-specific tests
-TEST_CASE("TAR.GZ specific functionality" * doctest::test_suite("vg")) {
-    SUBCASE("Multiple files in archive") {
-        TestEnvironment tar_env(valgrind_scale(300, 10), Format::TAR_GZIP);
-        REQUIRE(tar_env.is_valid());
-
-        std::string tar_gz_file = tar_env.create_test_tar_gzip_file();
-        REQUIRE(!tar_gz_file.empty());
-
-        std::string index_file = tar_env.get_index_path(tar_gz_file);
-
-        auto indexer =
-            IndexerFactory::create(tar_gz_file, index_file, 1024 * 1024);
-        REQUIRE(indexer != nullptr);
-
-        indexer->build();
-
-        // Verify that we can read from the tar.gz archive
-        auto reader = ReaderFactory::create(indexer);
-        REQUIRE(reader != nullptr);
-
-        const std::size_t buffer_size = 1024;
-        std::vector<char> buffer(buffer_size);
-        std::size_t total_bytes = 0;
-        std::size_t current_pos = 0;
-        std::uint64_t max_bytes = indexer->get_max_bytes();
-
-        while (current_pos < max_bytes) {
-            std::size_t end_pos = std::min(current_pos + buffer_size,
-                                           static_cast<std::size_t>(max_bytes));
-            std::size_t bytes_read = reader->read(current_pos, end_pos,
-                                                  buffer.data(), buffer.size());
-            if (bytes_read == 0) break;
-            total_bytes += bytes_read;
-            current_pos += bytes_read;
-        }
-
-        CHECK(total_bytes > 0);
-        MESSAGE("TAR.GZ archive total bytes read: " << total_bytes);
-
-        // Verify we read data from multiple files (should contain different
-        // "file" field values)
-        std::string content(buffer.data(), std::min(buffer_size, total_bytes));
-        // Reset reader and read all content for verification
-        reader = ReaderFactory::create(indexer);
-        std::vector<char> full_content(total_bytes + 1024);
-        std::size_t full_total = 0;
-        std::size_t current_pos_full = 0;
-
-        while (current_pos_full < max_bytes &&
-               full_total < full_content.size() - 1024) {
-            std::size_t end_pos = std::min(current_pos_full + 1024,
-                                           static_cast<std::size_t>(max_bytes));
-            std::size_t bytes_read =
-                reader->read(current_pos_full, end_pos,
-                             full_content.data() + full_total, 1024);
-            if (bytes_read == 0) break;
-            full_total += bytes_read;
-            current_pos_full += bytes_read;
-        }
-
-        std::string full_string(full_content.data(), full_total);
-        CHECK(full_string.find("\"file\": \"main\"") != std::string::npos);
-        CHECK(full_string.find("\"file\": \"secondary\"") != std::string::npos);
-        CHECK(full_string.find("\"file\": \"additional\"") !=
-              std::string::npos);
-    }
-
-    SUBCASE("Directory structure handling") {
-        const std::size_t n_tar = valgrind_scale(150, 5);
-        TestEnvironment tar_env(n_tar, Format::TAR_GZIP);
-        REQUIRE(tar_env.is_valid());
-
-        std::string tar_gz_file = tar_env.create_test_tar_gzip_file();
-        REQUIRE(!tar_gz_file.empty());
-
-        // The tar.gz should contain files with directory paths like
-        // "logs/additional.jsonl"
-        std::string index_file = tar_env.get_index_path(tar_gz_file);
-
-        auto indexer =
-            IndexerFactory::create(tar_gz_file, index_file, 1024 * 1024);
-        REQUIRE(indexer != nullptr);
-
-        indexer->build();
-        CHECK(indexer->get_num_lines() >= n_tar);
-    }
-}
-
-TEST_CASE("GZIP specific functionality" * doctest::test_suite("vg")) {
-    SUBCASE("Single file structure") {
-        const std::size_t n_gz = valgrind_scale(200, 5);
-        TestEnvironment gzip_env(n_gz, Format::GZIP);
-        REQUIRE(gzip_env.is_valid());
-
-        std::string gz_file = gzip_env.create_test_gzip_file();
-        REQUIRE(!gz_file.empty());
-
-        std::string index_file = gzip_env.get_index_path(gz_file);
-
-        auto indexer = IndexerFactory::create(gz_file, index_file, 1024 * 1024);
-        REQUIRE(indexer != nullptr);
-
-        indexer->build();
-        CHECK(indexer->get_num_lines() == n_gz);
-
-        auto reader = ReaderFactory::create(indexer);
-        REQUIRE(reader != nullptr);
-
-        // Read some content and verify it's the simple gzip format
-        std::vector<char> buffer(1024);
-        std::uint64_t max_bytes = indexer->get_max_bytes();
-        std::size_t bytes_read = reader->read(
-            0, std::min(static_cast<std::size_t>(max_bytes), buffer.size()),
-            buffer.data(), buffer.size());
-        CHECK(bytes_read > 0);
-
-        std::string content(buffer.data(), bytes_read);
-        CHECK(content.find("\"message\": \"Test message") != std::string::npos);
-        CHECK(content.find("\"file\":") ==
-              std::string::npos);  // GZIP format shouldn't have file field
     }
 }

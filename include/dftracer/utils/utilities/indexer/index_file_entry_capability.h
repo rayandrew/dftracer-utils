@@ -10,7 +10,7 @@ enum class IndexFileEntryCapability : std::uint8_t {
     BLOOM = 1 << 0,
     MANIFEST = 1 << 1,
     FILE_SUMMARY = 1 << 2,
-    CHECKPOINTS = 1 << 3,
+    MEMBERS = 1 << 3,
     INDEXING_COMPLETE = 1 << 4,
 };
 

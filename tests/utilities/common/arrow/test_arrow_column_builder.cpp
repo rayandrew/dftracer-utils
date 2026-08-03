@@ -212,4 +212,26 @@ TEST_CASE("RecordBatchBuilder - Bool column") {
     CHECK(result.num_columns() == 1);
 }
 
+TEST_CASE("RecordBatchBuilder - HIST list<struct> column") {
+    RecordBatchBuilder b;
+    b.declare_schema({{"name", ColumnType::STRING}, {"h", ColumnType::HIST}});
+
+    b.append_string(0, "read");
+    b.append_hist(1, {{0.0, 1.0, 3}, {1.0, 2.0, 5}});
+    b.end_row();
+
+    b.append_string(0, "write");
+    b.append_hist(1, {});  // empty histogram
+    b.end_row();
+
+    auto result = b.finish();
+    REQUIRE(result.valid());
+    CHECK(result.num_rows() == 2);
+    CHECK(result.num_columns() == 2);
+    // list<item: struct<lo,hi,count>>: format "+l" with a struct child.
+    CHECK(child_schema_format(result, 1) == std::string("+l"));
+    CHECK(std::string(result.get_schema()->children[1]->children[0]->format) ==
+          std::string("+s"));
+}
+
 #endif  // DFTRACER_UTILS_ENABLE_ARROW

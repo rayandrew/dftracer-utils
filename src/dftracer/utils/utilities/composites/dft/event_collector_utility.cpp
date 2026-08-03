@@ -3,7 +3,7 @@
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/utils/string.h>
 #include <dftracer/utils/utilities/composites/dft/event_collector_utility.h>
-#include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_line_generator.h>
+#include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
 #include <dftracer/utils/utilities/reader/internal/reader_factory.h>
 #include <simdjson.h>
@@ -90,8 +90,8 @@ EventCollectorFromMetadataUtility::process(
             co_await reader->read_lines_with_processor_async(
                 file.start_line, file.end_line, collector);
         } else {
-            // Plain text file — async line generator
-            auto line_gen = fileio::lines::sources::async_plain_file_lines(
+            // No index: stream the gzip trace directly.
+            auto line_gen = fileio::lines::sources::async_streaming_gz_lines(
                 file.file_path, file.start_line, file.end_line);
             while (auto line_opt = co_await line_gen.next()) {
                 co_await collector.process(line_opt->content.data(),

@@ -1,5 +1,6 @@
 #include <dftracer/utils/core/coro/yield.h>
 #include <dftracer/utils/core/pipeline/executor.h>
+#include <dftracer/utils/core/pipeline/run_loop.h>
 
 #include <chrono>
 
@@ -40,6 +41,36 @@ void* suppress_executor() noexcept {
 
 void restore_executor(void* saved) noexcept {
     Executor::set_current(static_cast<Executor*>(saved));
+}
+
+void drive_to_completion(std::coroutine_handle<> h) {
+    if (!h) return;
+
+    auto saved = get_timeslice_duration();
+    set_timeslice_duration(std::chrono::microseconds{0});
+    struct RestoreTimeslice {
+        std::chrono::microseconds saved;
+        ~RestoreTimeslice() { set_timeslice_duration(saved); }
+    } restore{saved};
+
+    // Lend this thread to the executor already driving it rather than
+    // standing up a private loop: a pool keeps serving its queue meanwhile,
+    // so waiting here costs it no capacity and work this task depends on can
+    // still run - including on this thread.
+    if (auto* exec = Executor::current()) {
+        exec->enqueue(h);
+        exec->drive_until([&] { return h.done(); });
+        return;
+    }
+
+    RunLoop loop;
+    struct Bind {
+        Executor* prev;
+        ~Bind() { Executor::set_current(prev); }
+    } bind{Executor::set_current(&loop)};
+
+    loop.enqueue(h);
+    loop.drive_until([&] { return h.done(); });
 }
 
 void yield_to_executor(std::coroutine_handle<> h) noexcept {

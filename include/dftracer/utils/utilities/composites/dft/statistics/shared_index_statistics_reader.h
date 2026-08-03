@@ -44,7 +44,7 @@ inline SharedIndexBatchRows query_shared_index_batch(
 
     utilities::indexer::IndexDatabase idx_db(
         index_path,
-        dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+        dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
     auto scalar_rows = idx_db.query_file_scalar_stats_batch(file_ids);
     std::unordered_map<int, utilities::indexer::ChunkStatistics*> merge_targets;
     merge_targets.reserve(file_ids.size());

@@ -1,7 +1,9 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/python/py_dict_helpers.h>
 #include <dftracer/utils/python/py_errors.h>
+#include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
@@ -23,8 +25,7 @@ static void Runtime_dealloc(RuntimeObject *self) {
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
-static PyObject *Runtime_new(PyTypeObject *type, PyObject *args,
-                             PyObject *kwds) {
+static PyObject *Runtime_new(PyTypeObject *type, PyObject *, PyObject *) {
     RuntimeObject *self = (RuntimeObject *)type->tp_alloc(type, 0);
     if (self) {
         // Placement-new the shared_ptr (tp_alloc gives raw memory)
@@ -38,8 +39,9 @@ static int Runtime_init(RuntimeObject *self, PyObject *args, PyObject *kwds) {
     Py_ssize_t threads = 0;
     Py_ssize_t io_threads = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|nn", (char **)kwlist,
-                                     &threads, &io_threads)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|nn",
+                                     const_cast<char **>(kwlist), &threads,
+                                     &io_threads)) {
         return -1;
     }
 
@@ -250,7 +252,8 @@ static PyObject *Runtime_set_timeout(RuntimeObject *self, PyObject *args,
     static const char *kwlist[] = {"global_ms", NULL};
     Py_ssize_t ms = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|n", (char **)kwlist, &ms)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|n",
+                                     const_cast<char **>(kwlist), &ms)) {
         return NULL;
     }
 
@@ -270,7 +273,8 @@ static PyObject *Runtime_set_default_task_timeout(RuntimeObject *self,
     static const char *kwlist[] = {"ms", NULL};
     Py_ssize_t ms = 0;
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|n", (char **)kwlist, &ms)) {
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|n",
+                                     const_cast<char **>(kwlist), &ms)) {
         return NULL;
     }
 
@@ -300,7 +304,7 @@ static PyObject *Runtime_enter(RuntimeObject *self,
     return (PyObject *)self;
 }
 
-static PyObject *Runtime_exit(RuntimeObject *self, PyObject *args) {
+static PyObject *Runtime_exit(RuntimeObject *self, PyObject *) {
     if (self->runtime) {
         Py_BEGIN_ALLOW_THREADS self->runtime->shutdown();
         Py_END_ALLOW_THREADS
@@ -308,7 +312,7 @@ static PyObject *Runtime_exit(RuntimeObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
-static PyObject *Runtime_get_threads(RuntimeObject *self, void *closure) {
+static PyObject *Runtime_get_threads(RuntimeObject *self, void *) {
     if (!self->runtime) {
         PyErr_SetString(PyExc_RuntimeError, "Runtime not initialized");
         return NULL;
@@ -323,6 +327,23 @@ static PyObject *get_default_runtime_py(PyObject *Py_UNUSED(module),
         PyErr_SetString(PyExc_RuntimeError, "Failed to create default runtime");
         return NULL;
     }
+
+    RuntimeObject *obj = (RuntimeObject *)RuntimeType.tp_alloc(&RuntimeType, 0);
+    if (!obj) return NULL;
+
+    new (&obj->runtime)
+        std::shared_ptr<dftracer::utils::Runtime>(g_default_runtime);
+    return (PyObject *)obj;
+}
+
+// Return the current default runtime without creating one. Unlike
+// get_default_runtime, this never materializes a full-machine-sized runtime as
+// a side effect, so callers that only want to save/restore the default (e.g. a
+// Dask worker plugin) do not each spin up an unused hardware_concurrency-thread
+// runtime.
+static PyObject *peek_default_runtime_py(PyObject *Py_UNUSED(module),
+                                         PyObject *Py_UNUSED(ignored)) {
+    if (!g_default_runtime) Py_RETURN_NONE;
 
     RuntimeObject *obj = (RuntimeObject *)RuntimeType.tp_alloc(&RuntimeType, 0);
     if (!obj) return NULL;
@@ -352,37 +373,38 @@ static PyObject *set_default_runtime_py(PyObject *Py_UNUSED(module),
 }
 
 static PyMethodDef Runtime_methods[] = {
-    {"shutdown", (PyCFunction)Runtime_shutdown, METH_NOARGS,
+    {"shutdown", DFT_PYCFUNCTION(Runtime_shutdown), METH_NOARGS,
      "shutdown()\n"
      "--\n"
      "\n"
      "Shut down the runtime.\n"},
-    {"get_progress", (PyCFunction)Runtime_get_progress, METH_NOARGS,
+    {"get_progress", DFT_PYCFUNCTION(Runtime_get_progress), METH_NOARGS,
      "Return progress dict with keys: total, completed, running,\n"
      "queued, failed."},
-    {"is_responsive", (PyCFunction)Runtime_is_responsive, METH_NOARGS,
+    {"is_responsive", DFT_PYCFUNCTION(Runtime_is_responsive), METH_NOARGS,
      "Return True if the runtime is making progress."},
-    {"set_timeout", (PyCFunction)Runtime_set_timeout,
+    {"set_timeout", DFT_PYCFUNCTION(Runtime_set_timeout),
      METH_VARARGS | METH_KEYWORDS,
      "Set global timeout in milliseconds.\n"
      "\n"
      "Args:\n"
      "    global_ms (int): Timeout in milliseconds (0 = no timeout).\n"},
-    {"set_default_task_timeout", (PyCFunction)Runtime_set_default_task_timeout,
+    {"set_default_task_timeout",
+     DFT_PYCFUNCTION(Runtime_set_default_task_timeout),
      METH_VARARGS | METH_KEYWORDS,
      "Set default per-task timeout in milliseconds.\n"
      "\n"
      "Args:\n"
      "    ms (int): Timeout in milliseconds (0 = no timeout).\n"},
-    {"wait_all", (PyCFunction)Runtime_wait_all, METH_NOARGS,
+    {"wait_all", DFT_PYCFUNCTION(Runtime_wait_all), METH_NOARGS,
      "Wait for all outstanding submitted tasks to complete."},
-    {"__enter__", (PyCFunction)Runtime_enter, METH_NOARGS,
+    {"__enter__", DFT_PYCFUNCTION(Runtime_enter), METH_NOARGS,
      "Enter context manager."},
-    {"__exit__", (PyCFunction)Runtime_exit, METH_VARARGS,
+    {"__exit__", DFT_PYCFUNCTION(Runtime_exit), METH_VARARGS,
      "Exit context manager (calls shutdown)."},
     {NULL}};
 
-static PyObject *Runtime_get_io_threads(RuntimeObject *self, void *closure) {
+static PyObject *Runtime_get_io_threads(RuntimeObject *self, void *) {
     if (!self->runtime) {
         PyErr_SetString(PyExc_RuntimeError, "Runtime not initialized");
         return NULL;
@@ -451,6 +473,9 @@ PyTypeObject RuntimeType = {
 static PyMethodDef runtime_module_methods[] = {
     {"get_default_runtime", get_default_runtime_py, METH_NOARGS,
      "Return the module-level default Runtime (lazy-created)."},
+    {"peek_default_runtime", peek_default_runtime_py, METH_NOARGS,
+     "Return the current default Runtime, or None if none exists yet "
+     "(never creates one)."},
     {"set_default_runtime", set_default_runtime_py, METH_VARARGS,
      "Replace the module-level default Runtime (pass None to clear).\n"
      "\n"
@@ -458,8 +483,22 @@ static PyMethodDef runtime_module_methods[] = {
      "    runtime (Runtime or None): New default runtime.\n"},
     {NULL}};
 
+// Runs during interpreter finalization. Stop the default runtime's worker and
+// I/O threads while the process is still healthy, then tell RocksDB we are
+// exiting so cached DB handles skip closing every open SST on teardown. A read
+// scan can leave hundreds of SSTs open (more so on a networked filesystem),
+// and without this the process can appear to hang after the work is done.
+static void dftracer_utils_atexit_cleanup() {
+    if (g_default_runtime) {
+        g_default_runtime->shutdown();
+    }
+    dftracer::utils::rocksdb::mark_process_exiting_for_rocksdb();
+}
+
 int init_runtime(PyObject *m) {
     if (register_type(m, &RuntimeType, "Runtime") < 0) return -1;
+
+    Py_AtExit(dftracer_utils_atexit_cleanup);
 
     for (PyMethodDef *def = runtime_module_methods; def->ml_name; ++def) {
         PyObject *fn = PyCFunction_New(def, NULL);

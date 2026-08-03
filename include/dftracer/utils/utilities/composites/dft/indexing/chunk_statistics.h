@@ -6,6 +6,7 @@
 #include <dftracer/utils/utilities/common/statistics/log2_histogram.h>
 #include <dftracer/utils/utilities/common/statistics/timestamp_histogram.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -14,6 +15,27 @@
 #include <vector>
 
 namespace dftracer::utils::utilities::composites::dft::indexing {
+
+/// Compact zone-map for a contiguous run of events within a member (a
+/// "sub-chunk"). Carries only an event count and ts/dur ranges, so the pruner
+/// can skip line ranges of an already-decoded member without a per-event scan.
+/// Buckets are stored in event order; a reader recovers each bucket's event
+/// range by cumulative-summing `event_count`, so no absolute offset is kept.
+struct SubChunkZoneMap {
+    std::uint64_t event_count = 0;
+    std::uint64_t min_timestamp_us = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t max_timestamp_us = 0;
+    std::uint64_t min_duration_us = std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t max_duration_us = 0;
+
+    void observe(std::uint64_t ts, std::uint64_t dur) {
+        min_timestamp_us = std::min(min_timestamp_us, ts);
+        max_timestamp_us = std::max(max_timestamp_us, ts);
+        min_duration_us = std::min(min_duration_us, dur);
+        max_duration_us = std::max(max_duration_us, dur);
+        ++event_count;
+    }
+};
 
 /**
  * @brief Per-chunk statistics for DFTracer events.
@@ -46,9 +68,27 @@ struct ChunkStatistics {
     StringViewMap<double> name_duration_sum_sqs;
     StringViewMap<std::string> name_category;
 
+    // Per-category and per-pid duration DDSketches + sums, so the viz stats
+    // fast path can answer group-by-cat and group-by-pid from stored
+    // aggregates. Pid keys are the decimal pid (matching the viz grouping).
+    StringViewMap<common::statistics::DDSketch> cat_duration_sketches;
+    StringViewMap<double> cat_duration_sums;
+    StringViewMap<common::statistics::DDSketch> pid_duration_sketches;
+    StringViewMap<double> pid_duration_sums;
+
+    // Sub-chunk zone-maps in event order (per-member only; empty for file and
+    // root summaries). merge_from does not touch these; the visitor appends
+    // them explicitly when merging parallel slices.
+    std::vector<SubChunkZoneMap> sub_zonemaps;
+
+    // has_dur reports whether the event carried a "dur" field. Event counts
+    // and timestamps cover every non-metadata event; duration aggregates
+    // (global and per-name) count only events with a duration, matching the
+    // viz stats aggregation.
     void update_from_event(std::string_view name, std::string_view cat,
                            std::uint64_t pid, std::uint64_t tid,
-                           std::uint64_t ts, std::uint64_t dur);
+                           std::uint64_t ts, std::uint64_t dur,
+                           bool has_dur = true);
 
     void merge_from(const ChunkStatistics& other);
 
@@ -59,9 +99,16 @@ struct ChunkStatistics {
     std::string name_duration_histograms_json() const;
     std::string name_duration_sums_json() const;
     std::string name_duration_sum_sqs_json() const;
+    std::string cat_duration_sums_json() const;
+    std::string pid_duration_sums_json() const;
 
     /// Serialize per-name DDSketches to a single binary blob.
     std::vector<std::uint8_t> serialize_name_duration_sketches() const;
+
+    /// Serialize an arbitrary key -> DDSketch map to one binary blob (same
+    /// format as serialize_name_duration_sketches; used for cat/pid sketches).
+    static std::vector<std::uint8_t> serialize_sketch_map(
+        const StringViewMap<common::statistics::DDSketch>& sketches);
 
     static StringViewMap<std::string> parse_string_map_json(
         const std::string& json);

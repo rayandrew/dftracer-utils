@@ -7,7 +7,7 @@
 namespace dftracer::utils::rocksdb::cf {
 
 inline constexpr std::string_view DEFAULT = "default";
-inline constexpr std::string_view CHECKPOINTS = "checkpoints";
+inline constexpr std::string_view MEMBERS = "members";
 inline constexpr std::string_view METADATA = "metadata";
 inline constexpr std::string_view CHUNK_BLOOM = "chunk_bloom";
 inline constexpr std::string_view FILE_BLOOM = "file_bloom";
@@ -27,14 +27,13 @@ inline constexpr std::string_view NAME_FILE_POSTINGS = "name_file_postings";
 inline constexpr std::string_view NAME_CHUNK_POSTINGS = "name_chunk_postings";
 inline constexpr std::string_view MANIFEST = "manifest";
 inline constexpr std::string_view PROVENANCE = "provenance";
-inline constexpr std::string_view ARCHIVES = "archives";
-inline constexpr std::string_view TAR_FILES = "tar_files";
 inline constexpr std::string_view AGGREGATION = "aggregation";
 inline constexpr std::string_view SYSTEM_METRICS = "system_metrics";
 inline constexpr std::string_view HASH_TABLES = "hash_tables";
+inline constexpr std::string_view ROLLUP = "rollup";
 inline constexpr auto ALL =
     std::to_array<std::string_view>({DEFAULT,
-                                     CHECKPOINTS,
+                                     MEMBERS,
                                      METADATA,
                                      CHUNK_BLOOM,
                                      FILE_BLOOM,
@@ -54,11 +53,10 @@ inline constexpr auto ALL =
                                      NAME_CHUNK_POSTINGS,
                                      MANIFEST,
                                      PROVENANCE,
-                                     ARCHIVES,
-                                     TAR_FILES,
                                      AGGREGATION,
                                      SYSTEM_METRICS,
-                                     HASH_TABLES});
+                                     HASH_TABLES,
+                                     ROLLUP});
 
 }  // namespace dftracer::utils::rocksdb::cf
 

@@ -263,25 +263,6 @@ trackers for downstream resolution.
     EventAggregatorOutput result = agg.finalize();
     auto tracker = agg.build_global_tracker();  // merged AssociationTracker
 
-AggregationVisitor
-~~~~~~~~~~~~~~~~~~
-
-``DftEventVisitor`` subclass that accumulates ``AggregationMetrics`` per
-``AggregationKey`` directly from parsed events during a scan, so the
-aggregation pass can share a single parse with bloom and manifest
-visitors via ``DftEventDispatcher``. Defined in
-``dftracer/utils/utilities/composites/dft/aggregators/aggregation_visitor.h``.
-
-DftEventDispatcher
-~~~~~~~~~~~~~~~~~~
-
-Fan-out adapter that implements the ``IndexVisitor`` interface, parses
-each line once, and dispatches the parsed ``DftEvent`` to a list of
-registered ``DftEventVisitor`` instances (``BloomVisitor``,
-``ManifestVisitor``, ``AggregationVisitor``, ...). This collapses
-multiple visitor passes into a single read of the input. Defined in
-``dftracer/utils/utilities/composites/dft/dft_event_dispatcher.h``.
-
 Association Tracking
 --------------------
 
@@ -428,7 +409,7 @@ Running the Full Pipeline
 
 ``run_aggregation`` (in ``aggregators/aggregation_runner.h``) is the one-call
 entry point used by the CLI binaries: it scans the log directory, indexes any
-files that need it, runs the aggregation visitor pipeline, and optionally emits
+files that need it, runs the aggregation pipeline, and optionally emits
 a Perfetto JSON / Arrow IPC file. When ``output_file`` is unset it only
 populates the ``AGGREGATION`` column family for downstream consumers.
 

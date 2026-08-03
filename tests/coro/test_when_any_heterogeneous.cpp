@@ -2,6 +2,7 @@
 #include <dftracer/utils/core/coro/when_any.h>
 #include <dftracer/utils/core/pipeline/executor.h>
 #include <dftracer/utils/core/pipeline/scheduler.h>
+#include <dftracer/utils/core/pipeline/thread_pool_executor.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <doctest/doctest.h>
@@ -12,7 +13,7 @@
 using namespace dftracer::utils;
 
 TEST_CASE("when_any - Two heterogeneous types (int, string)") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> index_valid{false};
@@ -58,7 +59,7 @@ TEST_CASE("when_any - Two heterogeneous types (int, string)") {
 }
 
 TEST_CASE("when_any - Three heterogeneous types") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> index_valid{false};
@@ -117,7 +118,7 @@ TEST_CASE("when_any - Three heterogeneous types") {
 }
 
 TEST_CASE("when_any - Mixed void and non-void") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> index_valid{false};
@@ -164,7 +165,7 @@ TEST_CASE("when_any - Mixed void and non-void") {
 }
 
 TEST_CASE("when_any - Exception propagation") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> handled{false};
@@ -213,7 +214,7 @@ TEST_CASE("when_any - Exception propagation") {
 }
 
 TEST_CASE("when_any - Index-based get<N>() access") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> accessed{false};
@@ -259,7 +260,7 @@ TEST_CASE("when_any - Index-based get<N>() access") {
 }
 
 TEST_CASE("when_any - Overload resolution (homogeneous uses vector version)") {
-    Executor executor(ExecutorConfig{.num_threads = 4});
+    ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
     std::atomic<bool> index_valid{false};

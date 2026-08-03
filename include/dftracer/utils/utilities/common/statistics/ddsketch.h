@@ -24,6 +24,14 @@
 
 namespace dftracer::utils::utilities::common::statistics {
 
+// One occupied histogram bucket: [lower, upper) DDSketch bounds and its count.
+// A {0, 0} bin carries the count of exact-zero values.
+struct HistogramBin {
+    double lower;
+    double upper;
+    std::uint64_t count;
+};
+
 class DDSketch {
    public:
     static constexpr int MAX_BINS = 128;
@@ -34,6 +42,10 @@ class DDSketch {
     void merge(const DDSketch& other);
     double quantile(double q) const;
     void reset();
+
+    // Occupied buckets in ascending value order (empty buckets omitted), for a
+    // raw histogram. Bounds are the sketch's relative-error bucket bounds.
+    std::vector<HistogramBin> bins() const;
 
     std::uint64_t count() const { return count_; }
     bool empty() const { return count_ == 0; }

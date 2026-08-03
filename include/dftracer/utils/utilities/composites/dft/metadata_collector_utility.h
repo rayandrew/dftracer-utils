@@ -134,8 +134,6 @@ class MetadataCollectorUtility
    private:
     coro::CoroTask<MetadataCollectorUtilityOutput> process_compressed(
         const MetadataCollectorUtilityInput& input);
-    coro::CoroTask<MetadataCollectorUtilityOutput> process_plain(
-        const MetadataCollectorUtilityInput& input);
 };
 
 }  // namespace dftracer::utils::utilities::composites::dft
