@@ -1,11 +1,11 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/utilities/common/query/ast.h>
 #include <dftracer/utils/utilities/common/statistics/timestamp_histogram.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/bloom_filter.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_pruner_utility.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/queries/queries.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/scalable_bloom_filter.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
 
@@ -53,7 +53,7 @@ struct PrunerContext {
     std::set<std::uint64_t> all_chunks;
     std::unordered_map<std::uint64_t, ChunkMeta> chunks;
     std::unordered_map<std::string,
-                       std::unordered_map<std::uint64_t, BloomFilter>>
+                       std::unordered_map<std::uint64_t, ScalableBloomFilter>>
         bloom_filters;
     std::unordered_map<std::uint64_t, common::statistics::TimestampHistogram>
         ts_histograms;
@@ -67,6 +67,11 @@ struct PrunerContext {
 
     BloomFilterCache* cache;
     std::string index_path;
+
+    /// File-level blooms for the dimensions this query touches, the first
+    /// pruning tier: a definite miss here skips the file without loading a
+    /// single chunk record.
+    std::unordered_map<std::string, ScalableBloomFilter> file_blooms;
 
     // Resolve a value for a hash dimension.
     // Returns the hash strings if the dimension is a hash dim and
@@ -285,6 +290,116 @@ bool histogram_has_events(PrunerContext& ctx, std::uint64_t ckpt,
     }
 }
 
+// Tier 0: file-level bloom probe with hash resolution. True when the file
+// may hold `val`, and when the dimension has no file bloom at all.
+bool file_bloom_may_contain(PrunerContext& ctx, const std::string& dim,
+                            const std::string& val) {
+    auto it = ctx.file_blooms.find(dim);
+    if (it == ctx.file_blooms.end()) return true;
+
+    auto& resolved = ctx.resolve_hashes(dim, val);
+    if (!resolved.empty()) {
+        for (const auto& hash : resolved) {
+            if (it->second.possibly_contains(hash)) return true;
+        }
+        return false;
+    }
+    return it->second.possibly_contains(val);
+}
+
+// Whether the file can hold any matching event at all. Only equality-shaped
+// leaves can answer "definitely not"; everything else stays conservative.
+bool file_may_match(const query_ns::QueryNode& node, PrunerContext& ctx) {
+    return std::visit(
+        [&ctx](auto&& n) -> bool {
+            using T = std::decay_t<decltype(n)>;
+            if constexpr (std::is_same_v<T, query_ns::CompareNode>) {
+                if (n.op != query_ns::CompareOp::EQ) return true;
+                return file_bloom_may_contain(ctx, n.field.path,
+                                              literal_to_string(n.value));
+            } else if constexpr (std::is_same_v<T, query_ns::InNode>) {
+                for (const auto& elem : n.values.elements) {
+                    if (file_bloom_may_contain(ctx, n.field.path,
+                                               literal_to_string(elem))) {
+                        return true;
+                    }
+                }
+                return false;
+            } else if constexpr (std::is_same_v<T, query_ns::AndNode>) {
+                return file_may_match(*n.left, ctx) &&
+                       file_may_match(*n.right, ctx);
+            } else if constexpr (std::is_same_v<T, query_ns::OrNode>) {
+                return file_may_match(*n.left, ctx) ||
+                       file_may_match(*n.right, ctx);
+            } else {
+                return true;
+            }
+        },
+        node.data);
+}
+
+// Dimensions named by equality-shaped leaves, the only ones tier 0 probes.
+void collect_bloom_dimensions(const query_ns::QueryNode& node,
+                              std::unordered_set<std::string>& out) {
+    std::visit(
+        [&out](auto&& n) {
+            using T = std::decay_t<decltype(n)>;
+            if constexpr (std::is_same_v<T, query_ns::CompareNode>) {
+                if (n.op == query_ns::CompareOp::EQ) out.insert(n.field.path);
+            } else if constexpr (std::is_same_v<T, query_ns::InNode>) {
+                out.insert(n.field.path);
+            } else if constexpr (std::is_same_v<T, query_ns::AndNode> ||
+                                 std::is_same_v<T, query_ns::OrNode>) {
+                collect_bloom_dimensions(*n.left, out);
+                collect_bloom_dimensions(*n.right, out);
+            } else if constexpr (std::is_same_v<T, query_ns::NotNode>) {
+                collect_bloom_dimensions(*n.operand, out);
+            }
+        },
+        node.data);
+}
+
+// Load the file blooms for `query`'s equality dimensions and report whether
+// the file survives tier 0.
+bool file_survives_file_blooms(PrunerContext& ctx, const IndexDatabase& db,
+                               int fid, const query_ns::QueryNode& root) {
+    std::unordered_set<std::string> dims;
+    collect_bloom_dimensions(root, dims);
+    if (dims.empty()) return true;
+
+    std::vector<std::string> dim_list(dims.begin(), dims.end());
+    auto blooms = db.query_file_bloom_filters_batch(fid, dim_list);
+    for (const auto& [dim, result] : blooms) {
+        ctx.file_blooms.emplace(
+            dim, ScalableBloomFilter::from_blob(result.bloom_data.data(),
+                                                result.bloom_data.size()));
+    }
+    return file_may_match(root, ctx);
+}
+
+// Pattern-match nodes (like/ilike/regex/contains) cannot be pruned against
+// chunk stats, so they conservatively yield all chunks. A NotNode wrapping such
+// a subtree must not take the set-difference complement (it would drop every
+// chunk); detect that case and yield all chunks instead.
+bool subtree_has_match(const query_ns::QueryNode& node) {
+    return std::visit(
+        [](auto&& n) -> bool {
+            using T = std::decay_t<decltype(n)>;
+            if constexpr (std::is_same_v<T, query_ns::MatchNode>) {
+                return true;
+            } else if constexpr (std::is_same_v<T, query_ns::AndNode> ||
+                                 std::is_same_v<T, query_ns::OrNode>) {
+                return subtree_has_match(*n.left) ||
+                       subtree_has_match(*n.right);
+            } else if constexpr (std::is_same_v<T, query_ns::NotNode>) {
+                return subtree_has_match(*n.operand);
+            } else {
+                return false;
+            }
+        },
+        node.data);
+}
+
 // Recursive AST evaluation: returns candidate chunk set
 std::set<std::uint64_t> evaluate_node(const query_ns::QueryNode& node,
                                       PrunerContext& ctx);
@@ -470,6 +585,7 @@ std::set<std::uint64_t> evaluate_node(const query_ns::QueryNode& node,
                 left.insert(right.begin(), right.end());
                 return left;
             } else if constexpr (std::is_same_v<T, query_ns::NotNode>) {
+                if (subtree_has_match(*n.operand)) return ctx.all_chunks;
                 auto inner = evaluate_node(*n.operand, ctx);
                 std::set<std::uint64_t> complement;
                 std::set_difference(
@@ -498,8 +614,8 @@ coro::CoroTask<ChunkPrunerOutput> ChunkPrunerUtility::process(
             IndexDatabase* db_ptr = input.external_db;
             if (!db_ptr) {
                 owned_db.emplace(input.index_path,
-                                 dftracer::utils::rocksdb::RocksDatabase::
-                                     OpenMode::ReadOnly);
+                                 dftracer::utils::utilities::indexer::
+                                     IndexOpenMode::ReadOnly);
                 db_ptr = &*owned_db;
             }
             IndexDatabase& idx_db = *db_ptr;
@@ -511,9 +627,6 @@ coro::CoroTask<ChunkPrunerOutput> ChunkPrunerUtility::process(
                 return out;
             }
 
-            // Load chunk dimension stats
-            auto dim_stats_rows = idx_db.query_chunk_dimension_stats(fid);
-
             PrunerContext ctx;
             ctx.file_info_id = fid;
             ctx.cache = input.cache;
@@ -521,6 +634,14 @@ coro::CoroTask<ChunkPrunerOutput> ChunkPrunerUtility::process(
             ctx.db = &idx_db;
             ctx.fid = fid;
 
+            if (!file_survives_file_blooms(ctx, idx_db, fid,
+                                           input.query.root())) {
+                out.success = true;
+                out.file_may_match = false;
+                return out;
+            }
+
+            auto dim_stats_rows = idx_db.query_chunk_dimension_stats(fid);
             for (const auto& ds : dim_stats_rows) {
                 ctx.all_chunks.insert(ds.checkpoint_idx);
                 ctx.chunks[ds.checkpoint_idx].dim_stats[ds.dimension] = ds;
@@ -543,7 +664,7 @@ coro::CoroTask<ChunkPrunerOutput> ChunkPrunerUtility::process(
             for (const auto& [dim, chunk_blooms] : all_chunk_blooms) {
                 for (const auto& cb : chunk_blooms) {
                     ctx.all_chunks.insert(cb.checkpoint_idx);
-                    BloomFilter bf = BloomFilter::from_blob(
+                    ScalableBloomFilter bf = ScalableBloomFilter::from_blob(
                         cb.bloom_data.data(), cb.bloom_data.size());
                     if (input.cache) {
                         input.cache->put(input.index_path, dim,
@@ -604,7 +725,7 @@ Result<ChunkPrunerBatchOutput> ChunkPrunerUtility::process_batch(
         if (!db_ptr) {
             owned_db.emplace(
                 input.index_path,
-                dftracer::utils::rocksdb::RocksDatabase::OpenMode::ReadOnly);
+                dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
             db_ptr = &*owned_db;
         }
         IndexDatabase& idx_db = *db_ptr;
@@ -648,6 +769,13 @@ Result<ChunkPrunerBatchOutput> ChunkPrunerUtility::process_batch(
                 ctx.db = &idx_db;
                 ctx.fid = fid;
 
+                if (!file_survives_file_blooms(ctx, idx_db, fid,
+                                               item.query.root())) {
+                    out.success = true;
+                    out.file_may_match = false;
+                    continue;
+                }
+
                 auto dim_it = all_dim_stats.find(fid);
                 if (dim_it != all_dim_stats.end()) {
                     for (const auto& ds : dim_it->second) {
@@ -673,7 +801,7 @@ Result<ChunkPrunerBatchOutput> ChunkPrunerUtility::process_batch(
                 for (const auto& [dim, chunk_blooms] : all_chunk_blooms) {
                     for (const auto& cb : chunk_blooms) {
                         ctx.all_chunks.insert(cb.checkpoint_idx);
-                        BloomFilter bf = BloomFilter::from_blob(
+                        ScalableBloomFilter bf = ScalableBloomFilter::from_blob(
                             cb.bloom_data.data(), cb.bloom_data.size());
                         if (input.cache) {
                             input.cache->put(input.index_path, dim,

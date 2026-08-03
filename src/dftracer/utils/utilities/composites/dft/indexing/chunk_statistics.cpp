@@ -16,7 +16,7 @@ namespace dftracer::utils::utilities::composites::dft::indexing {
 void ChunkStatistics::update_from_event(std::string_view name,
                                         std::string_view cat, std::uint64_t pid,
                                         std::uint64_t tid, std::uint64_t ts,
-                                        std::uint64_t dur) {
+                                        std::uint64_t dur, bool has_dur) {
     ++total_events;
 
     constexpr std::size_t pid_tid_buf_size =
@@ -50,6 +50,16 @@ void ChunkStatistics::update_from_event(std::string_view name,
     if (ts < min_timestamp_us) min_timestamp_us = ts;
     std::uint64_t end_ts = ts + dur;
     if (end_ts > max_timestamp_us) max_timestamp_us = end_ts;
+    timestamp_histogram.add(ts);
+
+    // name -> category is a property of the name, recorded for every event.
+    if (name_category.find(name) == name_category.end()) {
+        name_category.emplace(std::string(name), cat);
+    }
+
+    // Duration aggregates (global and per-name) count only events that carry a
+    // duration, so a counter or instant with no dur field never lands in them.
+    if (!has_dur) return;
 
     // Welford's online algorithm for variance
     double old_mean = (duration_count > 0)
@@ -71,7 +81,6 @@ void ChunkStatistics::update_from_event(std::string_view name,
     double dur_d = static_cast<double>(dur);
     duration_sketch.add(dur_d);
     duration_histogram.add(dur);
-    timestamp_histogram.add(ts);
 
     // name_duration_sketches: transparent find, allocate only on first
     // observation, then reuse the interned key for the other name_*_ maps.
@@ -87,7 +96,32 @@ void ChunkStatistics::update_from_event(std::string_view name,
     name_duration_histograms[name_key].add(dur);
     name_duration_sums[name_key] += dur_d;
     name_duration_sum_sqs[name_key] += dur_d * dur_d;
-    name_category.try_emplace(name_key, cat);
+
+    // Per-category duration aggregates (for group-by-cat stats).
+    auto cat_it = cat_duration_sketches.find(cat);
+    if (cat_it == cat_duration_sketches.end()) {
+        cat_it = cat_duration_sketches
+                     .emplace(std::string(cat), common::statistics::DDSketch{})
+                     .first;
+    }
+    cat_it->second.add(dur_d);
+    cat_duration_sums[cat_it->first] += dur_d;
+
+    // Per-pid duration aggregates, keyed by the decimal pid so the key matches
+    // the viz group-by-pid value.
+    char pid_buf[std::numeric_limits<std::uint64_t>::digits10 + 2];
+    auto [pe, pec] = std::to_chars(pid_buf, pid_buf + sizeof(pid_buf), pid);
+    std::string_view pid_key(pid_buf, static_cast<std::size_t>(pe - pid_buf));
+    if (pec != std::errc{}) return;
+    auto pid_it = pid_duration_sketches.find(pid_key);
+    if (pid_it == pid_duration_sketches.end()) {
+        pid_it =
+            pid_duration_sketches
+                .emplace(std::string(pid_key), common::statistics::DDSketch{})
+                .first;
+    }
+    pid_it->second.add(dur_d);
+    pid_duration_sums[pid_it->first] += dur_d;
 }
 
 void ChunkStatistics::merge_from(const ChunkStatistics& other) {
@@ -141,6 +175,18 @@ void ChunkStatistics::merge_from(const ChunkStatistics& other) {
     }
     for (const auto& [k, v] : other.name_category) {
         name_category.emplace(k, v);
+    }
+    for (const auto& [k, v] : other.cat_duration_sketches) {
+        cat_duration_sketches[k].merge(v);
+    }
+    for (const auto& [k, v] : other.cat_duration_sums) {
+        cat_duration_sums[k] += v;
+    }
+    for (const auto& [k, v] : other.pid_duration_sketches) {
+        pid_duration_sketches[k].merge(v);
+    }
+    for (const auto& [k, v] : other.pid_duration_sums) {
+        pid_duration_sums[k] += v;
     }
 }
 
@@ -227,12 +273,25 @@ std::string ChunkStatistics::name_duration_sum_sqs_json() const {
     return double_map_to_json(name_duration_sum_sqs);
 }
 
-// Binary format: uint32_t num_entries, then per entry:
-//   uint32_t key_len, char[key_len], uint32_t blob_len, uint8_t[blob_len]
+std::string ChunkStatistics::cat_duration_sums_json() const {
+    return double_map_to_json(cat_duration_sums);
+}
+
+std::string ChunkStatistics::pid_duration_sums_json() const {
+    return double_map_to_json(pid_duration_sums);
+}
+
 std::vector<std::uint8_t> ChunkStatistics::serialize_name_duration_sketches()
     const {
+    return serialize_sketch_map(name_duration_sketches);
+}
+
+// Binary format: uint32_t num_entries, then per entry:
+//   uint32_t key_len, char[key_len], uint32_t blob_len, uint8_t[blob_len]
+std::vector<std::uint8_t> ChunkStatistics::serialize_sketch_map(
+    const StringViewMap<common::statistics::DDSketch>& sketches) {
     std::vector<std::uint8_t> buf;
-    auto num = static_cast<std::uint32_t>(name_duration_sketches.size());
+    auto num = static_cast<std::uint32_t>(sketches.size());
 
     // NOTE(perf): pre-reserve header + estimated ~512 bytes per sketch entry
     buf.reserve(sizeof(std::uint32_t) + num * 512);
@@ -241,7 +300,7 @@ std::vector<std::uint8_t> ChunkStatistics::serialize_name_duration_sketches()
     std::memcpy(buf.data(), &num, sizeof(std::uint32_t));
 
     std::vector<std::uint8_t> sketch_blob;
-    for (const auto& [key, sketch] : name_duration_sketches) {
+    for (const auto& [key, sketch] : sketches) {
         sketch.serialize_into(sketch_blob);
         auto key_len = static_cast<std::uint32_t>(key.size());
         auto blob_len = static_cast<std::uint32_t>(sketch_blob.size());

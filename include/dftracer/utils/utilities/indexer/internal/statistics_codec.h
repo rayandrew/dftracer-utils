@@ -1,7 +1,7 @@
 #ifndef DFTRACER_UTILS_UTILITIES_INDEXER_INTERNAL_STATISTICS_CODEC_H
 #define DFTRACER_UTILS_UTILITIES_INDEXER_INTERNAL_STATISTICS_CODEC_H
 
-#include <dftracer/utils/utilities/indexer/index_types.h>
+#include <dftracer/utils/utilities/indexer/types/types.h>
 
 #include <cstdint>
 #include <string>

@@ -3,11 +3,13 @@
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_pruner_utility.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/scalable_bloom_filter.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/index_database_writer_context.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
 #include <doctest/doctest.h>
 
+#include <span>
 #include <string>
 
 #include "testing_utilities.h"
@@ -98,6 +100,27 @@ static void populate_test_idx(const std::string& index_path,
         writer->insert_chunk_dimension_stats(fid, 2, dur_ds);
     }
 
+    writer->commit();
+}
+
+// Add the file-level "name" bloom that the tier-0 file skip probes. The
+// base fixture writes none, which is itself a case worth keeping: a file
+// without blooms must stay unpruned.
+static void add_name_file_bloom(const std::string& index_path,
+                                const std::string& file_path) {
+    IndexDatabase idx_db(index_path);
+    auto writer = idx_db.begin_write();
+    int fid = idx_db.get_file_info_id(get_logical_path(file_path));
+    REQUIRE(fid >= 0);
+
+    ScalableBloomFilter bloom(1024, 0.01);
+    bloom.add("read");
+    bloom.add("write");
+    bloom.add("send");
+    auto blob = bloom.serialize();
+    writer->insert_file_bloom_filter(
+        fid, "name", std::span<const unsigned char>(blob.data(), blob.size()),
+        bloom.num_entries());
     writer->commit();
 }
 
@@ -278,5 +301,50 @@ TEST_SUITE("ChunkPrunerUtility") {
                               R"(cat == "POSIX" AND name == "send")");
         CHECK(out.success);
         CHECK(out.candidate_checkpoints.size() == 1);
+    }
+
+    TEST_CASE("Pruner - file bloom skips the file before any chunk work") {
+        std::string test_dir =
+            dft_utils_test::make_unique_test_path("test_pruner_file_bloom")
+                .string();
+        fs::create_directories(test_dir);
+        std::string index_path = test_dir + "/test.pfw.gz.idx";
+        std::string file_path = "/fake/test.pfw.gz";
+        populate_test_idx(index_path, file_path);
+        add_name_file_bloom(index_path, file_path);
+
+        SUBCASE("absent value prunes the whole file") {
+            auto out = run_pruner(index_path, file_path, R"(name == "absent")");
+            CHECK(out.success);
+            CHECK_FALSE(out.file_may_match);
+            CHECK(out.candidate_checkpoints.empty());
+        }
+
+        SUBCASE("present value still reaches chunk pruning") {
+            auto out = run_pruner(index_path, file_path, R"(name == "read")");
+            CHECK(out.success);
+            CHECK(out.file_may_match);
+            CHECK(out.candidate_checkpoints.size() == 2);
+        }
+
+        SUBCASE("OR keeps the file when one side may match") {
+            auto out = run_pruner(index_path, file_path,
+                                  R"(name == "absent" OR name == "read")");
+            CHECK(out.success);
+            CHECK(out.file_may_match);
+        }
+
+        SUBCASE("AND prunes when either side is absent") {
+            auto out = run_pruner(index_path, file_path,
+                                  R"(name == "read" AND name == "absent")");
+            CHECK(out.success);
+            CHECK_FALSE(out.file_may_match);
+        }
+
+        SUBCASE("non-equality predicates stay conservative") {
+            auto out = run_pruner(index_path, file_path, R"(dur > 100)");
+            CHECK(out.success);
+            CHECK(out.file_may_match);
+        }
     }
 }

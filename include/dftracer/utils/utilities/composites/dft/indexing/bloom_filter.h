@@ -62,9 +62,6 @@ class BloomFilter {
 
     void compute_hashes(std::string_view value, std::uint64_t& h1,
                         std::uint64_t& h2) const;
-    std::size_t nth_hash(std::uint64_t h1, std::uint64_t h2,
-                         std::size_t n) const;
-
     static std::size_t optimal_num_bits(std::size_t n, double p);
     static std::size_t optimal_num_hashes(std::size_t m, std::size_t n);
 

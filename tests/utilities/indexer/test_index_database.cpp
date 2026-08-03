@@ -6,6 +6,7 @@
 #include <doctest/doctest.h>
 #include <testing_utilities.h>
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <string>
@@ -54,7 +55,7 @@ TEST_SUITE("IndexDatabase") {
         CHECK(id1 == id2);
     }
 
-    TEST_CASE("rebuild clears per-file bloom and manifest data before reuse") {
+    TEST_CASE("rebuild clears per-file bloom data before reuse") {
         auto root = dft_utils_test::make_unique_test_path("idx_rebuild");
         fs::create_directories(root);
 
@@ -74,15 +75,10 @@ TEST_SUITE("IndexDatabase") {
                                              4);
             writer->insert_index_dimension(file_id, "name");
             writer->insert_hash_table_entry(0, "hashA", "resolvedA");
-            writer->insert_event_range(file_id, 0, "POSIX", "read",
-                                       std::vector<std::uint32_t>{1, 2, 3});
-            writer->insert_metadata_lines(file_id, 0, "HH",
-                                          std::vector<std::uint32_t>{0, 4});
             writer->commit();
         }
 
         CHECK(db.has_bloom_data(file_id));
-        CHECK(db.has_manifest_data(file_id));
         CHECK(db.query_file_bloom_filter(file_id, "name").has_value());
         CHECK(db.resolve_hash(IndexDatabase::HashType::FILE, "hashA")
                   .has_value());
@@ -97,11 +93,8 @@ TEST_SUITE("IndexDatabase") {
         CHECK(rebuilt_id == file_id);
 
         CHECK_FALSE(db.has_bloom_data(file_id));
-        CHECK_FALSE(db.has_manifest_data(file_id));
         CHECK_FALSE(db.query_file_bloom_filter(file_id, "name").has_value());
         CHECK(db.query_chunk_bloom_filters(file_id, "name").empty());
-        CHECK(db.query_event_ranges(file_id).empty());
-        CHECK(db.query_metadata_lines(file_id).empty());
         CHECK(db.resolve_hash(IndexDatabase::HashType::FILE, "hashA")
                   .has_value());
     }
@@ -157,7 +150,10 @@ TEST_SUITE("IndexDatabase") {
         CHECK(total_events == 505000);  // sum of 100+200+...+10000
     }
 
-    TEST_CASE("PID manifest - insert and query single file PIDs") {
+    // query_file_pids projects the distinct PIDs from the file's pid:tid count
+    // map (FILE_PID_TID_COUNTS, written by the bloom/stats pass); same pid
+    // across tids collapses to one.
+    TEST_CASE("PID query - distinct PIDs from pid:tid counts") {
         auto root = dft_utils_test::make_unique_test_path("idx_pid_single");
         fs::create_directories(root);
 
@@ -169,8 +165,12 @@ TEST_SUITE("IndexDatabase") {
             writer->init_schema();
             file_id = writer->get_or_create_file_info("trace.pfw.gz", 0xAAAA);
 
-            std::unordered_set<std::uint64_t> pids = {1234, 5678, 9012};
-            writer->insert_file_pids(file_id, pids);
+            dftracer::utils::StringViewMap<std::uint64_t> counts;
+            counts.emplace("1234:1", 3);
+            counts.emplace("1234:2", 1);  // same pid, different tid
+            counts.emplace("5678:1", 2);
+            counts.emplace("9012:7", 5);
+            writer->insert_file_pid_tid_counts(file_id, counts);
             writer->commit();
         }
 
@@ -181,7 +181,7 @@ TEST_SUITE("IndexDatabase") {
         CHECK(result.count(9012) == 1);
     }
 
-    TEST_CASE("PID manifest - query non-existent file returns empty set") {
+    TEST_CASE("PID query - non-existent file returns empty set") {
         auto root = dft_utils_test::make_unique_test_path("idx_pid_empty");
         fs::create_directories(root);
 
@@ -192,7 +192,7 @@ TEST_SUITE("IndexDatabase") {
         CHECK(result.empty());
     }
 
-    TEST_CASE("PID manifest - query all file PIDs") {
+    TEST_CASE("PID query - all file PIDs") {
         auto root = dft_utils_test::make_unique_test_path("idx_pid_all");
         fs::create_directories(root);
 
@@ -207,9 +207,16 @@ TEST_SUITE("IndexDatabase") {
             file_id2 = writer->get_or_create_file_info("trace2.pfw.gz", 0xAAA2);
             file_id3 = writer->get_or_create_file_info("trace3.pfw.gz", 0xAAA3);
 
-            writer->insert_file_pids(file_id1, {1000, 1001});
-            writer->insert_file_pids(file_id2, {1000, 2000, 2001});
-            writer->insert_file_pids(file_id3, {3000});
+            auto pid_tid = [](std::initializer_list<const char*> keys) {
+                dftracer::utils::StringViewMap<std::uint64_t> m;
+                for (const char* k : keys) m.emplace(k, 1);
+                return m;
+            };
+            writer->insert_file_pid_tid_counts(file_id1,
+                                               pid_tid({"1000:1", "1001:1"}));
+            writer->insert_file_pid_tid_counts(
+                file_id2, pid_tid({"1000:1", "2000:1", "2001:1"}));
+            writer->insert_file_pid_tid_counts(file_id3, pid_tid({"3000:1"}));
             writer->commit();
         }
 
@@ -229,7 +236,7 @@ TEST_SUITE("IndexDatabase") {
         CHECK(all_pids[file_id3].count(3000) == 1);
     }
 
-    TEST_CASE("PID manifest - large PIDs") {
+    TEST_CASE("PID query - large PIDs") {
         auto root = dft_utils_test::make_unique_test_path("idx_pid_large");
         fs::create_directories(root);
 
@@ -241,13 +248,11 @@ TEST_SUITE("IndexDatabase") {
             writer->init_schema();
             file_id = writer->get_or_create_file_info("trace.pfw.gz", 0xBBBB);
 
-            // Use large PID values to test varint encoding
-            std::unordered_set<std::uint64_t> pids = {
-                0xFFFFFFFFULL,         // 32-bit max
-                0x100000000ULL,        // Just over 32-bit
-                0xFFFFFFFFFFFFFFFFULL  // 64-bit max
-            };
-            writer->insert_file_pids(file_id, pids);
+            dftracer::utils::StringViewMap<std::uint64_t> counts;
+            counts.emplace("4294967295:1", 1);            // 32-bit max
+            counts.emplace("4294967296:1", 1);            // just over 32-bit
+            counts.emplace("18446744073709551615:1", 1);  // 64-bit max
+            writer->insert_file_pid_tid_counts(file_id, counts);
             writer->commit();
         }
 
@@ -258,54 +263,35 @@ TEST_SUITE("IndexDatabase") {
         CHECK(result.count(0xFFFFFFFFFFFFFFFFULL) == 1);
     }
 
-    TEST_CASE("PID manifest - empty PID set not stored") {
-        auto root = dft_utils_test::make_unique_test_path("idx_pid_empty_set");
+    TEST_CASE("column store round-trips and unions across files") {
+        auto root = dft_utils_test::make_unique_test_path("idx_columns");
         fs::create_directories(root);
-
         IndexDatabase db((root / ".dftindex").string());
 
-        int file_id;
+        // Empty before anything is written (old-index compatibility path).
+        CHECK(db.query_all_columns().empty());
+
+        int f1, f2;
         {
             auto writer = db.begin_write();
             writer->init_schema();
-            file_id = writer->get_or_create_file_info("trace.pfw.gz", 0xCCCC);
-
-            std::unordered_set<std::uint64_t> empty_pids;
-            writer->insert_file_pids(file_id, empty_pids);
+            f1 = writer->get_or_create_file_info("a.pfw.gz", 0x1111);
+            f2 = writer->get_or_create_file_info("b.pfw.gz", 0x2222);
+            writer->insert_index_dimension(f1, "name");  // "d|" space
+            writer->insert_column(f1, "cat");
+            writer->insert_column(f1, "mhost");
+            writer->insert_column(f2, "mhost");  // duplicate across files
+            writer->insert_column(f2, "fhash");
             writer->commit();
         }
 
-        auto result = db.query_file_pids(file_id);
-        CHECK(result.empty());
-    }
+        auto cols = db.query_all_columns();  // sorted, de-duplicated union
+        CHECK(cols == std::vector<std::string>{"cat", "fhash", "mhost"});
 
-    TEST_CASE("PID manifest - rebuild clears PIDs") {
-        auto root = dft_utils_test::make_unique_test_path("idx_pid_rebuild");
-        fs::create_directories(root);
-
-        IndexDatabase db((root / ".dftindex").string());
-
-        int file_id;
-        {
-            auto writer = db.begin_write();
-            writer->init_schema();
-            file_id = writer->get_or_create_file_info("trace.pfw.gz", 0xDDDD);
-            writer->insert_file_pids(file_id, {1234, 5678});
-            writer->commit();
-        }
-
-        CHECK(db.query_file_pids(file_id).size() == 2);
-
-        // Rebuild with new checksum clears data
-        {
-            auto writer = db.begin_write();
-            int rebuilt_id =
-                writer->get_or_create_file_info("trace.pfw.gz", 0xEEEE);
-            writer->commit();
-            CHECK(rebuilt_id == file_id);
-        }
-
-        CHECK(db.query_file_pids(file_id).empty());
+        // Columns live under "c|" and must not leak into the dimension scan.
+        auto dims = db.query_index_dimensions(f1);
+        CHECK(std::find(dims.begin(), dims.end(), "name") != dims.end());
+        CHECK(std::find(dims.begin(), dims.end(), "cat") == dims.end());
     }
 }
 
@@ -328,7 +314,7 @@ TEST_SUITE("IndexDatabase staleness") {
 
         IndexDatabase db((root / ".dftindex").string());
         db.init_schema();
-        db.register_files({a}, /*build_manifest=*/false);
+        db.register_files({a});
 
         auto stat = db.get_file_stat("a.pfw");
         REQUIRE(stat.has_value());
@@ -344,7 +330,7 @@ TEST_SUITE("IndexDatabase staleness") {
 
         IndexDatabase db((root / ".dftindex").string());
         db.init_schema();
-        db.register_files({a, b}, false);
+        db.register_files({a, b});
 
         auto result = db.find_stale_files({a, b});
         CHECK_FALSE(result.stale());
@@ -360,7 +346,7 @@ TEST_SUITE("IndexDatabase staleness") {
 
         IndexDatabase db((root / ".dftindex").string());
         db.init_schema();
-        db.register_files({a}, false);
+        db.register_files({a});
 
         write_file(root / "a.pfw", "original plus more bytes");
 
@@ -377,7 +363,7 @@ TEST_SUITE("IndexDatabase staleness") {
 
         IndexDatabase db((root / ".dftindex").string());
         db.init_schema();
-        db.register_files({a}, false);
+        db.register_files({a});
 
         auto bumped = fs::last_write_time(a) + std::chrono::hours(48);
         fs::last_write_time(a, bumped);
@@ -394,7 +380,7 @@ TEST_SUITE("IndexDatabase staleness") {
 
         IndexDatabase db((root / ".dftindex").string());
         db.init_schema();
-        db.register_files({a}, false);
+        db.register_files({a});
 
         auto b = write_file(root / "b.pfw", "bbb");
         auto result = db.find_stale_files({a, b});
@@ -411,7 +397,7 @@ TEST_SUITE("IndexDatabase staleness") {
 
         IndexDatabase db((root / ".dftindex").string());
         db.init_schema();
-        db.register_files({a, b}, false);
+        db.register_files({a, b});
 
         auto result = db.find_stale_files({a});
         REQUIRE(result.removed.size() == 1);
@@ -425,7 +411,7 @@ TEST_SUITE("IndexDatabase staleness") {
 
         IndexDatabase db((root / ".dftindex").string());
         db.init_schema();
-        db.register_files({a}, false);
+        db.register_files({a});
 
         db.db()->put("_schema_version",
                      dftracer::utils::rocksdb::KeyCodec::encode_be32(1));

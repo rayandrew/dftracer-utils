@@ -1,6 +1,5 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/rocksdb/key_codec.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/queries/manifest_queries.h>
 #include <dftracer/utils/utilities/hash/fnv1a_hasher_utility.h>
 #include <dftracer/utils/utilities/indexer/error.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -31,26 +30,25 @@ using namespace internal;
 
 namespace {
 
-using encoding::checkpoint_key;
 using encoding::chunk_bloom_key;
 using encoding::chunk_dim_stats_key;
 using encoding::chunk_stats_key;
 using encoding::encode_bloom_value;
-using encoding::encode_checkpoint_value;
 using encoding::encode_chunk_dimension_stats_value;
 using encoding::encode_chunk_statistics_value;
 using encoding::encode_count_map_value;
-using encoding::encode_event_range_value;
+using encoding::encode_gzip_member_value;
 using encoding::encode_metadata_record;
-using encoding::encode_metadata_value;
 using encoding::encode_name_summary_value;
 using encoding::file_bloom_key;
 using encoding::file_category_counts_key;
 using encoding::file_name_counts_key;
 using encoding::file_pid_tid_counts_key;
 using encoding::file_scalar_stats_key;
+using encoding::gzip_member_key;
+using encoding::gzip_member_prefix;
+using encoding::make_column_key;
 using encoding::make_dimension_key;
-using encoding::manifest_event_key;
 using encoding::name_chunk_owner_key;
 using encoding::name_chunk_owner_prefix;
 using encoding::name_chunk_posting_key;
@@ -61,11 +59,8 @@ using encoding::name_lookup_key;
 using encoding::name_reverse_key;
 
 namespace hash = dftracer::utils::utilities::hash;
-using encoding::manifest_metadata_key;
 using encoding::metadata_key;
 using encoding::prefix_for_file;
-
-constexpr std::uint32_t SCHEMA_VERSION = 2;
 
 std::string next_file_id_key() {
     return std::string(encoding::NEXT_FILE_ID_KEY);
@@ -83,15 +78,6 @@ std::string encode_file_record(
     append_u64(value, file_hash);
     append_u64(value, file_size);
     return value;
-}
-
-std::string tar_file_key(int file_id, std::uint64_t uncompressed_offset,
-                         std::string_view file_name) {
-    std::string key = prefix_for_file(file_id);
-    append_u64(key, uncompressed_offset);
-    key.push_back('\0');
-    key.append(file_name);
-    return key;
 }
 
 std::unordered_map<std::string, std::uint64_t> decode_count_map_value(
@@ -129,30 +115,6 @@ void for_each_name_summary_entry(std::string_view value, Callback&& callback) {
         auto count = cursor.u64();
         callback(key, count);
     }
-}
-
-std::string encode_tar_archive_value(std::string_view archive_name,
-                                     std::uint64_t checkpoint_size,
-                                     std::uint64_t total_lines,
-                                     std::uint64_t total_uc_size,
-                                     std::uint64_t total_files) {
-    std::string value;
-    append_string(value, archive_name);
-    append_u64(value, checkpoint_size);
-    append_u64(value, total_lines);
-    append_u64(value, total_uc_size);
-    append_u64(value, total_files);
-    return value;
-}
-
-std::string encode_tar_file_value(
-    const IndexDatabaseWriterContext::TarFileRecord& record) {
-    std::string value;
-    append_u64(value, record.file_size);
-    append_u64(value, record.file_mtime);
-    append_u8(value, static_cast<std::uint8_t>(record.typeflag));
-    append_u64(value, record.data_offset);
-    return value;
 }
 
 template <typename Fn>
@@ -324,8 +286,9 @@ void IndexDatabaseWriterContext::init_schema() {
     std::string value;
     auto status = db_->get(schema_version_key(), &value);
     if (status.IsNotFound()) {
-        status = db_->put(batch_, cf::DEFAULT, schema_version_key(),
-                          rocks::KeyCodec::encode_be32(SCHEMA_VERSION));
+        status = db_->put(
+            batch_, cf::DEFAULT, schema_version_key(),
+            rocks::KeyCodec::encode_be32(IndexDatabase::SCHEMA_VERSION));
         if (!status.ok()) {
             throw_db_error("Failed to initialize schema version", status);
         }
@@ -577,13 +540,6 @@ void IndexDatabaseWriterContext::insert_file_name_counts(
     if (!status.ok()) {
         throw_db_error("Failed to insert file name counts", status);
     }
-}
-
-std::uint64_t IndexDatabaseWriterContext::get_or_create_name_id(
-    std::string_view name) {
-    const auto name_id = hash::fnv1a_hash(name);
-    insert_name_dictionary_entry(name_id, name);
-    return name_id;
 }
 
 void IndexDatabaseWriterContext::insert_name_dictionary_entry(
@@ -918,14 +874,22 @@ void IndexDatabaseWriterContext::rebuild_root_summaries() {
                     "Failed to write root pid_tid counts");
 }
 
-void IndexDatabaseWriterContext::insert_checkpoint(
-    int file_id, const IndexerCheckpoint& checkpoint) {
-    const auto key = checkpoint_key(file_id, checkpoint.uc_offset,
-                                    checkpoint.checkpoint_idx);
-    const auto value = encode_checkpoint_value(checkpoint);
-    auto status = db_->put(batch_, rocks::cf::CHECKPOINTS, key, value);
+void IndexDatabaseWriterContext::insert_gzip_member(
+    int file_id, const GzipMemberRecord& member) {
+    const auto key = gzip_member_key(file_id, member.member_idx);
+    const auto value = encode_gzip_member_value(member);
+    auto status = db_->put(batch_, rocks::cf::MEMBERS, key, value);
     if (!status.ok()) {
-        throw_db_error("Failed to insert checkpoint", status);
+        throw_db_error("Failed to insert gzip member", status);
+    }
+}
+
+void IndexDatabaseWriterContext::insert_column(int file_id,
+                                               std::string_view column) {
+    const auto key = make_column_key(file_id, column);
+    auto status = db_->put(batch_, cf::DIMENSIONS, key, "");
+    if (!status.ok()) {
+        throw_db_error("Failed to insert column", status);
     }
 }
 
@@ -983,55 +947,6 @@ void IndexDatabaseWriterContext::insert_chunk_dimension_stats(
     }
 }
 
-void IndexDatabaseWriterContext::insert_tar_archive_metadata(
-    int file_id, std::string_view archive_name, std::uint64_t checkpoint_size,
-    std::uint64_t total_lines, std::uint64_t total_uc_size,
-    std::uint64_t total_files) {
-    const auto key = tar_archive_key(file_id);
-    const auto value = encode_tar_archive_value(
-        archive_name, checkpoint_size, total_lines, total_uc_size, total_files);
-    auto status = db_->put(batch_, cf::ARCHIVES, key, value);
-    if (!status.ok()) {
-        throw_db_error("Failed to insert tar archive metadata", status);
-    }
-}
-
-void IndexDatabaseWriterContext::insert_tar_file(int file_id,
-                                                 const TarFileRecord& record) {
-    const auto key =
-        tar_file_key(file_id, record.uncompressed_offset, record.file_name);
-    const auto value = encode_tar_file_value(record);
-    auto status = db_->put(batch_, cf::TAR_FILES, key, value);
-    if (!status.ok()) {
-        throw_db_error("Failed to insert tar file metadata", status);
-    }
-}
-
-void IndexDatabaseWriterContext::delete_chunk_bloom_filters(
-    int file_id, std::string_view dimension) {
-    std::vector<std::string> keys;
-    std::string prefix = prefix_for_file(file_id);
-    prefix.append(dimension);
-    prefix.push_back('\0');
-    scan_prefix(*db_, cf::CHUNK_BLOOM, prefix, [&](::rocksdb::Iterator& it) {
-        keys.push_back(iterator_key(it));
-    });
-    for (const auto& key : keys) {
-        auto status = db_->del(batch_, cf::CHUNK_BLOOM, key);
-        if (!status.ok())
-            throw_db_error("Failed to delete chunk bloom", status);
-    }
-}
-
-void IndexDatabaseWriterContext::delete_file_bloom_filter(
-    int file_id, std::string_view dimension) {
-    auto status =
-        db_->del(batch_, cf::FILE_BLOOM, file_bloom_key(file_id, dimension));
-    if (!status.ok() && !status.IsNotFound()) {
-        throw_db_error("Failed to delete file bloom", status);
-    }
-}
-
 void IndexDatabaseWriterContext::delete_chunk_statistics(int file_id) {
     std::vector<std::string> keys;
     scan_prefix(
@@ -1041,19 +956,6 @@ void IndexDatabaseWriterContext::delete_chunk_statistics(int file_id) {
         auto status = db_->del(batch_, cf::CHUNK_STATS, key);
         if (!status.ok()) {
             throw_db_error("Failed to delete chunk statistics", status);
-        }
-    }
-}
-
-void IndexDatabaseWriterContext::delete_chunk_dimension_stats(int file_id) {
-    std::vector<std::string> keys;
-    scan_prefix(
-        *db_, cf::CHUNK_DIM_STATS, prefix_for_file(file_id),
-        [&](::rocksdb::Iterator& it) { keys.push_back(iterator_key(it)); });
-    for (const auto& key : keys) {
-        auto status = db_->del(batch_, cf::CHUNK_DIM_STATS, key);
-        if (!status.ok()) {
-            throw_db_error("Failed to delete chunk dimension stats", status);
         }
     }
 }
@@ -1114,10 +1016,9 @@ void IndexDatabaseWriterContext::delete_file_contents(int file_id) {
         }
     };
 
-    delete_prefix(rocks::cf::CHECKPOINTS, prefix_for_file(file_id));
+    delete_prefix(rocks::cf::MEMBERS, prefix_for_file(file_id));
+    delete_prefix(rocks::cf::MEMBERS, gzip_member_prefix(file_id));
     delete_prefix(cf::METADATA, prefix_for_file(file_id));
-    delete_prefix(cf::ARCHIVES, prefix_for_file(file_id));
-    delete_prefix(cf::TAR_FILES, prefix_for_file(file_id));
     delete_prefix(cf::CHUNK_BLOOM, prefix_for_file(file_id));
     delete_prefix(cf::FILE_BLOOM, prefix_for_file(file_id));
     delete_prefix(cf::CHUNK_STATS, prefix_for_file(file_id));
@@ -1131,71 +1032,6 @@ void IndexDatabaseWriterContext::delete_file_contents(int file_id) {
     delete_name_postings_by_owner(cf::NAME_CHUNK_POSTINGS, file_id,
                                   name_chunk_owner_prefix(file_id), true);
     delete_prefix(cf::DIMENSIONS, std::string("d|") + prefix_for_file(file_id));
-    delete_prefix(cf::MANIFEST, std::string("E|") + prefix_for_file(file_id));
-    delete_prefix(cf::MANIFEST, std::string("M|") + prefix_for_file(file_id));
-    delete_prefix(cf::MANIFEST, std::string("P|") + prefix_for_file(file_id));
-}
-
-void IndexDatabaseWriterContext::insert_event_range(
-    int file_id, std::uint64_t checkpoint_idx, std::string_view cat,
-    std::string_view name, std::span<const std::uint32_t> line_numbers) {
-    const auto key = manifest_event_key(file_id, checkpoint_idx, cat, name);
-    const auto value = encode_event_range_value(line_numbers);
-    auto status = db_->put(batch_, cf::MANIFEST, key, value);
-    if (!status.ok()) {
-        throw_db_error("Failed to insert event range", status);
-    }
-}
-
-void IndexDatabaseWriterContext::insert_metadata_lines(
-    int file_id, std::uint64_t checkpoint_idx, std::string_view meta_type,
-    std::span<const std::uint32_t> line_numbers) {
-    const auto key = manifest_metadata_key(file_id, checkpoint_idx, meta_type);
-    const auto value = encode_metadata_value(line_numbers);
-    auto status = db_->put(batch_, cf::MANIFEST, key, value);
-    if (!status.ok()) {
-        throw_db_error("Failed to insert metadata lines", status);
-    }
-}
-
-void IndexDatabaseWriterContext::insert_file_pids(
-    int file_id, const std::unordered_set<std::uint64_t>& pids) {
-    const auto key = encoding::file_pids_key(file_id);
-    const auto value = encoding::encode_file_pids_value(pids);
-    auto status = db_->put(batch_, cf::MANIFEST, key, value);
-    if (!status.ok()) {
-        throw_db_error("Failed to insert file PIDs", status);
-    }
-}
-
-void IndexDatabaseWriterContext::delete_event_ranges(int file_id) {
-    std::vector<std::string> keys;
-    std::string prefix("E|");
-    rocks::KeyCodec::append_be32(prefix, static_cast<std::uint32_t>(file_id));
-    scan_prefix(*db_, cf::MANIFEST, prefix, [&](::rocksdb::Iterator& it) {
-        keys.push_back(iterator_key(it));
-    });
-    for (const auto& key : keys) {
-        auto status = db_->del(batch_, cf::MANIFEST, key);
-        if (!status.ok()) {
-            throw_db_error("Failed to delete manifest event ranges", status);
-        }
-    }
-}
-
-void IndexDatabaseWriterContext::delete_metadata_lines(int file_id) {
-    std::vector<std::string> keys;
-    std::string prefix("M|");
-    rocks::KeyCodec::append_be32(prefix, static_cast<std::uint32_t>(file_id));
-    scan_prefix(*db_, cf::MANIFEST, prefix, [&](::rocksdb::Iterator& it) {
-        keys.push_back(iterator_key(it));
-    });
-    for (const auto& key : keys) {
-        auto status = db_->del(batch_, cf::MANIFEST, key);
-        if (!status.ok()) {
-            throw_db_error("Failed to delete metadata lines", status);
-        }
-    }
 }
 
 }  // namespace dftracer::utils::utilities::indexer

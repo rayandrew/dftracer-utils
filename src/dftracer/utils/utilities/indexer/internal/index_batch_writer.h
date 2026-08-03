@@ -4,9 +4,9 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/coro/channel.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/composites/dft/visitors/bloom_visitor.h>
-#include <dftracer/utils/utilities/composites/dft/visitors/hash_table_visitor.h>
-#include <dftracer/utils/utilities/composites/dft/visitors/manifest_visitor.h>
+#include <dftracer/utils/utilities/composites/dft/views/aggregation_fold.h>
+#include <dftracer/utils/utilities/composites/dft/views/bloom_fold.h>
+#include <dftracer/utils/utilities/composites/dft/views/dict_fold.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
 #include <dftracer/utils/utilities/indexer/internal/gzip/gzip_indexer.h>
 
@@ -19,17 +19,20 @@
 
 namespace dftracer::utils::utilities::indexer::internal {
 
-using composites::dft::visitors::BloomVisitor;
-using composites::dft::visitors::HashTableVisitor;
-using composites::dft::visitors::ManifestVisitor;
+using composites::dft::views::detail::AggregationFold;
+using composites::dft::views::detail::BloomFold;
+using composites::dft::views::detail::DictFold;
 
 struct ParsedIndexJob {
     int file_id = 0;
     std::string file_path;
     gzip::GzipBuildArtifacts artifacts;
-    std::unique_ptr<BloomVisitor> bloom_visitor;
-    std::unique_ptr<HashTableVisitor> hash_table_visitor;
-    std::unique_ptr<ManifestVisitor> manifest_visitor;
+    // Owns the folds' intern so it outlives them through the channel; declared
+    // first so it is destroyed last.
+    std::unique_ptr<dftracer::utils::StringIntern> intern;
+    std::unique_ptr<BloomFold> bloom_fold;
+    std::unique_ptr<DictFold> dict_fold;
+    std::unique_ptr<AggregationFold> agg_fold;
     bool success = true;
     std::string error_message;
 };
@@ -65,20 +68,20 @@ inline coro::CoroTask<void> index_batch_write_worker(
         for (auto& job : batch) {
             if (!job.success) continue;
             try {
-                for (const auto& checkpoint : job.artifacts.checkpoints) {
-                    sink.insert_checkpoint(job.file_id, checkpoint);
+                for (const auto& member : job.artifacts.members) {
+                    sink.insert_gzip_member(job.file_id, member);
                 }
                 sink.insert_file_metadata(
                     job.file_id, job.artifacts.checkpoint_size,
                     job.artifacts.total_lines, job.artifacts.total_uc_size);
-                if (job.bloom_visitor) {
-                    job.bloom_visitor->finalize_sink_only(sink, job.file_id);
+                if (job.bloom_fold) {
+                    job.bloom_fold->write_to_sink(sink, job.file_id);
                 }
-                if (job.hash_table_visitor) {
-                    job.hash_table_visitor->finalize(sink, job.file_id);
+                if (job.dict_fold) {
+                    job.dict_fold->write_to_sink(sink);
                 }
-                if (job.manifest_visitor) {
-                    job.manifest_visitor->finalize(sink, job.file_id);
+                if (job.agg_fold) {
+                    job.agg_fold->write_to_sink(sink, job.file_id);
                 }
             } catch (const std::exception& e) {
                 job.success = false;
@@ -109,10 +112,21 @@ inline coro::CoroTask<void> index_batch_write_worker(
         batch.clear();
     };
 
+    // Each job carries its file's hash table, so a batch of the nominal size
+    // holds every entry of `batch_size` high-cardinality files at once. Flush
+    // early once the accumulated entries cross a budget to bound peak heap.
+    static constexpr std::size_t MAX_BATCH_HASH_ENTRIES = 2u * 1024 * 1024;
+    std::size_t batch_hash_entries = 0;
+
     while (auto item = co_await channel->receive()) {
+        std::size_t entries =
+            item->dict_fold ? item->dict_fold->entry_count() : 0;
         batch.push_back(std::move(*item));
-        if (batch.size() >= batch_size) {
+        batch_hash_entries += entries;
+        if (batch.size() >= batch_size ||
+            batch_hash_entries >= MAX_BATCH_HASH_ENTRIES) {
             flush();
+            batch_hash_entries = 0;
         }
     }
     flush();

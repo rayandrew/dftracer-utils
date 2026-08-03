@@ -37,7 +37,6 @@ struct ResolverInput {
 
     bool require_checkpoints = true;
     bool require_bloom = false;
-    bool require_manifest = false;
     bool require_aggregation = false;
 
     // Full config for computing hash with stored time_interval
@@ -52,7 +51,6 @@ struct ResolverResult {
 
     std::vector<FileWorkItem> needs_checkpoint;
     std::vector<FileWorkItem> needs_bloom;
-    std::vector<FileWorkItem> needs_manifest;
     std::vector<FileWorkItem> needs_aggregation;
 
     std::vector<ResolvedFile> cached;
@@ -64,11 +62,6 @@ struct ResolverResult {
 
     // A registered file's source changed since indexing (mtime/size mismatch).
     bool stale_detected = false;
-
-    std::size_t total_needs_work() const {
-        return needs_checkpoint.size() + needs_bloom.size() +
-               needs_manifest.size() + needs_aggregation.size();
-    }
 
     std::size_t total_cached() const { return cached.size(); }
 };

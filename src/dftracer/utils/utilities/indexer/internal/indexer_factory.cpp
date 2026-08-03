@@ -3,7 +3,6 @@
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/internal/gzip/gzip_indexer.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
-#include <dftracer/utils/utilities/indexer/internal/tar/tar_indexer.h>
 
 namespace dftracer::utils::utilities::indexer::internal {
 
@@ -19,10 +18,6 @@ std::shared_ptr<Indexer> IndexerFactory::create(const std::string &archive_path,
     switch (format) {
         case ArchiveFormat::GZIP:
             return std::make_shared<gzip::GzipIndexer>(
-                archive_path, final_idx_path, checkpoint_size, force);
-
-        case ArchiveFormat::TAR_GZ:
-            return std::make_shared<tar::TarIndexer>(
                 archive_path, final_idx_path, checkpoint_size, force);
 
         case ArchiveFormat::UNKNOWN:
@@ -46,7 +41,6 @@ std::string IndexerFactory::generate_index_path(const std::string &archive_path,
 
     switch (format) {
         case ArchiveFormat::GZIP:
-        case ArchiveFormat::TAR_GZ:
             return composites::dft::internal::determine_index_path(archive_path,
                                                                    "");
 
