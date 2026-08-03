@@ -10,6 +10,11 @@ class Executor;
 void schedule_coroutine_resumption_helper(Executor* executor,
                                           std::coroutine_handle<> handle);
 
+/// Executor a coroutine suspending right now must be resumed through:
+/// `preferred` when it has one, else whichever is driving this thread.
+/// Parking a waiter with neither means it can never be woken.
+Executor* resume_executor_for(Executor* preferred) noexcept;
+
 /// Schedule a coroutine handle for deferred destruction.
 /// Used by SpawnFuture::detach() when the waiter handle is extracted
 /// but will never be resumed (preventing frame leaks).

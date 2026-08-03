@@ -229,12 +229,6 @@ TargetTuple convert_any_tuple_impl(const AnyTuple& any_tuple,
         get<Is>(any_tuple))...);
 }
 
-template <typename TargetTuple, typename AnyTuple>
-TargetTuple convert_any_tuple(const AnyTuple& any_tuple) {
-    return convert_any_tuple_impl<TargetTuple>(
-        any_tuple, std::make_index_sequence<std::tuple_size_v<TargetTuple>>{});
-}
-
 template <typename Func, typename Tuple, std::size_t... Is>
 auto apply_tuple_impl(Func&& func, Tuple&& tuple, std::index_sequence<Is...>) {
     return std::forward<Func>(func)(

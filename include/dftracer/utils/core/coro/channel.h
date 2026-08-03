@@ -191,14 +191,11 @@ class Channel : public std::enable_shared_from_this<Channel<T>> {
                               p.get_root_promise()->awaiting_async_ = true;
                           }) {
                 auto* root = h.promise().get_root_promise();
-                if (root) {
-                    root->awaiting_async_ = true;
-                    waiter_.executor = root->get_executor();
-                } else {
-                    waiter_.executor = nullptr;
-                }
+                if (root) root->awaiting_async_ = true;
+                waiter_.executor =
+                    resume_executor_for(root ? root->get_executor() : nullptr);
             } else {
-                waiter_.executor = nullptr;
+                waiter_.executor = resume_executor_for(nullptr);
             }
 
             T item;
@@ -372,14 +369,11 @@ class Channel : public std::enable_shared_from_this<Channel<T>> {
                               p.get_root_promise()->awaiting_async_ = true;
                           }) {
                 auto* root = h.promise().get_root_promise();
-                if (root) {
-                    root->awaiting_async_ = true;
-                    waiter_.executor = root->get_executor();
-                } else {
-                    waiter_.executor = nullptr;
-                }
+                if (root) root->awaiting_async_ = true;
+                waiter_.executor =
+                    resume_executor_for(root ? root->get_executor() : nullptr);
             } else {
-                waiter_.executor = nullptr;
+                waiter_.executor = resume_executor_for(nullptr);
             }
 
             std::coroutine_handle<> receive_handle;
@@ -545,16 +539,6 @@ class Channel : public std::enable_shared_from_this<Channel<T>> {
         }
     }
 
-    void release_slot_if_bounded() {
-        if (capacity_ == SIZE_MAX) {
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        release_slot_if_bounded_locked();
-        cv_writable_.notify_one();
-    }
-
     bool try_receive_locked(T& item) {
         const bool ok = queue_.try_dequeue(item);
         if (ok) {
@@ -598,14 +582,6 @@ class Channel : public std::enable_shared_from_this<Channel<T>> {
         if (!send_waiters_head_) send_waiters_tail_ = nullptr;
         node->next = nullptr;
         return node;
-    }
-
-    void enqueue_receive_waiter_front_locked(ReceiveWaiterNode* node) {
-        node->next = recv_waiters_head_;
-        recv_waiters_head_ = node;
-        if (!recv_waiters_tail_) {
-            recv_waiters_tail_ = node;
-        }
     }
 
     ReceiveWaiterNode* pop_receive_waiter_locked() {
@@ -747,28 +723,6 @@ class Channel : public std::enable_shared_from_this<Channel<T>> {
         return true;
     }
 
-    bool try_handoff_to_receive_waiter(T& item) {
-        std::coroutine_handle<> resume_handle;
-        dftracer::utils::Executor* resume_executor = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            ReceiveWaiterNode* waiter = pop_receive_waiter_locked();
-            if (!waiter) {
-                return false;
-            }
-            if (waiter->result) {
-                *(waiter->result) = std::optional<T>(std::move(item));
-            }
-            resume_handle = waiter->handle;
-            resume_executor = waiter->executor;
-        }
-        if (resume_handle) {
-            schedule_coroutine_resumption_helper(resume_executor,
-                                                 resume_handle);
-        }
-        return true;
-    }
-
     void notify_all_waiters() {
         cv_readable_.notify_all();
         cv_writable_.notify_all();
@@ -884,13 +838,6 @@ class Channel : public std::enable_shared_from_this<Channel<T>> {
     void register_producer() {
         had_producers_.store(true, std::memory_order_release);
         num_producers_.fetch_add(1, std::memory_order_release);
-    }
-
-    void register_producers(std::size_t n) {
-        if (n > 0) {
-            had_producers_.store(true, std::memory_order_release);
-            num_producers_.fetch_add(n, std::memory_order_release);
-        }
     }
 
     void release_producer() {

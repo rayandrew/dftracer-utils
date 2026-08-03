@@ -1,6 +1,7 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/pipeline/scheduler.h>
+#include <dftracer/utils/core/pipeline/watchdog.h>
 #include <dftracer/utils/core/tasks/noop_task.h>
 #include <dftracer/utils/core/tasks/task.h>
 
@@ -321,45 +322,6 @@ bool Pipeline::is_reachable_dfs(std::shared_ptr<Task> current,
     }
 
     return false;
-}
-
-bool Pipeline::validate_types() {
-    // Type validation happens during DAG construction in Task::depends_on()
-    // Here we just do a sanity check
-
-    for (const auto& task : all_tasks_) {
-        for (const auto& parent : task->get_parents()) {
-            // Skip validation for void outputs (synchronization only)
-            if (parent->get_output_type() == typeid(void)) {
-                continue;
-            }
-
-            // For single parent, types should match (unless task has custom
-            // combiner)
-            if (task->get_parents().size() == 1 && !task->has_combiner()) {
-                // std::any can accept any input type, and std::any output can
-                // feed any input (wildcard in both directions)
-                bool types_match =
-                    (parent->get_output_type() == task->get_input_type()) ||
-                    (task->get_input_type() == typeid(std::any)) ||
-                    (parent->get_output_type() == typeid(std::any));
-
-                if (!types_match) {
-                    auto& tloc = task->get_location();
-                    auto& ploc = parent->get_location();
-                    DFTRACER_UTILS_LOG_ERROR(
-                        "Type mismatch: task '%s' at %s:%u incompatible "
-                        "with parent '%s' at %s:%u",
-                        task->get_name(), tloc.file_name(), tloc.line(),
-                        parent->get_name(), ploc.file_name(), ploc.line());
-                    return false;
-                }
-            }
-            // Multiple parents are handled via combiner or tuple packing
-        }
-    }
-
-    return true;
 }
 
 bool Pipeline::has_cycles() {

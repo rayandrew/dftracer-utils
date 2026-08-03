@@ -15,8 +15,6 @@ void TaskResult::set_exception(std::exception_ptr ex) {
     publish(State::exception);
 }
 
-void TaskResult::set_cancelled() { publish(State::cancelled); }
-
 void TaskResult::mark_running() {
     auto expected = static_cast<std::uint8_t>(State::pending);
     state_.compare_exchange_strong(

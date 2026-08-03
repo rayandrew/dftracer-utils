@@ -55,13 +55,6 @@ class AsyncMutex {
     AsyncMutex(const AsyncMutex&) = delete;
     AsyncMutex& operator=(const AsyncMutex&) = delete;
 
-    bool try_lock() noexcept {
-        auto old = NOT_LOCKED;
-        return state_.compare_exchange_strong(old, LOCKED_NO_WAITERS,
-                                              std::memory_order_acquire,
-                                              std::memory_order_relaxed);
-    }
-
     AsyncMutexLockOperation lock() noexcept;
 
     void unlock();

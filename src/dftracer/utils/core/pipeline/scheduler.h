@@ -21,7 +21,7 @@
 namespace dftracer::utils {
 
 class Task;
-class Executor;
+class TaskExecutor;
 class Watchdog;
 
 /**
@@ -40,7 +40,7 @@ class Watchdog;
  */
 class Scheduler {
    private:
-    Executor* executor_;
+    TaskExecutor* executor_;
     std::atomic<bool> running_{false};
 
     Watchdog* watchdog_{nullptr};  // Borrowed from Runtime, not owned
@@ -81,9 +81,9 @@ class Scheduler {
     ShardedMutex<CallbackMap, 64> completion_callbacks_;
 
    public:
-    explicit Scheduler(Executor* executor);
+    explicit Scheduler(TaskExecutor* executor);
 
-    Scheduler(Executor* executor, Watchdog* watchdog,
+    Scheduler(TaskExecutor* executor, Watchdog* watchdog,
               const PipelineConfig& config);
 
     ~Scheduler();
@@ -181,7 +181,7 @@ class Scheduler {
     /**
      * Get executor reference (for TaskFuture async suspension)
      */
-    Executor* get_executor() const { return executor_; }
+    TaskExecutor* get_executor() const { return executor_; }
 
     // ========================================================================
     // Coroutine Support - Completion Callbacks

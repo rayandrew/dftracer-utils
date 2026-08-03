@@ -15,7 +15,7 @@
 namespace dftracer::utils {
 
 class Task;
-class Executor;
+class TaskExecutor;
 
 /**
  * Watchdog - Monitors pipeline execution and enforces timeouts
@@ -81,7 +81,7 @@ class Watchdog {
     WarningCallback warning_callback_;
 
     // Reference to executor (for responsiveness check)
-    Executor* executor_{nullptr};
+    TaskExecutor* executor_{nullptr};
 
    public:
     /**
@@ -152,7 +152,7 @@ class Watchdog {
     /**
      * Set executor reference for responsiveness checks
      */
-    void set_executor(Executor* executor);
+    void set_executor(TaskExecutor* executor);
 
     /**
      * Set global timeout

@@ -37,16 +37,13 @@ class CompletionLatch {
     std::atomic<std::uint8_t> state_{0};
 };
 
-// Resume `continuation` via the executor if present, else inline, guarding a
-// null/already-done handle. Used after the latch says this side won the race.
+// Resume `continuation` after the latch says this side won the race.
+// Always through its executor: resuming inline would run the coroutine on
+// whichever thread happened to win, which is not the one it was parked on.
 inline void resume_continuation(Executor* executor,
                                 std::coroutine_handle<> continuation) {
     if (continuation && !continuation.done()) {
-        if (executor) {
-            schedule_coroutine_resumption_helper(executor, continuation);
-        } else {
-            continuation.resume();
-        }
+        schedule_coroutine_resumption_helper(executor, continuation);
     }
 }
 
