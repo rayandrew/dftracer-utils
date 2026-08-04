@@ -22,6 +22,7 @@ set(UTILITIES_TEST_SOURCES
     composites/test_indexed_file_reader.cpp
 
     # DFT Composites
+    composites/dft/test_parse_inflated.cpp
     composites/dft/test_schema.cpp
     composites/dft/test_trace_config.cpp
     composites/dft/test_chunk_extractor.cpp

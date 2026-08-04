@@ -41,20 +41,19 @@ inline void strip_array_delimiters(char* buf, std::size_t len) {
     }
 }
 
-// Iterate parsed dftracer events from a single inflated buffer. The buffer
-// is assumed to hold concatenated NDJSON-ish events plus the simdjson
-// padding required by parse_many; callers responsible for stripping any
-// "[" / "]" delimiter lines (see strip_array_delimiters above).
+// Iterate parsed dftracer events from one inflated buffer (NDJSON plus simdjson
+// padding; the caller strips any "[" / "]" delimiter lines). `chunk_buffer` is
+// held shared so an EventRecord's string_view can outlive the loop.
+// `needs_args_map` takes the slower parse path that materializes the args map.
+// Returns the trailing incomplete line for the caller to carry into the next
+// buffer.
 //
-// `chunk_buffer` is held shared so the EventRecord's string_view can outlive
-// the loop body if a visitor stashes it. `len` excludes the simdjson
-// padding tail. `line_number` is incremented for each successfully parsed
-// event before being copied into the EventRecord. `needs_args_map` follows
-// the existing dispatcher contract (when any consumer requires the args
-// JSON object materialized, take the slower DFTracerEvent::parse path).
-//
-// Returns the number of trailing bytes parse_many reported as truncated, so
-// the caller can carry them over to the next buffer.
+// Parsed only through the last newline, not by parse_many's own truncation
+// (which reads zero when a chunk is cut mid-string, leaving the next chunk to
+// start mid-string and be rejected whole). parse_many derives all boundaries
+// from one scan of the batch, so a single unescaped character in a string
+// collapses it into one rejected document; on that (nothing delivered) the
+// chunk is re-parsed line by line so a bad record drops only itself.
 template <typename Cb>
 std::size_t parse_buffer(simdjson::dom::parser& parser,
                          std::shared_ptr<std::string> chunk_buffer,
@@ -63,35 +62,72 @@ std::size_t parse_buffer(simdjson::dom::parser& parser,
                          Cb&& cb) {
     if (!chunk_buffer || len == 0) return 0;
 
-    simdjson::dom::document_stream stream;
-    auto err = parser.parse_many(chunk_buffer->data(), len, len).get(stream);
-    if (err) return 0;
+    const char* base = chunk_buffer->data();
+    std::size_t parse_len = 0;
+    for (std::size_t i = len; i-- > 0;) {
+        if (base[i] == '\n') {
+            parse_len = i + 1;
+            break;
+        }
+    }
+    // A record longer than the whole chunk: carry it to the next.
+    if (parse_len == 0) return len;
 
-    for (auto it = stream.begin(); it != stream.end(); ++it) {
-        if ((*it).error()) continue;
-        auto root = (*it).value_unsafe();
-        if (!root.is_object()) continue;
+    auto emit = [&](simdjson::dom::element root, std::string_view src) {
+        if (!root.is_object()) return;
         common::json::JsonValue json(root);
         DFTracerEvent ev;
         simdjson::dom::element args_dom{};
         bool has_args = false;
-        bool ok = false;
-        if (needs_args_map) {
-            ok = DFTracerEvent::parse(json, ev, args_dom, has_args);
-        } else {
-            ok = DFTracerEvent::parse_scalars(root, ev, args_dom, has_args);
-        }
-        if (!ok) continue;
-
+        bool ok =
+            needs_args_map
+                ? DFTracerEvent::parse(json, ev, args_dom, has_args)
+                : DFTracerEvent::parse_scalars(root, ev, args_dom, has_args);
+        if (!ok) return;
         std::size_t ln = line_number++;
-        std::string_view src = it.source();
         EventRecord record{ev, json,     src,     chunk_buffer, checkpoint_idx,
                            ln, args_dom, has_args};
         cb(record);
+    };
+
+    std::size_t covered = 0;
+    {
+        simdjson::dom::document_stream stream;
+        auto err = parser.parse_many(base, parse_len, parse_len).get(stream);
+        if (!err) {
+            for (auto it = stream.begin(); it != stream.end(); ++it) {
+                if ((*it).error()) continue;
+                std::string_view src = it.source();
+                emit((*it).value_unsafe(), src);
+                covered =
+                    static_cast<std::size_t>(src.data() - base) + src.size();
+            }
+        }
     }
 
-    std::size_t truncated = stream.truncated_bytes();
-    return (truncated > 0 && truncated <= len) ? truncated : 0;
+    // A bad record can desync parse_many's single structural scan and swallow
+    // the rest of the batch as one rejected document. Re-parse whatever it did
+    // not reach, line by line, so a malformed record drops only itself.
+    if (covered < parse_len) {
+        std::size_t pos = covered;
+        if (pos > 0) {  // resume at the line after the last record parsed
+            while (pos < parse_len && base[pos] != '\n') ++pos;
+            if (pos < parse_len) ++pos;
+        }
+        while (pos < parse_len) {
+            std::size_t end = pos;
+            while (end < parse_len && base[end] != '\n') ++end;
+            if (end > pos) {
+                auto r = parser.parse(base + pos, end - pos);
+                if (!r.error())
+                    emit(r.value_unsafe(),
+                         std::string_view(base + pos, end - pos));
+            }
+            pos = end + 1;
+        }
+    }
+
+    return len - parse_len;
 }
 
 }  // namespace dftracer::utils::utilities::composites::dft
