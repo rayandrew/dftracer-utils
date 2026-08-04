@@ -168,6 +168,12 @@ struct SumBuild {
         lane_cache;
     std::vector<dftracer::utils::StringViewMap<std::uint32_t>> name_cache;
 
+    // Per-worker simdjson parser + reusable buffer. Frame-local (owned here,
+    // constructed on the caller's thread) rather than thread_local, which a
+    // coroutine running on a pool thread leaves zero-initialised.
+    std::vector<simdjson::dom::parser> parsers;
+    std::vector<std::string> parse_bufs;
+
     std::vector<FineAcc> fine;
     std::vector<std::size_t> long_quota;  // per level-0 bucket, per worker
 
@@ -390,10 +396,14 @@ static void fold_group(NameMap& m, std::string_view key, double dur) {
 }
 
 static void fold_summary(std::size_t w, std::string_view event, SumBuild& b) {
-    thread_local simdjson::dom::parser parser;
-    thread_local std::string buf;
+    simdjson::dom::parser& parser = b.parsers[w];
+    std::string& buf = b.parse_bufs[w];
+    // Give simdjson zero-filled trailing padding it can over-read into. Parsing
+    // a bare std::string pads it in place, leaving that padding uninitialised.
     buf.assign(event);
-    auto res = parser.parse(buf);
+    buf.append(simdjson::SIMDJSON_PADDING, '\0');
+    auto res =
+        parser.parse(buf.data(), event.size(), /*realloc_if_needed=*/false);
     if (res.error()) return;
     auto root = res.value_unsafe();
     if (!root.is_object()) return;
@@ -726,6 +736,8 @@ static coro::CoroTask<void> build_viz_summary(TraceIndex& index) {
         std::max<std::size_t>(1, VizSummary::MAX_FINE_CELLS / slots);
     b.long_cap = std::max<std::size_t>(2, VizSummary::MAX_LONG_EVENTS / slots);
     b.fine.resize(slots);
+    b.parsers.resize(slots);
+    b.parse_bufs.resize(slots);
     b.long_quota.assign(
         slots, std::max<std::size_t>(1, VizSummary::MAX_LONG_EVENTS /
                                             std::max<std::size_t>(1, nb)));
