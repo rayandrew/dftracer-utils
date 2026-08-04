@@ -35,6 +35,14 @@ from dftracer.utils import (
 )
 from dftracer.utils.dftracer_utils_ext import AggregatedTraceViewer, TraceViewer
 
+__all__ = [
+    "DaskTraceViewer",
+    "DaskAggregatedTraceViewer",
+    "ProgressAggregator",
+    "register_auto_thread_plugin",
+]
+
+
 if WorkerPlugin is not None:
 
     class DFTracerUtilsDaskWorkerPlugin(WorkerPlugin):  # ty: ignore[unsupported-base]
