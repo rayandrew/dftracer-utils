@@ -5,6 +5,7 @@
 
 #include <condition_variable>
 #include <cstddef>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -53,6 +54,13 @@ class RocksDBManager {
     std::unordered_map<std::string, RetainedList::iterator> retained_index_;
     std::size_t retain_cap_ = 0;  // 0 until first read from env
 };
+
+// Register a callback invoked by RocksDBManager::reset(db_path) with that path.
+// Caches keyed by DB path that hold their own strong handle (e.g. the view
+// aggregation tier) register here so reset() releases every reference and the
+// DB actually closes - required before an index directory is removed for a
+// rebuild, or the removal fails with EBUSY while the handle is open.
+void register_reset_listener(std::function<void(const std::string&)> fn);
 
 }  // namespace dftracer::utils::rocksdb
 

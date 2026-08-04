@@ -70,6 +70,11 @@ coro::CoroTask<ResolverResult> resolve_and_build_index(
                                         ? "Source changed since indexing"
                                         : "Aggregation interval changed",
                                     root.c_str());
+            // Close any cached open handle to this index (the resolve above
+            // retains one via RocksDBManager, and a prior read may hold the
+            // agg tier) before removing the directory, or the removal fails
+            // with EBUSY while a RocksDB file is still open.
+            dftracer::utils::rocksdb::RocksDBManager::instance().reset(root);
             std::error_code ec;
             fs::remove_all(root, ec);
             if (ec) {
