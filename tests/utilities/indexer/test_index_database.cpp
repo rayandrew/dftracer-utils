@@ -43,13 +43,14 @@ TEST_SUITE("IndexDatabase") {
             writer->commit();
         }
 
+        const std::string p = (root / "a.pfw.gz").string();
         int id1;
         {
             auto writer = db1.begin_write();
-            id1 = writer->get_or_create_file_info("a.pfw.gz", 0x1111);
+            id1 = writer->get_or_create_file_info(p, 0x1111);
             writer->commit();
         }
-        int id2 = db2.get_file_info_id("a.pfw.gz");
+        int id2 = db2.get_file_info_id(p);
 
         CHECK(id1 > 0);
         CHECK(id1 == id2);
@@ -316,7 +317,7 @@ TEST_SUITE("IndexDatabase staleness") {
         db.init_schema();
         db.register_files({a});
 
-        auto stat = db.get_file_stat("a.pfw");
+        auto stat = db.get_file_stat(a);
         REQUIRE(stat.has_value());
         CHECK(stat->size == fs::file_size(a));
         CHECK(stat->mtime != 0);
@@ -401,7 +402,7 @@ TEST_SUITE("IndexDatabase staleness") {
 
         auto result = db.find_stale_files({a});
         REQUIRE(result.removed.size() == 1);
-        CHECK(result.removed[0] == "b.pfw");
+        CHECK(result.removed[0] == b);
     }
 
     TEST_CASE("outdated schema forces a full rebuild") {

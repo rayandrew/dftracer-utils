@@ -5,9 +5,12 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/utilities/common/query/query.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_config.h>
 #include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
+#include <dftracer/utils/utilities/composites/dft/indexing/shard_manifest.h>
 #include <dftracer/utils/utilities/composites/dft/internal/utils.h>
 #include <dftracer/utils/utilities/composites/dft/views/chunk_stats_source.h>
+#include <dftracer/utils/utilities/composites/dft/views/sharded_view.h>
 #include <dftracer/utils/utilities/composites/dft/views/view.h>
 #include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
@@ -706,8 +709,30 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         std::printf("View recipe saved to: %s\n", save_recipe.c_str());
     }
 
+    // A shard set is a directory holding a shards.json manifest. When the
+    // target is one, the query runs over the immutable shards via ShardedView
+    // and needs no trace-file arguments (the shards are self-describing).
+    std::string shard_set_root;
+    if (!directory.empty()) shard_set_root = resolve_shard_set_root(directory);
+    if (shard_set_root.empty() && !index_dir.empty())
+        shard_set_root = resolve_shard_set_root(index_dir);
+    if (shard_set_root.empty() && directory.empty() &&
+        cli->files_args.value.size() == 1 &&
+        fs::is_directory(cli->files_args.value[0]))
+        shard_set_root = resolve_shard_set_root(cli->files_args.value[0]);
+
+    if (!shard_set_root.empty() && !aggregate && !counters) {
+        DFTRACER_UTILS_LOG_ERROR(
+            "%s",
+            "A shard set supports only aggregate/counter queries "
+            "(--group-by/--agg/--counters).");
+        co_return 1;
+    }
+
     std::vector<std::string> files;
-    if (!directory.empty()) {
+    if (!shard_set_root.empty()) {
+        // Self-describing: ShardedView enumerates files from each shard index.
+    } else if (!directory.empty()) {
         if (!fs::exists(directory)) {
             DFTRACER_UTILS_LOG_ERROR("Directory does not exist: %s",
                                      directory.c_str());
@@ -849,18 +874,43 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
             // and emits (counters -> ph="C" events; aggregate -> collect
             // table). Only these reductions distribute; other modes fall
             // through to rank 0 (single-node) below.
-            if ((counters || aggregate) && transport.size() > 1) {
+            if ((counters || aggregate) && transport.size() > 1 &&
+                shard_set_root.empty()) {
                 auto shard =
                     shard_files(files, transport.rank(), transport.size());
+                // Default: nest the shard set under a hidden dir so it does not
+                // clutter (or get scanned from) the trace directory. An
+                // explicit
+                // --index-dir is used verbatim.
                 std::string idx_base =
-                    index_dir.empty()
-                        ? fs::path(files.front()).parent_path().string()
-                        : index_dir;
+                    index_dir.empty() ? (fs::path(files.front()).parent_path() /
+                                         SHARD_SET_DIRNAME)
+                                            .string()
+                                      : index_dir;
                 std::string rank_idx =
                     idx_base + "/rank_" + std::to_string(transport.rank());
                 if (!no_auto_index) {
-                    co_await indexing::ensure_indexes_fresh(&ctx, "", shard,
-                                                            rank_idx);
+                    if (counters) {
+                        // The tier is EVENT-only; a counter partial scans
+                        // regardless, so build only the base index.
+                        co_await indexing::ensure_indexes_fresh(&ctx, "", shard,
+                                                                rank_idx);
+                    } else {
+                        // Build the aggregation tier per rank so the partial -
+                        // and any later read of the auto-written shard set - is
+                        // answered from the index instead of re-scanning
+                        // traces.
+                        indexing::ResolveAndBuildInput bin;
+                        bin.files = shard;
+                        bin.index_dir = rank_idx;
+                        bin.checkpoint_size = checkpoint_size;
+                        bin.require_checkpoints = true;
+                        bin.require_aggregation = true;
+                        bin.aggregation_config =
+                            aggregators::AggregationConfig{};
+                        co_await indexing::resolve_and_build_index(
+                            &ctx, std::move(bin));
+                    }
                 }
                 std::vector<ViewFile> shard_files_vf;
                 for (const auto& f : shard) {
@@ -885,6 +935,26 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                         co_await emit_table(table, arrow, output_path,
                                             out_target);
                         stats.events_matched = table.rows.size();
+                    }
+
+                    // Catalog the per-rank shards so a later query autodetects
+                    // and reads the set without rebuilding. Best-effort: a
+                    // write failure never fails the query.
+                    if (!no_auto_index) {
+                        std::vector<std::string> shard_dirs;
+                        for (int r = 0; r < transport.size(); ++r) {
+                            std::string d = internal::determine_index_path(
+                                "x", idx_base + "/rank_" + std::to_string(r));
+                            if (fs::exists(d))
+                                shard_dirs.push_back(std::move(d));
+                        }
+                        try {
+                            if (!shard_dirs.empty())
+                                write_shard_set(idx_base, shard_dirs);
+                        } catch (const std::exception& e) {
+                            DFTRACER_UTILS_LOG_WARN(
+                                "shard-set manifest not written: %s", e.what());
+                        }
                     }
                 }
                 co_return;
@@ -939,6 +1009,20 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
             // Non-distributed modes run on rank 0 only (correct, not sharded).
             if (transport.rank() != 0) co_return;
 #endif
+            // Shard set: merge the query across the immutable shards read-only,
+            // no trace-file scan when each shard's aggregation tier covers it.
+            if (!shard_set_root.empty()) {
+                ShardedView sv = ShardedView::from_manifest(shard_set_root);
+                if (counters) {
+                    stats = co_await sv.aggregate_counters(configure, sink);
+                } else {
+                    auto table = co_await sv.aggregate(configure);
+                    co_await emit_table(table, arrow, output_path, out_target);
+                    stats.events_matched = table.rows.size();
+                }
+                co_return;
+            }
+
             View v = configure(
                 View::from_files(view_files).with_partial_source(&source));
 

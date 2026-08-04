@@ -953,6 +953,22 @@ coro::CoroTask<ExportStats> run_export_counters(const ViewPlan& plan,
 // (shard of) files in memory and serialize the groups into an opaque partial
 // buffer. The transport (MPI etc.) lives in the caller; only bytes cross ranks.
 coro::CoroTask<std::string> run_aggregate_partial(const ViewPlan& plan) {
+    // Index-only fast path: when the aggregation tier answers the whole plan,
+    // read its pre-folded accumulators instead of scanning the trace files and
+    // serialize them into the same partial format a scan produces. This lets a
+    // sharded/distributed reader merge shards straight from their indexes, with
+    // no trace read. Restricted to plain event aggregations: the tier is
+    // EVENT-only, so counter and dynamic-numeric-args plans still scan (their
+    // values are not in the tier).
+    if (plan.phase != Phase::Counters && !plan.auto_numeric_metrics) {
+        GroupMap tier;
+        if (agg_tier_collect(plan, tier)) {
+            std::string out;
+            for (const auto& [k, a] : tier) serialize_accum(out, k, a);
+            co_return out;
+        }
+    }
+
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/true);
     std::string out;
     co_await fused_aggregate(plan, vdef,

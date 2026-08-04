@@ -72,8 +72,10 @@ class IndexDatabase {
     /// axis on gzip members instead of checkpoints, so chunk-keyed records of
     /// an older index address the wrong bytes. v6 dropped the zran checkpoint
     /// records the read path used to seek with. v7 renamed their column family
-    /// to `members`, so an older index's member table is invisible.
-    static constexpr std::uint32_t SCHEMA_VERSION = 8;
+    /// to `members`, so an older index's member table is invisible. v8 -> v9
+    /// keyed the file registry on the canonical absolute path instead of the
+    /// bare filename, so an older index's file lookups miss under new code.
+    static constexpr std::uint32_t SCHEMA_VERSION = 9;
 
     /// True if the stored schema predates the current build's layout.
     bool schema_outdated() const;

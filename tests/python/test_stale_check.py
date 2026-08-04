@@ -4,8 +4,6 @@ Covers the IndexDatabase.find_stale_files binding and verifies that a full
 aggregation run rebuilds only the traces whose source files changed.
 """
 
-import os
-
 import pytest
 
 import dftracer.utils as dft_utils
@@ -84,7 +82,8 @@ class TestFindStaleFiles:
 
             db = IndexDatabase(determine_index_path(a))
             res = db.find_stale_files([a])
-            assert res["removed"] == [os.path.basename(b)]
+            # The registry now keys on the full canonical path.
+            assert res["removed"] == [b]
             assert res["changed"] == []
 
 
