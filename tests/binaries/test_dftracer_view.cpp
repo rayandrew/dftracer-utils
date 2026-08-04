@@ -428,6 +428,43 @@ TEST_SUITE("DFTracerView") {
         CHECK(sorted_lines(shard_out) == sorted_lines(direct_out));
     }
 
+    // --select projects raw (non-aggregate) events to the chosen fields,
+    // SQL-style, flattening args - even on a fresh trace (lazy indexing).
+    TEST_CASE("select projects raw event fields") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found; skipping");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        std::string dir = env.get_dir() + "/sel";
+        fs::create_directories(dir);
+        std::string pfw = dir + "/t.pfw";
+        {
+            std::ofstream out(pfw);
+            out << R"({"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,"ts":1000,"dur":10,"args":{"fhash":"abc","bytes":4096}})"
+                << "\n";
+        }
+        std::string gz = pfw + ".gz";
+        REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
+        fs::remove(pfw);
+
+        std::string cap = env.get_dir() + "/cap.txt";
+        std::string out;
+        CHECK(run_view_capture(binary,
+                               {"--files", gz, "--query", "name == \"read\"",
+                                "--select", "name,fhash,bytes"},
+                               cap, out) == 0);
+        // Projected to exactly the selected fields (name top-level; fhash/bytes
+        // lifted out of args); the unselected cat/pid/ts/dur are gone.
+        CHECK(out.find("\"name\":\"read\"") != std::string::npos);
+        CHECK(out.find("\"fhash\":\"abc\"") != std::string::npos);
+        CHECK(out.find("\"bytes\":4096") != std::string::npos);
+        CHECK(out.find("\"cat\"") == std::string::npos);
+        CHECK(out.find("\"dur\"") == std::string::npos);
+    }
+
     // A 1-byte budget forces a spill; the result must match the in-memory run.
     TEST_CASE("memory-budget spill matches --no-spill") {
         auto binary = find_view_binary();
