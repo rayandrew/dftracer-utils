@@ -39,6 +39,7 @@ set(UTILITIES_TEST_SOURCES
     composites/dft/indexing/test_chunk_pruner.cpp
     composites/dft/indexing/test_sub_chunk_prune.cpp
     composites/dft/indexing/test_resolved_field_rewriter.cpp
+    composites/dft/indexing/test_shard_manifest.cpp
 
     # DFT Views Composites
     composites/dft/views/test_view_definition.cpp
@@ -55,6 +56,7 @@ set(UTILITIES_TEST_SOURCES
     composites/dft/views/test_raw_gzip_fuse.cpp
     composites/dft/views/test_event_source.cpp
     composites/dft/views/test_aggfold.cpp
+    composites/dft/views/test_sharded_view.cpp
 
     # DFT Statistics Composites
     composites/dft/statistics/test_trace_statistics.cpp

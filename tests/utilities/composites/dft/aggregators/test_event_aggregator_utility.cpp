@@ -1,10 +1,10 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/event_aggregator.h>
 #include <doctest/doctest.h>
 
-#include <filesystem>
 #include <string>
 
 using namespace dftracer::utils::utilities::composites::dft::aggregators;
@@ -82,7 +82,6 @@ TEST_SUITE("EventAggregator") {
     }
 
     TEST_CASE("Two indexes open at once keep their own string ids") {
-        namespace fs = std::filesystem;
         auto root = fs::temp_directory_path() / "dft_intern_two_index_test";
         fs::remove_all(root);
         const auto path_a = (root / "a").string();

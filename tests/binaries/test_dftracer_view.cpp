@@ -1,5 +1,10 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/filesystem.h>
+#include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/utilities/composites/dft/aggregators/aggregator_utility.h>
+#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/utilities/composites/dft/views/sharded_view.h>
 #include <dftracer/utils/utilities/fileio/compress/gzip_rechunker.h>
 #include <doctest/doctest.h>
 #include <fcntl.h>
@@ -116,6 +121,38 @@ int run_view_capture(const std::string& binary,
 
 std::size_t count_lines(const std::string& s) {
     return static_cast<std::size_t>(std::count(s.begin(), s.end(), '\n'));
+}
+
+// Create a trace in its own subdir and build an aggregated index (tier) over it
+// via the aggregator; returns the shard's .dftindex path.
+std::string build_aggregated_shard(dft_utils_test::TestEnvironment& env,
+                                   const std::string& tag, int num_events) {
+    namespace agg = dftracer::utils::utilities::composites::dft::aggregators;
+    namespace internal = dftracer::utils::utilities::composites::dft::internal;
+    std::string dir = env.get_dir() + "/" + tag;
+    fs::create_directories(dir);
+    std::string src = env.create_dft_test_gzip_file(num_events);
+    std::string gz = dir + "/t.pfw.gz";
+    fs::rename(src, gz);
+
+    agg::AggregatorInput input;
+    input.directory = dir;
+    input.force_rebuild = true;
+    dftracer::utils::Runtime rt(4);
+    auto task = dftracer::utils::run_coro_scope(
+        rt.executor(),
+        [&](dftracer::utils::CoroScope& ctx)
+            -> dftracer::utils::coro::CoroTask<void> {
+            agg::AggregatorUtility u;
+            u.bind_context(ctx);
+            auto gen = u.process(input);
+            while (auto batch = co_await gen.next()) (void)batch;
+            u.unbind_context();
+            co_return;
+        });
+    rt.submit(std::move(task), "build-shard").wait();
+    rt.shutdown();
+    return internal::determine_index_path(gz, "");
 }
 
 // Split into non-empty lines and sort, so two aggregations can be compared
@@ -352,6 +389,80 @@ TEST_SUITE("DFTracerView") {
         // The fixture carries a numeric arg, so --agg-numeric-args adds a value
         // column that a bare count does not.
         CHECK(numeric.size() > plain.size());
+    }
+
+    // Pointing -d at a shard-set root (a dir with shards.json) autodetects it
+    // and answers the aggregate over the immutable shards, matching a direct
+    // query over the same traces.
+    TEST_CASE("shard-set query matches a direct query") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found; skipping");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+
+        std::string sa = build_aggregated_shard(env, "sa", 50);
+        std::string sb = build_aggregated_shard(env, "sb", 40);
+        std::string root = env.get_dir() + "/set";
+        dftracer::utils::utilities::composites::dft::views::write_shard_set(
+            root, {sa, sb});
+
+        // A flat directory with the same two traces for the baseline query.
+        std::string both = env.get_dir() + "/both";
+        fs::create_directories(both);
+        fs::copy_file(env.get_dir() + "/sa/t.pfw.gz", both + "/a.pfw.gz");
+        fs::copy_file(env.get_dir() + "/sb/t.pfw.gz", both + "/b.pfw.gz");
+
+        std::string cap = env.get_dir() + "/cap.txt";
+        std::string shard_out, direct_out;
+        CHECK(run_view_capture(
+                  binary, {"--group-by", "cat", "--agg", "count", "-d", root},
+                  cap, shard_out) == 0);
+        CHECK(run_view_capture(
+                  binary, {"--group-by", "cat", "--agg", "count", "-d", both},
+                  cap, direct_out) == 0);
+
+        CHECK(!shard_out.empty());
+        CHECK(sorted_lines(shard_out) == sorted_lines(direct_out));
+    }
+
+    // --select projects raw (non-aggregate) events to the chosen fields,
+    // SQL-style, flattening args - even on a fresh trace (lazy indexing).
+    TEST_CASE("select projects raw event fields") {
+        auto binary = find_view_binary();
+        if (binary.empty()) {
+            MESSAGE("dftracer_view binary not found; skipping");
+            return;
+        }
+        dft_utils_test::TestEnvironment env(100);
+        REQUIRE(env.is_valid());
+        std::string dir = env.get_dir() + "/sel";
+        fs::create_directories(dir);
+        std::string pfw = dir + "/t.pfw";
+        {
+            std::ofstream out(pfw);
+            out << R"({"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,"ts":1000,"dur":10,"args":{"fhash":"abc","bytes":4096}})"
+                << "\n";
+        }
+        std::string gz = pfw + ".gz";
+        REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
+        fs::remove(pfw);
+
+        std::string cap = env.get_dir() + "/cap.txt";
+        std::string out;
+        CHECK(run_view_capture(binary,
+                               {"--files", gz, "--query", "name == \"read\"",
+                                "--select", "name,fhash,bytes"},
+                               cap, out) == 0);
+        // Projected to exactly the selected fields (name top-level; fhash/bytes
+        // lifted out of args); the unselected cat/pid/ts/dur are gone.
+        CHECK(out.find("\"name\":\"read\"") != std::string::npos);
+        CHECK(out.find("\"fhash\":\"abc\"") != std::string::npos);
+        CHECK(out.find("\"bytes\":4096") != std::string::npos);
+        CHECK(out.find("\"cat\"") == std::string::npos);
+        CHECK(out.find("\"dur\"") == std::string::npos);
     }
 
     // A 1-byte budget forces a spill; the result must match the in-memory run.

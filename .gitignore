@@ -100,3 +100,6 @@ profiling-results*/
 # ccache dir created by CI and the valgrind docker runner
 .ccache/
 wheelhouse/
+
+# Local GCC14 repro scratch script
+.gcc14_repro.sh

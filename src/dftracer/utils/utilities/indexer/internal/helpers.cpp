@@ -18,9 +18,15 @@
 
 namespace dftracer::utils::utilities::indexer::internal {
 
+// Registry key: the canonical absolute path, so same-named files in different
+// directories are distinct and the key locates the trace. Applied on both the
+// write and read side so lookups stay consistent; relative inputs resolve
+// against the cwd, so the index is not portable across an absolute-layout move.
 std::string get_logical_path(std::string_view path) {
-    auto fs_path = fs::path(std::string(path));
-    return fs_path.filename().string();
+    std::error_code ec;
+    fs::path abs = fs::absolute(fs::path(std::string(path)), ec);
+    if (ec) return fs::path(std::string(path)).lexically_normal().string();
+    return abs.lexically_normal().string();
 }
 
 std::string normalize_index_root(std::string_view path) {

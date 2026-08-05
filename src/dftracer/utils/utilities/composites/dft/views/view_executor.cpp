@@ -43,6 +43,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -67,9 +68,42 @@ static bool all_files_fresh(const ViewPlan& plan) {
 bool export_bootstrap_eligible(const ViewPlan& plan) {
     if (plan.query || plan.time_range || plan.offset || plan.limit ||
         plan.phase != Phase::Any || !plan.include_metadata ||
-        plan.files.empty())
+        !plan.select.empty() || plan.files.empty())
         return false;
     return all_files_fresh(plan);
+}
+
+// Project one NDJSON event to the selected bare-name fields (found at top level
+// or nested in `args`), emitted flat as a JSON object - the raw-event form of
+// project_columns. `parser` is caller-owned: a thread_local parser is unsafe
+// here because the export emit runs on pooled coroutine threads.
+std::string project_event(simdjson::dom::parser& parser, std::string_view ev,
+                          const std::vector<std::string>& select) {
+    simdjson::padded_string padded(ev);
+    simdjson::dom::element doc;
+    if (parser.parse(padded).get(doc) || !doc.is_object())
+        return std::string(ev);
+    simdjson::dom::object args;
+    const bool has_args = !doc["args"].get(args);
+
+    std::string out = "{";
+    bool first = true;
+    for (const auto& name : select) {
+        simdjson::dom::element val;
+        bool found = !doc[name].get(val);
+        if (!found && has_args) found = !args[name].get(val);
+        if (!found) continue;
+        std::ostringstream os;
+        os << val;
+        if (!first) out += ',';
+        first = false;
+        out += '"';
+        out += name;
+        out += "\":";
+        out += os.str();
+    }
+    out += '}';
+    return out;
 }
 
 bool collect_bootstrap_eligible(const ViewPlan& plan) {
@@ -223,8 +257,10 @@ coro::CoroTask<ExportStats> run_export(const ViewPlan& base_plan,
     auto folds = select_index_folds(plan, vdef, intern);
     std::vector<Fold*> fold_ptrs;
     for (auto& f : folds) fold_ptrs.push_back(f.get());
-    // Stream matched events verbatim; the scan driver owns the gather +
-    // fan-out.
+    // Stream matched events; --select projects each one to the chosen fields
+    // (SQL-style), otherwise they are written verbatim. The scan driver owns
+    // the gather + fan-out. The projection parser is used under sink_mtx.
+    simdjson::dom::parser proj_parser;
     ExportStats stats = co_await for_each_scanned_batch(
         plan, vdef, /*num_slots=*/0, cap,
         [&](std::size_t, const std::vector<std::string_view>& events) {
@@ -232,7 +268,11 @@ coro::CoroTask<ExportStats> run_export(const ViewPlan& base_plan,
             for (const auto& ev : events) {
                 if (seen++ < plan.offset) continue;
                 if (plan.limit && written >= plan.limit) break;
-                sink.write(ev);
+                if (plan.select.empty()) {
+                    sink.write(ev);
+                } else {
+                    sink.write(project_event(proj_parser, ev, plan.select));
+                }
                 sink.write("\n");
                 ++written;
             }
@@ -953,6 +993,22 @@ coro::CoroTask<ExportStats> run_export_counters(const ViewPlan& plan,
 // (shard of) files in memory and serialize the groups into an opaque partial
 // buffer. The transport (MPI etc.) lives in the caller; only bytes cross ranks.
 coro::CoroTask<std::string> run_aggregate_partial(const ViewPlan& plan) {
+    // Index-only fast path: when the aggregation tier answers the whole plan,
+    // read its pre-folded accumulators instead of scanning the trace files and
+    // serialize them into the same partial format a scan produces. This lets a
+    // sharded/distributed reader merge shards straight from their indexes, with
+    // no trace read. Restricted to plain event aggregations: the tier is
+    // EVENT-only, so counter and dynamic-numeric-args plans still scan (their
+    // values are not in the tier).
+    if (plan.phase != Phase::Counters && !plan.auto_numeric_metrics) {
+        GroupMap tier;
+        if (agg_tier_collect(plan, tier)) {
+            std::string out;
+            for (const auto& [k, a] : tier) serialize_accum(out, k, a);
+            co_return out;
+        }
+    }
+
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/true);
     std::string out;
     co_await fused_aggregate(plan, vdef,
