@@ -10,6 +10,12 @@ export interface TraceEvent {
   ph: string;
   args?: Record<string, unknown>;
   depth?: number; // server-computed containment depth (live path only)
+  // DFTracer SELECTIVE-aggregation record (ph=3): dur is the aggregation window
+  // and args carries dft_cnt/dur_sum. Individual events are gone from the trace.
+  agg?: boolean;
+  // A synthetic event extrapolated from an aggregate when zoomed below the
+  // window: positioned uniformly, so the timing is an estimate, not real.
+  est?: boolean;
   [key: string]: unknown;
 }
 

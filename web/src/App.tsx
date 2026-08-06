@@ -730,12 +730,22 @@ export default function App() {
 
   function inspRows(ev: TraceEvent): [string, string][] {
     if (isAggregated(ev)) {
-      return [
-        ["events", Number(ev.count ?? 0).toLocaleString()],
-        ["busy", formatTime(Number(ev.total ?? 0))],
-        ["pid/tid", `${String(ev.pid)}/${String(ev.tid)}`],
-        ["start", formatTime(Number(ev.ts) || 0)],
+      // ph=3 aggregates keep their real stats in args (dft_cnt/dur_sum/...);
+      // synthetic density blocks carry them on count/total instead.
+      const aa = (ev.args ?? {}) as Record<string, unknown>;
+      const cnt = Number(aa.dft_cnt ?? ev.count ?? 0);
+      const busy = Number(aa.dur_sum ?? ev.total ?? 0);
+      const rows: [string, string][] = [
+        ["merged events", cnt.toLocaleString()],
+        ["busy (sum)", formatTime(busy)],
       ];
+      if (aa.dur_min != null) rows.push(["min", formatTime(Number(aa.dur_min))]);
+      if (aa.dur_max != null) rows.push(["max", formatTime(Number(aa.dur_max))]);
+      if (cnt > 0) rows.push(["mean", formatTime(busy / cnt)]);
+      rows.push(["pid/tid", `${String(ev.pid)}/${String(ev.tid)}`]);
+      rows.push(["window", formatTime(Number(ev.dur) || 0)]);
+      rows.push(["start", formatTime(Number(ev.ts) || 0)]);
+      return rows;
     }
     const args = (ev.args ?? {}) as Record<string, unknown>;
     const dur = Number(ev.dur) || 0;
@@ -2245,7 +2255,15 @@ export default function App() {
                     </Show>
                     <Show when={isAggregated(ev())}>
                       <div class="muted sm">
-                        Merged block. Zoom in to resolve individual events.
+                        {ev().agg === true
+                          ? "Aggregated at capture; individual events were dropped. Marks show estimated uniform positions, not real timings."
+                          : "Merged block. Zoom in to resolve individual events."}
+                      </div>
+                    </Show>
+                    <Show when={ev().est === true}>
+                      <div class="muted sm">
+                        Extrapolated from an aggregate: position is a uniform estimate, not a real
+                        timing.
                       </div>
                     </Show>
                     <Show when={inspHist()}>
@@ -2451,7 +2469,14 @@ export default function App() {
                       </For>
                       <Show when={isAggregated(h().ev)}>
                         <div class="tt-row">
-                          <span class="hint2">zoom in to resolve</span>
+                          <span class="hint2">
+                            {h().ev.agg === true ? "estimated positions" : "zoom in to resolve"}
+                          </span>
+                        </div>
+                      </Show>
+                      <Show when={h().ev.est === true}>
+                        <div class="tt-row">
+                          <span class="hint2">estimated position</span>
                         </div>
                       </Show>
                       <For each={flattenArgs(h().ev).slice(0, 6)}>

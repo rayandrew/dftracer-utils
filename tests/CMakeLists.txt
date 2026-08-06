@@ -75,6 +75,7 @@ set(TEST_CPP_SOURCES
     server/test_trace_index.cpp
     server/test_cancel.cpp
     server/test_viz_stats_fastpath.cpp
+    server/test_viz_aggregated.cpp
     )
 
 foreach(test_file ${TEST_CPP_SOURCES})
