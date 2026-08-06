@@ -310,6 +310,21 @@ struct StatRow {
     double max;
 };
 
+// Per-group accumulator that merges real events (from the View) with the
+// prorated contribution of ph=3 aggregates overlapping the window.
+struct StatAgg {
+    double count = 0;  // fractional: an aggregate contributes dft_cnt * overlap
+    double total = 0;
+    double min = std::numeric_limits<double>::infinity();
+    double max = 0;
+    void add(double cnt, double sum, double dmin, double dmax) {
+        count += cnt;
+        total += sum;
+        if (dmin < min) min = dmin;
+        if (dmax > max) max = dmax;
+    }
+};
+
 template <typename builder_type>
 void tag_invoke(simdjson::serialize_tag, builder_type& b, const StatRow& r) {
     b.start_object();
@@ -555,9 +570,12 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
 
     // Whole-trace, unfiltered Analyze: answer from the prebuilt summary (built
     // lazily here). Concurrent builds fall through to the live scan below.
+    // Aggregated traces skip it so the live fold below prorates their ph=3
+    // records (the summary rows omit them), keeping counts consistent with any
+    // sub-window selection.
     if (viz_stats_summary_eligible(params, begin, end, index)) {
         const VizSummary* s = co_await ensure_viz_summary(index);
-        if (s) {
+        if (s && !s->has_aggregated) {
             const auto& gr = summary_group_rows(*s, group);
             std::vector<StatRow> rows;
             rows.reserve(gr.size());
@@ -575,50 +593,163 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
         }
     }
 
-    // Full detail (no min-duration threshold), as a View over the target
-    // files. The cache-backed agg_source answers covered chunks from the
-    // stored per-key sketches (the former inline fast path) and the executor
-    // scans only the boundary chunks; it engages only for an unfiltered
-    // (ts-only) query, since chunk aggregates cover all events in a chunk.
-    ViewDefinition view = build_viz_view(params, begin, end, 0);
-
+    // "What was active in this window", so include every event that OVERLAPS
+    // [begin, end] with its duration clamped to the window (enclosing events
+    // that started earlier still count), and prorate ph=3 aggregates by their
+    // overlap. A plain ts-in-window sum leaves a small selection empty because
+    // nothing starts inside it.
+    //
+    // The ts window is applied via time_range/clamping, not the query, so the
+    // query carries only the user's field filters (a wide-open ts range keeps
+    // build_viz_view's own ts clause a no-op) - otherwise it would reject the
+    // enclosers, whose ts precedes `begin`.
+    ViewDefinition view = build_viz_view(params, 0.0, 4e18, 0);
     std::vector<const TraceIndex::FileInfo*> target_files =
         select_viz_target_files(index, params, begin, end);
 
-    std::vector<views::ViewFile> vfiles = to_view_files(target_files);
+    // Whole-run enclosers (started long before the window) are taken from the
+    // summary long-event list; shorter ones from a scan back bounded by the
+    // same threshold. ph=3 aggregates prorate over the trace's aggregation
+    // window.
+    const VizSummary* s = co_await ensure_viz_summary(index);
+    auto to_native = [&](double us) {
+        return index.time_metric() == TraceIndex::TimeMetric::US
+                   ? us
+                   : static_cast<double>(
+                         index.us_to_native(static_cast<std::uint64_t>(us)));
+    };
+    double enc_threshold_native =
+        s && s->long_threshold_us > 0 ? to_native(s->long_threshold_us) : 0;
+    double interval_native =
+        s && s->agg_interval_us > 0 ? to_native(s->agg_interval_us) : 0;
+    double scan_begin = begin - enc_threshold_native;
+    if (scan_begin < 0) scan_begin = 0;
 
-    const views::GroupKey gk = group == GroupBy::Cat   ? views::GroupKey::cat()
-                               : group == GroupBy::Pid ? views::GroupKey::pid()
-                               : group == GroupBy::Fhash
-                                   ? views::GroupKey::fhash()
-                                   : views::GroupKey::name();
+    const char* gcol = group == GroupBy::Cat     ? "cat"
+                       : group == GroupBy::Pid   ? "pid"
+                       : group == GroupBy::Fhash ? "fhash"
+                                                 : "name";
 
-    ServerStatsSource source(index, target_files);
-    views::View v =
-        views::View::from_files(std::move(vfiles), &index.bloom_cache())
-            .phase(views::Phase::Any)
-            .time_range(begin, end)
-            .group_by({gk})
-            .agg({{views::AggOp::Count, "dur", ""},
-                  {views::AggOp::Sum, "dur", ""},
-                  {views::AggOp::Min, "dur", ""},
-                  {views::AggOp::Max, "dur", ""}});
-    if (view.query) v = v.filter(*view.query);
-    // nofast=1 forces the full scan (A/B check against the agg_source).
-    if (params.get("nofast").empty()) v = v.with_partial_source(&source);
+    using StatMap = ankerl::unordered_dense::map<std::string, StatAgg>;
+    auto merge_stats = [](StatMap&& a, StatMap&& b) {
+        for (auto& [k, v] : b) {
+            auto& x = a[k];
+            x.count += v.count;
+            x.total += v.total;
+            if (v.min < x.min) x.min = v.min;
+            if (v.max > x.max) x.max = v.max;
+        }
+        return std::move(a);
+    };
 
-    views::ResultTable table = co_await v.collect();
+    std::size_t slots = std::max<std::size_t>(1, index.max_concurrent());
+    auto sv = views::View::from_files(to_view_files(target_files),
+                                      &index.bloom_cache())
+                  .phase(views::Phase::Any)
+                  .metadata(false)
+                  .time_range(scan_begin, end);
+    if (view.query) sv = sv.filter(*view.query);
+
+    auto scan = co_await sv.map_batches<StatMap>(
+        [begin, end, scan_begin, interval_native, gcol](
+            StatMap& acc, const std::vector<std::string_view>& events) {
+            thread_local simdjson::dom::parser parser;
+            thread_local std::string buf;
+            for (auto ev : events) {
+                buf.assign(ev);
+                auto res = parser.parse(buf);
+                if (res.error()) continue;
+                auto root = res.value_unsafe();
+                if (!root.is_object()) continue;
+                auto tr = root["ts"];
+                if (tr.error()) continue;
+                double ts = json_number(tr.value_unsafe());
+                // Events opening before the scan-back window are the whole-run
+                // enclosers served from long_events below; skip here to not
+                // double-count (chunk pruning still reads their chunk).
+                if (ts < scan_begin) continue;
+                bool is_agg = false;
+                auto phr = root["ph"];
+                if (!phr.error()) {
+                    if (phr.is_int64())
+                        is_agg = phr.get_int64().value_unsafe() == 3;
+                    else if (phr.is_uint64())
+                        is_agg = phr.get_uint64().value_unsafe() == 3;
+                    else if (phr.is_string())
+                        is_agg = phr.get_string().value_unsafe() == "A";
+                }
+                std::string key = extract_group_value(root, gcol);
+                if (is_agg) {
+                    if (interval_native <= 0) continue;
+                    double lo = std::max(begin, ts);
+                    double hi = std::min(end, ts + interval_native);
+                    if (hi <= lo) continue;
+                    double f = (hi - lo) / interval_native;
+                    double cnt = 1, sum = 0, dmin = 0, dmax = 0;
+                    auto args = root["args"];
+                    if (!args.error() && args.is_object()) {
+                        auto c = args["dft_cnt"];
+                        if (!c.error()) cnt = json_number(c.value_unsafe());
+                        auto sm = args["dur_sum"];
+                        if (!sm.error())
+                            sum = json_number(sm.value_unsafe());
+                        else {
+                            auto d = args["dur"];
+                            if (!d.error()) sum = json_number(d.value_unsafe());
+                        }
+                        auto mn = args["dur_min"];
+                        if (!mn.error()) dmin = json_number(mn.value_unsafe());
+                        auto mx = args["dur_max"];
+                        if (!mx.error()) dmax = json_number(mx.value_unsafe());
+                    }
+                    acc[key].add(cnt * f, sum * f, dmin, dmax);
+                } else {
+                    auto dr = root["dur"];
+                    if (dr.error()) continue;
+                    double dur = json_number(dr.value_unsafe());
+                    double lo = std::max(begin, ts);
+                    double hi = std::min(end, ts + dur);
+                    if (hi <= lo) continue;
+                    acc[key].add(1.0, hi - lo, dur, dur);
+                }
+            }
+        },
+        merge_stats, slots, 0);
+    StatMap byKey = std::move(scan.value);
+
+    // Whole-run enclosers that opened before the scan-back window. The scan's
+    // query filter did not see these, so re-apply it per event.
+    if (s) {
+        simdjson::dom::parser lp;
+        for (const auto& sp : s->long_events) {
+            double sb = static_cast<double>(sp.begin);
+            if (sb >= scan_begin) continue;  // already covered by the scan
+            double lo = std::max(begin, sb);
+            double hi = std::min(end, static_cast<double>(sp.end));
+            if (hi <= lo) continue;
+            auto pr = lp.parse(sp.json);
+            if (pr.error() || !pr.value_unsafe().is_object()) continue;
+            auto root = pr.value_unsafe();
+            if (view.query &&
+                !view.query->evaluate(utilities::common::json::JsonValue(root)))
+                continue;
+            double dur = static_cast<double>(sp.end - sp.begin);
+            byKey[extract_group_value(root, gcol)].add(1.0, hi - lo, dur, dur);
+        }
+    }
 
     std::vector<StatRow> rows;
-    rows.reserve(table.rows.size());
+    rows.reserve(byKey.size());
     std::uint64_t total_count = 0;
     double total_dur = 0;
-    for (const auto& r : table.rows) {
-        const std::uint64_t count = static_cast<std::uint64_t>(r.values[0]);
-        const double total = r.values[1];
-        rows.push_back({&r.keys[0], count, total, r.values[2], r.values[3]});
-        total_count += count;
-        total_dur += total;
+    for (auto& kv : byKey) {
+        auto cnt = static_cast<std::uint64_t>(kv.second.count + 0.5);
+        double mn = kv.second.min == std::numeric_limits<double>::infinity()
+                        ? 0
+                        : kv.second.min;
+        rows.push_back({&kv.first, cnt, kv.second.total, mn, kv.second.max});
+        total_count += cnt;
+        total_dur += kv.second.total;
     }
     std::sort(rows.begin(), rows.end(), [](const StatRow& a, const StatRow& b) {
         return a.total > b.total;
@@ -1560,19 +1691,27 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     // Unfiltered views come from the prebuilt summary pyramid (no event cap),
     // built lazily here; concurrent requests fall through to a live scan, as do
     // zooms finer than the pyramid's finest level.
+    double cfg_agg_interval = 0;  // trace-declared aggregation window, us
+    bool trace_has_agg = false;
     if (threshold > 0 && viz_summary_eligible(params)) {
         const VizSummary* s = co_await ensure_viz_summary(index);
         if (s && s->t_end > s->t_begin) {
-            if (const VizSummary::Level* level = s->level_for(threshold)) {
-                DFTRACER_UTILS_LOG_DEBUG(
-                    "viz: density threshold %.0f us served from level "
-                    "%.0f us",
-                    threshold, level->bucket_us);
-                co_return HttpResponse::ok(serve_density_from_summary(
-                    *s, *level, params, begin, end, original_begin,
-                    original_end, threshold, global_min > 0,
-                    index.native_to_us(index.global_min_timestamp_us()),
-                    index.time_metric()));
+            cfg_agg_interval = s->agg_interval_us;
+            trace_has_agg = s->has_aggregated;
+            // ph=3 aggregates are absent from the duration-built pyramid, so an
+            // aggregated trace falls through to the (cheap) live scan.
+            if (!s->has_aggregated) {
+                if (const VizSummary::Level* level = s->level_for(threshold)) {
+                    DFTRACER_UTILS_LOG_DEBUG(
+                        "viz: density threshold %.0f us served from level "
+                        "%.0f us",
+                        threshold, level->bucket_us);
+                    co_return HttpResponse::ok(serve_density_from_summary(
+                        *s, *level, params, begin, end, original_begin,
+                        original_end, threshold, global_min > 0,
+                        index.native_to_us(index.global_min_timestamp_us()),
+                        index.time_metric()));
+                }
             }
         }
     }
@@ -1597,12 +1736,26 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     // honoring it literally rescans everything before the window. Anything that
     // wide is already in the summary's long-event list, so take enclosers from
     // there and scan back only far enough to catch the ones too short to list.
+    // Only whole-run enclosers (>= half the span) are guaranteed complete in
+    // the summary's long-event list (compact_long exempts them from its
+    // per-bucket quota). Shorter enclosers the quota may have dropped, so the
+    // live scan back must reach them instead of trusting the list. All three
+    // uses below share this one threshold so there is no gap and no
+    // double-serve.
     const VizSummary* enc_summary = nullptr;
+    double enc_threshold_us = 0;
+    double enc_threshold_native = 0;
     if (lookback > 0 && viz_summary_eligible(params)) {
         const VizSummary* s = co_await ensure_viz_summary(index);
         if (s != nullptr && s->long_threshold_us > 0) {
             enc_summary = s;
-            lookback = std::min(lookback, s->long_threshold_us);
+            enc_threshold_us = s->long_threshold_us;
+            enc_threshold_native =
+                index.time_metric() == TraceIndex::TimeMetric::US
+                    ? enc_threshold_us
+                    : static_cast<double>(index.us_to_native(
+                          static_cast<std::uint64_t>(enc_threshold_us)));
+            lookback = std::min(lookback, enc_threshold_native);
         }
     }
 
@@ -1620,11 +1773,13 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
         std::vector<double> big_dur;  // parallel to `big`
         DensityMap dens;
         double max_dur = 0;
+        std::vector<AggRec> agg;      // ph=3 records, kept whole
     };
     auto merge_acc = [](Acc&& x, Acc&& y) {
         if (y.max_dur > x.max_dur) x.max_dur = y.max_dur;
         for (auto& d : y.big_dur) x.big_dur.push_back(d);
         for (auto& s : y.big) x.big.emplace_back(std::move(s));
+        for (auto& r : y.agg) x.agg.emplace_back(std::move(r));
         for (auto& kv : y.dens) {
             auto it = x.dens.find(kv.first);
             if (it == x.dens.end())
@@ -1691,6 +1846,15 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
                                  acc.dens);
         },
         merge_acc);
+    // ph=3 SELECTIVE-aggregation records: the individual events were dropped at
+    // capture time, so keep each whole (all args intact for selection) and give
+    // it a renderable span below once the aggregation window is known.
+    auto ag_out = p1run.fold<Acc>(
+        utilities::common::query::parse_or_throw("ph == 3 or ph == \"A\""),
+        [](Acc& acc, const auto& jv, std::string_view raw) {
+            collect_aggregated(jv.element(), raw, acc.agg);
+        },
+        merge_acc);
     auto p1 = co_await p1run.execute();
     bool truncated = p1.truncated;
 
@@ -1710,13 +1874,62 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     // `lookback` so deep zooms still catch long enclosing events.
     double max_dur = ev_out->max_dur;
 
+    // Aggregation window, from the ts spacing of the in-window aggregates, with
+    // the trace-declared cfg as cross-check and single-window fallback.
+    double agg_interval = 0;
+    if (trace_has_agg || !ag_out->agg.empty()) {
+        std::vector<double> ats;
+        ats.reserve(ag_out->agg.size());
+        for (const auto& r : ag_out->agg) ats.push_back(r.ts);
+        agg_interval = infer_agg_interval(std::move(ats));
+        double cfg_native = cfg_agg_interval;
+        if (cfg_agg_interval > 0 &&
+            index.time_metric() != TraceIndex::TimeMetric::US)
+            cfg_native = static_cast<double>(index.us_to_native(
+                static_cast<std::uint64_t>(cfg_agg_interval)));
+        if (agg_interval <= 0) {
+            agg_interval = cfg_native;
+        } else if (cfg_native > 0) {
+            double diff = agg_interval > cfg_native ? agg_interval - cfg_native
+                                                    : cfg_native - agg_interval;
+            if (diff > 0.5 * cfg_native)
+                DFTRACER_UTILS_LOG_WARN(
+                    "viz: aggregated interval inferred %.0f differs from cfg "
+                    "%.0f",
+                    agg_interval, cfg_native);
+        }
+    }
+
+    // An aggregate's ts is its window start, so one that opened before `begin`
+    // still covers the view but the in-window pass skips it (ts < begin). Scan
+    // back one window to recover these enclosing aggregates.
+    if (agg_interval > 0 && begin > 0) {
+        double asb = begin - agg_interval;
+        if (asb < 0) asb = 0;
+        if (asb < begin) {
+            auto er = make_window_view(asb, begin)
+                          .phase(views::Phase::Any)
+                          .partition(slots, scan_cap);
+            auto eo = er.fold<Acc>(
+                utilities::common::query::parse_or_throw(
+                    "ph == 3 or ph == \"A\""),
+                [](Acc& acc, const auto& jv, std::string_view raw) {
+                    collect_aggregated(jv.element(), raw, acc.agg);
+                },
+                merge_acc);
+            co_await er.execute();
+            for (auto& r : eo->agg) ag_out->agg.emplace_back(std::move(r));
+        }
+    }
+
     // Pass 2 (enclosers): keep only events still open at `begin`
     // (ts < begin <= ts + dur); these ancestor bars set containment depth.
     if (scan_begin < begin) {
-        // Wide enclosers come from the summary below; excluding them here
-        // keeps them from being served twice.
+        // Whole-run enclosers come from the summary below; excluding them here
+        // keeps them from being served twice. Everything shorter is caught
+        // here.
         double skip_from = enc_summary != nullptr
-                               ? enc_summary->long_threshold_us
+                               ? enc_threshold_native
                                : std::numeric_limits<double>::infinity();
         auto p2 =
             co_await make_window_view(scan_begin, begin)
@@ -1752,12 +1965,15 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
         std::int64_t want_tid =
             has_tid ? std::strtoll(tid_s.data(), nullptr, 10) : 0;
         for (const auto& sp : enc_summary->long_events) {
+            auto dur = static_cast<double>(sp.end - sp.begin);
+            // Shorter enclosers are caught by the live scan above; serving them
+            // here too would double them (and the quota may have dropped some).
+            if (dur < enc_threshold_us) continue;
             if (static_cast<double>(sp.begin) >= begin ||
                 static_cast<double>(sp.end) <= begin)
                 continue;
             if (has_pid && sp.pid != want_pid) continue;
             if (has_tid && sp.tid != want_tid) continue;
-            auto dur = static_cast<double>(sp.end - sp.begin);
             if (dur > max_dur) max_dur = dur;
             big.push_back(sp.json);
             big_dur.push_back(dur);
@@ -1786,6 +2002,32 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     drop_unreferenced_hash_records(big);
 
     co_await append_app_spans(big, index, begin, end, params);
+
+    // Aggregated (ph=3) records ride through as whole events so selection keeps
+    // every arg (dur_sum, tag_min, ...); we only tag them and give them the
+    // aggregation window as `dur` so they draw as a span. dur is left absent
+    // when the window cannot be inferred (client falls back to args.dur_sum).
+    // Held back from `big` here so they neither enter the greedy depth packer
+    // An aggregate has no positions inside its window, but count + dur_sum let
+    // us extrapolate uniformly-spaced synthetic events that position and nest
+    // by containment like real events. This is the representation at EVERY zoom
+    // - the view never re-skins between a merged block and individual events as
+    // the user zooms. A per-request budget bounds the count: split it across
+    // the aggregates, subsampling them when there are more than the budget so a
+    // full-trace view never floods the response.
+    if (agg_interval > 0 && !ag_out->agg.empty()) {
+        constexpr std::size_t SYNTHETIC_BUDGET = 40000;
+        std::size_t nagg = ag_out->agg.size();
+        std::size_t per_agg_cap =
+            std::min(static_cast<std::size_t>(std::max(1, width)),
+                     std::max<std::size_t>(1, SYNTHETIC_BUDGET / nagg));
+        std::size_t step =
+            nagg > SYNTHETIC_BUDGET ? nagg / SYNTHETIC_BUDGET : 1;
+        for (std::size_t i = 0; i < nagg; i += step)
+            extrapolate_aggregate(ag_out->agg[i], agg_interval, begin, end,
+                                  per_agg_cap, big, big_dur);
+        if (agg_interval > max_dur) max_dur = agg_interval;
+    }
 
     // Resolve hash group values (fhash -> path, hhash -> host, ...) for the
     // groups actually present; unresolvable hashes fall back to the raw value

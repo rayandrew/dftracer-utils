@@ -1,4 +1,5 @@
 import type { DensityBlock, ProcTreeNode, TraceEvent } from "../data/types";
+import { planAggregate } from "./aggregate";
 import { colorFor, colorSlot, contrastText, DENSITY_GREY, sliceKey } from "./color";
 import {
   formatBytesCompact,
@@ -23,9 +24,11 @@ interface Slice {
   laneIdx: number;
   depth: number;
   sdepth: number; // server-computed containment depth, or -1 (fall back to stacking)
-  count: number; // >1 for aggregated density blocks
+  count: number; // >1 for aggregated density blocks and ph=3 aggregates
   total: number; // summed busy time (== dur for individual events)
   density: boolean;
+  aggregated: boolean; // ph=3 record: dur is the window, count is dft_cnt
+  est: boolean; // synthetic event extrapolated from an aggregate (estimated ts)
   fill: string; // resolved once here; the frame loop redraws every slice
 }
 
@@ -212,6 +215,15 @@ export interface TimelineCallbacks {
   onSelect?: (ev: TraceEvent | null) => void;
   // Fired when the user finishes dragging a time-range selection (for stats).
   onSelectRange?: (t0: number, t1: number) => void;
+  // Fired when the user finishes a rectangle selection: a time range, the lanes
+  // it covers, and the operation names under the covered rows, so stats can
+  // scope to exactly those tracks and operations.
+  onSelectRect?: (
+    t0: number,
+    t1: number,
+    lanes: { pid: string; tid: string }[],
+    names: string[],
+  ) => void;
   onSelectRangeClear?: () => void;
 }
 
@@ -363,7 +375,10 @@ export class Timeline {
   private zoomFocusX = this.gutter;
   private selecting = false;
   private selAnchorT = 0;
-  private selection: { t0: number; t1: number } | null = null;
+  private selAnchorY = 0;
+  // y0/y1 (content coords, below the ruler) are present only for a rectangle
+  // selection; a plain range covers the full height.
+  private selection: { t0: number; t1: number; y0?: number; y1?: number } | null = null;
 
   private th: VizTheme = vizTheme("dark");
   private hostByPid = new Map<number, string>();
@@ -763,20 +778,34 @@ export class Timeline {
       const ts = num(ev.ts);
       const dur = num(ev.dur);
       if (!Number.isFinite(ts) || dur < 0) continue;
+      // ph=3 aggregate: dur is the window, args.dft_cnt/dur_sum the real stats.
+      // Marking the event aggregated lights up the grey fill and inspector notes.
+      const agg = ev.agg === true;
+      const est = ev.est === true;
+      const a = (ev.args ?? {}) as Record<string, unknown>;
+      const cnt = agg ? num(a.dft_cnt) : 1;
+      const busy = agg ? num(a.dur_sum) : dur;
+      if (agg) (ev as Record<string, unknown>).aggregated = true;
       const key = colActive
         ? `${ev.pid}/${ev.tid}\u0000${eventGroupValue(ev, this.groupColumn)}`
         : `${ev.pid}/${ev.tid}`;
+      // Extrapolated aggregate events keep the server's depth: it peeks at the
+      // containment level (right under the active call stack) without occupying
+      // a row, so they never add a band of their own.
+      const sdepth = typeof ev.depth === "number" ? ev.depth : -1;
       push(key, {
         ev,
         ts,
         dur,
         laneIdx: 0,
         depth: 0,
-        sdepth: typeof ev.depth === "number" ? ev.depth : -1,
-        count: 1,
-        total: dur,
+        sdepth,
+        count: agg && cnt > 0 ? cnt : 1,
+        total: agg && Number.isFinite(busy) ? busy : dur,
         density: false,
-        fill: this.fillFor(ev, false),
+        aggregated: agg,
+        est,
+        fill: this.fillFor(ev, agg),
       });
     }
     // Aggregated density blocks render as slices too. The server echoes the
@@ -808,6 +837,8 @@ export class Timeline {
         count: b.count,
         total: b.total,
         density: true,
+        aggregated: false,
+        est: false,
         fill: this.fillFor(synthetic, true),
       });
     }
@@ -935,7 +966,7 @@ export class Timeline {
     if (c === this.colorBy) return;
     this.colorBy = c;
     for (const arr of this.slicesByKey.values())
-      for (const s of arr) s.fill = this.fillFor(s.ev, s.density);
+      for (const s of arr) s.fill = this.fillFor(s.ev, s.density || s.aggregated);
     this.invalidate();
   }
 
@@ -1293,6 +1324,10 @@ export class Timeline {
     targetOf: Map<string, number>,
     clientStack: Set<number>,
   ): void {
+    // Anchor the viewport to the lane at its top before the row counts change
+    // (they shift as zoom folds/unfolds events), so relayout never jumps the
+    // user somewhere else vertically.
+    const anchor = this.scrollAnchor();
     const byLane = new Map<number, Slice[]>();
     for (const [key, arr] of this.slicesByKey) {
       const idx = targetOf.get(key);
@@ -1342,6 +1377,7 @@ export class Timeline {
     this.slices = slices;
     this.lanes = lanes;
     this.contentH = y;
+    this.restoreScrollAnchor(anchor);
     this.computeMiniActivity();
     this.recomputeMatches();
     this.computeGaps();
@@ -1518,6 +1554,22 @@ export class Timeline {
       this.invalidate();
       return;
     }
+    // Ctrl/Cmd + drag in the plot paints a rectangle (time x lanes) for stats.
+    if ((e.ctrlKey || e.metaKey) && x >= this.gutter && y >= RULER_H) {
+      this.selecting = true;
+      this.selAnchorT = this.timeOf(x);
+      // y bounds are stored in content space so the box stays on its lanes when
+      // the user scrolls (screen y = contentY + RULER_H - scrollY).
+      this.selAnchorY = y - RULER_H + this.scrollY;
+      this.selection = {
+        t0: this.selAnchorT,
+        t1: this.selAnchorT,
+        y0: this.selAnchorY,
+        y1: this.selAnchorY,
+      };
+      this.invalidate();
+      return;
+    }
     if (x < this.gutter && y > RULER_H) {
       // Gutter: a potential collapse click; never a pan/scroll drag.
       this.gutterDown = { x, y };
@@ -1539,9 +1591,17 @@ export class Timeline {
     }
     if (this.selecting) {
       const t = clamp(this.timeOf(x), 0, this.totalSpan);
+      const isRect = this.selection?.y0 !== undefined;
+      const cy = clamp(y, RULER_H, this.cssH) - RULER_H + this.scrollY;
       this.selection = {
         t0: Math.min(this.selAnchorT, t),
         t1: Math.max(this.selAnchorT, t),
+        ...(isRect
+          ? {
+              y0: Math.min(this.selAnchorY, cy),
+              y1: Math.max(this.selAnchorY, cy),
+            }
+          : {}),
       };
       this.invalidate();
       return;
@@ -1630,7 +1690,18 @@ export class Timeline {
       const sel = this.selection;
       const span = this.live.end - this.live.begin;
       if (sel && sel.t1 - sel.t0 > span * 0.002) {
-        this.cb.onSelectRange?.(this.toReal(sel.t0), this.toReal(sel.t1));
+        if (sel.y0 !== undefined && sel.y1 !== undefined) {
+          const rt0 = this.toReal(sel.t0);
+          const rt1 = this.toReal(sel.t1);
+          this.cb.onSelectRect?.(
+            rt0,
+            rt1,
+            this.lanesInYRange(sel.y0, sel.y1),
+            this.namesInRect(rt0, rt1, sel.y0, sel.y1),
+          );
+        } else {
+          this.cb.onSelectRange?.(this.toReal(sel.t0), this.toReal(sel.t1));
+        }
       } else {
         this.selection = null;
         this.cb.onSelectRangeClear?.();
@@ -1661,6 +1732,51 @@ export class Timeline {
   clearSelection(): void {
     this.selection = null;
     this.invalidate();
+  }
+
+  // Lanes whose rows intersect the content y-range [y0, y1] (lane.y is content
+  // space too). A thread lane maps to its (pid, tid); a summary row (host, or
+  // collapsed process) stands for every tid of its pid (tid ""), and a host row
+  // for all its pids.
+  private lanesInYRange(y0: number, y1: number): { pid: string; tid: string }[] {
+    const seen = new Set<string>();
+    const out: { pid: string; tid: string }[] = [];
+    const add = (pid: string, tid: string) => {
+      const key = `${pid} ${tid}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ pid, tid });
+    };
+    for (const lane of this.lanes) {
+      const ly0 = lane.y;
+      const ly1 = ly0 + Math.max(1, lane.rows) * this.rowH;
+      if (ly1 <= y0 || ly0 >= y1) continue;
+      if (lane.kind === "host") {
+        for (const pid of this.hostPids.get(lane.host) ?? []) add(String(pid), "");
+      } else if (lane.flatten) {
+        add(lane.pid, "");
+      } else {
+        add(lane.pid, lane.tid);
+      }
+    }
+    return out;
+  }
+
+  // Distinct operation names whose slice falls inside the rectangle: its row
+  // (lane.y + depth) overlaps the content y-range and its time overlaps
+  // [t0, t1] (real time, as stored on the slice). Lets stats scope to the exact
+  // rows the user dragged over, not the whole track.
+  private namesInRect(t0: number, t1: number, y0: number, y1: number): string[] {
+    const names = new Set<string>();
+    for (const s of this.slices) {
+      const lane = this.lanes[s.laneIdx];
+      const cy0 = lane.y + s.depth * this.rowH;
+      if (cy0 + this.rowH <= y0 || cy0 >= y1) continue;
+      if (s.ts + s.dur <= t0 || s.ts >= t1) continue;
+      const n = String(s.ev.name ?? "");
+      if (n) names.add(n);
+    }
+    return [...names];
   }
 
   private onMouseLeave = (): void => {
@@ -1718,6 +1834,22 @@ export class Timeline {
   private clampScroll(): void {
     const maxScroll = Math.max(0, this.contentH - (this.cssH - RULER_H));
     this.scrollY = clamp(this.scrollY, 0, maxScroll);
+  }
+
+  // The lane at the top of the viewport and the scroll offset into it, so the
+  // same content can be kept in place across a relayout.
+  private scrollAnchor(): { key: string; off: number } | null {
+    for (const lane of this.lanes) {
+      const bottom = lane.y + lane.rows * this.rowH + LANE_GAP;
+      if (this.scrollY < bottom) return { key: lane.key, off: this.scrollY - lane.y };
+    }
+    return null;
+  }
+
+  private restoreScrollAnchor(anchor: { key: string; off: number } | null): void {
+    if (!anchor) return;
+    const lane = this.lanes.find((l) => l.key === anchor.key);
+    if (lane) this.scrollY = lane.y + anchor.off;
   }
 
   private emitRange(immediate: boolean): void {
@@ -2439,15 +2571,27 @@ export class Timeline {
       this.gutter,
       this.cssW,
     );
+    // A rectangle selection clips to its y-band (stored in content space, so it
+    // scrolls with its lanes); a plain range spans full height.
+    const rect = this.selection.y0 !== undefined && this.selection.y1 !== undefined;
+    const off = RULER_H - this.scrollY;
+    const yTop = rect ? clamp(this.selection.y0! + off, RULER_H, this.cssH) : RULER_H;
+    const yBot = rect ? clamp(this.selection.y1! + off, RULER_H, this.cssH) : this.cssH;
     ctx.fillStyle = this.th.selFill;
-    ctx.fillRect(x0, RULER_H, x1 - x0, this.cssH - RULER_H);
+    ctx.fillRect(x0, yTop, x1 - x0, yBot - yTop);
     ctx.strokeStyle = this.th.selStroke;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(x0 + 0.5, RULER_H);
-    ctx.lineTo(x0 + 0.5, this.cssH);
-    ctx.moveTo(x1 - 0.5, RULER_H);
-    ctx.lineTo(x1 - 0.5, this.cssH);
+    ctx.moveTo(x0 + 0.5, yTop);
+    ctx.lineTo(x0 + 0.5, yBot);
+    ctx.moveTo(x1 - 0.5, yTop);
+    ctx.lineTo(x1 - 0.5, yBot);
+    if (rect) {
+      ctx.moveTo(x0, yTop + 0.5);
+      ctx.lineTo(x1, yTop + 0.5);
+      ctx.moveTo(x0, yBot - 0.5);
+      ctx.lineTo(x1, yBot - 0.5);
+    }
     ctx.stroke();
 
     const rt0 = this.toReal(this.selection.t0);
@@ -2502,6 +2646,83 @@ export class Timeline {
     }
   }
 
+  // Draw a ph=3 aggregate. Zoomed out it is one merged block; zoomed in it
+  // becomes `count` uniformly-spaced synthetic marks (dashed, since the real
+  // positions are unknown), degrading to a hatched band when the events
+  // outnumber the pixels. Restores globalAlpha to its entry value.
+  private drawAggregate(
+    ctx: CanvasRenderingContext2D,
+    s: Slice,
+    sx: number,
+    x: number,
+    w: number,
+    sy: number,
+    pxW: number,
+  ): void {
+    const inset = this.rowH >= 8 ? 3 : this.rowH >= 4 ? 1 : 0;
+    const y = sy + inset;
+    const h = Math.max(1, this.rowH - 2 * inset);
+    const baseA = ctx.globalAlpha;
+    const busyFrac = s.dur > 0 ? s.total / s.dur : 1;
+    const plan = planAggregate(pxW, s.count, busyFrac);
+
+    // A filled, hatched band: the aggregate region reads as present and as an
+    // estimate. Used when marks would be illegible - too dense, or so sparse
+    // (deep zoom into a wide window) that none land in view.
+    const drawBand = () => {
+      ctx.globalAlpha = baseA * 0.3;
+      ctx.fillRect(x, y, w, h);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x, y, w, h);
+      ctx.clip();
+      ctx.strokeStyle = s.fill;
+      ctx.globalAlpha = baseA * 0.6;
+      ctx.lineWidth = 1;
+      for (let hx = x - h; hx < x + w; hx += 5) {
+        ctx.beginPath();
+        ctx.moveTo(hx, y + h);
+        ctx.lineTo(hx + h, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+      ctx.globalAlpha = baseA;
+    };
+
+    if (plan.mode === "block") {
+      ctx.globalAlpha = baseA * 0.7;
+      ctx.fillRect(x, y, w, h);
+      ctx.globalAlpha = baseA;
+      return;
+    }
+    // Marks only help when at least a couple fall in the visible span; deep
+    // inside a wide window they would be 0-1 lonely dots, so band instead.
+    if (plan.mode === "band" || w / plan.spacing < 2) {
+      drawBand();
+      return;
+    }
+    ctx.globalAlpha = baseA * 0.14;
+    ctx.fillRect(x, y, w, h);
+    ctx.globalAlpha = baseA;
+    ctx.setLineDash([2, 2]);
+    ctx.strokeStyle = s.fill;
+    ctx.lineWidth = 1;
+    for (let i = 0; i < plan.n; i++) {
+      const mx = sx + i * plan.spacing;
+      if (mx >= this.cssW) break;
+      if (mx + plan.markW <= this.gutter) continue;
+      const mxx = Math.max(mx, this.gutter);
+      const mw = Math.min(mx + plan.markW, this.cssW) - mxx;
+      if (mw <= 0) continue;
+      ctx.globalAlpha = baseA * 0.4;
+      ctx.fillRect(mxx, y, mw, h);
+      ctx.globalAlpha = baseA;
+      ctx.strokeRect(mxx + 0.5, y + 0.5, Math.max(1, mw - 1), Math.max(1, h - 1));
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = baseA;
+  }
+
   private renderSlices(ctx: CanvasRenderingContext2D): void {
     ctx.save();
     ctx.beginPath();
@@ -2529,6 +2750,7 @@ export class Timeline {
       if (sy + this.rowH < RULER_H || sy > cssH) continue;
       const sx = this.gutter + (toDisp(s.ts) - begin) * scale;
       if (sx > cssW) continue;
+      const pxW = (toDisp(s.ts + s.dur) - toDisp(s.ts)) * scale;
       const sw = Math.max(this.gutter + (toDisp(s.ts + s.dur) - begin) * scale - sx, 1);
       if (sx + sw < this.gutter) continue;
 
@@ -2539,7 +2761,7 @@ export class Timeline {
       const dim = this.searchTerm !== "" && !this.searchMatchSet.has(s);
       // Canvas state changes cost far more than the fills themselves, so only
       // touch them when the value actually changes.
-      const alpha = s.density ? (dim ? 0.12 : 0.55) : dim ? 0.15 : 1;
+      const alpha = s.density ? (dim ? 0.12 : 0.55) : s.est ? (dim ? 0.1 : 0.6) : dim ? 0.15 : 1;
       if (alpha !== lastAlpha) {
         ctx.globalAlpha = alpha;
         lastAlpha = alpha;
@@ -2548,7 +2770,10 @@ export class Timeline {
         ctx.fillStyle = fill;
         lastFill = fill;
       }
-      if (s.density) {
+      if (s.aggregated) {
+        this.drawAggregate(ctx, s, sx, x, w, sy, pxW);
+        lastAlpha = alpha; // drawAggregate restores globalAlpha to this
+      } else if (s.density) {
         // Aggregated block: inset and dimmed so a run of them reads as a
         // "density" strip distinct from individual slices. Insets shrink on tiny
         // rows so the bar never collapses to zero height and vanishes.
@@ -2576,7 +2801,7 @@ export class Timeline {
         ctx.strokeRect(x + 1, sy + 2, w - 2, this.rowH - 4);
       }
 
-      if (!s.density && sw > 32 && this.rowH >= LABEL_MIN_ROW_H) {
+      if (!s.density && !s.aggregated && sw > 32 && this.rowH >= LABEL_MIN_ROW_H) {
         ctx.fillStyle = contrastText(fill);
         lastFill = "";
         const label = String(s.ev.name ?? "");

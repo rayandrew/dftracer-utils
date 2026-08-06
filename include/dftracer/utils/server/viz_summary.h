@@ -108,6 +108,13 @@ struct VizSummary {
     std::size_t total_files = 0;  // distinct files declared by FH metadata
     std::size_t io_files = 0;     // subset actually read from or written to
 
+    // Trace carries ph=3 SELECTIVE-aggregation records. Their individual events
+    // are gone, so the pyramid (built from durations) cannot represent them; a
+    // density request live-scans instead, which is cheap because an aggregated
+    // trace is physically tiny. agg_interval_us is the aggregation window.
+    bool has_aggregated = false;
+    double agg_interval_us = 0;
+
     // Per-process totals for the fork hierarchy. Exact (not bucketed), so the
     // proctree answers from here identically to a live scan.
     struct ProcRow {

@@ -141,10 +141,15 @@ struct FineAcc {
 };
 
 struct SumBuild {
-    std::size_t nb = 0;             // level 0 (counter grid)
+    std::size_t nb = 0;       // level 0 (counter grid)
     double bucket_us = 1;
-    std::size_t nb_fine = 0;        // finest level, before any coarsening
+    std::size_t nb_fine = 0;  // finest level, before any coarsening
     double fine_bucket_us = 1;
+    // Only events at least this wide are kept whole in `long_evs`; narrower
+    // ones fold into cells and a request finds them by scanning back at most
+    // this far. A fraction of the span keeps the list bounded without a
+    // per-bucket quota.
+    double enc_threshold_us = 1;
     std::size_t max_lanes = 0;
     std::size_t fine_cell_cap = 0;  // per worker
     std::size_t long_cap = 0;       // per worker
@@ -158,6 +163,10 @@ struct SumBuild {
     std::vector<std::atomic<double>> cwrite;
     std::vector<std::atomic<double>> cops;
     std::atomic<std::uint64_t> gmax_dur{0};
+
+    std::atomic<bool> has_aggregated{false};
+    std::atomic<double> agg_interval_us{
+        0};  // cfg.trace_interval_ms, if declared
 
     std::mutex name_mtx;
     dftracer::utils::StringViewMap<std::uint32_t> name_of;
@@ -175,7 +184,6 @@ struct SumBuild {
     std::vector<std::string> parse_bufs;
 
     std::vector<FineAcc> fine;
-    std::vector<std::size_t> long_quota;  // per level-0 bucket, per worker
 
     // Per-worker Analyze aggregates (no lock); merged single-threaded after the
     // scan. One map per GroupBy dimension.
@@ -299,52 +307,33 @@ struct SumBuild {
         return bk >= nb ? nb - 1 : bk;
     }
 
-    // Trim a worker's long events to `long_quota` per level-0 bucket, keeping
-    // the widest and folding the rest into cells. A global "widest wins" cap
-    // would spend the whole budget on a few enormous events and leave zoomed-in
-    // windows empty, so the budget is spread over time instead.
+    // long_evs holds only enclosers >= enc_threshold_us (>= 1/K of the span),
+    // so it is naturally small (~K per lane per depth) and needs no per-bucket
+    // quota. This is only a backstop for a pathological trace with too many:
+    // keep the widest, fold the rest into cells.
     void compact_long(std::size_t w) {
         auto& lv = long_evs[w];
-        std::sort(
-            lv.begin(), lv.end(),
-            [this](const VizSummary::AppSpan& a, const VizSummary::AppSpan& x) {
-                auto ba = coarse_bucket(a.begin);
-                auto bx = coarse_bucket(x.begin);
-                if (ba != bx) return ba < bx;
+        if (lv.size() <= long_cap) return;
+        std::nth_element(
+            lv.begin(), lv.begin() + static_cast<std::ptrdiff_t>(long_cap),
+            lv.end(),
+            [](const VizSummary::AppSpan& a, const VizSummary::AppSpan& x) {
                 return a.end - a.begin > x.end - x.begin;
             });
-        std::size_t out = 0, run = 0;
-        std::uint64_t cur = std::numeric_limits<std::uint64_t>::max();
-        for (std::size_t i = 0; i < lv.size(); ++i) {
-            auto bk = coarse_bucket(lv[i].begin);
-            if (bk != cur) {
-                cur = bk;
-                run = 0;
-            }
-            if (run < long_quota[w]) {
-                ++run;
-                if (out != i) lv[out] = std::move(lv[i]);
-                ++out;
-                continue;
-            }
+        for (std::size_t i = long_cap; i < lv.size(); ++i) {
             auto lane = get_lane(w, lv[i].pid, lv[i].tid);
             if (lane != NO_LANE)
                 fold_cell(w, lane, static_cast<double>(lv[i].begin),
                           static_cast<double>(lv[i].end - lv[i].begin),
                           lv[i].name_id);
         }
-        lv.resize(out);
+        lv.resize(long_cap);
     }
 
     void push_long(std::size_t w, VizSummary::AppSpan&& span) {
         auto& lv = long_evs[w];
         lv.push_back(std::move(span));
-        if (lv.size() < long_cap) return;
-        compact_long(w);
-        if (lv.size() > long_cap / 2 && long_quota[w] > 1) {
-            long_quota[w] /= 2;
-            compact_long(w);
-        }
+        if (lv.size() > long_cap * 2) compact_long(w);
     }
 
     std::uint32_t intern(std::size_t w, std::string_view name) {
@@ -455,6 +444,37 @@ static void fold_summary(std::size_t w, std::string_view event, SumBuild& b) {
                 }
             }
             return;
+        }
+    }
+
+    // ph=3 SELECTIVE-aggregation records: the individual events are gone, so
+    // they cannot fold into duration cells. Flag the trace (density requests
+    // then live-scan) and skip the gates below.
+    {
+        auto phr = root["ph"];
+        if (!phr.error() &&
+            read_phase(phr.value_unsafe()) == RecordPhase::AGGREGATED) {
+            b.has_aggregated.store(true, std::memory_order_relaxed);
+            return;
+        }
+    }
+
+    // The trailing "end" record declares the aggregation window under
+    // args.cfg.trace_interval_ms; keep it so a density request can cross-check
+    // its inferred interval.
+    if (name0 == "end") {
+        auto args = root["args"];
+        if (!args.error() && args.is_object()) {
+            auto cfg = args["cfg"];
+            if (!cfg.error() && cfg.is_object()) {
+                auto ti = cfg["trace_interval_ms"];
+                if (!ti.error()) {
+                    double ms = json_number(ti.value_unsafe());
+                    if (ms > 0)
+                        b.agg_interval_us.store(ms * 1000.0,
+                                                std::memory_order_relaxed);
+                }
+            }
         }
     }
 
@@ -659,10 +679,10 @@ static void fold_summary(std::size_t w, std::string_view event, SumBuild& b) {
         name_id = b.intern(w, name);
     }
 
-    if (dur >= b.fine_bucket_us && dur > 0) {
-        // Wider than a finest-level bucket: folded into a cell it would render
-        // as a sliver, so keep it whole and let each request decide whether it
-        // is wide enough to draw.
+    if (dur >= b.enc_threshold_us && dur > 0) {
+        // Wide enough to enclose many windows: keep it whole so a deep zoom can
+        // find it without an unbounded scan back. Narrower events fold into
+        // cells (and a request finds them with a short scan back).
         b.push_long(
             w, VizSummary::AppSpan{static_cast<std::uint64_t>(ts),
                                    static_cast<std::uint64_t>(ts + dur), pid,
@@ -728,6 +748,12 @@ static coro::CoroTask<void> build_viz_summary(TraceIndex& index) {
     b.nb_fine = nb << (2 * VizSummary::EXTRA_LEVELS);
     b.fine_bucket_us =
         static_cast<double>(gmax - gmin) / static_cast<double>(b.nb_fine);
+    // Whole-run enclosers span >= 1/K of the trace: there are at most ~K of
+    // them per lane per depth, so the list stays bounded with no quota.
+    constexpr double ENC_THRESHOLD_FRACTION = 32.0;
+    b.enc_threshold_us =
+        std::max(b.fine_bucket_us,
+                 static_cast<double>(gmax - gmin) / ENC_THRESHOLD_FRACTION);
     b.cread = std::vector<std::atomic<double>>(b.nb_fine);
     b.cwrite = std::vector<std::atomic<double>>(b.nb_fine);
     b.cops = std::vector<std::atomic<double>>(b.nb_fine);
@@ -738,9 +764,6 @@ static coro::CoroTask<void> build_viz_summary(TraceIndex& index) {
     b.fine.resize(slots);
     b.parsers.resize(slots);
     b.parse_bufs.resize(slots);
-    b.long_quota.assign(
-        slots, std::max<std::size_t>(1, VizSummary::MAX_LONG_EVENTS /
-                                            std::max<std::size_t>(1, nb)));
     b.lane_cache.resize(slots);
     b.name_cache.resize(slots);
     b.g_name.resize(slots);
@@ -782,8 +805,11 @@ static coro::CoroTask<void> build_viz_summary(TraceIndex& index) {
     summary->nbuckets = nb;
     summary->bucket_us = b.bucket_us;
     summary->max_dur = b.gmax_dur.load(std::memory_order_relaxed);
+    summary->has_aggregated = b.has_aggregated.load(std::memory_order_relaxed);
+    summary->agg_interval_us =
+        b.agg_interval_us.load(std::memory_order_relaxed);
     summary->names = std::move(b.names);
-    summary->long_threshold_us = b.fine_bucket_us;
+    summary->long_threshold_us = b.enc_threshold_us;
     summary->fine_bucket_us = b.fine_bucket_us;
 
     // Merge per-worker ph="C" samples by series key into sparse, ascending
@@ -834,13 +860,26 @@ static coro::CoroTask<void> build_viz_summary(TraceIndex& index) {
         part.clear();
         part.shrink_to_fit();
     }
-    b.long_quota[0] =
-        std::max<std::size_t>(1, VizSummary::MAX_LONG_EVENTS / nb);
-    while (b.long_evs[0].size() > VizSummary::MAX_LONG_EVENTS) {
-        b.compact_long(0);
-        if (b.long_evs[0].size() <= VizSummary::MAX_LONG_EVENTS) break;
-        if (b.long_quota[0] == 1) break;
-        b.long_quota[0] /= 2;
+    // Backstop only: keep the widest if a pathological trace somehow exceeds
+    // the budget (the enc_threshold keep-rule already bounds this in practice).
+    if (b.long_evs[0].size() > VizSummary::MAX_LONG_EVENTS) {
+        auto& lv = b.long_evs[0];
+        std::nth_element(
+            lv.begin(),
+            lv.begin() +
+                static_cast<std::ptrdiff_t>(VizSummary::MAX_LONG_EVENTS),
+            lv.end(),
+            [](const VizSummary::AppSpan& a, const VizSummary::AppSpan& x) {
+                return a.end - a.begin > x.end - x.begin;
+            });
+        for (std::size_t i = VizSummary::MAX_LONG_EVENTS; i < lv.size(); ++i) {
+            auto lane = b.get_lane(0, lv[i].pid, lv[i].tid);
+            if (lane != SumBuild::NO_LANE)
+                b.fold_cell(0, lane, static_cast<double>(lv[i].begin),
+                            static_cast<double>(lv[i].end - lv[i].begin),
+                            lv[i].name_id);
+        }
+        lv.resize(VizSummary::MAX_LONG_EVENTS);
     }
     summary->long_events = std::move(b.long_evs[0]);
 

@@ -412,7 +412,7 @@ export default function App() {
   function loadAnFlame() {
     if (totalSpan <= 0) return;
     const [b, e] = scopeRange();
-    const q = appliedQuery();
+    const q = scopedQuery();
     const key = `${q}|${Math.floor(b)}-${Math.ceil(e)}`;
     if (anFlameKey === key && !anFlameLoading()) return;
     anFlameInflight?.abort();
@@ -561,15 +561,46 @@ export default function App() {
     }
     return [...counts.values()].sort((a, b) => b.count - a.count);
   });
-  // Range the Analyze panel aggregates over; null means the whole trace.
-  const [anScope, setAnScope] = createSignal<{ t0: number; t1: number } | null>(null);
+  // Range the Analyze panel aggregates over; null means the whole trace. A
+  // rectangle selection also carries the lanes (pid/tid) and the operation
+  // names under the rows it covered.
+  type AnScope = {
+    t0: number;
+    t1: number;
+    lanes?: { pid: string; tid: string }[];
+    names?: string[];
+  };
+  const [anScope, setAnScope] = createSignal<AnScope | null>(null);
   const scopeRange = (): [number, number] => {
     const s = anScope();
     return s ? [s.t0, s.t1] : [0, totalSpan];
   };
+  // Query clause restricting to the selected lanes, or "" for the whole height.
+  const laneFilter = (): string => {
+    const lanes = anScope()?.lanes;
+    if (!lanes || lanes.length === 0) return "";
+    const clauses = lanes.map((l) =>
+      l.tid ? `(pid == ${l.pid} and tid == ${l.tid})` : `pid == ${l.pid}`,
+    );
+    return `(${clauses.join(" or ")})`;
+  };
+  // Clause restricting to the operations under the covered rows.
+  const nameFilter = (): string => {
+    const names = anScope()?.names;
+    if (!names || names.length === 0) return "";
+    const clauses = names.map((n) => `name == "${n.replace(/"/g, '\\"')}"`);
+    return `(${clauses.join(" or ")})`;
+  };
+  // Combine the applied query with the selection's lane and name filters.
+  const scopedQuery = (): string =>
+    [appliedQuery(), laneFilter(), nameFilter()]
+      .filter((c) => c)
+      .map((c) => `(${c})`)
+      .join(" and ");
   const scopeKey = () => {
     const s = anScope();
-    return s ? `${Math.floor(s.t0)}-${Math.ceil(s.t1)}` : "all";
+    if (!s) return "all";
+    return `${Math.floor(s.t0)}-${Math.ceil(s.t1)}|${laneFilter()}|${nameFilter()}`;
   };
 
   const [procRank, setProcRank] = createSignal<Map<string, string>>(new Map());
@@ -730,12 +761,22 @@ export default function App() {
 
   function inspRows(ev: TraceEvent): [string, string][] {
     if (isAggregated(ev)) {
-      return [
-        ["events", Number(ev.count ?? 0).toLocaleString()],
-        ["busy", formatTime(Number(ev.total ?? 0))],
-        ["pid/tid", `${String(ev.pid)}/${String(ev.tid)}`],
-        ["start", formatTime(Number(ev.ts) || 0)],
+      // ph=3 aggregates keep their real stats in args (dft_cnt/dur_sum/...);
+      // synthetic density blocks carry them on count/total instead.
+      const aa = (ev.args ?? {}) as Record<string, unknown>;
+      const cnt = Number(aa.dft_cnt ?? ev.count ?? 0);
+      const busy = Number(aa.dur_sum ?? ev.total ?? 0);
+      const rows: [string, string][] = [
+        ["merged events", cnt.toLocaleString()],
+        ["busy (sum)", formatTime(busy)],
       ];
+      if (aa.dur_min != null) rows.push(["min", formatTime(Number(aa.dur_min))]);
+      if (aa.dur_max != null) rows.push(["max", formatTime(Number(aa.dur_max))]);
+      if (cnt > 0) rows.push(["mean", formatTime(busy / cnt)]);
+      rows.push(["pid/tid", `${String(ev.pid)}/${String(ev.tid)}`]);
+      rows.push(["window", formatTime(Number(ev.dur) || 0)]);
+      rows.push(["start", formatTime(Number(ev.ts) || 0)]);
+      return rows;
     }
     const args = (ev.args ?? {}) as Record<string, unknown>;
     const dur = Number(ev.dur) || 0;
@@ -919,9 +960,21 @@ export default function App() {
   }
 
   // Server-side per-name aggregation for the selected range.
-  function requestSelection(t0: number, t1: number) {
+  function requestSelection(
+    t0: number,
+    t1: number,
+    lanes?: { pid: string; tid: string }[],
+    names?: string[],
+  ) {
+    // Absolute timestamps lose sub-microsecond precision, so a razor-thin drag
+    // would collapse to an empty window; floor it to 1us around its centre.
+    if (t1 - t0 < 1) {
+      const m = (t0 + t1) / 2;
+      t0 = m - 0.5;
+      t1 = m + 0.5;
+    }
     setSelected(null);
-    setAnScope({ t0, t1 });
+    setAnScope({ t0, t1, lanes, names });
     setSidebarOpen(true);
     reloadBottom();
   }
@@ -992,7 +1045,7 @@ export default function App() {
     try {
       const group = tab === "file" ? "fhash" : tab;
       const [b, e] = scopeRange();
-      const res = await fetchVizStats(b, e, appliedQuery(), group, ac.signal);
+      const res = await fetchVizStats(b, e, scopedQuery(), group, ac.signal);
       if (!ac.signal.aborted) {
         analyzeCache.set(cacheKey, res);
         setAnalyzeStats(res);
@@ -1015,7 +1068,7 @@ export default function App() {
     try {
       const [b, e] = scopeRange();
       const res = await fetchViz(
-        { begin: b, end: e, summary: 1, query: appliedQuery(), limit: 1000 },
+        { begin: b, end: e, summary: 1, query: scopedQuery(), limit: 1000 },
         ac.signal,
       );
       if (!ac.signal.aborted) {
@@ -1062,7 +1115,7 @@ export default function App() {
     distInflight = ac;
     setDistLoading(true);
     setDistHist(null);
-    const q = appliedQuery();
+    const q = scopedQuery();
     const combined = q ? `(${q}) and ${pred}` : pred;
     try {
       const [b, e] = scopeRange();
@@ -1132,6 +1185,7 @@ export default function App() {
         }
       },
       onSelectRange: (t0, t1) => requestSelection(t0, t1),
+      onSelectRect: (t0, t1, lanes, names) => requestSelection(t0, t1, lanes, names),
       onSelectRangeClear: () => clearSelection(),
     });
     timeline.attachMinimap(minimap);
@@ -2245,7 +2299,15 @@ export default function App() {
                     </Show>
                     <Show when={isAggregated(ev())}>
                       <div class="muted sm">
-                        Merged block. Zoom in to resolve individual events.
+                        {ev().agg === true
+                          ? "Aggregated at capture; individual events were dropped. Marks show estimated uniform positions, not real timings."
+                          : "Merged block. Zoom in to resolve individual events."}
+                      </div>
+                    </Show>
+                    <Show when={ev().est === true}>
+                      <div class="muted sm">
+                        Extrapolated from an aggregate: position is a uniform estimate, not a real
+                        timing.
                       </div>
                     </Show>
                     <Show when={inspHist()}>
@@ -2451,7 +2513,14 @@ export default function App() {
                       </For>
                       <Show when={isAggregated(h().ev)}>
                         <div class="tt-row">
-                          <span class="hint2">zoom in to resolve</span>
+                          <span class="hint2">
+                            {h().ev.agg === true ? "estimated positions" : "zoom in to resolve"}
+                          </span>
+                        </div>
+                      </Show>
+                      <Show when={h().ev.est === true}>
+                        <div class="tt-row">
+                          <span class="hint2">estimated position</span>
                         </div>
                       </Show>
                       <For each={flattenArgs(h().ev).slice(0, 6)}>

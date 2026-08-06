@@ -10,6 +10,7 @@
 #include <dftracer/utils/utilities/composites/dft/aggregators/reserved_args.h>
 #include <simdjson.h>
 
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -306,6 +307,7 @@ static std::vector<std::uint32_t> assign_view_depths(
         double end;         // big end, or bucket right edge for a block query
         int big_idx;        // index into `big`, or -1 for a density query
         DensityAgg* block;  // set for a density query, null for a big event
+        bool est = false;   // extrapolated aggregate event: peek, do not occupy
     };
     struct LaneKey {
         std::int64_t pid, tid;
@@ -328,8 +330,9 @@ static std::vector<std::uint32_t> assign_view_depths(
         double ts = 0, dur = 0;
         if (!parse_lane_ts_dur(big[i], pid, tid, ts, dur)) continue;
         double end = ts + (dur > 0 ? dur : 0);
+        bool est = big[i].find("\"est\":true") != std::string::npos;
         lanes[LaneKey{pid, tid}].push_back(
-            Item{ts, end, static_cast<int>(i), nullptr});
+            Item{ts, end, static_cast<int>(i), nullptr, est});
     }
     if (threshold > 0) {
         for (auto& kv : dens) {
@@ -352,10 +355,17 @@ static std::vector<std::uint32_t> assign_view_depths(
         // still cascade.
         std::vector<double> row_end;  // end time occupying each row
         for (auto& it : items) {
-            if (it.block) {
+            if (it.block || it.est) {
+                // Peek at the lowest row free at this time without occupying
+                // it: aggregated/density marks sit right under the active call
+                // stack and never add rows of their own.
                 std::size_t r = 0;
                 while (r < row_end.size() && row_end[r] > it.end) ++r;
-                it.block->depth = static_cast<std::uint32_t>(r);
+                if (it.block)
+                    it.block->depth = static_cast<std::uint32_t>(r);
+                else
+                    depth[static_cast<std::size_t>(it.big_idx)] =
+                        static_cast<std::uint32_t>(r);
             } else {
                 std::size_t r = 0;
                 while (r < row_end.size() && row_end[r] > it.ts) ++r;
@@ -534,6 +544,127 @@ static void fold_counter_density(simdjson::dom::element root, double begin,
         series.append(field.key);
         add_counter_bucket(dens, pid, tid, col, series, val, 1);
     }
+}
+
+// A ph=3 SELECTIVE-aggregation record kept whole (so selection keeps every
+// arg), plus the fields needed to place it: lane and name for a stable row, ts
+// for window inference.
+struct AggRec {
+    std::string raw;
+    double ts;  // window start, native time units
+    std::int64_t pid;
+    std::int64_t tid;
+    std::string name;
+    std::string cat;
+    std::uint32_t count;  // dft_cnt
+    double total;         // dur_sum, native units
+};
+
+static bool collect_aggregated(simdjson::dom::element root,
+                               std::string_view raw, std::vector<AggRec>& out) {
+    if (!root.is_object()) return false;
+    auto tr = root["ts"];
+    if (tr.error()) return false;
+    std::int64_t pid = 0, tid = 0;
+    auto pr = root["pid"];
+    if (!pr.error())
+        pid = static_cast<std::int64_t>(json_number(pr.value_unsafe()));
+    auto tir = root["tid"];
+    if (!tir.error())
+        tid = static_cast<std::int64_t>(json_number(tir.value_unsafe()));
+    std::string_view name, cat;
+    auto nr = root["name"];
+    if (!nr.error() && nr.is_string()) name = nr.get_string().value_unsafe();
+    auto cr = root["cat"];
+    if (!cr.error() && cr.is_string()) cat = cr.get_string().value_unsafe();
+
+    std::uint32_t count = 1;
+    double total = 0;
+    auto args = root["args"];
+    if (!args.error() && args.is_object()) {
+        auto cnt = args["dft_cnt"];
+        if (!cnt.error()) {
+            double c = json_number(cnt.value_unsafe());
+            count = c > 0 ? static_cast<std::uint32_t>(c) : 1;
+        }
+        auto ds = args["dur_sum"];
+        if (!ds.error())
+            total = json_number(ds.value_unsafe());
+        else {
+            auto d = args["dur"];
+            if (!d.error()) total = json_number(d.value_unsafe());
+        }
+    }
+    out.push_back(AggRec{std::string(raw), json_number(tr.value_unsafe()), pid,
+                         tid, std::string(name), std::string(cat), count,
+                         total});
+    return true;
+}
+
+// Split an aggregate into uniformly-spaced synthetic events that fall inside
+// [begin, end], emitting each as a complete (ph=1) event so it nests by
+// containment like a real event. Positions are estimated (marked "est":true),
+// not real timings. Bounded by `cap` per aggregate: denser aggregates subsample
+// so a 5s window of millions never floods the response.
+static void extrapolate_aggregate(const AggRec& r, double interval,
+                                  double begin, double end, std::size_t cap,
+                                  std::vector<std::string>& big,
+                                  std::vector<double>& big_dur) {
+    if (r.count == 0 || interval <= 0) return;
+    double spacing = interval / static_cast<double>(r.count);
+    if (spacing <= 0) return;
+    double ev_dur = r.total / static_cast<double>(r.count);
+
+    std::int64_t i_lo =
+        static_cast<std::int64_t>(std::ceil((begin - r.ts) / spacing));
+    std::int64_t i_hi =
+        static_cast<std::int64_t>(std::floor((end - r.ts) / spacing));
+    if (i_lo < 0) i_lo = 0;
+    if (i_hi > static_cast<std::int64_t>(r.count) - 1)
+        i_hi = static_cast<std::int64_t>(r.count) - 1;
+    if (i_hi < i_lo) return;
+
+    std::int64_t visible = i_hi - i_lo + 1;
+    std::int64_t step = 1;
+    if (cap > 0 && visible > static_cast<std::int64_t>(cap))
+        step = (visible + static_cast<std::int64_t>(cap) - 1) /
+               static_cast<std::int64_t>(cap);
+
+    // Each synthetic event is the aggregate's own record with ts moved to the
+    // estimated position and a mean dur added, so selection keeps every arg
+    // (dft_cnt, dur_sum, tag_min, ...). The record's ts is its window start; we
+    // rewrite that one occurrence.
+    const std::string ts_key =
+        "\"ts\":" + std::to_string(static_cast<long long>(r.ts));
+    const std::string tail =
+        ",\"dur\":" + std::to_string(ev_dur) + ",\"est\":true}";
+    for (std::int64_t i = i_lo; i <= i_hi; i += step) {
+        double ts_i = r.ts + static_cast<double>(i) * spacing;
+        std::string e = r.raw;
+        auto pos = e.find(ts_key);
+        if (pos != std::string::npos)
+            e.replace(pos, ts_key.size(),
+                      "\"ts\":" + std::to_string(static_cast<long long>(ts_i)));
+        if (e.empty() || e.back() != '}') continue;
+        e.pop_back();
+        e += tail;
+        big.push_back(std::move(e));
+        big_dur.push_back(ev_dur);
+    }
+}
+
+// Smallest positive gap between distinct aggregate (ph=3) timestamps. Records
+// are emitted on trace_interval_ms boundaries, so this recovers that window.
+// Returns 0 when fewer than two distinct timestamps are present.
+static double infer_agg_interval(std::vector<double> ts) {
+    if (ts.size() < 2) return 0;
+    std::sort(ts.begin(), ts.end());
+    double best = 0;
+    for (std::size_t i = 1; i < ts.size(); ++i) {
+        double d = ts[i] - ts[i - 1];
+        if (d > 0 && (best == 0 || d < best)) best = d;
+    }
+    return best;
 }
 
 }  // namespace dftracer::utils::server

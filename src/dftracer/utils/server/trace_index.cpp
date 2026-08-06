@@ -38,7 +38,7 @@ namespace {
 // Bump VERSION when the on-disk layout below changes; the loader then ignores
 // the stale cache.
 constexpr std::uint32_t VIZ_SUMMARY_MAGIC = 0x315A5644;  // "DVZ1"
-constexpr std::uint32_t VIZ_SUMMARY_FORMAT_VERSION = 6;
+constexpr std::uint32_t VIZ_SUMMARY_FORMAT_VERSION = 9;
 
 struct BufWriter {
     std::string b;
@@ -258,6 +258,9 @@ void serialize_summary(BufWriter& w, const VizSummary& s) {
         for (double x : c.sum) w.dbl(x);
         for (auto n : c.cnt) w.u32(n);
     }
+
+    w.u32(s.has_aggregated ? 1 : 0);
+    w.dbl(s.agg_interval_us);
 }
 
 bool deserialize_summary(BufReader& r, VizSummary& s) {
@@ -388,6 +391,9 @@ bool deserialize_summary(BufReader& r, VizSummary& s) {
         c.cnt.resize(nb);
         for (auto& n : c.cnt) n = r.u32();
     }
+
+    s.has_aggregated = r.u32() != 0;
+    s.agg_interval_us = r.dbl();
 
     return r.ok;
 }
