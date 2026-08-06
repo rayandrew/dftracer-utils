@@ -310,6 +310,21 @@ struct StatRow {
     double max;
 };
 
+// Per-group accumulator that merges real events (from the View) with the
+// prorated contribution of ph=3 aggregates overlapping the window.
+struct StatAgg {
+    double count = 0;  // fractional: an aggregate contributes dft_cnt * overlap
+    double total = 0;
+    double min = std::numeric_limits<double>::infinity();
+    double max = 0;
+    void add(double cnt, double sum, double dmin, double dmax) {
+        count += cnt;
+        total += sum;
+        if (dmin < min) min = dmin;
+        if (dmax > max) max = dmax;
+    }
+};
+
 template <typename builder_type>
 void tag_invoke(simdjson::serialize_tag, builder_type& b, const StatRow& r) {
     b.start_object();
@@ -555,9 +570,12 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
 
     // Whole-trace, unfiltered Analyze: answer from the prebuilt summary (built
     // lazily here). Concurrent builds fall through to the live scan below.
+    // Aggregated traces skip it so the live fold below prorates their ph=3
+    // records (the summary rows omit them), keeping counts consistent with any
+    // sub-window selection.
     if (viz_stats_summary_eligible(params, begin, end, index)) {
         const VizSummary* s = co_await ensure_viz_summary(index);
-        if (s) {
+        if (s && !s->has_aggregated) {
             const auto& gr = summary_group_rows(*s, group);
             std::vector<StatRow> rows;
             rows.reserve(gr.size());
@@ -575,50 +593,163 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
         }
     }
 
-    // Full detail (no min-duration threshold), as a View over the target
-    // files. The cache-backed agg_source answers covered chunks from the
-    // stored per-key sketches (the former inline fast path) and the executor
-    // scans only the boundary chunks; it engages only for an unfiltered
-    // (ts-only) query, since chunk aggregates cover all events in a chunk.
-    ViewDefinition view = build_viz_view(params, begin, end, 0);
-
+    // "What was active in this window", so include every event that OVERLAPS
+    // [begin, end] with its duration clamped to the window (enclosing events
+    // that started earlier still count), and prorate ph=3 aggregates by their
+    // overlap. A plain ts-in-window sum leaves a small selection empty because
+    // nothing starts inside it.
+    //
+    // The ts window is applied via time_range/clamping, not the query, so the
+    // query carries only the user's field filters (a wide-open ts range keeps
+    // build_viz_view's own ts clause a no-op) - otherwise it would reject the
+    // enclosers, whose ts precedes `begin`.
+    ViewDefinition view = build_viz_view(params, 0.0, 4e18, 0);
     std::vector<const TraceIndex::FileInfo*> target_files =
         select_viz_target_files(index, params, begin, end);
 
-    std::vector<views::ViewFile> vfiles = to_view_files(target_files);
+    // Whole-run enclosers (started long before the window) are taken from the
+    // summary long-event list; shorter ones from a scan back bounded by the
+    // same threshold. ph=3 aggregates prorate over the trace's aggregation
+    // window.
+    const VizSummary* s = co_await ensure_viz_summary(index);
+    auto to_native = [&](double us) {
+        return index.time_metric() == TraceIndex::TimeMetric::US
+                   ? us
+                   : static_cast<double>(
+                         index.us_to_native(static_cast<std::uint64_t>(us)));
+    };
+    double enc_threshold_native =
+        s && s->long_threshold_us > 0 ? to_native(s->long_threshold_us) : 0;
+    double interval_native =
+        s && s->agg_interval_us > 0 ? to_native(s->agg_interval_us) : 0;
+    double scan_begin = begin - enc_threshold_native;
+    if (scan_begin < 0) scan_begin = 0;
 
-    const views::GroupKey gk = group == GroupBy::Cat   ? views::GroupKey::cat()
-                               : group == GroupBy::Pid ? views::GroupKey::pid()
-                               : group == GroupBy::Fhash
-                                   ? views::GroupKey::fhash()
-                                   : views::GroupKey::name();
+    const char* gcol = group == GroupBy::Cat     ? "cat"
+                       : group == GroupBy::Pid   ? "pid"
+                       : group == GroupBy::Fhash ? "fhash"
+                                                 : "name";
 
-    ServerStatsSource source(index, target_files);
-    views::View v =
-        views::View::from_files(std::move(vfiles), &index.bloom_cache())
-            .phase(views::Phase::Any)
-            .time_range(begin, end)
-            .group_by({gk})
-            .agg({{views::AggOp::Count, "dur", ""},
-                  {views::AggOp::Sum, "dur", ""},
-                  {views::AggOp::Min, "dur", ""},
-                  {views::AggOp::Max, "dur", ""}});
-    if (view.query) v = v.filter(*view.query);
-    // nofast=1 forces the full scan (A/B check against the agg_source).
-    if (params.get("nofast").empty()) v = v.with_partial_source(&source);
+    using StatMap = ankerl::unordered_dense::map<std::string, StatAgg>;
+    auto merge_stats = [](StatMap&& a, StatMap&& b) {
+        for (auto& [k, v] : b) {
+            auto& x = a[k];
+            x.count += v.count;
+            x.total += v.total;
+            if (v.min < x.min) x.min = v.min;
+            if (v.max > x.max) x.max = v.max;
+        }
+        return std::move(a);
+    };
 
-    views::ResultTable table = co_await v.collect();
+    std::size_t slots = std::max<std::size_t>(1, index.max_concurrent());
+    auto sv = views::View::from_files(to_view_files(target_files),
+                                      &index.bloom_cache())
+                  .phase(views::Phase::Any)
+                  .metadata(false)
+                  .time_range(scan_begin, end);
+    if (view.query) sv = sv.filter(*view.query);
+
+    auto scan = co_await sv.map_batches<StatMap>(
+        [begin, end, scan_begin, interval_native, gcol](
+            StatMap& acc, const std::vector<std::string_view>& events) {
+            thread_local simdjson::dom::parser parser;
+            thread_local std::string buf;
+            for (auto ev : events) {
+                buf.assign(ev);
+                auto res = parser.parse(buf);
+                if (res.error()) continue;
+                auto root = res.value_unsafe();
+                if (!root.is_object()) continue;
+                auto tr = root["ts"];
+                if (tr.error()) continue;
+                double ts = json_number(tr.value_unsafe());
+                // Events opening before the scan-back window are the whole-run
+                // enclosers served from long_events below; skip here to not
+                // double-count (chunk pruning still reads their chunk).
+                if (ts < scan_begin) continue;
+                bool is_agg = false;
+                auto phr = root["ph"];
+                if (!phr.error()) {
+                    if (phr.is_int64())
+                        is_agg = phr.get_int64().value_unsafe() == 3;
+                    else if (phr.is_uint64())
+                        is_agg = phr.get_uint64().value_unsafe() == 3;
+                    else if (phr.is_string())
+                        is_agg = phr.get_string().value_unsafe() == "A";
+                }
+                std::string key = extract_group_value(root, gcol);
+                if (is_agg) {
+                    if (interval_native <= 0) continue;
+                    double lo = std::max(begin, ts);
+                    double hi = std::min(end, ts + interval_native);
+                    if (hi <= lo) continue;
+                    double f = (hi - lo) / interval_native;
+                    double cnt = 1, sum = 0, dmin = 0, dmax = 0;
+                    auto args = root["args"];
+                    if (!args.error() && args.is_object()) {
+                        auto c = args["dft_cnt"];
+                        if (!c.error()) cnt = json_number(c.value_unsafe());
+                        auto sm = args["dur_sum"];
+                        if (!sm.error())
+                            sum = json_number(sm.value_unsafe());
+                        else {
+                            auto d = args["dur"];
+                            if (!d.error()) sum = json_number(d.value_unsafe());
+                        }
+                        auto mn = args["dur_min"];
+                        if (!mn.error()) dmin = json_number(mn.value_unsafe());
+                        auto mx = args["dur_max"];
+                        if (!mx.error()) dmax = json_number(mx.value_unsafe());
+                    }
+                    acc[key].add(cnt * f, sum * f, dmin, dmax);
+                } else {
+                    auto dr = root["dur"];
+                    if (dr.error()) continue;
+                    double dur = json_number(dr.value_unsafe());
+                    double lo = std::max(begin, ts);
+                    double hi = std::min(end, ts + dur);
+                    if (hi <= lo) continue;
+                    acc[key].add(1.0, hi - lo, dur, dur);
+                }
+            }
+        },
+        merge_stats, slots, 0);
+    StatMap byKey = std::move(scan.value);
+
+    // Whole-run enclosers that opened before the scan-back window. The scan's
+    // query filter did not see these, so re-apply it per event.
+    if (s) {
+        simdjson::dom::parser lp;
+        for (const auto& sp : s->long_events) {
+            double sb = static_cast<double>(sp.begin);
+            if (sb >= scan_begin) continue;  // already covered by the scan
+            double lo = std::max(begin, sb);
+            double hi = std::min(end, static_cast<double>(sp.end));
+            if (hi <= lo) continue;
+            auto pr = lp.parse(sp.json);
+            if (pr.error() || !pr.value_unsafe().is_object()) continue;
+            auto root = pr.value_unsafe();
+            if (view.query &&
+                !view.query->evaluate(utilities::common::json::JsonValue(root)))
+                continue;
+            double dur = static_cast<double>(sp.end - sp.begin);
+            byKey[extract_group_value(root, gcol)].add(1.0, hi - lo, dur, dur);
+        }
+    }
 
     std::vector<StatRow> rows;
-    rows.reserve(table.rows.size());
+    rows.reserve(byKey.size());
     std::uint64_t total_count = 0;
     double total_dur = 0;
-    for (const auto& r : table.rows) {
-        const std::uint64_t count = static_cast<std::uint64_t>(r.values[0]);
-        const double total = r.values[1];
-        rows.push_back({&r.keys[0], count, total, r.values[2], r.values[3]});
-        total_count += count;
-        total_dur += total;
+    for (auto& kv : byKey) {
+        auto cnt = static_cast<std::uint64_t>(kv.second.count + 0.5);
+        double mn = kv.second.min == std::numeric_limits<double>::infinity()
+                        ? 0
+                        : kv.second.min;
+        rows.push_back({&kv.first, cnt, kv.second.total, mn, kv.second.max});
+        total_count += cnt;
+        total_dur += kv.second.total;
     }
     std::sort(rows.begin(), rows.end(), [](const StatRow& a, const StatRow& b) {
         return a.total > b.total;

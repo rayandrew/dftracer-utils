@@ -215,6 +215,15 @@ export interface TimelineCallbacks {
   onSelect?: (ev: TraceEvent | null) => void;
   // Fired when the user finishes dragging a time-range selection (for stats).
   onSelectRange?: (t0: number, t1: number) => void;
+  // Fired when the user finishes a rectangle selection: a time range, the lanes
+  // it covers, and the operation names under the covered rows, so stats can
+  // scope to exactly those tracks and operations.
+  onSelectRect?: (
+    t0: number,
+    t1: number,
+    lanes: { pid: string; tid: string }[],
+    names: string[],
+  ) => void;
   onSelectRangeClear?: () => void;
 }
 
@@ -366,7 +375,10 @@ export class Timeline {
   private zoomFocusX = this.gutter;
   private selecting = false;
   private selAnchorT = 0;
-  private selection: { t0: number; t1: number } | null = null;
+  private selAnchorY = 0;
+  // y0/y1 (content coords, below the ruler) are present only for a rectangle
+  // selection; a plain range covers the full height.
+  private selection: { t0: number; t1: number; y0?: number; y1?: number } | null = null;
 
   private th: VizTheme = vizTheme("dark");
   private hostByPid = new Map<number, string>();
@@ -1542,6 +1554,22 @@ export class Timeline {
       this.invalidate();
       return;
     }
+    // Ctrl/Cmd + drag in the plot paints a rectangle (time x lanes) for stats.
+    if ((e.ctrlKey || e.metaKey) && x >= this.gutter && y >= RULER_H) {
+      this.selecting = true;
+      this.selAnchorT = this.timeOf(x);
+      // y bounds are stored in content space so the box stays on its lanes when
+      // the user scrolls (screen y = contentY + RULER_H - scrollY).
+      this.selAnchorY = y - RULER_H + this.scrollY;
+      this.selection = {
+        t0: this.selAnchorT,
+        t1: this.selAnchorT,
+        y0: this.selAnchorY,
+        y1: this.selAnchorY,
+      };
+      this.invalidate();
+      return;
+    }
     if (x < this.gutter && y > RULER_H) {
       // Gutter: a potential collapse click; never a pan/scroll drag.
       this.gutterDown = { x, y };
@@ -1563,9 +1591,17 @@ export class Timeline {
     }
     if (this.selecting) {
       const t = clamp(this.timeOf(x), 0, this.totalSpan);
+      const isRect = this.selection?.y0 !== undefined;
+      const cy = clamp(y, RULER_H, this.cssH) - RULER_H + this.scrollY;
       this.selection = {
         t0: Math.min(this.selAnchorT, t),
         t1: Math.max(this.selAnchorT, t),
+        ...(isRect
+          ? {
+              y0: Math.min(this.selAnchorY, cy),
+              y1: Math.max(this.selAnchorY, cy),
+            }
+          : {}),
       };
       this.invalidate();
       return;
@@ -1654,7 +1690,18 @@ export class Timeline {
       const sel = this.selection;
       const span = this.live.end - this.live.begin;
       if (sel && sel.t1 - sel.t0 > span * 0.002) {
-        this.cb.onSelectRange?.(this.toReal(sel.t0), this.toReal(sel.t1));
+        if (sel.y0 !== undefined && sel.y1 !== undefined) {
+          const rt0 = this.toReal(sel.t0);
+          const rt1 = this.toReal(sel.t1);
+          this.cb.onSelectRect?.(
+            rt0,
+            rt1,
+            this.lanesInYRange(sel.y0, sel.y1),
+            this.namesInRect(rt0, rt1, sel.y0, sel.y1),
+          );
+        } else {
+          this.cb.onSelectRange?.(this.toReal(sel.t0), this.toReal(sel.t1));
+        }
       } else {
         this.selection = null;
         this.cb.onSelectRangeClear?.();
@@ -1685,6 +1732,51 @@ export class Timeline {
   clearSelection(): void {
     this.selection = null;
     this.invalidate();
+  }
+
+  // Lanes whose rows intersect the content y-range [y0, y1] (lane.y is content
+  // space too). A thread lane maps to its (pid, tid); a summary row (host, or
+  // collapsed process) stands for every tid of its pid (tid ""), and a host row
+  // for all its pids.
+  private lanesInYRange(y0: number, y1: number): { pid: string; tid: string }[] {
+    const seen = new Set<string>();
+    const out: { pid: string; tid: string }[] = [];
+    const add = (pid: string, tid: string) => {
+      const key = `${pid} ${tid}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ pid, tid });
+    };
+    for (const lane of this.lanes) {
+      const ly0 = lane.y;
+      const ly1 = ly0 + Math.max(1, lane.rows) * this.rowH;
+      if (ly1 <= y0 || ly0 >= y1) continue;
+      if (lane.kind === "host") {
+        for (const pid of this.hostPids.get(lane.host) ?? []) add(String(pid), "");
+      } else if (lane.flatten) {
+        add(lane.pid, "");
+      } else {
+        add(lane.pid, lane.tid);
+      }
+    }
+    return out;
+  }
+
+  // Distinct operation names whose slice falls inside the rectangle: its row
+  // (lane.y + depth) overlaps the content y-range and its time overlaps
+  // [t0, t1] (real time, as stored on the slice). Lets stats scope to the exact
+  // rows the user dragged over, not the whole track.
+  private namesInRect(t0: number, t1: number, y0: number, y1: number): string[] {
+    const names = new Set<string>();
+    for (const s of this.slices) {
+      const lane = this.lanes[s.laneIdx];
+      const cy0 = lane.y + s.depth * this.rowH;
+      if (cy0 + this.rowH <= y0 || cy0 >= y1) continue;
+      if (s.ts + s.dur <= t0 || s.ts >= t1) continue;
+      const n = String(s.ev.name ?? "");
+      if (n) names.add(n);
+    }
+    return [...names];
   }
 
   private onMouseLeave = (): void => {
@@ -2479,15 +2571,27 @@ export class Timeline {
       this.gutter,
       this.cssW,
     );
+    // A rectangle selection clips to its y-band (stored in content space, so it
+    // scrolls with its lanes); a plain range spans full height.
+    const rect = this.selection.y0 !== undefined && this.selection.y1 !== undefined;
+    const off = RULER_H - this.scrollY;
+    const yTop = rect ? clamp(this.selection.y0! + off, RULER_H, this.cssH) : RULER_H;
+    const yBot = rect ? clamp(this.selection.y1! + off, RULER_H, this.cssH) : this.cssH;
     ctx.fillStyle = this.th.selFill;
-    ctx.fillRect(x0, RULER_H, x1 - x0, this.cssH - RULER_H);
+    ctx.fillRect(x0, yTop, x1 - x0, yBot - yTop);
     ctx.strokeStyle = this.th.selStroke;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(x0 + 0.5, RULER_H);
-    ctx.lineTo(x0 + 0.5, this.cssH);
-    ctx.moveTo(x1 - 0.5, RULER_H);
-    ctx.lineTo(x1 - 0.5, this.cssH);
+    ctx.moveTo(x0 + 0.5, yTop);
+    ctx.lineTo(x0 + 0.5, yBot);
+    ctx.moveTo(x1 - 0.5, yTop);
+    ctx.lineTo(x1 - 0.5, yBot);
+    if (rect) {
+      ctx.moveTo(x0, yTop + 0.5);
+      ctx.lineTo(x1, yTop + 0.5);
+      ctx.moveTo(x0, yBot - 0.5);
+      ctx.lineTo(x1, yBot - 0.5);
+    }
     ctx.stroke();
 
     const rt0 = this.toReal(this.selection.t0);

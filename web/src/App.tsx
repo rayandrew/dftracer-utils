@@ -412,7 +412,7 @@ export default function App() {
   function loadAnFlame() {
     if (totalSpan <= 0) return;
     const [b, e] = scopeRange();
-    const q = appliedQuery();
+    const q = scopedQuery();
     const key = `${q}|${Math.floor(b)}-${Math.ceil(e)}`;
     if (anFlameKey === key && !anFlameLoading()) return;
     anFlameInflight?.abort();
@@ -561,15 +561,46 @@ export default function App() {
     }
     return [...counts.values()].sort((a, b) => b.count - a.count);
   });
-  // Range the Analyze panel aggregates over; null means the whole trace.
-  const [anScope, setAnScope] = createSignal<{ t0: number; t1: number } | null>(null);
+  // Range the Analyze panel aggregates over; null means the whole trace. A
+  // rectangle selection also carries the lanes (pid/tid) and the operation
+  // names under the rows it covered.
+  type AnScope = {
+    t0: number;
+    t1: number;
+    lanes?: { pid: string; tid: string }[];
+    names?: string[];
+  };
+  const [anScope, setAnScope] = createSignal<AnScope | null>(null);
   const scopeRange = (): [number, number] => {
     const s = anScope();
     return s ? [s.t0, s.t1] : [0, totalSpan];
   };
+  // Query clause restricting to the selected lanes, or "" for the whole height.
+  const laneFilter = (): string => {
+    const lanes = anScope()?.lanes;
+    if (!lanes || lanes.length === 0) return "";
+    const clauses = lanes.map((l) =>
+      l.tid ? `(pid == ${l.pid} and tid == ${l.tid})` : `pid == ${l.pid}`,
+    );
+    return `(${clauses.join(" or ")})`;
+  };
+  // Clause restricting to the operations under the covered rows.
+  const nameFilter = (): string => {
+    const names = anScope()?.names;
+    if (!names || names.length === 0) return "";
+    const clauses = names.map((n) => `name == "${n.replace(/"/g, '\\"')}"`);
+    return `(${clauses.join(" or ")})`;
+  };
+  // Combine the applied query with the selection's lane and name filters.
+  const scopedQuery = (): string =>
+    [appliedQuery(), laneFilter(), nameFilter()]
+      .filter((c) => c)
+      .map((c) => `(${c})`)
+      .join(" and ");
   const scopeKey = () => {
     const s = anScope();
-    return s ? `${Math.floor(s.t0)}-${Math.ceil(s.t1)}` : "all";
+    if (!s) return "all";
+    return `${Math.floor(s.t0)}-${Math.ceil(s.t1)}|${laneFilter()}|${nameFilter()}`;
   };
 
   const [procRank, setProcRank] = createSignal<Map<string, string>>(new Map());
@@ -929,9 +960,21 @@ export default function App() {
   }
 
   // Server-side per-name aggregation for the selected range.
-  function requestSelection(t0: number, t1: number) {
+  function requestSelection(
+    t0: number,
+    t1: number,
+    lanes?: { pid: string; tid: string }[],
+    names?: string[],
+  ) {
+    // Absolute timestamps lose sub-microsecond precision, so a razor-thin drag
+    // would collapse to an empty window; floor it to 1us around its centre.
+    if (t1 - t0 < 1) {
+      const m = (t0 + t1) / 2;
+      t0 = m - 0.5;
+      t1 = m + 0.5;
+    }
     setSelected(null);
-    setAnScope({ t0, t1 });
+    setAnScope({ t0, t1, lanes, names });
     setSidebarOpen(true);
     reloadBottom();
   }
@@ -1002,7 +1045,7 @@ export default function App() {
     try {
       const group = tab === "file" ? "fhash" : tab;
       const [b, e] = scopeRange();
-      const res = await fetchVizStats(b, e, appliedQuery(), group, ac.signal);
+      const res = await fetchVizStats(b, e, scopedQuery(), group, ac.signal);
       if (!ac.signal.aborted) {
         analyzeCache.set(cacheKey, res);
         setAnalyzeStats(res);
@@ -1025,7 +1068,7 @@ export default function App() {
     try {
       const [b, e] = scopeRange();
       const res = await fetchViz(
-        { begin: b, end: e, summary: 1, query: appliedQuery(), limit: 1000 },
+        { begin: b, end: e, summary: 1, query: scopedQuery(), limit: 1000 },
         ac.signal,
       );
       if (!ac.signal.aborted) {
@@ -1072,7 +1115,7 @@ export default function App() {
     distInflight = ac;
     setDistLoading(true);
     setDistHist(null);
-    const q = appliedQuery();
+    const q = scopedQuery();
     const combined = q ? `(${q}) and ${pred}` : pred;
     try {
       const [b, e] = scopeRange();
@@ -1142,6 +1185,7 @@ export default function App() {
         }
       },
       onSelectRange: (t0, t1) => requestSelection(t0, t1),
+      onSelectRect: (t0, t1, lanes, names) => requestSelection(t0, t1, lanes, names),
       onSelectRangeClear: () => clearSelection(),
     });
     timeline.attachMinimap(minimap);
