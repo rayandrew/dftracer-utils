@@ -2491,8 +2491,10 @@ export default function App() {
                       <div class="tt-name">
                         <i style={{ background: eventColor(h().ev) }} />
                         {String(h().ev.name ?? "")}
-                        <Show when={isAggregated(h().ev)}>
-                          <span class="agg-tag">merged</span>
+                        <Show when={isAggregated(h().ev) || h().ev.est === true}>
+                          <span class="agg-tag">
+                            {h().ev.est === true || h().ev.agg === true ? "aggregated" : "merged"}
+                          </span>
                         </Show>
                       </div>
                       <For each={inspRows(h().ev)}>
@@ -2516,11 +2518,6 @@ export default function App() {
                           <span class="hint2">
                             {h().ev.agg === true ? "estimated positions" : "zoom in to resolve"}
                           </span>
-                        </div>
-                      </Show>
-                      <Show when={h().ev.est === true}>
-                        <div class="tt-row">
-                          <span class="hint2">estimated position</span>
                         </div>
                       </Show>
                       <For each={flattenArgs(h().ev).slice(0, 6)}>
