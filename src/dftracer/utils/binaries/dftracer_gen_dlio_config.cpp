@@ -53,6 +53,9 @@ class GenDlioConfigArgParse : public cli::ArgParse {
     std::uint64_t max_samples_per_entry = 100;
     double time_interval = 5000.0;
 
+    // Optional YAML/JSON file remapping the (cat, name) of each DLIO component.
+    std::string event_map;
+
     explicit GenDlioConfigArgParse(argparse::ArgumentParser& p) : ArgParse(p) {
         indexing.index_dir_help =
             "Directory to store index files (default: system temp directory)";
@@ -137,6 +140,13 @@ class GenDlioConfigArgParse : public cli::ArgParse {
             .help("Aggregation time interval in ms (default: 5000)")
             .scan<'g', double>()
             .default_value(5000.0);
+
+        parser()
+            .add_argument("--event-map")
+            .help(
+                "YAML or JSON file remapping the (cat, name) of the "
+                "fetch_block / fetch_iter / preprocess / item components")
+            .default_value(std::string{});
     }
 
     void post_parse() override {
@@ -155,6 +165,7 @@ class GenDlioConfigArgParse : public cli::ArgParse {
         max_samples_per_entry =
             parser().get<std::uint64_t>("--max-samples-per-entry");
         time_interval = parser().get<double>("--time-interval");
+        event_map = parser().get<std::string>("--event-map");
     }
 };
 
@@ -244,6 +255,15 @@ int main(int argc, char** argv) {
             dlio::TraceLoaderOptions loader_opts;
             loader_opts.max_samples_per_entry = cli.max_samples_per_entry;
             loader_opts.seed = cli.seed;
+            // Remap component (cat, name) selectors from the event map, if any.
+            if (!cli.event_map.empty()) {
+                try {
+                    dlio::load_event_map(cli.event_map, loader_opts);
+                } catch (const std::exception& e) {
+                    DFTRACER_UTILS_LOG_ERROR("%s", e.what());
+                    return 1;
+                }
+            }
             dlio::AggregatedTraces traces;
             try {
                 traces = dlio::load_aggregated_traces(run_result->index_path,
@@ -255,7 +275,11 @@ int main(int argc, char** argv) {
             }
             if (!traces.any_data) {
                 DFTRACER_UTILS_LOG_ERROR(
-                    "No DLIO events (fetch.block / preprocess) found in %s",
+                    "No DLIO events (%s/%s, %s/%s) found in %s",
+                    loader_opts.fetch_block.cat.c_str(),
+                    loader_opts.fetch_block.name.c_str(),
+                    loader_opts.preprocess.cat.c_str(),
+                    loader_opts.preprocess.name.c_str(),
                     cli.directory.value.c_str());
                 return 1;
             }

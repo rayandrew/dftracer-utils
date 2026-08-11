@@ -26,9 +26,10 @@ End-to-end the module composes four pieces:
    merge operator re-attached), iterates the ``AGGREGATION`` column family,
    groups entries by ``(cat, name, pid, time_bucket)``, and synthesizes a flat
    per-rank sample stream per component (``fetch.block``, ``fetch.iter``,
-   ``preprocess``, ``item``). Sketches are used for inverse-CDF sampling when
-   the aggregator was run with ``--compute-percentiles``; otherwise the
-   per-call mean is replicated.
+   ``preprocess``, ``item`` by default; the selecting ``(cat, name)`` per
+   component is configurable via ``TraceLoaderOptions`` / ``load_event_map``).
+   Sketches are used for inverse-CDF sampling when the aggregator was run with
+   ``--compute-percentiles``; otherwise the per-call mean is replicated.
 
 2. The :doc:`distribution fitter <common>` (under
    ``common/statistics/distributions.h`` and ``mixture.h``) fits the lowest-BIC
@@ -53,6 +54,8 @@ trace_loader
    TraceLoaderOptions opts;
    opts.max_samples_per_entry = 100;   // cap per (pid, bucket) entry, 0 = unlimited
    opts.seed = 0xD15710;                // seed for inverse-CDF sampling
+   opts.preprocess = {"cpu", "transform"};   // remap one component directly, or
+   load_event_map("event_map.yaml", opts);   // overlay a YAML/JSON map file
 
    AggregatedTraces traces = load_aggregated_traces(db_path, opts);
 

@@ -16,12 +16,24 @@
 
 namespace {
 
+// (cat, name) labels for the three emitted components. Defaults are the DLIO
+// benchmark event names; override to exercise the loader's event selectors.
+struct EventLabels {
+    std::string fetch_block_cat = "dataloader";
+    std::string fetch_block_name = "fetch.block";
+    std::string fetch_iter_cat = "dataloader";
+    std::string fetch_iter_name = "fetch.iter";
+    std::string preprocess_cat = "data";
+    std::string preprocess_name = "preprocess";
+};
+
 // Produce a .pfw.gz file containing realistic DLIO trace events: a mix of
-// (cat=dataloader, name=fetch.block / fetch.iter) and (cat=data,
-// name=preprocess) duration events spread across `num_ranks` pids. Each rank
-// gets `events_per_rank` of each kind.
+// fetch.block / fetch.iter and preprocess duration events spread across
+// `num_ranks` pids. Each rank gets `events_per_rank` of each kind. Event
+// categories and names come from `labels`.
 std::string create_dlio_pfw_gz(dft_utils_test::TestEnvironment& env, int id,
-                               int num_ranks, int events_per_rank) {
+                               int num_ranks, int events_per_rank,
+                               const EventLabels& labels = {}) {
     const std::string plain_path =
         env.get_dir() + "/dlio_trace_" + std::to_string(id) + ".pfw";
     {
@@ -38,8 +50,9 @@ std::string create_dlio_pfw_gz(dft_utils_test::TestEnvironment& env, int id,
                 // fetch.block: lognormal-ish via varying durations.
                 const std::uint64_t fb_dur = 100 + (i * 7) % 500;
                 ofs << R"({"id":)" << event_id++ << R"(,"pid":)" << pid
-                    << R"(,"tid":)" << tid
-                    << R"(,"name":"fetch.block","cat":"dataloader")"
+                    << R"(,"tid":)" << tid << R"(,"name":")"
+                    << labels.fetch_block_name << R"(","cat":")"
+                    << labels.fetch_block_cat << R"(")"
                     << R"(,"ph":"X","ts":)" << ts << R"(,"dur":)" << fb_dur
                     << R"(,"args":{"hhash":"h1"}})"
                     << "\n";
@@ -48,8 +61,9 @@ std::string create_dlio_pfw_gz(dft_utils_test::TestEnvironment& env, int id,
                 // fetch.iter: shorter durations.
                 const std::uint64_t fi_dur = 50 + (i * 3) % 100;
                 ofs << R"({"id":)" << event_id++ << R"(,"pid":)" << pid
-                    << R"(,"tid":)" << tid
-                    << R"(,"name":"fetch.iter","cat":"dataloader")"
+                    << R"(,"tid":)" << tid << R"(,"name":")"
+                    << labels.fetch_iter_name << R"(","cat":")"
+                    << labels.fetch_iter_cat << R"(")"
                     << R"(,"ph":"X","ts":)" << ts << R"(,"dur":)" << fi_dur
                     << R"(,"args":{"hhash":"h1"}})"
                     << "\n";
@@ -59,8 +73,9 @@ std::string create_dlio_pfw_gz(dft_utils_test::TestEnvironment& env, int id,
                 const std::uint64_t worker_pid = pid + 100000ULL;
                 const std::uint64_t pre_dur = 80 + (i * 5) % 200;
                 ofs << R"({"id":)" << event_id++ << R"(,"pid":)" << worker_pid
-                    << R"(,"tid":)" << tid
-                    << R"(,"name":"preprocess","cat":"data")"
+                    << R"(,"tid":)" << tid << R"(,"name":")"
+                    << labels.preprocess_name << R"(","cat":")"
+                    << labels.preprocess_cat << R"(")"
                     << R"(,"ph":"X","ts":)" << ts << R"(,"dur":)" << pre_dur
                     << R"(,"args":{"hhash":"h1"}})"
                     << "\n";
@@ -200,6 +215,123 @@ TEST_SUITE("DFTracerGenDlioConfig") {
         CHECK(contents.find("preprocess_time:") != std::string::npos);
         CHECK(contents.find("type:") != std::string::npos);
         CHECK(contents.find("max_bound:") != std::string::npos);
+    }
+
+    TEST_CASE("custom event cat/name overrides map onto DLIO components") {
+        const auto binary = find_binary();
+        if (binary.empty()) return;
+        dft_utils_test::TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+
+        EventLabels labels;
+        labels.fetch_block_cat = "io";
+        labels.fetch_block_name = "read";
+        labels.fetch_iter_cat = "io";
+        labels.fetch_iter_name = "iter";
+        labels.preprocess_cat = "cpu";
+        labels.preprocess_name = "transform";
+
+        auto f = create_dlio_pfw_gz(env, 0, /*num_ranks=*/2,
+                                    /*events_per_rank=*/200, labels);
+        REQUIRE(!f.empty());
+
+        // Without overrides the loader looks for DLIO defaults and finds
+        // nothing.
+        const std::string out_default = env.get_dir() + "/dlio_default.yaml";
+        const int rc_default =
+            run_binary(binary, {"-d", env.get_dir(), "-o", out_default,
+                                "--simulation-iterations", "2"});
+        CHECK(rc_default != 0);
+        CHECK_FALSE(fs::exists(out_default));
+
+        // A YAML event map remaps the components onto the custom events.
+        const std::string map_path = env.get_dir() + "/event_map.yaml";
+        {
+            std::ofstream ofs(map_path);
+            REQUIRE(ofs.is_open());
+            ofs << "fetch_block:\n"
+                << "  cat: " << labels.fetch_block_cat << "\n"
+                << "  name: " << labels.fetch_block_name << "\n"
+                << "fetch_iter:\n"
+                << "  cat: " << labels.fetch_iter_cat << "\n"
+                << "  name: " << labels.fetch_iter_name << "\n"
+                << "preprocess:\n"
+                << "  cat: " << labels.preprocess_cat << "\n"
+                << "  name: " << labels.preprocess_name << "\n";
+        }
+
+        const std::string out = env.get_dir() + "/dlio_config.yaml";
+        const int rc = run_binary(
+            binary, {"-d", env.get_dir(), "-o", out, "--simulation-iterations",
+                     "2", "--event-map", map_path});
+        CHECK(rc == 0);
+        REQUIRE(fs::exists(out));
+
+        const std::string contents = read_file(out);
+        CHECK(contents.find("computation_time:") != std::string::npos);
+        CHECK(contents.find("preprocess_time:") != std::string::npos);
+    }
+
+    TEST_CASE("JSON event map is accepted") {
+        const auto binary = find_binary();
+        if (binary.empty()) return;
+        dft_utils_test::TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+
+        EventLabels labels;
+        labels.fetch_block_cat = "io";
+        labels.fetch_block_name = "read";
+        labels.fetch_iter_cat = "io";
+        labels.fetch_iter_name = "iter";
+        labels.preprocess_cat = "cpu";
+        labels.preprocess_name = "transform";
+
+        auto f = create_dlio_pfw_gz(env, 0, /*num_ranks=*/2,
+                                    /*events_per_rank=*/200, labels);
+        REQUIRE(!f.empty());
+
+        // JSON is a YAML subset, so the same loader accepts a .json map.
+        const std::string map_path = env.get_dir() + "/event_map.json";
+        {
+            std::ofstream ofs(map_path);
+            REQUIRE(ofs.is_open());
+            ofs << R"({"fetch_block":{"cat":")" << labels.fetch_block_cat
+                << R"(","name":")" << labels.fetch_block_name << R"("},)"
+                << R"("preprocess":{"cat":")" << labels.preprocess_cat
+                << R"(","name":")" << labels.preprocess_name << R"("}})";
+        }
+
+        const std::string out = env.get_dir() + "/dlio_config.yaml";
+        const int rc = run_binary(
+            binary, {"-d", env.get_dir(), "-o", out, "--simulation-iterations",
+                     "2", "--event-map", map_path});
+        CHECK(rc == 0);
+        CHECK(fs::exists(out));
+    }
+
+    TEST_CASE("malformed event map is rejected") {
+        const auto binary = find_binary();
+        if (binary.empty()) return;
+        dft_utils_test::TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+
+        auto f = create_dlio_pfw_gz(env, 0, /*num_ranks=*/1,
+                                    /*events_per_rank=*/150);
+        REQUIRE(!f.empty());
+
+        const std::string map_path = env.get_dir() + "/bad_map.yaml";
+        {
+            std::ofstream ofs(map_path);
+            REQUIRE(ofs.is_open());
+            ofs << "fetch_block: {cat: dataloader, name: fetch.block\n";
+        }
+
+        const std::string out = env.get_dir() + "/dlio_config.yaml";
+        const int rc = run_binary(
+            binary, {"-d", env.get_dir(), "-o", out, "--simulation-iterations",
+                     "2", "--event-map", map_path});
+        CHECK(rc != 0);
+        CHECK_FALSE(fs::exists(out));
     }
 
     TEST_CASE("respects --num-workers and --prefetch-factor") {

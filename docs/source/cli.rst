@@ -621,9 +621,11 @@ distributions, refines ``max_bound`` against an internal barrier simulator, and
 emits a DLIO ``train.computation_time`` + ``reader.preprocess_time`` block. The
 user does not need to run ``dftracer_aggregator`` separately.
 
-Required input event names: ``cat=dataloader`` with ``name=fetch.block`` /
-``fetch.iter``, and ``cat=data`` with ``name=preprocess`` / ``item``. The tool
-exits non-zero with an explanatory message if no DLIO events are present.
+Default input event names: ``cat=dataloader`` with ``name=fetch.block`` /
+``fetch.iter``, and ``cat=data`` with ``name=preprocess`` / ``item``. Traces
+that label these phases differently can be remapped with ``--event-map`` (see
+below). The tool exits non-zero with an explanatory message if no DLIO events
+are present.
 
 **Usage:**
 
@@ -648,6 +650,7 @@ exits non-zero with an explanatory message if no DLIO events are present.
 - ``--seed <n>`` - Base seed for simulator and sampler (default: 42)
 - ``--max-samples-per-entry <n>`` - Cap on synthesized samples per aggregation entry; 0 disables (default: 100)
 - ``-t, --time-interval <ms>`` - Aggregation time interval in ms (default: 5000)
+- ``--event-map <path>`` - YAML or JSON file remapping the ``(cat, name)`` of the ``fetch_block`` / ``fetch_iter`` / ``preprocess`` / ``item`` components (see below)
 - ``--index-dir <path>`` - Directory for the shared index store (default: system temp dir)
 - ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
 - ``--executor-threads <count>`` - Number of executor threads for parallel processing
@@ -657,6 +660,22 @@ exits non-zero with an explanatory message if no DLIO events are present.
 {Normal, Lognormal, Gamma, Exponential, Weibull, Gaussian Mixture (K=2),
 Gaussian Mixture (K=3)}. Mixture candidates are only considered when the
 sample count is at least 20.
+
+**Event map:** ``--event-map`` points at a YAML or JSON file (JSON is parsed as
+a YAML subset, so either form works) whose top-level keys ``fetch_block``,
+``fetch_iter``, ``preprocess`` and ``item`` each carry an optional ``cat`` and
+``name``. Omitted keys and fields keep the defaults above, so only the events
+that differ need an entry.
+
+.. code-block:: yaml
+
+    # event_map.yaml
+    fetch_block:
+      cat: io
+      name: read
+    preprocess:
+      cat: cpu
+      name: transform
 
 **Example:**
 
@@ -672,6 +691,10 @@ sample count is at least 20.
     # Reuse a shared index directory across runs to skip re-indexing
     dftracer_gen_dlio_config -d ./traces -o dlio_config.yaml \
         --index-dir /var/cache/dftracer/idx
+
+    # Remap non-default event names onto the DLIO components
+    dftracer_gen_dlio_config -d ./traces -o dlio_config.yaml \
+        --event-map event_map.yaml
 
 **Output schema:**
 
