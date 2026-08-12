@@ -15,13 +15,20 @@ namespace dftracer::utils::utilities::dlio {
 
 using DDSketch = ::dftracer::utils::utilities::common::statistics::DDSketch;
 
-// DLIO category / event names matched in the AGGREGATION CF.
+// Default DLIO category / event names; overridable per-component via
+// TraceLoaderOptions.
 inline constexpr std::string_view CATEGORY_DATALOADER = "dataloader";
 inline constexpr std::string_view CATEGORY_DATA = "data";
 inline constexpr std::string_view EVENT_FETCH_BLOCK = "fetch.block";
 inline constexpr std::string_view EVENT_FETCH_ITER = "fetch.iter";
 inline constexpr std::string_view EVENT_PREPROCESS = "preprocess";
 inline constexpr std::string_view EVENT_ITEM = "item";
+
+// A (category, name) pair selecting one DLIO component.
+struct EventSelector {
+    std::string cat;
+    std::string name;
+};
 
 struct AggregatedTraces {
     // Per-rank concatenated sample sequences (seconds), in pid-ascending,
@@ -83,6 +90,15 @@ struct TraceLoaderOptions {
     std::uint64_t max_samples_per_entry = 100;
     // Seed for inverse-CDF sketch sampling.
     std::uint64_t seed = 0xD15710;
+
+    // Per-component (cat, name) selectors; defaults are the DLIO event names.
+    EventSelector fetch_block{std::string(CATEGORY_DATALOADER),
+                              std::string(EVENT_FETCH_BLOCK)};
+    EventSelector fetch_iter{std::string(CATEGORY_DATALOADER),
+                             std::string(EVENT_FETCH_ITER)};
+    EventSelector preprocess{std::string(CATEGORY_DATA),
+                             std::string(EVENT_PREPROCESS)};
+    EventSelector item{std::string(CATEGORY_DATA), std::string(EVENT_ITEM)};
 };
 
 // Loads aggregated DLIO trace data from a dftracer RocksDB. Opens the database
@@ -91,6 +107,12 @@ struct TraceLoaderOptions {
 // ComponentTimeMetrics.
 AggregatedTraces load_aggregated_traces(const std::string& db_path,
                                         const TraceLoaderOptions& options = {});
+
+// Overlays (cat, name) overrides from a YAML or JSON file onto the component
+// selectors in `options`. Top-level keys fetch_block, fetch_iter, preprocess
+// and item each take an optional `cat` and `name`; omitted keys and fields are
+// left untouched. Throws DFTUtilsException on a missing file or parse error.
+void load_event_map(const std::string& path, TraceLoaderOptions& options);
 
 // Convenience: build a BarrierSimulatorContext from loaded traces.
 BarrierSimulatorContext make_simulator_context(const AggregatedTraces& traces,

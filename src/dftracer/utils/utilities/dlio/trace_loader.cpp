@@ -5,6 +5,7 @@
 #include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
 #include <dftracer/utils/utilities/composites/dft/aggregators/event_aggregator.h>
 #include <dftracer/utils/utilities/dlio/trace_loader.h>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -168,17 +169,17 @@ AggregatedTraces load_aggregated_traces(const std::string& db_path,
         if (!agg::parse_agg_key_view(key_sv, intern, kv)) continue;
 
         ComponentAccumulator* target = nullptr;
-        if (matches(kv.cat, CATEGORY_DATALOADER) &&
-            matches(kv.name, EVENT_FETCH_BLOCK)) {
+        if (matches(kv.cat, options.fetch_block.cat) &&
+            matches(kv.name, options.fetch_block.name)) {
             target = &acc_fetch_block;
-        } else if (matches(kv.cat, CATEGORY_DATALOADER) &&
-                   matches(kv.name, EVENT_FETCH_ITER)) {
+        } else if (matches(kv.cat, options.fetch_iter.cat) &&
+                   matches(kv.name, options.fetch_iter.name)) {
             target = &acc_fetch_iter;
-        } else if (matches(kv.cat, CATEGORY_DATA) &&
-                   matches(kv.name, EVENT_PREPROCESS)) {
+        } else if (matches(kv.cat, options.preprocess.cat) &&
+                   matches(kv.name, options.preprocess.name)) {
             target = &acc_preprocess;
-        } else if (matches(kv.cat, CATEGORY_DATA) &&
-                   matches(kv.name, EVENT_ITEM)) {
+        } else if (matches(kv.cat, options.item.cat) &&
+                   matches(kv.name, options.item.name)) {
             target = &acc_getitem;
         } else {
             continue;
@@ -380,6 +381,38 @@ BarrierSimulatorContext make_simulator_context(const AggregatedTraces& traces,
     ctx.num_workers = num_workers;
     ctx.prefetch_factor = prefetch_factor;
     return ctx;
+}
+
+namespace {
+
+void overlay_selector(const YAML::Node& root, const char* key,
+                      EventSelector& sel) {
+    const auto node = root[key];
+    if (!node || !node.IsMap()) return;
+    if (const auto cat = node["cat"]) sel.cat = cat.as<std::string>();
+    if (const auto name = node["name"]) sel.name = name.as<std::string>();
+}
+
+}  // namespace
+
+void load_event_map(const std::string& path, TraceLoaderOptions& options) {
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(path);
+    } catch (const YAML::Exception& e) {
+        throw DFTUtilsException(
+            ErrorCode::INVALID_ARGUMENT,
+            "dlio: failed to parse event map " + path + ": " + e.what());
+    }
+    if (!root.IsMap()) {
+        throw DFTUtilsException(ErrorCode::INVALID_ARGUMENT,
+                                "dlio: event map " + path +
+                                    " must be a mapping of component names");
+    }
+    overlay_selector(root, "fetch_block", options.fetch_block);
+    overlay_selector(root, "fetch_iter", options.fetch_iter);
+    overlay_selector(root, "preprocess", options.preprocess);
+    overlay_selector(root, "item", options.item);
 }
 
 }  // namespace dftracer::utils::utilities::dlio
