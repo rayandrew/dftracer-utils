@@ -4,6 +4,7 @@ import { colorFor, colorSlot, contrastText, DENSITY_GREY, sliceKey } from "./col
 import {
   formatBytesCompact,
   formatBytesPerSec,
+  formatCompact,
   formatRate,
   formatTick,
   formatTime,
@@ -29,6 +30,7 @@ interface Slice {
   density: boolean;
   aggregated: boolean; // ph=3 record: dur is the window, count is dft_cnt
   est: boolean; // synthetic event extrapolated from an aggregate (estimated ts)
+  malformed: boolean; // impossible timing vs process lifetimes (untrustworthy)
   fill: string; // resolved once here; the frame loop redraws every slice
 }
 
@@ -38,7 +40,7 @@ interface Lane {
   tid: string;
   rows: number;
   y: number; // top offset within content (below ruler), in css px
-  kind: "host" | "proc" | "thread";
+  kind: "host" | "proc" | "thread" | "counter";
   label: string;
   indent: number; // gutter indent, px
   collapsible: boolean;
@@ -48,6 +50,10 @@ interface Lane {
   processFirst: boolean; // first lane of its process group
   soleThread: boolean; // process has exactly one thread
   depth: number; // fork-hierarchy depth (0 = root)
+  // Present only on kind "counter": the ph="C" series drawn in this lane and the
+  // source scope. `scope` is "node" (pid 0 emitters) or a specific pid; `overlay`
+  // stacks several series normalized in one lane vs one series auto-scaled.
+  counter?: { scope: "node" | number; series: string[]; overlay: boolean };
 }
 
 export interface Gap {
@@ -225,6 +231,63 @@ export interface TimelineCallbacks {
     names: string[],
   ) => void;
   onSelectRangeClear?: () => void;
+  // Fired when the set of ph="C" counter series in the current data changes, so
+  // the app can populate the counter picker.
+  onCounterSeries?: (series: CounterSeriesInfo[]) => void;
+  // Hover over a counter lane: nearest reading of each series/source to the
+  // cursor time (null when not over one).
+  onCounterHover?: (info: CounterHoverInfo | null, clientX: number, clientY: number) => void;
+  // Click on a counter lane: select it (like picking an event).
+  onCounterSelect?: (info: CounterSelectInfo | null) => void;
+}
+
+// One counter reading at (or nearest) a queried time.
+export interface CounterReading {
+  name: string;
+  pid: number;
+  tid: number;
+  value: number;
+  ts: number;
+}
+export interface CounterHoverInfo {
+  ts: number;
+  series: CounterReading[];
+}
+export interface CounterSelectInfo {
+  label: string;
+  scope: "node" | number;
+  ts: number;
+  series: CounterReading[];
+}
+
+// Aggregate of one counter source over a time range.
+export interface CounterRangeStat {
+  name: string;
+  pid: number;
+  tid: number;
+  scope: "node" | "proc";
+  n: number;
+  min: number;
+  max: number;
+  mean: number;
+  first: number;
+  last: number;
+}
+
+// A ph="C" counter series (e.g. "PAPI.PAPI_BR_INS", "cpu.user_pct"). Node-level
+// counters emit from pid 0; process-level ones have one source per process.
+export interface CounterSeriesInfo {
+  name: string;
+  sources: number; // distinct (pid,tid) emitters
+  nodeLevel: boolean;
+}
+
+// One emitter of a counter series: a time-ordered set of bucket readings.
+interface CounterSource {
+  pid: number;
+  tid: number;
+  ts: number[]; // bucket centers (us), ascending
+  val: number[];
 }
 
 const GUTTER_DEFAULT = 348;
@@ -233,6 +296,8 @@ const GUTTER_MAX = 900;
 const GUTTER_KEY = "dftracer.gutterW";
 // Offsets from the gutter's right edge, so widening it all goes to the label.
 const COL_UTIL_OFF = 220; // left edge of the I/O UTIL bar column
+// Gutter width when the I/O columns are hidden (their width returned to the plot).
+const GUTTER_NO_METRICS = Math.max(GUTTER_MIN, GUTTER_DEFAULT - (COL_UTIL_OFF - 16));
 const COL_UTIL_W = 44;
 const COL_OPS_OFF = 66; // right edge of the OPS (ops/s) column
 const COL_BYTES_OFF = 12; // right edge of the BYTES column
@@ -245,6 +310,11 @@ const MIN_LABEL_FONT = 4; // smallest gutter-label font; scales up with row heig
 const LANE_GAP = 6;
 const HOST_GAP = 12; // vertical separation between host groups
 const TWIST_W = 14; // twisty hit-area / indent step per tree level
+const COUNTER_ROWS = 2; // height (in event-rows) of a small-multiples counter lane
+const COUNTER_ROWS_OVERLAY = 3; // taller lane when several series share it
+// An event longer than the longest process by this factor is impossible, so its
+// timing is malformed (the factor absorbs float slack, not real overruns).
+const MALFORMED_DUR_FACTOR = 1.25;
 const MIN_SPAN = 1; // microseconds
 const EASE = 0.22;
 const RANGE_DEBOUNCE_MS = 130;
@@ -296,7 +366,7 @@ export class Timeline {
   private groupNames: Record<string, string> = {}; // hash -> resolved name
   private colorBy = ""; // "" colors by event name; else by this column's value
   private rowH = ROW_H; // lane row height in px; scaled by the vertical zoom
-  private showMetrics = true; // I/O UTIL / OPS / BYTES gutter columns
+  private showMetrics = false; // I/O UTIL / OPS / BYTES gutter columns
   private gutterWithMetrics = GUTTER_DEFAULT; // gutter width to restore when re-showing metrics
   private knownColumns = new Set<string>(); // groupable columns seen in events
 
@@ -345,6 +415,25 @@ export class Timeline {
   private counters?: { begin: number; bucketUs: number; read: number[]; write: number[] };
   private counterPeak = 1; // bytes/sec
 
+  // Longest process lifetime in the current data; the ceiling a real event's
+  // duration cannot exceed (see setData's malformed-timing check).
+  private procMaxLife = 0;
+  private hideMalformed = false;
+  // Real-time window covered by the process lifetimes (app-span markers): the
+  // range of trustworthy activity, used to reframe when malformed events hide.
+  private validStart = 0;
+  private validEnd = 0;
+  private hasValidWindow = false;
+  // Subtracted from displayed times so the axis reads 0-based from the valid
+  // window when malformed events (which dragged the origin back ~14d) are hidden.
+  private timeOrigin = 0;
+
+  // ph="C" counter track (PAPI / sys): series name -> per-process/node sources.
+  // Rendered as nested lanes (see counterLanesFor / renderCounterLanes).
+  private counterSeries = new Map<string, CounterSource[]>();
+  private counterSelected: string[] = [];
+  private counterMode: "multiples" | "overlay" = "overlay";
+
   private gaps: Gap[] = [];
   private showGaps = false;
   private hoveredGap: Gap | null = null;
@@ -366,9 +455,9 @@ export class Timeline {
   private lastY = 0;
   private moved = false;
   private gutterDown: { x: number; y: number } | null = null;
-  private gutter = GUTTER_DEFAULT;
+  private gutter = GUTTER_NO_METRICS;
   private gutterResizing = false;
-  private mouseX = GUTTER_DEFAULT;
+  private mouseX = GUTTER_NO_METRICS;
   private cursorInside = false;
   private keys = new Set<string>();
   private pendingZoom = 0;
@@ -398,8 +487,11 @@ export class Timeline {
     if (!ctx) throw new Error("2D canvas context unavailable");
     this.ctx = ctx;
     try {
+      // Start in the metrics-off state, so cap a restored width to that layout;
+      // showing the I/O columns restores the wider gutter via gutterWithMetrics.
       const saved = Number(localStorage.getItem(GUTTER_KEY));
-      if (Number.isFinite(saved) && saved > 0) this.gutter = clamp(saved, GUTTER_MIN, GUTTER_MAX);
+      if (Number.isFinite(saved) && saved > 0)
+        this.gutter = clamp(saved, GUTTER_MIN, GUTTER_NO_METRICS);
     } catch {
       /* storage unavailable; use the default width */
     }
@@ -495,7 +587,7 @@ export class Timeline {
   }
 
   resetView(): void {
-    this.target = { begin: 0, end: this.totalSpan };
+    this.target = { begin: this.viewLo(), end: this.viewHi() };
     this.scrollY = 0;
     this.invalidate();
     this.emitRange(false);
@@ -644,11 +736,21 @@ export class Timeline {
     });
   }
 
+  // Scrollable time bounds. With malformed events hidden, panning/zooming is
+  // confined to the trustworthy window so the view cannot wander into the empty
+  // range the hidden events opened up; otherwise it is the whole trace.
+  private viewLo(): number {
+    return this.hideMalformed && this.hasValidWindow ? this.validStart : 0;
+  }
+  private viewHi(): number {
+    return this.hideMalformed && this.hasValidWindow ? this.validEnd : this.totalSpan;
+  }
+
   // Fit the viewport to [t0, t1] with a little padding.
   focusRange(t0: number, t1: number): void {
     const pad = Math.max((t1 - t0) * 0.3, 1);
-    const begin = clamp(t0 - pad, 0, this.totalSpan);
-    const end = clamp(t1 + pad, 0, this.totalSpan);
+    const begin = clamp(t0 - pad, this.viewLo(), this.viewHi());
+    const end = clamp(t1 + pad, this.viewLo(), this.viewHi());
     if (end > begin) {
       this.target = { begin, end };
       this.invalidate();
@@ -747,7 +849,11 @@ export class Timeline {
     const s = this.searchMatches[this.searchIdx];
     const center = this.toDisplay(s.ts + s.dur / 2);
     const span = this.target.end - this.target.begin;
-    const begin = clamp(center - span / 2, 0, Math.max(0, this.totalSpan - span));
+    const begin = clamp(
+      center - span / 2,
+      this.viewLo(),
+      Math.max(this.viewLo(), this.viewHi() - span),
+    );
     this.target = { begin, end: begin + span };
     this.selected = s.ev;
     this.cb.onSelect?.(s.ev);
@@ -756,11 +862,73 @@ export class Timeline {
     return this.searchIdx + 1;
   }
 
+  // The longest process lifetime seen in the last setData (0 if unknown).
+  maxProcLifetime(): number {
+    return this.procMaxLife;
+  }
+
+  setHideMalformed(v: boolean): void {
+    if (this.hideMalformed === v) return;
+    this.hideMalformed = v;
+    this.timeOrigin = v && this.hasValidWindow ? this.validStart : 0;
+    // Re-lay out so malformed events drop out of (or back into) the lane row
+    // counts, not just the render.
+    this.layoutLanes();
+    // Hidden events can sit far outside the real activity, so the trustworthy
+    // window is a small slice of the axis; jump straight to it. Snap live and
+    // target together: easing there refetches on every frame.
+    if (v && this.hasValidWindow) {
+      // Start exactly at validStart so the axis reads from 0 (no negative pad);
+      // a little room on the right keeps the last events off the edge.
+      const begin = this.validStart;
+      const end = clamp(
+        this.validEnd + (this.validEnd - this.validStart) * 0.02,
+        0,
+        this.totalSpan,
+      );
+      if (end > begin) {
+        this.target = { begin, end };
+        this.live = { begin, end };
+        this.emitRange(false);
+      }
+    }
+    this.invalidate();
+  }
+
+  // Ground-truth timing bounds from the per-process app-span markers the server
+  // appends (cat "dftracer", args.num_events): the earliest any process began
+  // and the longest any ran. An event that starts before the former or lasts
+  // longer than the latter is physically impossible, so its timing is malformed.
+  private timingBounds(
+    events: TraceEvent[],
+  ): { validStart: number; validEnd: number; maxLife: number } | null {
+    let validStart = Infinity;
+    let validEnd = -Infinity;
+    let maxLife = 0;
+    for (const ev of events) {
+      const a = ev.args as Record<string, unknown> | undefined;
+      if (ev.cat !== "dftracer" || !a || a.num_events === undefined) continue;
+      const ts = num(ev.ts);
+      const dur = num(ev.dur);
+      if (!Number.isFinite(ts) || !Number.isFinite(dur)) continue;
+      if (ts < validStart) validStart = ts;
+      if (ts + dur > validEnd) validEnd = ts + dur;
+      if (dur > maxLife) maxLife = dur;
+    }
+    return maxLife > 0 && Number.isFinite(validStart) ? { validStart, validEnd, maxLife } : null;
+  }
+
   setData(
     events: TraceEvent[],
     density: DensityBlock[] = [],
     groupNames?: Record<string, string>,
   ): void {
+    const bounds = this.timingBounds(events);
+    this.procMaxLife = bounds?.maxLife ?? 0;
+    this.validStart = bounds?.validStart ?? 0;
+    this.validEnd = bounds?.validEnd ?? 0;
+    this.hasValidWindow = bounds != null && this.validEnd > this.validStart;
+    this.timeOrigin = this.hideMalformed && this.hasValidWindow ? this.validStart : 0;
     const byLane = new Map<string, Slice[]>();
     const push = (key: string, s: Slice) => {
       let arr = byLane.get(key);
@@ -786,6 +954,13 @@ export class Timeline {
       const cnt = agg ? num(a.dft_cnt) : 1;
       const busy = agg ? num(a.dur_sum) : dur;
       if (agg) (ev as Record<string, unknown>).aggregated = true;
+      // A duration longer than any process, or a start before the earliest one,
+      // is impossible; the slack around validStart is one process lifetime.
+      const malformed = bounds
+        ? (!agg && dur > bounds.maxLife * MALFORMED_DUR_FACTOR) ||
+          ts < bounds.validStart - bounds.maxLife
+        : false;
+      ev.malformed_event = malformed;
       const key = colActive
         ? `${ev.pid}/${ev.tid}\u0000${eventGroupValue(ev, this.groupColumn)}`
         : `${ev.pid}/${ev.tid}`;
@@ -805,12 +980,20 @@ export class Timeline {
         density: false,
         aggregated: agg,
         est,
+        malformed,
         fill: this.fillFor(ev, agg),
       });
     }
     // Aggregated density blocks render as slices too. The server echoes the
     // group_by value per block; blocks without one land in "(none)".
+    const counterBlocks: DensityBlock[] = [];
     for (const b of density) {
+      // ph="C" counter blocks carry a numeric reading, not a call slice: divert
+      // them to the counter track instead of drawing them as fake bars.
+      if (b.counter) {
+        counterBlocks.push(b);
+        continue;
+      }
       const synthetic = {
         name: b.name,
         cat: "",
@@ -839,6 +1022,7 @@ export class Timeline {
         density: true,
         aggregated: false,
         est: false,
+        malformed: false,
         fill: this.fillFor(synthetic, true),
       });
     }
@@ -847,7 +1031,56 @@ export class Timeline {
     // current window (Perfetto keeps them). New lanes are added, never removed.
     for (const k of byLane.keys()) this.laneRegistry.add(k);
     this.slicesByKey = byLane;
+    this.ingestCounters(counterBlocks);
     this.layoutLanes();
+  }
+
+  // Fold ph="C" density blocks into per-series, per-source point sets. Each
+  // block is one bucket reading for a (series, pid, tid); node-level counters
+  // emit from pid 0, process-level ones once per process.
+  private ingestCounters(blocks: DensityBlock[]): void {
+    const acc = new Map<string, Map<string, CounterSource>>();
+    for (const b of blocks) {
+      if (typeof b.value !== "number" || !Number.isFinite(b.value)) continue;
+      const name = b.name || b.group || "";
+      if (!name) continue;
+      let sm = acc.get(name);
+      if (!sm) {
+        sm = new Map();
+        acc.set(name, sm);
+      }
+      const skey = `${b.pid}/${b.tid}`;
+      let src = sm.get(skey);
+      if (!src) {
+        src = { pid: b.pid, tid: b.tid, ts: [], val: [] };
+        sm.set(skey, src);
+      }
+      src.ts.push(b.ts + b.dur / 2);
+      src.val.push(b.value);
+    }
+    const series = new Map<string, CounterSource[]>();
+    const info: CounterSeriesInfo[] = [];
+    for (const [name, sm] of acc) {
+      const srcs: CounterSource[] = [];
+      for (const s of sm.values()) {
+        // Blocks may arrive out of order; sort each source by time once.
+        const order = s.ts.map((_, i) => i).sort((a, c) => s.ts[a] - s.ts[c]);
+        srcs.push({
+          pid: s.pid,
+          tid: s.tid,
+          ts: order.map((i) => s.ts[i]),
+          val: order.map((i) => s.val[i]),
+        });
+      }
+      srcs.sort((a, c) => a.pid - c.pid || a.tid - c.tid);
+      series.set(name, srcs);
+      info.push({ name, sources: srcs.length, nodeLevel: srcs.every((s) => s.pid === 0) });
+    }
+    info.sort((a, c) => a.name.localeCompare(c.name));
+    this.counterSeries = series;
+    this.counterSelected = this.counterSelected.filter((n) => series.has(n));
+    this.cb.onCounterSeries?.(info);
+    this.invalidate();
   }
 
   // Merge, never replace: the per-window HH scan is empty at full view and
@@ -993,6 +1226,51 @@ export class Timeline {
     else this.layoutLanesGeneric();
   }
 
+  // Counter lanes for a scope: "node" (pid-0 emitters, e.g. cpu/mem) or a
+  // process pid (PAPI). Overlay mode packs the applicable selection into one
+  // normalized lane; small-multiples emits one auto-scaled lane per series.
+  private counterLanesFor(scope: "node" | number, indent: number, host: string): Lane[] {
+    const applies = (name: string): boolean => {
+      const srcs = this.counterSeries.get(name);
+      if (!srcs) return false;
+      return scope === "node" ? srcs.some((s) => s.pid === 0) : srcs.some((s) => s.pid === scope);
+    };
+    const sel = this.counterSelected.filter(applies);
+    if (sel.length === 0) return [];
+    const base = {
+      pid: "",
+      tid: "",
+      y: 0,
+      kind: "counter" as const,
+      indent,
+      collapsible: false,
+      collapseKey: "",
+      flatten: false,
+      host,
+      processFirst: false,
+      soleThread: false,
+      depth: 0,
+    };
+    if (this.counterMode === "overlay") {
+      return [
+        {
+          ...base,
+          key: `counter:${scope}`,
+          rows: COUNTER_ROWS_OVERLAY,
+          label: `${sel.length} counters`,
+          counter: { scope, series: sel, overlay: true },
+        },
+      ];
+    }
+    return sel.map((name) => ({
+      ...base,
+      key: `counter:${scope}:${name}`,
+      rows: COUNTER_ROWS,
+      label: name,
+      counter: { scope, series: [name], overlay: false },
+    }));
+  }
+
   // Build the gutter tree: host -> process (fork DFS) -> thread. Collapsed
   // groups fold their descendants' slices into one summary row so load still
   // shows. Assigns each slice a target lane + stack depth and flows y.
@@ -1086,6 +1364,8 @@ export class Timeline {
         }
       }
       const base = singleHost ? 0 : 1;
+      // Node-level counters (cpu/mem) sit right under the host header.
+      for (const cl of this.counterLanesFor("node", base * TWIST_W, host)) lanes.push(cl);
       const roots = hostPids
         .get(host)!
         .filter((pid) => {
@@ -1121,6 +1401,8 @@ export class Timeline {
           routeAll(pid, pIdx);
           return;
         }
+        // Per-process counters (PAPI) nest under the process, above its threads.
+        for (const cl of this.counterLanesFor(pid, (base + d + 1) * TWIST_W, host)) lanes.push(cl);
         if (sole) {
           targetOf.set(pid + "/" + tids[0], pIdx);
         } else {
@@ -1337,7 +1619,12 @@ export class Timeline {
         a = [];
         byLane.set(idx, a);
       }
-      for (const s of arr) a.push(s);
+      // Hidden malformed events must not reserve rows either, or the lane keeps
+      // a tall empty gap where their (14-day) bars would have stacked.
+      for (const s of arr) {
+        if (this.hideMalformed && s.malformed) continue;
+        a.push(s);
+      }
     }
 
     const slices: Slice[] = [];
@@ -1362,6 +1649,17 @@ export class Timeline {
         }
         lane.rows = Math.max(lane.rows, s.depth + 1);
         slices.push(s);
+      }
+      // A hidden malformed event that enclosed the real work left every
+      // remaining slice one row deeper than it needs to be. Shift each lane's
+      // stack up to fill row 0, preserving the relative call-stack nesting.
+      if (this.hideMalformed && arr.length) {
+        let minDepth = Infinity;
+        for (const s of arr) if (s.depth < minDepth) minDepth = s.depth;
+        if (minDepth > 0 && minDepth !== Infinity) {
+          for (const s of arr) s.depth -= minDepth;
+          lane.rows = Math.max(1, lane.rows - minDepth);
+        }
       }
     }
 
@@ -1472,7 +1770,7 @@ export class Timeline {
     const anchor = this.timeOf(x);
     const span = this.target.end - this.target.begin;
     const factor = Math.exp(deltaY * ZOOM_SENSITIVITY);
-    const newSpan = clamp(span * factor, MIN_SPAN, this.totalSpan);
+    const newSpan = clamp(span * factor, MIN_SPAN, this.viewHi() - this.viewLo());
     const frac = clamp((anchor - this.target.begin) / span, 0, 1);
     let begin = anchor - frac * newSpan;
     let end = begin + newSpan;
@@ -1491,7 +1789,11 @@ export class Timeline {
 
   private panBy(dt: number): void {
     const span = this.target.end - this.target.begin;
-    const begin = clamp(this.target.begin + dt, 0, Math.max(0, this.totalSpan - span));
+    const begin = clamp(
+      this.target.begin + dt,
+      this.viewLo(),
+      Math.max(this.viewLo(), this.viewHi() - span),
+    );
     this.target = { begin, end: begin + span };
     this.invalidate();
     this.emitRange(false);
@@ -1590,7 +1892,7 @@ export class Timeline {
       return;
     }
     if (this.selecting) {
-      const t = clamp(this.timeOf(x), 0, this.totalSpan);
+      const t = clamp(this.timeOf(x), this.viewLo(), this.viewHi());
       const isRect = this.selection?.y0 !== undefined;
       const cy = clamp(y, RULER_H, this.cssH) - RULER_H + this.scrollY;
       this.selection = {
@@ -1612,7 +1914,7 @@ export class Timeline {
       if (Math.abs(dx) + Math.abs(dy) > 2) this.moved = true;
       const span = this.target.end - this.target.begin;
       const dt = -(dx / this.plotW()) * span;
-      const begin = clamp(this.target.begin + dt, 0, this.totalSpan - span);
+      const begin = clamp(this.target.begin + dt, this.viewLo(), this.viewHi() - span);
       this.target = { begin, end: begin + span };
       this.scrollY -= dy;
       this.clampScroll();
@@ -1632,6 +1934,7 @@ export class Timeline {
       }
       this.cursorInside = false;
       this.cb.onHover?.(null, 0, 0);
+      this.cb.onCounterHover?.(null, 0, 0);
       this.cb.onLaneHover?.(null, 0, 0);
       return;
     }
@@ -1652,6 +1955,12 @@ export class Timeline {
       this.invalidate();
     }
     this.cb.onHover?.(hit?.ev ?? null, e.clientX, e.clientY);
+    const chit = hit ? null : this.counterAt(x, y);
+    this.cb.onCounterHover?.(
+      chit ? { ts: chit.ts - this.timeOrigin, series: chit.readings } : null,
+      e.clientX,
+      e.clientY,
+    );
     this.cb.onHeaderHover?.(this.headerKeyAt(x, y), e.clientX, e.clientY);
     // When rows are too short to show labels inline, surface the label on hover.
     const laneLabel =
@@ -1720,6 +2029,17 @@ export class Timeline {
       this.selectedGap = hit ? null : this.gapAt(x, y);
       this.selected = hit?.ev ?? null;
       this.cb.onSelect?.(this.selected);
+      const chit = hit ? null : this.counterAt(x, y);
+      this.cb.onCounterSelect?.(
+        chit
+          ? {
+              label: chit.lane.label,
+              scope: chit.lane.counter!.scope,
+              ts: chit.ts - this.timeOrigin,
+              series: chit.readings,
+            }
+          : null,
+      );
       this.invalidate();
     }
     this.dragging = false;
@@ -1751,6 +2071,7 @@ export class Timeline {
       const ly0 = lane.y;
       const ly1 = ly0 + Math.max(1, lane.rows) * this.rowH;
       if (ly1 <= y0 || ly0 >= y1) continue;
+      if (lane.kind === "counter") continue; // no pid/tid; not an event scope
       if (lane.kind === "host") {
         for (const pid of this.hostPids.get(lane.host) ?? []) add(String(pid), "");
       } else if (lane.flatten) {
@@ -1791,8 +2112,8 @@ export class Timeline {
     const { x } = this.localPos(e as MouseEvent);
     const anchor = this.timeOf(x);
     const span = this.target.end - this.target.begin;
-    const newSpan = clamp(span * 0.4, MIN_SPAN, this.totalSpan);
-    const begin = clamp(anchor - newSpan / 2, 0, this.totalSpan - newSpan);
+    const newSpan = clamp(span * 0.4, MIN_SPAN, this.viewHi() - this.viewLo());
+    const begin = clamp(anchor - newSpan / 2, this.viewLo(), this.viewHi() - newSpan);
     this.target = { begin, end: begin + newSpan };
     this.invalidate();
     this.emitRange(false);
@@ -2089,7 +2410,7 @@ export class Timeline {
 
   private centerViewportAt(t: number): void {
     const span = this.target.end - this.target.begin;
-    const begin = clamp(t - span / 2, 0, Math.max(0, this.totalSpan - span));
+    const begin = clamp(t - span / 2, this.viewLo(), Math.max(this.viewLo(), this.viewHi() - span));
     this.target = { begin, end: begin + span };
     this.invalidate();
     this.emitRange(false);
@@ -2122,8 +2443,8 @@ export class Timeline {
   private onMiniUp = (): void => {
     if (this.miniDragging && this.miniMoved && this.miniSel) {
       const { t0, t1 } = this.miniSel;
-      const begin = clamp(t0, 0, this.totalSpan);
-      const end = clamp(Math.max(t1, begin + MIN_SPAN), 0, this.totalSpan);
+      const begin = clamp(t0, this.viewLo(), this.viewHi());
+      const end = clamp(Math.max(t1, begin + MIN_SPAN), this.viewLo(), this.viewHi());
       this.target = { begin, end };
       this.invalidate();
       this.emitRange(false);
@@ -2258,6 +2579,267 @@ export class Timeline {
     ctx.restore();
   }
 
+  // --- counter (ph="C") lanes -----------------------------------------------
+  // Counters render as lanes nested in the timeline tree (see counterLanesFor):
+  // node counters under the host, process counters under each process. Changing
+  // the selection or mode changes which lanes exist, so both relayout.
+
+  setCounterSelection(names: string[]): void {
+    this.counterSelected = names.filter((n) => this.counterSeries.has(n));
+    this.layoutLanes();
+    this.invalidate();
+  }
+
+  setCounterMode(mode: "multiples" | "overlay"): void {
+    if (this.counterMode === mode) return;
+    this.counterMode = mode;
+    this.layoutLanes();
+    this.invalidate();
+  }
+
+  // Sources of a series within a lane scope: "node" = pid-0 emitters (cpu/mem),
+  // a pid = that process's emitters (one line per thread).
+  private scopeSources(name: string, scope: "node" | number): CounterSource[] {
+    const srcs = this.counterSeries.get(name);
+    if (!srcs) return [];
+    return srcs.filter((s) => (scope === "node" ? s.pid === 0 : s.pid === scope));
+  }
+
+  // Per-source stats of the selected counters over a real-time range. Used by
+  // the analysis panel; a source with no samples in range is omitted.
+  counterRangeStats(t0: number, t1: number): CounterRangeStat[] {
+    const out: CounterRangeStat[] = [];
+    for (const name of this.counterSelected) {
+      const srcs = this.counterSeries.get(name);
+      if (!srcs) continue;
+      for (const s of srcs) {
+        let n = 0;
+        let sum = 0;
+        let mn = Infinity;
+        let mx = -Infinity;
+        let first = 0;
+        let last = 0;
+        for (let i = 0; i < s.ts.length; i++) {
+          const t = s.ts[i];
+          if (t < t0 || t > t1) continue;
+          const v = s.val[i];
+          if (n === 0) first = v;
+          last = v;
+          sum += v;
+          n++;
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+        if (n === 0) continue;
+        out.push({
+          name,
+          pid: s.pid,
+          tid: s.tid,
+          scope: s.pid === 0 ? "node" : "proc",
+          n,
+          min: mn,
+          max: mx,
+          mean: sum / n,
+          first,
+          last,
+        });
+      }
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name) || a.pid - b.pid || a.tid - b.tid);
+    return out;
+  }
+
+  // Nearest sample of a source to real time `t` (sources are time-ordered).
+  private sampleAt(s: CounterSource, t: number): { ts: number; val: number } | null {
+    const ts = s.ts;
+    if (ts.length === 0) return null;
+    let lo = 0;
+    let hi = ts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ts[mid] < t) lo = mid + 1;
+      else hi = mid;
+    }
+    let best = lo;
+    if (lo > 0 && Math.abs(ts[lo - 1] - t) <= Math.abs(ts[lo] - t)) best = lo - 1;
+    return { ts: ts[best], val: s.val[best] };
+  }
+
+  // If (x,y) lands on a counter lane, the lane plus the nearest reading of each
+  // of its series/sources to the cursor time; null otherwise.
+  private counterAt(
+    x: number,
+    y: number,
+  ): { lane: Lane; ts: number; readings: CounterReading[] } | null {
+    if (x < this.gutter || y < RULER_H) return null;
+    const lane = this.laneAtY(y);
+    if (!lane || lane.kind !== "counter" || !lane.counter) return null;
+    const t = this.toReal(this.timeOf(x));
+    const readings: CounterReading[] = [];
+    for (const name of lane.counter.series) {
+      for (const s of this.scopeSources(name, lane.counter.scope)) {
+        const smp = this.sampleAt(s, t);
+        if (smp) readings.push({ name, pid: s.pid, tid: s.tid, value: smp.val, ts: smp.ts });
+      }
+    }
+    if (readings.length === 0) return null;
+    const ts = readings.reduce(
+      (best, r) => (Math.abs(r.ts - t) < Math.abs(best - t) ? r.ts : best),
+      readings[0].ts,
+    );
+    return { lane, ts, readings };
+  }
+
+  // Min/max of a series over the visible window, across all its sources. Pads a
+  // flat window so a constant counter draws a centered line instead of a spike.
+  private seriesExtent(srcs: CounterSource[], lo: number, hi: number): [number, number] {
+    let mn = Infinity;
+    let mx = -Infinity;
+    for (const s of srcs) {
+      for (let i = 0; i < s.ts.length; i++) {
+        const t = s.ts[i];
+        if (t < lo || t > hi) continue;
+        const v = s.val[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+    }
+    if (!Number.isFinite(mn)) return [0, 1];
+    if (mn === mx) {
+      const pad = Math.abs(mn) || 1;
+      return [mn - pad, mx + pad];
+    }
+    return [mn, mx];
+  }
+
+  private drawSeriesLine(
+    ctx: CanvasRenderingContext2D,
+    src: CounterSource,
+    mn: number,
+    mx: number,
+    top: number,
+    plotH: number,
+    color: string,
+  ): void {
+    const range = mx - mn || 1;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < src.ts.length; i++) {
+      const x = this.xOf(src.ts[i]);
+      const y = top + plotH - ((src.val[i] - mn) / range) * plotH;
+      if (!started) {
+        ctx.moveTo(x, y);
+        started = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    if (!started) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  }
+
+  private renderCounterLanes(ctx: CanvasRenderingContext2D): void {
+    if (this.live.end <= this.live.begin) return;
+    for (const lane of this.lanes) {
+      if (lane.kind !== "counter" || !lane.counter) continue;
+      const y = RULER_H - this.scrollY + lane.y;
+      const h = lane.rows * this.rowH;
+      if (y + h < RULER_H || y > this.cssH) continue;
+      this.drawCounterLane(ctx, lane, y, h);
+    }
+  }
+
+  private drawCounterLane(ctx: CanvasRenderingContext2D, lane: Lane, y: number, h: number): void {
+    const c = lane.counter!;
+    const lo = this.live.begin;
+    const hi = this.live.end;
+    const clipTop = Math.max(y, RULER_H);
+    const clipBot = Math.min(y + h, this.cssH);
+    if (clipBot <= clipTop) return;
+    const pad = 3;
+    const plotTop = y + pad;
+    const plotH = Math.max(1, h - 2 * pad);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.gutter, clipTop, this.cssW - this.gutter, clipBot - clipTop);
+    ctx.clip();
+    // Each series auto-scales to its own visible window; overlay lanes share the
+    // lane height (comparison by shape), small-multiples lanes own it.
+    for (const name of c.series) {
+      const srcs = this.scopeSources(name, c.scope);
+      if (!srcs.length) continue;
+      const [mn, mx] = this.seriesExtent(srcs, lo, hi);
+      for (const s of srcs) {
+        const color =
+          c.overlay || srcs.length === 1 ? colorFor(name) : colorFor(`${name}#${s.tid}`);
+        this.drawSeriesLine(ctx, s, mn, mx, plotTop, plotH, color);
+      }
+    }
+    ctx.restore();
+  }
+
+  // Gutter block for a counter lane: series name(s) + window peak, or a color
+  // legend when several series share an overlay lane.
+  private renderCounterGutter(
+    ctx: CanvasRenderingContext2D,
+    lane: Lane,
+    top: number,
+    bottom: number,
+  ): void {
+    const c = lane.counter!;
+    const x = lane.indent + 4;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, top, this.gutter - 6 - x, bottom - top);
+    ctx.clip();
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    if (c.overlay) {
+      ctx.fillStyle = this.th.counterLabel;
+      ctx.font = "600 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.fillText(`${c.series.length} counters`, x, top + 2);
+      ctx.font = "9px ui-monospace, SFMono-Regular, Menlo, monospace";
+      let ly = top + 15;
+      for (const name of c.series) {
+        if (ly > bottom - 3) break;
+        ctx.fillStyle = colorFor(name);
+        ctx.fillRect(x, ly + 3, 10, 2);
+        ctx.fillStyle = this.th.laneText;
+        ctx.fillText(this.ellip(ctx, name, this.gutter - 22 - x), x + 14, ly);
+        ly += 11;
+      }
+    } else {
+      const name = c.series[0];
+      ctx.fillStyle = colorFor(name);
+      ctx.fillRect(x, top + 6, 8, 2);
+      ctx.fillStyle = this.th.counterLabel;
+      ctx.font = "600 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.fillText(this.ellip(ctx, name, this.gutter - 66 - x), x + 12, top + 2);
+      const [, mx] = this.seriesExtent(
+        this.scopeSources(name, c.scope),
+        this.live.begin,
+        this.live.end,
+      );
+      ctx.fillStyle = this.th.numText;
+      ctx.font = "9px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.textAlign = "right";
+      ctx.fillText(formatCompact(mx), this.gutter - 8, top + 2);
+    }
+    ctx.restore();
+  }
+
+  // Truncate `text` with an ellipsis so it fits within `maxW` px in the current
+  // ctx font. Cheap linear shrink; labels are short.
+  private ellip(ctx: CanvasRenderingContext2D, text: string, maxW: number): string {
+    if (ctx.measureText(text).width <= maxW) return text;
+    let s = text;
+    while (s.length > 1 && ctx.measureText(s + "...").width > maxW) s = s.slice(0, -1);
+    return s + "...";
+  }
+
   // Render-on-demand: a frame is only scheduled while something is animating
   // (easing, held keys, pending zoom) or after an explicit invalidate(). When
   // idle, no rAF runs at all, so the app uses ~0 CPU.
@@ -2390,6 +2972,7 @@ export class Timeline {
     this.renderLanes(ctx);
     this.renderGridlines(ctx);
     this.renderSlices(ctx);
+    this.renderCounterLanes(ctx);
     this.renderSpawnArrows(ctx);
     this.renderGaps(ctx);
     this.renderBreaks(ctx);
@@ -2472,7 +3055,7 @@ export class Timeline {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    const label = formatTime(this.toReal(this.timeOf(this.mouseX)));
+    const label = formatTime(this.toReal(this.timeOf(this.mouseX)) - this.timeOrigin);
     ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
     const tw = ctx.measureText(label).width + 8;
     const lx = clamp(this.mouseX - tw / 2, this.gutter, this.cssW - tw);
@@ -2598,7 +3181,9 @@ export class Timeline {
     const rt1 = this.toReal(this.selection.t1);
     const dur = rt1 - rt0;
     const bw = this.selBandwidth(rt0, rt1);
-    const main = `${formatTime(rt0)} → ${formatTime(rt1)}` + `   ·   Δ ${formatTime(dur)}`;
+    const main =
+      `${formatTime(rt0 - this.timeOrigin)} → ${formatTime(rt1 - this.timeOrigin)}` +
+      `   ·   Δ ${formatTime(dur)}`;
     const bwStr = bw > 0 ? `   ·   ${formatBytesPerSec(bw)}` : "";
     ctx.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
     ctx.textBaseline = "middle";
@@ -2784,6 +3369,32 @@ export class Timeline {
         ctx.fillRect(x, sy + inset, w, Math.max(1, this.rowH - 2 * inset));
       }
 
+      if (s.malformed) {
+        if (lastAlpha !== 1) {
+          ctx.globalAlpha = 1;
+          lastAlpha = 1;
+        }
+        const my = sy + (this.rowH >= 4 ? 1 : 0);
+        const mh = Math.max(1, this.rowH - (this.rowH >= 4 ? 2 : 0));
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, my, w, mh);
+        ctx.clip();
+        ctx.strokeStyle = this.th.gapStroke;
+        ctx.lineWidth = 1;
+        for (let hx = x - mh; hx < x + w; hx += 5) {
+          ctx.beginPath();
+          ctx.moveTo(hx, my + mh);
+          ctx.lineTo(hx + mh, my);
+          ctx.stroke();
+        }
+        ctx.restore();
+        ctx.strokeStyle = this.th.gapStroke;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 0.75, my + 0.75, w - 1.5, mh - 1.5);
+        lastFill = "";
+      }
+
       if (s === this.hovered || s.ev === this.selected || (!s.density && sw > 32)) {
         if (lastAlpha !== 1) {
           ctx.globalAlpha = 1;
@@ -2854,7 +3465,7 @@ export class Timeline {
       ctx.moveTo(x + 0.5, RULER_H - 6);
       ctx.lineTo(x + 0.5, RULER_H);
       ctx.stroke();
-      ctx.fillText(formatTick(this.toReal(t), step), x + 3, RULER_H / 2);
+      ctx.fillText(formatTick(this.toReal(t) - this.timeOrigin, step), x + 3, RULER_H / 2);
     }
   }
 
@@ -2880,6 +3491,11 @@ export class Timeline {
       // lanes stay distinguishable, but skip the labels and metric columns that
       // would otherwise overlap into an unreadable smear.
       const showText = this.rowH >= LABEL_MIN_ROW_H;
+
+      if (lane.kind === "counter") {
+        if (showText) this.renderCounterGutter(ctx, lane, top, bottom);
+        continue;
+      }
 
       if (lane.kind === "host") {
         ctx.fillStyle = this.th.groupBand;

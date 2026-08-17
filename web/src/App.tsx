@@ -27,7 +27,16 @@ import type {
 } from "./data/types";
 import { CONFIG } from "./data/config";
 import { onHostMessage, post } from "./data/vscode";
-import { eventGroupValue, Timeline, type Gap, type LaneGroupLevel } from "./timeline/timeline";
+import {
+  eventGroupValue,
+  Timeline,
+  type CounterHoverInfo,
+  type CounterRangeStat,
+  type CounterSelectInfo,
+  type CounterSeriesInfo,
+  type Gap,
+  type LaneGroupLevel,
+} from "./timeline/timeline";
 import { ApiExplorer } from "./api/ApiExplorer";
 import { Flamegraph } from "./flame/flamegraph";
 import { SandwichView } from "./flame/SandwichView";
@@ -37,7 +46,7 @@ import { FlameTooltip, type FlameHover } from "./flame/FlameTooltip";
 // booting the (empty) timeline.
 const NEEDS_LOAD = CONFIG.vscode && !CONFIG.apiBase;
 import { colorFor, colorSlot, DENSITY_GREY, sliceKey } from "./timeline/color";
-import { formatBytes, formatBytesPerSec, formatTime } from "./timeline/format";
+import { formatBytes, formatBytesPerSec, formatCompact, formatTime } from "./timeline/format";
 
 interface HoverState {
   ev: TraceEvent;
@@ -75,6 +84,7 @@ const BOTTOM_TABS: [string, string, AnGroup][] = [
   ["calltree", "call tree", null],
   ["ranks", "ranks", "pid"],
   ["files", "files", "file"],
+  ["counters", "counters", null],
   ["eventlog", "event log", null],
 ];
 
@@ -94,6 +104,8 @@ const METRIC_HELP: Record<string, string> = {
   operation: "The traced operation (function or syscall) name.",
   layer: "I/O layer / category the operation belongs to (POSIX, MPI-IO, ...).",
   total: "Total inclusive time spent in this operation across the scope.",
+  active:
+    "Wall-clock time this operation was running (union of its intervals), so concurrent copies are not double-counted the way total is.",
   "wall share": "This operation's total time as a share of the scope's wall time.",
   self: "Time spent in this operation excluding nested child operations.",
   start: "Offset from the trace start when this event began.",
@@ -170,6 +182,77 @@ export default function App() {
   const [view, setView] = createSignal<"timeline" | "flamegraph" | "sandwich" | "api">("timeline");
   const [navCollapsed, setNavCollapsed] = createSignal(false);
   const [theme, setTheme] = createSignal<"dark" | "light">(initialTheme());
+  // ph="C" counter track (PAPI / sys): available series, current picks, mode.
+  const [counterSeries, setCounterSeries] = createSignal<CounterSeriesInfo[]>([]);
+  const [selectedCounters, setSelectedCounters] = createSignal<string[]>([]);
+  const [counterMode, setCounterMode] = createSignal<"multiples" | "overlay">("overlay");
+  const [counterPickerOpen, setCounterPickerOpen] = createSignal(false);
+  const [counterFilter, setCounterFilter] = createSignal("");
+  const [counterHover, setCounterHover] = createSignal<{
+    info: CounterHoverInfo;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [selectedCounter, setSelectedCounter] = createSignal<CounterSelectInfo | null>(null);
+  // Virtual scroll over the (possibly ~1800) counter series: only rows in view
+  // are rendered, so the whole list is browsable without wedging the thread.
+  const CROW_H = 26; // px per counter row (matches .counters-item)
+  const VLIST_H = 300; // px list viewport (matches .counters-list max-height)
+  const ADD_ALL_CAP = 120; // guard against selecting a runaway number of lanes
+  const [counterScrollTop, setCounterScrollTop] = createSignal(0);
+  const selectedCounterSet = createMemo(() => new Set(selectedCounters()));
+  // Filter supports plain substring, /regex/, and glob (* ?). Empty = all.
+  const counterMatcher = createMemo<(name: string) => boolean>(() => {
+    const f = counterFilter().trim();
+    if (!f) return () => true;
+    if (f.length >= 2 && f.startsWith("/") && f.endsWith("/")) {
+      try {
+        const re = new RegExp(f.slice(1, -1), "i");
+        return (n) => re.test(n);
+      } catch {
+        /* invalid regex: fall through to substring */
+      }
+    }
+    if (f.includes("*") || f.includes("?")) {
+      const rx = f
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".");
+      try {
+        const re = new RegExp(rx, "i");
+        return (n) => re.test(n);
+      } catch {
+        /* fall through */
+      }
+    }
+    const lf = f.toLowerCase();
+    return (n) => n.toLowerCase().includes(lf);
+  });
+  const filteredCounterSeries = createMemo(() => {
+    const match = counterMatcher();
+    return counterSeries().filter((s) => match(s.name));
+  });
+  const counterWindow = createMemo(() => {
+    const items = filteredCounterSeries();
+    const start = Math.max(0, Math.floor(counterScrollTop() / CROW_H) - 4);
+    const end = Math.min(items.length, start + Math.ceil(VLIST_H / CROW_H) + 8);
+    return { start, rows: items.slice(start, end), total: items.length };
+  });
+  function toggleCounter(name: string) {
+    setSelectedCounters((prev) =>
+      prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name],
+    );
+  }
+  function addAllFiltered() {
+    const names = filteredCounterSeries()
+      .map((s) => s.name)
+      .slice(0, ADD_ALL_CAP);
+    setSelectedCounters((prev) => [...new Set([...prev, ...names])]);
+  }
+  function removeAllFiltered() {
+    const drop = new Set(filteredCounterSeries().map((s) => s.name));
+    setSelectedCounters((prev) => prev.filter((n) => !drop.has(n)));
+  }
   const [kpis, setKpis] = createSignal<{
     wall: number;
     totalIO: number;
@@ -265,9 +348,11 @@ export default function App() {
   const [matchPos, setMatchPos] = createSignal(0);
   const [showHelp, setShowHelp] = createSignal(false);
   const [showGaps, setShowGaps] = createSignal(false);
-  const [showIoCols, setShowIoCols] = createSignal(true); // I/O UTIL/OPS/BYTES gutter columns
+  const [showIoCols, setShowIoCols] = createSignal(false); // I/O UTIL/OPS/BYTES gutter columns
   const [multiRun, setMultiRun] = createSignal(false);
   const [timelapse, setTimelapse] = createSignal(false);
+  const [hideMalformed, setHideMalformed] = createSignal(false);
+  const [showDisplayMenu, setShowDisplayMenu] = createSignal(false);
   const ALL_LANE_LEVELS: LaneGroupLevel[] = ["host", "pid", "tid", "col"];
   const LANE_LEVEL_LABEL: Record<LaneGroupLevel, string> = {
     host: "host",
@@ -571,6 +656,15 @@ export default function App() {
     names?: string[];
   };
   const [anScope, setAnScope] = createSignal<AnScope | null>(null);
+  // Counter stats over the analysis range (or whole trace when unscoped), for
+  // the bottom "counters" tab. Recomputes on selection/scope change.
+  const counterStats = createMemo<CounterRangeStat[]>(() => {
+    if (bottomTab() !== "counters") return [];
+    selectedCounters();
+    counterSeries();
+    const s = anScope();
+    return timeline?.counterRangeStats(s ? s.t0 : -Infinity, s ? s.t1 : Infinity) ?? [];
+  });
   const scopeRange = (): [number, number] => {
     const s = anScope();
     return s ? [s.t0, s.t1] : [0, totalSpan];
@@ -1187,9 +1281,21 @@ export default function App() {
       onSelectRange: (t0, t1) => requestSelection(t0, t1),
       onSelectRect: (t0, t1, lanes, names) => requestSelection(t0, t1, lanes, names),
       onSelectRangeClear: () => clearSelection(),
+      onCounterSeries: (s) => setCounterSeries(s),
+      onCounterHover: (info, x, y) => setCounterHover(info ? { info, x, y } : null),
+      onCounterSelect: (info) => {
+        setSelectedCounter(info);
+        if (info) {
+          setSelected(null);
+          clearSelection();
+        }
+      },
     });
     timeline.attachMinimap(minimap);
     timeline.attachCounters(counterCanvas);
+    // Push counter picks / display mode into the lane layout as they change.
+    createEffect(() => timeline?.setCounterSelection(selectedCounters()));
+    createEffect(() => timeline?.setCounterMode(counterMode()));
     flame = new Flamegraph(flameCanvas, {
       onHover: (node, pct, x, y) => setFlameHover(node ? { node, pct, x, y } : null),
     });
@@ -1429,18 +1535,6 @@ export default function App() {
                 </button>
               </Show>
             </div>
-            <label class="toggle">
-              <input
-                type="checkbox"
-                checked={fullDetail()}
-                onChange={(e) => {
-                  setFullDetail(e.currentTarget.checked);
-                  const vp = timeline?.getViewport();
-                  if (vp) ensureData(vp.begin, vp.end, true);
-                }}
-              />
-              Full detail
-            </label>
             <button
               type="button"
               class="ghost"
@@ -1465,95 +1559,126 @@ export default function App() {
             >
               Lanes
             </button>
-            <button
-              type="button"
-              class="ghost"
-              classList={{ active: showGaps() }}
-              onClick={() => {
-                const v = !showGaps();
-                setShowGaps(v);
-                timeline?.setShowGaps(v);
-              }}
-            >
-              Gaps
-            </button>
-            <Show when={view() === "timeline"}>
-              <span class="lane-zoom" title="Lane row height - also shift+wheel, or - / = / 0">
-                <button
-                  type="button"
-                  class="ghost sm"
-                  title="shorter rows (see more lanes)"
-                  onClick={() => timeline?.zoomRows(-3)}
-                >
-                  &minus;
-                </button>
-                <button
-                  type="button"
-                  class="ghost sm"
-                  title="fit all lanes on screen"
-                  onClick={() => timeline?.fitRows()}
-                >
-                  fit rows
-                </button>
-                <button
-                  type="button"
-                  class="ghost sm"
-                  title="taller rows"
-                  onClick={() => timeline?.zoomRows(3)}
-                >
-                  +
-                </button>
-                <button
-                  type="button"
-                  class="ghost sm"
-                  classList={{ active: !showIoCols() }}
-                  title="show/hide the I/O UTIL, OPS, BYTES columns (more room for labels)"
-                  onClick={() => {
-                    const v = !showIoCols();
-                    setShowIoCols(v);
-                    timeline?.setShowMetrics(v);
-                  }}
-                >
-                  i/o cols
-                </button>
-              </span>
-              <span class="export-wrap">
-                <button
-                  type="button"
-                  class="ghost sm"
-                  classList={{ active: showExport() }}
-                  title="Export the timeline as a PNG image"
-                  onClick={() => setShowExport(!showExport())}
-                >
-                  export
-                </button>
-                <Show when={showExport()}>
-                  <div class="export-menu">
-                    <button type="button" class="ghost sm" onClick={() => doExport(true)}>
-                      whole range (PNG)
-                    </button>
-                    <button type="button" class="ghost sm" onClick={() => doExport(false)}>
-                      current view (PNG)
-                    </button>
-                  </div>
-                </Show>
-              </span>
-            </Show>
-            <Show when={multiRun()}>
+            <span class="menu-wrap">
               <button
                 type="button"
                 class="ghost"
-                classList={{ active: timelapse() }}
-                title="Compress the dead time between separate runs"
-                onClick={() => {
-                  const v = !timelapse();
-                  setTimelapse(v);
-                  timeline?.setTimelapse(v);
-                }}
+                classList={{ active: showDisplayMenu() }}
+                onClick={() => setShowDisplayMenu((v) => !v)}
               >
-                Timelapse
+                Display &#9662;
               </button>
-            </Show>
+              <Show when={showDisplayMenu()}>
+                <div class="tb-menu">
+                  <label class="tb-menu-item">
+                    <input
+                      type="checkbox"
+                      checked={fullDetail()}
+                      onChange={(e) => {
+                        setFullDetail(e.currentTarget.checked);
+                        const vp = timeline?.getViewport();
+                        if (vp) ensureData(vp.begin, vp.end, true);
+                      }}
+                    />
+                    Full detail
+                  </label>
+                  <label class="tb-menu-item">
+                    <input
+                      type="checkbox"
+                      checked={showGaps()}
+                      onChange={(e) => {
+                        setShowGaps(e.currentTarget.checked);
+                        timeline?.setShowGaps(e.currentTarget.checked);
+                      }}
+                    />
+                    Gaps
+                  </label>
+                  <Show when={multiRun()}>
+                    <label class="tb-menu-item" title="Compress the dead time between runs">
+                      <input
+                        type="checkbox"
+                        checked={timelapse()}
+                        onChange={(e) => {
+                          setTimelapse(e.currentTarget.checked);
+                          timeline?.setTimelapse(e.currentTarget.checked);
+                        }}
+                      />
+                      Timelapse
+                    </label>
+                  </Show>
+                  <label class="tb-menu-item" title="Hide events whose timing is malformed">
+                    <input
+                      type="checkbox"
+                      checked={hideMalformed()}
+                      onChange={(e) => {
+                        setHideMalformed(e.currentTarget.checked);
+                        timeline?.setHideMalformed(e.currentTarget.checked);
+                      }}
+                    />
+                    Hide malformed
+                  </label>
+                  <label class="tb-menu-item">
+                    <input
+                      type="checkbox"
+                      checked={showIoCols()}
+                      onChange={(e) => {
+                        setShowIoCols(e.currentTarget.checked);
+                        timeline?.setShowMetrics(e.currentTarget.checked);
+                      }}
+                    />
+                    I/O columns
+                  </label>
+                  <div class="tb-menu-row">
+                    <span>Lane rows</span>
+                    <button
+                      type="button"
+                      class="ghost sm"
+                      title="shorter rows (see more lanes)"
+                      onClick={() => timeline?.zoomRows(-3)}
+                    >
+                      &minus;
+                    </button>
+                    <button
+                      type="button"
+                      class="ghost sm"
+                      title="fit all lanes on screen"
+                      onClick={() => timeline?.fitRows()}
+                    >
+                      fit
+                    </button>
+                    <button
+                      type="button"
+                      class="ghost sm"
+                      title="taller rows"
+                      onClick={() => timeline?.zoomRows(3)}
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              </Show>
+            </span>
+            <span class="export-wrap">
+              <button
+                type="button"
+                class="ghost"
+                classList={{ active: showExport() }}
+                title="Export the timeline as a PNG image"
+                onClick={() => setShowExport(!showExport())}
+              >
+                Export &#9662;
+              </button>
+              <Show when={showExport()}>
+                <div class="export-menu">
+                  <button type="button" class="ghost sm" onClick={() => doExport(true)}>
+                    whole range (PNG)
+                  </button>
+                  <button type="button" class="ghost sm" onClick={() => doExport(false)}>
+                    current view (PNG)
+                  </button>
+                </div>
+              </Show>
+            </span>
           </Show>
           <Show when={view() === "flamegraph"}>
             <button
@@ -1811,6 +1936,54 @@ export default function App() {
                 </For>
               </div>
               <div class="analyze-body">
+                <Show when={bottomTab() === "counters"}>
+                  <Show
+                    when={selectedCounters().length > 0}
+                    fallback={<div class="muted">pick counters to see range stats</div>}
+                  >
+                    <Show
+                      when={counterStats().length > 0}
+                      fallback={<div class="muted">no counter samples in this range</div>}
+                    >
+                      <table class="kv stats analyze-table op-table">
+                        <thead>
+                          <tr>
+                            <th>counter</th>
+                            <th>scope</th>
+                            <th class="num">min</th>
+                            <th class="num">mean</th>
+                            <th class="num">max</th>
+                            <th class="num">last</th>
+                            <th class="num">n</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <For each={counterStats()}>
+                            {(r) => (
+                              <tr>
+                                <td
+                                  class="op-name"
+                                  style={{ color: colorFor(r.name) }}
+                                  title={r.name}
+                                >
+                                  {r.name}
+                                </td>
+                                <td class="op-layer">
+                                  {r.scope === "node" ? "node" : `pid ${r.pid}`}
+                                </td>
+                                <td class="num">{formatCompact(r.min)}</td>
+                                <td class="num">{formatCompact(r.mean)}</td>
+                                <td class="num">{formatCompact(r.max)}</td>
+                                <td class="num">{formatCompact(r.last)}</td>
+                                <td class="num">{r.n}</td>
+                              </tr>
+                            )}
+                          </For>
+                        </tbody>
+                      </table>
+                    </Show>
+                  </Show>
+                </Show>
                 <Show when={bottomTab() === "eventlog"}>
                   <Show when={eventLogLoading() && !eventLog()}>
                     <div class="muted">loading events...</div>
@@ -1950,6 +2123,7 @@ export default function App() {
                     analyzeStats() &&
                     bottomTab() !== "eventlog" &&
                     bottomTab() !== "calltree" &&
+                    bottomTab() !== "counters" &&
                     !isFlameTab()
                   }
                 >
@@ -1973,6 +2147,9 @@ export default function App() {
                                   : "operation"}
                             </th>
                             <th {...help("layer")}>layer</th>
+                            <th class="num" {...help("active")}>
+                              active
+                            </th>
                             <th class="num" {...help("total")}>
                               total
                             </th>
@@ -2009,6 +2186,7 @@ export default function App() {
                                   <td class="op-layer">
                                     {analyzeTab() === "name" ? layerOf(n.name) : "-"}
                                   </td>
+                                  <td class="num">{n.coverage ? formatTime(n.coverage) : "-"}</td>
                                   <td class="num">{formatTime(n.total)}</td>
                                   <td class="bar-col op-share">
                                     <span
@@ -2235,6 +2413,51 @@ export default function App() {
             </aside>
           </Show>
 
+          <Show when={!showLanePanel() && selectedCounter()}>
+            {(sc) => (
+              <aside class="inspector">
+                <div class="sidebar-head">
+                  <b>COUNTER</b>
+                  <span class="muted sm">
+                    {sc().scope === "node" ? "NODE" : `PROC ${sc().scope}`}
+                  </span>
+                  <button class="ghost sm" onClick={() => setSelectedCounter(null)}>
+                    close
+                  </button>
+                </div>
+                <div class="insp-scroll">
+                  <div class="insp-title">{sc().label}</div>
+                  <div class="insp-sub">@ {formatTime(sc().ts)}</div>
+                  <table class="kv insp-kv">
+                    <tbody>
+                      <For each={sc().series}>
+                        {(r) => (
+                          <tr>
+                            <td class="k">
+                              <i
+                                style={{
+                                  background: colorFor(r.name),
+                                  display: "inline-block",
+                                  width: "8px",
+                                  height: "8px",
+                                  "border-radius": "2px",
+                                  "margin-right": "5px",
+                                }}
+                              />
+                              {r.name}
+                              {r.pid !== 0 ? ` · pid ${r.pid}` : ""}
+                              {r.tid !== r.pid && r.tid !== 0 ? ` · tid ${r.tid}` : ""}
+                            </td>
+                            <td class="v">{formatCompact(r.value)}</td>
+                          </tr>
+                        )}
+                      </For>
+                    </tbody>
+                  </table>
+                </div>
+              </aside>
+            )}
+          </Show>
           <Show when={selected() && !showLanePanel()}>
             <aside class="inspector">
               <div class="sidebar-head">
@@ -2264,6 +2487,13 @@ export default function App() {
                       </Show>{" "}
                       · PROC {String(ev().pid)}
                     </div>
+                    <Show when={ev().malformed_event === true}>
+                      <div class="insp-warn">
+                        malformed timing: outlasts the longest process (
+                        {formatTime(timeline?.maxProcLifetime() ?? 0)}), so its timestamps are
+                        unreliable - likely a mixed-clock GPU event.
+                      </div>
+                    </Show>
                     <table class="kv insp-kv">
                       <tbody>
                         <For each={inspRows(ev())}>
@@ -2404,6 +2634,113 @@ export default function App() {
               <div class="counter-wrap">
                 <canvas ref={counterCanvas} />
               </div>
+              <Show when={counterSeries().length > 0}>
+                <div class="counters-bar">
+                  <span class="counters-title">COUNTERS</span>
+                  <div class="counters-modes">
+                    <button
+                      classList={{ active: counterMode() === "multiples" }}
+                      onClick={() => setCounterMode("multiples")}
+                      title="One auto-scaled row per counter"
+                    >
+                      Small multiples
+                    </button>
+                    <button
+                      classList={{ active: counterMode() === "overlay" }}
+                      onClick={() => setCounterMode("overlay")}
+                      title="All lines overlaid, each normalized to its window"
+                    >
+                      Overlay
+                    </button>
+                  </div>
+                  <div class="counters-pick">
+                    <button
+                      class="counters-pick-btn"
+                      onClick={() => setCounterPickerOpen((v) => !v)}
+                    >
+                      Pick counters ({selectedCounters().length}/{counterSeries().length}) ▾
+                    </button>
+                    <Show when={selectedCounters().length > 0}>
+                      <button class="counters-clear" onClick={() => setSelectedCounters([])}>
+                        clear
+                      </button>
+                    </Show>
+                    <Show when={counterPickerOpen()}>
+                      <div class="counters-picker">
+                        <input
+                          class="counters-search"
+                          placeholder="filter: substring, glob (PAPI_L*), or /regex/"
+                          value={counterFilter()}
+                          onInput={(e) => setCounterFilter(e.currentTarget.value)}
+                        />
+                        <div class="counters-picker-actions">
+                          <span class="counters-match-count">
+                            {filteredCounterSeries().length} match
+                            {filteredCounterSeries().length === 1 ? "" : "es"}
+                          </span>
+                          <button
+                            class="counters-bulk"
+                            disabled={filteredCounterSeries().length === 0}
+                            onClick={addAllFiltered}
+                            title={`Select up to ${ADD_ALL_CAP} matching`}
+                          >
+                            + add {Math.min(filteredCounterSeries().length, ADD_ALL_CAP)}
+                          </button>
+                          <button
+                            class="counters-bulk"
+                            disabled={filteredCounterSeries().length === 0}
+                            onClick={removeAllFiltered}
+                          >
+                            − remove
+                          </button>
+                        </div>
+                        <div
+                          class="counters-list"
+                          onScroll={(e) => setCounterScrollTop(e.currentTarget.scrollTop)}
+                        >
+                          <Show
+                            when={counterWindow().total > 0}
+                            fallback={<div class="counters-empty">no match</div>}
+                          >
+                            <div
+                              class="counters-vspace"
+                              style={{ height: `${counterWindow().total * CROW_H}px` }}
+                            >
+                              <For each={counterWindow().rows}>
+                                {(s, i) => (
+                                  <label
+                                    class="counters-item"
+                                    style={{
+                                      position: "absolute",
+                                      top: `${(counterWindow().start + i()) * CROW_H}px`,
+                                      left: "0",
+                                      right: "0",
+                                      height: `${CROW_H}px`,
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedCounterSet().has(s.name)}
+                                      onChange={() => toggleCounter(s.name)}
+                                    />
+                                    <span class="counters-cname">{s.name}</span>
+                                    <span
+                                      class="counters-cbadge"
+                                      classList={{ node: s.nodeLevel, proc: !s.nodeLevel }}
+                                    >
+                                      {s.nodeLevel ? "node" : `${s.sources} proc`}
+                                    </span>
+                                  </label>
+                                )}
+                              </For>
+                            </div>
+                          </Show>
+                        </div>
+                      </div>
+                    </Show>
+                  </div>
+                </div>
+              </Show>
               <div class="canvas-wrap">
                 <canvas ref={canvas} />
 
@@ -2496,6 +2833,9 @@ export default function App() {
                             {h().ev.est === true || h().ev.agg === true ? "aggregated" : "merged"}
                           </span>
                         </Show>
+                        <Show when={h().ev.malformed_event === true}>
+                          <span class="warn-tag">malformed</span>
+                        </Show>
                       </div>
                       <For each={inspRows(h().ev)}>
                         {([k, v]) => (
@@ -2528,6 +2868,42 @@ export default function App() {
                           </div>
                         )}
                       </For>
+                    </div>
+                  )}
+                </Show>
+                <Show when={counterHover()}>
+                  {(h) => (
+                    <div
+                      class="tooltip"
+                      style={{ left: `${h().x + 14}px`, top: `${h().y + 14}px` }}
+                    >
+                      <div class="tt-name">counter @ {formatTime(h().info.ts)}</div>
+                      <For each={h().info.series.slice(0, 10)}>
+                        {(r) => (
+                          <div class="tt-row">
+                            <span>
+                              <i
+                                style={{
+                                  background: colorFor(r.name),
+                                  display: "inline-block",
+                                  width: "8px",
+                                  height: "8px",
+                                  "border-radius": "2px",
+                                  "margin-right": "5px",
+                                }}
+                              />
+                              {r.name}
+                              <Show when={r.pid !== 0}> · {r.pid}</Show>
+                            </span>
+                            <b>{formatCompact(r.value)}</b>
+                          </div>
+                        )}
+                      </For>
+                      <Show when={h().info.series.length > 10}>
+                        <div class="tt-row">
+                          <span class="hint2">+{h().info.series.length - 10} more</span>
+                        </div>
+                      </Show>
                     </div>
                   )}
                 </Show>

@@ -1,19 +1,39 @@
-// Format a microsecond value as a human-readable duration/time.
+// Compound clock form for durations >= 1 minute: the two most significant
+// units among d/h/m/s (e.g. 400000s -> "4d15h", 3661s -> "1h1m", 90s -> "1m30s").
+export function formatClock(us: number): string {
+  const neg = us < 0 ? "-" : "";
+  let s = Math.round(Math.abs(us) / 1_000_000);
+  const d = Math.floor(s / 86_400);
+  s -= d * 86_400;
+  const h = Math.floor(s / 3_600);
+  s -= h * 3_600;
+  const m = Math.floor(s / 60);
+  s -= m * 60;
+  if (d > 0) return `${neg}${d}d${h > 0 ? `${h}h` : ""}`;
+  if (h > 0) return `${neg}${h}h${m > 0 ? `${m}m` : ""}`;
+  if (m > 0) return `${neg}${m}m${s > 0 ? `${s}s` : ""}`;
+  return `${neg}${s}s`;
+}
+
+// Format a microsecond value as a human-readable duration/time. Rolls up to
+// minutes/hours/days past a minute so long traces don't read as "400000s".
 export function formatTime(us: number): string {
   const a = Math.abs(us);
   if (a === 0) return "0";
   if (a < 1) return `${(us * 1000).toFixed(0)}ns`;
   if (a < 1000) return `${us.toFixed(a < 10 ? 2 : 0)}us`;
   if (a < 1_000_000) return `${(us / 1000).toFixed(a < 10_000 ? 2 : 1)}ms`;
-  return `${(us / 1_000_000).toFixed(a < 10_000_000 ? 3 : 2)}s`;
+  if (a < 60_000_000) return `${(us / 1_000_000).toFixed(a < 10_000_000 ? 3 : 2)}s`;
+  return formatClock(us);
 }
 
-// Ruler tick label: like formatTime, but with enough fractional digits that
-// ticks spaced `step` us apart stay distinct, so a zoomed-in axis reads in
-// ms/us granularity instead of every tick rounding to the same second.
+// Ruler tick label: below a minute, enough fractional digits that ticks spaced
+// `step` us apart stay distinct (us/ms/s); at or above a minute, the compact
+// d/h/m clock form so a wide axis reads in human units, not raw seconds.
 export function formatTick(us: number, step: number): string {
   const a = Math.abs(us);
   if (a === 0) return "0";
+  if (a >= 60_000_000) return formatClock(us);
   let div: number;
   let unit: string;
   if (a >= 1_000_000) {
@@ -66,6 +86,21 @@ export function formatBytesPerSec(bps: number): string {
   if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
   if (bps < 1024 * 1024 * 1024) return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
   return `${(bps / 1024 / 1024 / 1024).toFixed(2)} GB/s`;
+}
+
+// "8.6M", "1.2G" - compact SI magnitude for plain counter values (not bytes).
+export function formatCompact(n: number): string {
+  if (!Number.isFinite(n)) return "-";
+  const a = Math.abs(n);
+  if (a < 1000) return Number.isInteger(n) ? String(n) : n.toFixed(a < 10 ? 2 : 1);
+  const u = ["", "K", "M", "G", "T", "P", "E"];
+  let i = 0;
+  let v = n;
+  while (Math.abs(v) >= 1000 && i < u.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${v.toFixed(Math.abs(v) < 10 ? 2 : 1)}${u[i]}`;
 }
 
 // Choose a "nice" tick step (1/2/5 * 10^n) close to the target spacing.
