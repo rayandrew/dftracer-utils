@@ -308,7 +308,13 @@ struct StatRow {
     double total;
     double min;
     double max;
+    double coverage;  // wall time the group was active (union of intervals)
 };
+
+// Coverage resolution: intervals are bucketed at (window / this) so concurrent
+// events collapse to their union instead of summing. Sparse, so memory tracks
+// distinct occupied buckets, not this count.
+static constexpr double COVERAGE_BUCKETS = 8192.0;
 
 // Per-group accumulator that merges real events (from the View) with the
 // prorated contribution of ph=3 aggregates overlapping the window.
@@ -317,11 +323,35 @@ struct StatAgg {
     double total = 0;
     double min = std::numeric_limits<double>::infinity();
     double max = 0;
+    // Union of active intervals as a difference map: bucket -> net (starts -
+    // ends). Coverage is the length of buckets whose running sum stays > 0.
+    ankerl::unordered_dense::map<std::int32_t, std::int32_t> cov;
     void add(double cnt, double sum, double dmin, double dmax) {
         count += cnt;
         total += sum;
         if (dmin < min) min = dmin;
         if (dmax > max) max = dmax;
+    }
+    void mark(double lo, double hi, double begin, double bw) {
+        if (bw <= 0) return;
+        auto blo = static_cast<std::int32_t>((lo - begin) / bw);
+        auto bhi = static_cast<std::int32_t>((hi - begin) / bw);
+        if (bhi <= blo) bhi = blo + 1;  // an event occupies at least its bucket
+        cov[blo] += 1;
+        cov[bhi] -= 1;
+    }
+    double coverage(double bw) const {
+        if (cov.empty()) return 0;
+        std::vector<std::pair<std::int32_t, std::int32_t>> pts(cov.begin(),
+                                                               cov.end());
+        std::sort(pts.begin(), pts.end());
+        double buckets = 0;
+        int running = 0;
+        for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+            running += pts[i].second;
+            if (running > 0) buckets += pts[i + 1].first - pts[i].first;
+        }
+        return buckets * bw;
     }
 };
 
@@ -340,6 +370,8 @@ void tag_invoke(simdjson::serialize_tag, builder_type& b, const StatRow& r) {
     b.append_key_value("min", r.min);
     b.append_comma();
     b.append_key_value("max", r.max);
+    b.append_comma();
+    b.append_key_value("coverage", r.coverage);
     b.end_object();
 }
 
@@ -374,6 +406,7 @@ static void scale_stat_durations(std::vector<StatRow>& rows, double& total_dur,
         r.total *= us;
         r.min *= us;
         r.max *= us;
+        r.coverage *= us;
     }
     total_dur *= us;
 }
@@ -582,7 +615,9 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
             std::uint64_t total_count = 0;
             double total_dur = 0;
             for (const auto& r : gr) {
-                rows.push_back({&r.key, r.count, r.total, r.min, r.max});
+                // Summary rows are pre-aggregated scalars with no intervals, so
+                // coverage is unavailable (0); the live-scan path fills it in.
+                rows.push_back({&r.key, r.count, r.total, r.min, r.max, 0});
                 total_count += r.count;
                 total_dur += r.total;
             }
@@ -638,10 +673,12 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
             x.total += v.total;
             if (v.min < x.min) x.min = v.min;
             if (v.max > x.max) x.max = v.max;
+            for (auto& [bk, d] : v.cov) x.cov[bk] += d;
         }
         return std::move(a);
     };
 
+    const double cov_bw = end > begin ? (end - begin) / COVERAGE_BUCKETS : 0;
     std::size_t slots = std::max<std::size_t>(1, index.max_concurrent());
     auto sv = views::View::from_files(to_view_files(target_files),
                                       &index.bloom_cache())
@@ -651,7 +688,7 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
     if (view.query) sv = sv.filter(*view.query);
 
     auto scan = co_await sv.map_batches<StatMap>(
-        [begin, end, scan_begin, interval_native, gcol](
+        [begin, end, scan_begin, interval_native, gcol, cov_bw](
             StatMap& acc, const std::vector<std::string_view>& events) {
             thread_local simdjson::dom::parser parser;
             thread_local std::string buf;
@@ -702,7 +739,9 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
                         auto mx = args["dur_max"];
                         if (!mx.error()) dmax = json_number(mx.value_unsafe());
                     }
-                    acc[key].add(cnt * f, sum * f, dmin, dmax);
+                    auto& a = acc[key];
+                    a.add(cnt * f, sum * f, dmin, dmax);
+                    a.mark(lo, hi, begin, cov_bw);
                 } else {
                     auto dr = root["dur"];
                     if (dr.error()) continue;
@@ -710,7 +749,9 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
                     double lo = std::max(begin, ts);
                     double hi = std::min(end, ts + dur);
                     if (hi <= lo) continue;
-                    acc[key].add(1.0, hi - lo, dur, dur);
+                    auto& a = acc[key];
+                    a.add(1.0, hi - lo, dur, dur);
+                    a.mark(lo, hi, begin, cov_bw);
                 }
             }
         },
@@ -734,7 +775,9 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
                 !view.query->evaluate(utilities::common::json::JsonValue(root)))
                 continue;
             double dur = static_cast<double>(sp.end - sp.begin);
-            byKey[extract_group_value(root, gcol)].add(1.0, hi - lo, dur, dur);
+            auto& a = byKey[extract_group_value(root, gcol)];
+            a.add(1.0, hi - lo, dur, dur);
+            a.mark(lo, hi, begin, cov_bw);
         }
     }
 
@@ -747,7 +790,8 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
         double mn = kv.second.min == std::numeric_limits<double>::infinity()
                         ? 0
                         : kv.second.min;
-        rows.push_back({&kv.first, cnt, kv.second.total, mn, kv.second.max});
+        rows.push_back({&kv.first, cnt, kv.second.total, mn, kv.second.max,
+                        kv.second.coverage(cov_bw)});
         total_count += cnt;
         total_dur += kv.second.total;
     }
@@ -1532,7 +1576,7 @@ static std::string serve_density_from_summary(
     // Re-bucket the summary's ph="C" series onto this window's density columns
     // and fold them into the same density map, so the unfiltered/summary path
     // renders counters as ordinary event blocks like the live path. The summary
-    // predates per-counter pid/tid, so these land in the pid/tid=0 system lane.
+    // carries each series' emitting pid/tid (0 = node-level).
     if (!s.counter_series.empty() && threshold > 0 && s.fine_bucket_us > 0) {
         const std::size_t ncols =
             static_cast<std::size_t>((end_abs - begin_abs) / threshold) + 1;
@@ -1544,7 +1588,7 @@ static std::string serve_density_from_summary(
                                     s.fine_bucket_us;
                 long col = static_cast<long>((ts_mid - begin_abs) / threshold);
                 if (col < 0 || col >= static_cast<long>(ncols)) continue;
-                add_counter_bucket(dens, 0, 0, col, series, cd.sum[i],
+                add_counter_bucket(dens, cd.pid, cd.tid, col, series, cd.sum[i],
                                    cd.cnt[i]);
             }
         }
@@ -1980,22 +2024,61 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
         }
     }
 
-    // The scan overshoots its cap (checked per batch), so clamp here.
-    // Keep the longest events: those are the slices wide enough to see.
-    if (limit > 0 && big.size() > static_cast<std::size_t>(limit)) {
-        const auto keep = static_cast<std::size_t>(limit);
-        std::vector<std::size_t> idx(big.size());
-        std::iota(idx.begin(), idx.end(), std::size_t{0});
-        std::nth_element(idx.begin(), idx.begin() + static_cast<long>(keep),
-                         idx.end(), [&big_dur](std::size_t a, std::size_t b) {
+    // Bound individual events by count. `threshold` is per-pixel time and is
+    // blind to how many events share a pixel, so a narrow-but-dense window
+    // (e.g. a whole trace compressed into a sliver by bad timestamps) would
+    // otherwise return every event whole. Keep the longest - the slices wide
+    // enough to see - and fold the rest into density blocks so none are lost.
+    constexpr std::size_t MAX_DENSITY_EVENTS = 30000;
+    const std::size_t cap =
+        limit > 0 ? static_cast<std::size_t>(limit) : MAX_DENSITY_EVENTS;
+    if (big.size() > cap) {
+        std::vector<std::uint32_t> idx(big.size());
+        std::iota(idx.begin(), idx.end(), std::uint32_t{0});
+        std::nth_element(idx.begin(), idx.begin() + static_cast<long>(cap),
+                         idx.end(),
+                         [&big_dur](std::uint32_t a, std::uint32_t b) {
                              return big_dur[a] > big_dur[b];
                          });
-        idx.resize(keep);
+        std::vector<std::uint32_t> overflow(
+            idx.begin() + static_cast<long>(cap), idx.end());
+        fold_overflow_events(big, big_dur, overflow, threshold, begin, dens,
+                             group_col);
+        idx.resize(cap);
         std::sort(idx.begin(), idx.end());
         std::vector<std::string> kept;
-        kept.reserve(keep);
-        for (std::size_t i : idx) kept.emplace_back(std::move(big[i]));
+        std::vector<double> kept_dur;
+        kept.reserve(cap);
+        kept_dur.reserve(cap);
+        for (std::uint32_t i : idx) {
+            kept.emplace_back(std::move(big[i]));
+            kept_dur.push_back(big_dur[i]);
+        }
         big.swap(kept);
+        big_dur.swap(kept_dur);
+        truncated = true;
+    }
+
+    // Bound the block count too. A dense window occupies a block per pixel per
+    // lane (threshold is per-pixel time, so many lanes x many columns), so
+    // coarsen columns - merge pairs, doubling the effective bucket width -
+    // until the map fits the budget. This is the trade the summary pyramid
+    // makes, applied here for the live path; block ts/width use eff_threshold.
+    constexpr std::size_t MAX_DENSITY_BLOCKS = 120000;
+    double eff_threshold = threshold;
+    while (dens.size() > MAX_DENSITY_BLOCKS && eff_threshold > 0) {
+        DensityMap merged;
+        merged.reserve(dens.size() / 2 + 1);
+        for (auto& [k, a] : dens) {
+            DensityKey nk{k.pid, k.tid, k.col >> 1, k.group};
+            auto it = merged.find(nk);
+            if (it == merged.end())
+                merged.emplace(std::move(nk), std::move(a));
+            else
+                it->second.merge_from(a);
+        }
+        dens = std::move(merged);
+        eff_threshold *= 2;
         truncated = true;
     }
 
@@ -2067,7 +2150,7 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     // Stable per-event/-block depth (computed in absolute space, before ts
     // normalization rewrites the big strings; order is preserved in place).
     std::vector<std::uint32_t> big_depth =
-        assign_view_depths(big, dens, begin, threshold);
+        assign_view_depths(big, dens, begin, eff_threshold);
     // Counters get their own rows above the lane's events (assign_view_depths
     // leaves every counter block on depth 0).
     assign_counter_depths(big, big_depth, dens);
@@ -2077,9 +2160,10 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     }
 
     std::string body = serialize_density_body(
-        big, dens, original_begin, original_end, threshold, limit, truncated,
-        global_min > 0, index.native_to_us(index.global_min_timestamp_us()),
-        max_dur, index.time_metric(), &big_depth,
+        big, dens, original_begin, original_end, eff_threshold, limit,
+        truncated, global_min > 0,
+        index.native_to_us(index.global_min_timestamp_us()), max_dur,
+        index.time_metric(), &big_depth,
         group_names.empty() ? nullptr : &group_names);
     if (!req.cancel_token.cancelled()) index.viz_cache().put(cache_key, body);
     co_return HttpResponse::ok(std::move(body));

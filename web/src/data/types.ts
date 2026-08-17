@@ -16,6 +16,10 @@ export interface TraceEvent {
   // A synthetic event extrapolated from an aggregate when zoomed below the
   // window: positioned uniformly, so the timing is an estimate, not real.
   est?: boolean;
+  // Timing that is impossible against the trace's process lifetimes (a duration
+  // longer than any process, or a span outside all of them), so the timestamps
+  // are untrustworthy, e.g. a mixed-clock GPU event. Set by Timeline.setData.
+  malformed_event?: boolean;
   [key: string]: unknown;
 }
 
@@ -152,6 +156,9 @@ export interface NameStat {
   avg: number;
   min: number;
   max: number;
+  // Wall-clock time the operation was active (union of its event intervals), so
+  // concurrent work is not summed. 0 when unavailable (whole-trace summary path).
+  coverage?: number;
 }
 
 // Response of GET /api/viz/stats (aggregated server-side).

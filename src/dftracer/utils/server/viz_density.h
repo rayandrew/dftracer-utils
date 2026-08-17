@@ -163,22 +163,12 @@ static std::string extract_group_from_line(std::string_view event,
     return extract_group_value(root, col);
 }
 
-// Fold a small event into the density map. Returns false (keep as an individual
-// event) when the event has no duration or is at/above the `threshold`. Takes
-// an already-parsed element so a caller that parsed for routing does not
-// re-parse.
-static bool fold_density(simdjson::dom::element root, double threshold,
-                         double begin, DensityMap& dens,
-                         double* out_dur = nullptr,
-                         std::string_view group_col = {}) {
-    if (!root.is_object()) return false;
-
-    auto dr = root["dur"];
-    if (dr.error()) return false;
-    double dur = json_number(dr.value_unsafe());
-    if (out_dur) *out_dur = dur;
-    if (threshold <= 0 || dur >= threshold) return false;
-
+// Aggregate one event (already parsed, with its duration) into the density
+// bucket for its (pid, tid, pixel-column, group). Used both by fold_density for
+// sub-threshold events and to demote a dense window's overflow individuals.
+static void add_to_density(simdjson::dom::element root, double dur,
+                           double threshold, double begin, DensityMap& dens,
+                           std::string_view group_col) {
     double ts = 0;
     auto tr = root["ts"];
     if (!tr.error()) ts = json_number(tr.value_unsafe());
@@ -207,7 +197,43 @@ static bool fold_density(simdjson::dom::element root, double threshold,
         a.max_dur = dur;
         a.name.assign(name);
     }
+}
+
+// Fold a sub-threshold event into the density map. Returns false (caller keeps
+// it as an individual event) when it has no duration or is at/above
+// `threshold`.
+static bool fold_density(simdjson::dom::element root, double threshold,
+                         double begin, DensityMap& dens,
+                         double* out_dur = nullptr,
+                         std::string_view group_col = {}) {
+    if (!root.is_object()) return false;
+
+    auto dr = root["dur"];
+    if (dr.error()) return false;
+    double dur = json_number(dr.value_unsafe());
+    if (out_dur) *out_dur = dur;
+    if (threshold <= 0 || dur >= threshold) return false;
+
+    add_to_density(root, dur, threshold, begin, dens, group_col);
     return true;
+}
+
+// Demote a set of individual events (indices into `big`, already kept whole
+// because dur >= threshold) into density blocks. Lets a dense window cap its
+// individual-event count without dropping any activity from the view.
+static void fold_overflow_events(const std::vector<std::string>& big,
+                                 const std::vector<double>& big_dur,
+                                 const std::vector<std::uint32_t>& overflow,
+                                 double threshold, double begin,
+                                 DensityMap& dens, std::string_view group_col) {
+    simdjson::dom::parser parser;
+    for (std::uint32_t i : overflow) {
+        auto res = parser.parse(big[i]);
+        if (res.error()) continue;
+        auto root = res.value_unsafe();
+        if (root.is_object())
+            add_to_density(root, big_dur[i], threshold, begin, dens, group_col);
+    }
 }
 
 // Thin out FH/HH hash-declaration records: keep every one an event in this
