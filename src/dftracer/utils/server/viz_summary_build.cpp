@@ -232,21 +232,32 @@ struct SumBuild {
     // VizSummary::counter_series.
     struct CtrAccum {
         std::string cat;
+        std::int64_t pid = 0;
+        std::int64_t tid = 0;
         ankerl::unordered_dense::map<std::uint32_t,
                                      std::pair<double, std::uint32_t>>
             byb;
     };
     std::vector<ankerl::unordered_dense::map<std::string, CtrAccum>> c_series;
 
+    // Series identity includes pid/tid so a per-process counter keeps one
+    // series per emitter (node-level counters emit under pid 0).
     void fold_counter_sample(std::size_t w, std::string_view name,
                              std::string_view key, std::string_view cat,
+                             std::int64_t pid, std::int64_t tid,
                              std::uint32_t bucket, double val) {
         std::string sk;
-        sk.reserve(name.size() + 1 + key.size());
+        std::string pids = std::to_string(pid);
+        std::string tids = std::to_string(tid);
+        sk.reserve(name.size() + key.size() + pids.size() + tids.size() + 3);
         sk.append(name).push_back('\x1f');
-        sk.append(key);
+        sk.append(key).push_back('\x1f');
+        sk.append(pids).push_back('\x1f');
+        sk.append(tids);
         auto& acc = c_series[w][sk];
         if (acc.cat.empty()) acc.cat.assign(cat);
+        acc.pid = pid;
+        acc.tid = tid;
         auto& bc = acc.byb[bucket];
         bc.first += val;
         bc.second += 1;
@@ -423,6 +434,18 @@ static void fold_summary(std::size_t w, std::string_view event, SumBuild& b) {
             auto ccr = root["cat"];
             if (!ccr.error() && ccr.is_string())
                 ccat = ccr.get_string().value_unsafe();
+            std::int64_t cpid = 0;
+            std::int64_t ctid = 0;
+            {
+                auto pr = root["pid"];
+                if (!pr.error())
+                    cpid = static_cast<std::int64_t>(
+                        json_number(pr.value_unsafe()));
+                auto tr2 = root["tid"];
+                if (!tr2.error())
+                    ctid = static_cast<std::int64_t>(
+                        json_number(tr2.value_unsafe()));
+            }
             auto args = root["args"];
             if (!args.error() && args.is_object()) {
                 for (auto field : args.get_object()) {
@@ -438,7 +461,7 @@ static void fold_summary(std::size_t w, std::string_view event, SumBuild& b) {
                         val = vv.get_double().value_unsafe();
                     else
                         continue;
-                    b.fold_counter_sample(w, name0, field.key, ccat,
+                    b.fold_counter_sample(w, name0, field.key, ccat, cpid, ctid,
                                           static_cast<std::uint32_t>(bucket),
                                           val);
                 }
@@ -820,6 +843,8 @@ static coro::CoroTask<void> build_viz_summary(TraceIndex& index) {
             for (auto& [sk, acc] : wm) {
                 auto& m = merged[sk];
                 if (m.cat.empty()) m.cat = acc.cat;
+                m.pid = acc.pid;
+                m.tid = acc.tid;
                 for (auto& [bk, sc] : acc.byb) {
                     auto& d = m.byb[bk];
                     d.first += sc.first;
@@ -829,11 +854,15 @@ static coro::CoroTask<void> build_viz_summary(TraceIndex& index) {
         summary->counter_series.reserve(merged.size());
         for (auto& [sk, acc] : merged) {
             VizSummary::CounterSeriesData cd;
-            auto sep = sk.find('\x1f');
-            cd.name = sk.substr(0, sep);
-            cd.key =
-                sep == std::string::npos ? std::string() : sk.substr(sep + 1);
+            // sk = name \x1f key \x1f pid \x1f tid; take only name and key
+            // here, pid/tid come from the accumulator.
+            auto sep1 = sk.find('\x1f');
+            cd.name = sk.substr(0, sep1);
+            auto sep2 = sk.find('\x1f', sep1 + 1);
+            cd.key = sk.substr(sep1 + 1, sep2 - (sep1 + 1));
             cd.cat = acc.cat;
+            cd.pid = acc.pid;
+            cd.tid = acc.tid;
             std::vector<std::uint32_t> bks;
             bks.reserve(acc.byb.size());
             for (auto& [bk, sc] : acc.byb) {

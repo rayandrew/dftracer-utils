@@ -75,7 +75,9 @@ class IndexDatabase {
     /// to `members`, so an older index's member table is invisible. v8 -> v9
     /// keyed the file registry on the canonical absolute path instead of the
     /// bare filename, so an older index's file lookups miss under new code.
-    static constexpr std::uint32_t SCHEMA_VERSION = 9;
+    /// v9 -> v10 added per-counter pid/tid to the ph="C" summary series, so an
+    /// older summary would deserialize the new fields as counter bucket data.
+    static constexpr std::uint32_t SCHEMA_VERSION = 10;
 
     /// True if the stored schema predates the current build's layout.
     bool schema_outdated() const;

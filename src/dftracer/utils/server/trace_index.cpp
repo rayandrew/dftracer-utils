@@ -253,6 +253,8 @@ void serialize_summary(BufWriter& w, const VizSummary& s) {
         w.str(c.name);
         w.str(c.key);
         w.str(c.cat);
+        w.i64(c.pid);
+        w.i64(c.tid);
         w.u64(c.buckets.size());
         for (auto bk : c.buckets) w.u32(bk);
         for (double x : c.sum) w.dbl(x);
@@ -382,6 +384,8 @@ bool deserialize_summary(BufReader& r, VizSummary& s) {
         c.name = r.str();
         c.key = r.str();
         c.cat = r.str();
+        c.pid = r.i64();
+        c.tid = r.i64();
         std::uint64_t nb = r.u64();
         if (!r.fits(nb, 4)) return false;
         c.buckets.resize(nb);

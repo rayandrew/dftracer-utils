@@ -79,6 +79,9 @@ struct VizSummary {
         std::string name;
         std::string key;
         std::string cat;
+        std::int64_t pid =
+            0;  // emitting process (0 = node-level, e.g. cpu/mem)
+        std::int64_t tid = 0;
         std::vector<std::uint32_t> buckets;
         std::vector<double> sum;
         std::vector<std::uint32_t> cnt;
