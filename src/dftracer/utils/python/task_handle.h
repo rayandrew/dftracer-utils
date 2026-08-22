@@ -24,7 +24,12 @@ typedef struct {
 } TaskHandleObject;
 
 extern PyTypeObject TaskHandleType;
+
+namespace dftracer::utils::python {
+
 int init_task_handle(PyObject *m);
+
+}  // namespace dftracer::utils::python
 
 // Create a TaskHandle Python object for a typed task (result stored as
 #endif  // DFTRACER_UTILS_PYTHON_TASK_HANDLE_H

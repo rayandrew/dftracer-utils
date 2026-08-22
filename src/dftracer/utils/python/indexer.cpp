@@ -7,7 +7,7 @@
 #include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
@@ -21,7 +21,7 @@ static void CheckpointIndexer_dealloc(CheckpointIndexerObject *self) {
         // The Python wrapper owns only the native indexer handle. The
         // underlying RocksDB instance remains manager-owned and may continue to
         // live process-wide for the same .dftindex path.
-        dft_indexer_destroy(self->handle);
+        dftu_indexer_destroy(self->handle);
         self->handle = NULL;
     }
     Py_XDECREF(self->gz_path);
@@ -34,7 +34,7 @@ static void CheckpointIndexer_release_handle(CheckpointIndexerObject *self) {
     if (self->handle) {
         // Releasing the handle drops this wrapper's native indexer state only.
         // Shared RocksDB lifetime is managed separately by RocksDBManager.
-        dft_indexer_destroy(self->handle);
+        dftu_indexer_destroy(self->handle);
         self->handle = NULL;
     }
 }
@@ -103,8 +103,8 @@ static int CheckpointIndexer_init(CheckpointIndexerObject *self, PyObject *args,
     if (index_path) {
         self->index_path = PyUnicode_FromString(index_path);
     } else {
-        const std::string resolved_index_path = dftracer::utils::utilities::
-            composites::dft::internal::determine_index_path(gz_path, "");
+        const std::string resolved_index_path =
+            dftracer::utils::trace::internal::determine_index_path(gz_path, "");
         self->index_path = PyUnicode_FromString(resolved_index_path.c_str());
     }
 
@@ -121,8 +121,8 @@ static int CheckpointIndexer_init(CheckpointIndexerObject *self, PyObject *args,
         return -1;
     }
 
-    self->handle = dft_indexer_create(gz_path, index_path_str, checkpoint_size,
-                                      force_rebuild);
+    self->handle = dftu_indexer_create(gz_path, index_path_str, checkpoint_size,
+                                       force_rebuild);
     if (!self->handle) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to create indexer");
         return -1;
@@ -136,7 +136,7 @@ static dftracer::utils::Runtime *get_indexer_runtime(
     if (self->runtime_obj) {
         return ((RuntimeObject *)self->runtime_obj)->runtime.get();
     }
-    return get_default_runtime();
+    return dftracer::utils::python::get_default_runtime();
 }
 
 static PyObject *CheckpointIndexer_build(CheckpointIndexerObject *self,
@@ -147,7 +147,7 @@ static PyObject *CheckpointIndexer_build(CheckpointIndexerObject *self,
     }
 
     // Use IndexBatchBuilderUtility when bloom is requested.
-    // Otherwise, use the simpler dft_indexer_build which only creates
+    // Otherwise, use the simpler dftu_indexer_build which only creates
     // checkpoints.
     if (self->build_bloom) {
         using namespace dftracer::utils;
@@ -204,7 +204,7 @@ static PyObject *CheckpointIndexer_build(CheckpointIndexerObject *self,
     } else {
         // Simple checkpoint-only build
         int result;
-        Py_BEGIN_ALLOW_THREADS result = dft_indexer_build(self->handle);
+        Py_BEGIN_ALLOW_THREADS result = dftu_indexer_build(self->handle);
         Py_END_ALLOW_THREADS
 
             if (result < 0) {
@@ -223,7 +223,7 @@ static PyObject *CheckpointIndexer_need_rebuild(CheckpointIndexerObject *self,
         return NULL;
     }
 
-    int result = dft_indexer_need_rebuild(self->handle);
+    int result = dftu_indexer_need_rebuild(self->handle);
     return PyBool_FromLong(result);
 }
 
@@ -234,7 +234,7 @@ static PyObject *CheckpointIndexer_exists(CheckpointIndexerObject *self,
         return NULL;
     }
 
-    int result = dft_indexer_exists(self->handle);
+    int result = dftu_indexer_exists(self->handle);
     return PyBool_FromLong(result);
 }
 
@@ -245,7 +245,7 @@ static PyObject *CheckpointIndexer_get_max_bytes(CheckpointIndexerObject *self,
         return NULL;
     }
 
-    uint64_t result = dft_indexer_get_max_bytes(self->handle);
+    uint64_t result = dftu_indexer_get_max_bytes(self->handle);
     return PyLong_FromUnsignedLongLong(result);
 }
 
@@ -256,7 +256,7 @@ static PyObject *CheckpointIndexer_get_num_lines(CheckpointIndexerObject *self,
         return NULL;
     }
 
-    uint64_t result = dft_indexer_get_num_lines(self->handle);
+    uint64_t result = dftu_indexer_get_num_lines(self->handle);
     return PyLong_FromUnsignedLongLong(result);
 }
 
@@ -318,27 +318,27 @@ static PyObject *CheckpointIndexer_exit(CheckpointIndexerObject *self,
 }
 
 static PyMethodDef CheckpointIndexer_methods[] = {
-    {"build", DFT_PYCFUNCTION(CheckpointIndexer_build), METH_NOARGS,
+    {"build", DFTU_PYCFUNCTION(CheckpointIndexer_build), METH_NOARGS,
      "build()\n"
      "--\n"
      "\n"
      "Build or rebuild the index.\n"},
-    {"need_rebuild", DFT_PYCFUNCTION(CheckpointIndexer_need_rebuild),
+    {"need_rebuild", DFTU_PYCFUNCTION(CheckpointIndexer_need_rebuild),
      METH_NOARGS, "Check if a rebuild is needed."},
-    {"exists", DFT_PYCFUNCTION(CheckpointIndexer_exists), METH_NOARGS,
+    {"exists", DFTU_PYCFUNCTION(CheckpointIndexer_exists), METH_NOARGS,
      "Check if the .dftindex store exists."},
-    {"get_max_bytes", DFT_PYCFUNCTION(CheckpointIndexer_get_max_bytes),
+    {"get_max_bytes", DFTU_PYCFUNCTION(CheckpointIndexer_get_max_bytes),
      METH_NOARGS, "Get the maximum uncompressed bytes in the indexed file."},
-    {"get_num_lines", DFT_PYCFUNCTION(CheckpointIndexer_get_num_lines),
+    {"get_num_lines", DFTU_PYCFUNCTION(CheckpointIndexer_get_num_lines),
      METH_NOARGS, "Get the total number of lines in the indexed file."},
-    {"close", DFT_PYCFUNCTION(CheckpointIndexer_close), METH_NOARGS,
+    {"close", DFTU_PYCFUNCTION(CheckpointIndexer_close), METH_NOARGS,
      "Release this Python wrapper's native indexer handle.\n"
      "\n"
      "The shared RocksDB instance for the same .dftindex path remains managed\n"
      "by the native RocksDBManager cache."},
-    {"__enter__", DFT_PYCFUNCTION(CheckpointIndexer_enter), METH_NOARGS,
+    {"__enter__", DFTU_PYCFUNCTION(CheckpointIndexer_enter), METH_NOARGS,
      "Enter the runtime context for the with statement."},
-    {"__exit__", DFT_PYCFUNCTION(CheckpointIndexer_exit), METH_VARARGS,
+    {"__exit__", DFTU_PYCFUNCTION(CheckpointIndexer_exit), METH_VARARGS,
      "Release this Python wrapper on context exit.\n"
      "\n"
      "This does not force-close the shared RocksDB instance for the same\n"
@@ -417,7 +417,7 @@ PyTypeObject CheckpointIndexerType = {
     CheckpointIndexer_new,            /* tp_new */
 };
 
-int init_checkpoint_indexer(PyObject *m) {
+int dftracer::utils::python::init_checkpoint_indexer(PyObject *m) {
     if (register_type(m, &CheckpointIndexerType, "CheckpointIndexer") < 0)
         return -1;
 

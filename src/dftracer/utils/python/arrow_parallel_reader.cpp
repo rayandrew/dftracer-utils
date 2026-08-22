@@ -135,7 +135,8 @@ static PyObject* py_read_arrow_files_parallel(PyObject* /*self*/,
 }
 
 static PyMethodDef arrow_parallel_reader_methods[] = {
-    {"read_arrow_files_parallel", DFT_PYCFUNCTION(py_read_arrow_files_parallel),
+    {"read_arrow_files_parallel",
+     DFTU_PYCFUNCTION(py_read_arrow_files_parallel),
      METH_VARARGS | METH_KEYWORDS,
      "Read multiple Arrow IPC files in parallel using the Runtime.\n\n"
      "Args:\n"

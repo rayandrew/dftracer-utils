@@ -8,10 +8,10 @@
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
 #include <dftracer/utils/python/sst_distribution.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_config.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_key.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/association_tracker.h>
-#include <dftracer/utils/utilities/composites/dft/views/aggregation_fold.h>
+#include <dftracer/utils/trace/aggregators/aggregation_config.h>
+#include <dftracer/utils/trace/aggregators/aggregation_key.h>
+#include <dftracer/utils/trace/aggregators/association_tracker.h>
+#include <dftracer/utils/trace/views/aggregation_fold.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/file_partition.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
@@ -199,7 +199,7 @@ static PyObject *SstArtifactRegistry_append(SstArtifactRegistryObject *self,
 }
 
 static PyMethodDef SstArtifactRegistry_methods[] = {
-    {"append", DFT_PYCFUNCTION(SstArtifactRegistry_append), METH_VARARGS,
+    {"append", DFTU_PYCFUNCTION(SstArtifactRegistry_append), METH_VARARGS,
      "append(artifacts_dict) -> None\n"
      "Add a per-batch Artifacts dict (as returned by build_sst_batch or "
      "IndexDatabaseSstWriterContext.commit) to the registry."},
@@ -245,7 +245,8 @@ static PyTypeObject SstArtifactRegistryType = {
     SstArtifactRegistry_new,
 };
 
-SstArtifactRegistry *sst_artifact_registry_get(PyObject *obj) {
+SstArtifactRegistry *dftracer::utils::python::sst_artifact_registry_get(
+    PyObject *obj) {
     if (!PyObject_TypeCheck(obj, &SstArtifactRegistryType)) return nullptr;
     return ((SstArtifactRegistryObject *)obj)->registry.get();
 }
@@ -302,7 +303,7 @@ static PyObject *scan_files_fn(PyObject * /*self*/, PyObject *args,
             rt = ((RuntimeObject *)runtime_arg)->runtime.get();
         }
     } else {
-        rt = get_default_runtime();
+        rt = dftracer::utils::python::get_default_runtime();
     }
 
     PatternDirectoryScannerUtilityInput input(directory, patterns,
@@ -316,7 +317,7 @@ static PyObject *scan_files_fn(PyObject * /*self*/, PyObject *args,
                               std::vector<FileEntry> *out)
                                -> dftracer::utils::coro::CoroTask<void> {
                                PatternDirectoryScannerUtility scanner;
-                               *out = co_await scope.spawn(scanner, in);
+                               *out = co_await scanner(scope, in);
                            },
                            std::move(input), &entries),
                        "scan-files")
@@ -529,7 +530,7 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
             Py_DECREF(native);
         }
     } else {
-        rt = get_default_runtime();
+        rt = dftracer::utils::python::get_default_runtime();
     }
 
     // Build config + sink factory shared state.
@@ -542,12 +543,10 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
     auto batch = std::string(batch_id);
 
     // Optional aggregation config, extracted from the Python dataclass.
-    std::shared_ptr<dftracer::utils::utilities::composites::dft::aggregators::
-                        AggregationConfig>
+    std::shared_ptr<dftracer::utils::trace::aggregators::AggregationConfig>
         agg_config_ptr;
     if (aggregation_config_obj && aggregation_config_obj != Py_None) {
-        using dftracer::utils::utilities::composites::dft::aggregators::
-            AggregationConfig;
+        using dftracer::utils::trace::aggregators::AggregationConfig;
         auto cfg = std::make_shared<AggregationConfig>();
         auto pull_double = [&](const char *name, double fallback) -> double {
             PyObject *v = PyObject_GetAttrString(aggregation_config_obj, name);
@@ -706,18 +705,18 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
     }
 
     if (agg_config_ptr) {
-        auto agg_intern = dftracer::utils::utilities::composites::dft::
-            aggregators::intern_for_index(index_dir);
+        auto agg_intern =
+            dftracer::utils::trace::aggregators::intern_for_index(index_dir);
         // The fold writes aggregation SSTs through the batch build's own SST
         // sink (routed to aggregation.sst / system_metrics.sst), so they land
         // in `artifacts->list` with bloom/dict - no separate per-file sink.
         batch_config->agg_fold_factory =
             [agg_config_ptr,
              agg_intern](dftracer::utils::StringIntern &build_intern)
-            -> std::unique_ptr<dftracer::utils::utilities::composites::dft::
-                                   views::detail::AggregationFold> {
-            return std::make_unique<dftracer::utils::utilities::composites::
-                                        dft::views::detail::AggregationFold>(
+            -> std::unique_ptr<
+                dftracer::utils::trace::views::detail::AggregationFold> {
+            return std::make_unique<
+                dftracer::utils::trace::views::detail::AggregationFold>(
                 build_intern, agg_intern, *agg_config_ptr, /*config_hash=*/0);
         };
     }
@@ -788,8 +787,7 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
     // The fold wrote its aggregation SSTs through the batch build's sink, so
     // they are already in `artifacts->list` above (no separate per-visitor
     // harvest). Combine the per-file trackers the folds produced out-of-band.
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        AssociationTracker;
+    using dftracer::utils::trace::aggregators::AssociationTracker;
     AssociationTracker combined;
     bool any_tracker = false;
     for (auto &ao : result.agg_outputs) {
@@ -820,8 +818,7 @@ static PyObject *build_sst_batch_fn(PyObject * /*self*/, PyObject *args,
 
 static PyObject *enable_aggregation_deterministic_ids_fn(PyObject * /*self*/,
                                                          PyObject * /*args*/) {
-    dftracer::utils::utilities::composites::dft::aggregators::
-        enable_deterministic_intern_ids();
+    dftracer::utils::trace::aggregators::enable_deterministic_intern_ids();
     Py_RETURN_NONE;
 }
 
@@ -903,7 +900,7 @@ static PyObject *enumerate_gzip_members_fn(PyObject * /*self*/, PyObject *args,
             Py_DECREF(native);
         }
     } else {
-        rt = get_default_runtime();
+        rt = dftracer::utils::python::get_default_runtime();
     }
 
     std::vector<std::vector<GzipMember>> results(files.size());
@@ -1111,7 +1108,7 @@ static PyObject *plan_work_units_fn(PyObject * /*self*/, PyObject *args,
 // ---------------------------------------------------------------------------
 
 static PyMethodDef SstDistributionMethods[] = {
-    {"build_sst_batch", DFT_PYCFUNCTION(build_sst_batch_fn),
+    {"build_sst_batch", DFTU_PYCFUNCTION(build_sst_batch_fn),
      METH_VARARGS | METH_KEYWORDS,
      "build_sst_batch(files, file_ids, staging_dir, batch_id, ...) "
      "-> (list[dict], bytes)\n"
@@ -1119,37 +1116,39 @@ static PyMethodDef SstDistributionMethods[] = {
      "(artifact_dicts, tracker_blob). The tracker blob is the serialized "
      "merged AssociationTracker from this batch's aggregation visitors "
      "(empty bytes when no aggregation_config was passed)."},
-    {"plan_lpt_partition", DFT_PYCFUNCTION(plan_lpt_partition_fn), METH_VARARGS,
+    {"plan_lpt_partition", DFTU_PYCFUNCTION(plan_lpt_partition_fn),
+     METH_VARARGS,
      "plan_lpt_partition(entries, num_workers) -> list[list[(path, size)]]\n"
      "Greedy Longest-Processing-Time-first bin-packing of (path, size) "
      "tuples across num_workers buckets. Minimises the maximum per-worker "
      "total size."},
-    {"scan_files", DFT_PYCFUNCTION(scan_files_fn), METH_VARARGS | METH_KEYWORDS,
+    {"scan_files", DFTU_PYCFUNCTION(scan_files_fn),
+     METH_VARARGS | METH_KEYWORDS,
      "scan_files(directory, patterns=None, recursive=False, runtime=None) "
      "-> list[(path, size)]\n"
      "Parallel directory scan returning (path, size) tuples for regular "
      "files matching the patterns."},
     {"enable_aggregation_deterministic_ids",
-     DFT_PYCFUNCTION(enable_aggregation_deterministic_ids_fn), METH_NOARGS,
+     DFTU_PYCFUNCTION(enable_aggregation_deterministic_ids_fn), METH_NOARGS,
      "enable_aggregation_deterministic_ids() -> None\n"
      "Flip the global aggregation StringIntern into deterministic-id mode "
      "so the same string maps to the same 32-bit id in every worker "
      "process. Call once at worker startup BEFORE any aggregation work."},
-    {"move_artifacts", DFT_PYCFUNCTION(move_artifacts_fn),
+    {"move_artifacts", DFTU_PYCFUNCTION(move_artifacts_fn),
      METH_VARARGS | METH_KEYWORDS,
      "move_artifacts(artifacts, dest_dir) -> dict\n"
      "Move every populated SST in `artifacts` (as returned by "
      "`build_sst_batch`) into `dest_dir` via the C++ rename/copy helper, "
      "returning a fresh dict with the new paths. Single GIL release, no "
      "per-file Python shutil.move overhead."},
-    {"enumerate_gzip_members", DFT_PYCFUNCTION(enumerate_gzip_members_fn),
+    {"enumerate_gzip_members", DFTU_PYCFUNCTION(enumerate_gzip_members_fn),
      METH_VARARGS | METH_KEYWORDS,
      "enumerate_gzip_members(files, runtime=None) -> list[list[(c_offset, "
      "c_size)]]\n"
      "Cooperative async scan of gzip member offsets across `files`. "
      "Returns lists of (c_offset, c_size) parallel to `files`; empty for "
      "non-gzip / unreadable files."},
-    {"plan_work_units", DFT_PYCFUNCTION(plan_work_units_fn),
+    {"plan_work_units", DFTU_PYCFUNCTION(plan_work_units_fn),
      METH_VARARGS | METH_KEYWORDS,
      "plan_work_units(member_map, num_workers, target_c_size=0) "
      "-> list[list[(file_idx, member_begin, member_end, c_size)]]\n"
@@ -1160,7 +1159,7 @@ static PyMethodDef SstDistributionMethods[] = {
      "[member_begin, member_end) ranges."},
     {NULL, NULL, 0, NULL}};
 
-int init_sst_distribution(PyObject *m) {
+int dftracer::utils::python::init_sst_distribution(PyObject *m) {
     if (register_type(m, &SstArtifactRegistryType, "SstArtifactRegistry") < 0)
         return -1;
     if (PyModule_AddFunctions(m, SstDistributionMethods) < 0) return -1;

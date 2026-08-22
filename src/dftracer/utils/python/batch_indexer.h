@@ -34,6 +34,10 @@ struct IndexerObject {
 
 extern PyTypeObject IndexerType;
 
+namespace dftracer::utils::python {
+
 int init_indexer(PyObject* m);
+
+}  // namespace dftracer::utils::python
 
 #endif  // DFTRACER_UTILS_PYTHON_BATCH_INDEXER_H

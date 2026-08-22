@@ -92,7 +92,7 @@ static void ArrowBatchCapsule_dealloc(ArrowBatchCapsuleObject *self) {
 }
 
 static PyMethodDef ArrowBatchCapsule_methods[] = {
-    {"__arrow_c_array__", DFT_PYCFUNCTION(ArrowBatchCapsule_arrow_c_array),
+    {"__arrow_c_array__", DFTU_PYCFUNCTION(ArrowBatchCapsule_arrow_c_array),
      METH_VARARGS,
      "Export as Arrow C Data Interface PyCapsule pair (schema, array)"},
     {NULL}};
@@ -215,7 +215,7 @@ static PyObject *TraceReaderIterator_next(TraceReaderIteratorObject *self) {
                     try {
                         std::rethrow_exception(js->error);
                     } catch (const std::exception &e) {
-                        set_typed_py_error(e);
+                        dftracer::utils::python::set_typed_py_error(e);
                         return NULL;
                     } catch (...) {
                         PyErr_SetString(PyExc_RuntimeError,
@@ -248,7 +248,7 @@ static PyObject *TraceReaderIterator_next(TraceReaderIteratorObject *self) {
                 try {
                     std::rethrow_exception(astate->error);
                 } catch (const std::exception &e) {
-                    set_typed_py_error(e);
+                    dftracer::utils::python::set_typed_py_error(e);
                     return NULL;
                 } catch (...) {
                     PyErr_SetString(PyExc_RuntimeError,
@@ -300,7 +300,7 @@ static PyObject *TraceReaderIterator_next(TraceReaderIteratorObject *self) {
                 try {
                     std::rethrow_exception(bs->error);
                 } catch (const std::exception &e) {
-                    set_typed_py_error(e);
+                    dftracer::utils::python::set_typed_py_error(e);
                     return NULL;
                 } catch (...) {
                     PyErr_SetString(PyExc_RuntimeError,
@@ -363,7 +363,7 @@ PyTypeObject TraceReaderIteratorType = {
     0,                                       /* tp_new */
 };
 
-int init_trace_reader_iterator(PyObject *m) {
+int dftracer::utils::python::init_trace_reader_iterator(PyObject *m) {
     if (register_type(m, &TraceReaderIteratorType, "TraceReaderIterator") < 0)
         return -1;
 
