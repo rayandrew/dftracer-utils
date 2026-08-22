@@ -1,3 +1,5 @@
+:description: Reference for the dfanalyzer bridge: build high-level metrics as a View aggregation and drive index builds over a Dask cluster.
+
 DFAnalyzer Module
 =================
 
@@ -18,6 +20,13 @@ View-based HLM
 dfanalyzer HLM domain rules (ignored funcs/files, POSIX category suffixes) and
 composes the events and profile HLM as a single View aggregation. ``HLMConfig``
 carries the rule set.
+
+Type relationships
+------------------
+
+How the dfanalyzer bridge types relate:
+
+.. mermaid:: /_generated/py_dfanalyzer.mmd
 
 .. autoclass:: dftracer.utils.dfanalyzer.DFAnalyzerAggregatedTraceViewer
    :members: hlm, profile_hlm

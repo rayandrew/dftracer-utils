@@ -2,7 +2,7 @@
 
 # You can set these variables from the command line, and also
 # from the environment for the first two.
-SPHINXOPTS    ?=
+SPHINXOPTS    ?= -j auto
 SPHINXBUILD   ?= sphinx-build
 SOURCEDIR     = source
 BUILDDIR      = build
@@ -27,10 +27,13 @@ clean:
 	rm -rf $(GENDIR)
 	rm -rf $(APIDIR)
 
-# Generate Doxygen documentation (only if doxygen is installed)
+# Generate Doxygen documentation (only if doxygen is installed). Wipe the XML
+# first: a partial dir left by an interrupted run or a branch switch makes
+# Breathe abort the whole Sphinx build on the one file it cannot find.
 doxygen:
 ifdef DOXYGEN
 	@echo "Running Doxygen..."
+	@rm -rf doxygen/xml
 	@doxygen Doxyfile
 else
 	@echo "Warning: doxygen not found. Skipping C++ API documentation."

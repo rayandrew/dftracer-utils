@@ -1,3 +1,5 @@
+:description: Explore traces in the query-on-demand web UI dftracer_server serves, re-querying at the right level of detail as you pan and zoom.
+
 Trace Viewer (Web UI)
 =====================
 
@@ -27,8 +29,8 @@ From VS Code, install the `DFTracer Viewer
 extension (`source <https://github.com/rayandrew/vscode-dftracer-viewer>`_): it
 embeds the same UI, downloads a prebuilt server from `dftracer-utils-prebuilds
 <https://github.com/rayandrew/dftracer-utils-prebuilds>`_ for you, and opens a
-trace when you click a ``.pfw`` / ``.pfw.gz`` file. It also works over
-Remote-SSH, running the server on the remote host.
+trace when you click a ``.pfw.gz`` file. It also works over Remote-SSH,
+running the server on the remote host.
 
 The timeline
 ------------

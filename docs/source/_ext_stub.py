@@ -888,13 +888,75 @@ def install_extension_stub() -> None:
         `(file_idx, member_begin, member_end, c_size)`."""
         return []
 
+    class _Series(_BaseNative):
+        """Native columnar Series handle (SIMD ops + Arrow C Data Interface).
+
+        The Python :class:`dftracer.utils.Series` wrapper forwards every native
+        op to this handle; the ops are documented on the wrapper.
+        """
+
+        length = 0
+
+        def __len__(self) -> int:
+            return 0
+
+        def __arrow_c_array__(self, requested_schema: object = None) -> tuple[object, object]:
+            return (None, None)
+
+    class _DataFrame(_BaseNative):
+        """Native columnar DataFrame handle (a set of named :class:`_Series`).
+
+        The Python :class:`dftracer.utils.DataFrame` wrapper forwards to it.
+        """
+
+        num_rows = 0
+        num_columns = 0
+
+        def column_names(self) -> list[str]:
+            return []
+
+        def __arrow_c_stream__(self, requested_schema: object = None) -> object:
+            return None
+
+    def _series_from_arrow(array: object) -> "_Series":
+        """Import a pyarrow Array into a native Series (zero-copy)."""
+        return _Series()
+
+    def _series_from_numpy(array: object) -> "_Series":
+        """Import a 1-D numpy array into a native Series, borrowing its buffer."""
+        return _Series()
+
+    def _dataframe_from_arrow(table: object) -> "_DataFrame":
+        """Import a pyarrow Table into a native DataFrame (zero-copy)."""
+        return _DataFrame()
+
+    def vec_eval(ast: object, columns: object) -> "_Series":
+        """Compile and evaluate one column expression on the SIMD engine."""
+        return _Series()
+
+    def vec_eval_many(asts: object, columns: object) -> list:
+        """Compile several column expressions into one CSE'd pass; return one
+        Series per root."""
+        return []
+
+    def jit_run_op(so_path: str, in_bytes: bytes, out_size: int) -> bytes:
+        """Run a compiled jit_op ``.so`` over ``in_bytes`` on a standalone
+        compose host, returning ``out_size`` bytes."""
+        return b""
+
+    def memory_budget_advice(required_bytes: int, available_bytes: int = 0) -> dict:
+        """Whether an aggregated workload fits in process, with advice if not."""
+        return {}
+
+    NUM_SHARDS = 0
+
     _class_symbols = [
         "_ArrowBatchCapsule",
         "_ArrowBatchStream",
+        "_DataFrame",
+        "_Series",
         "AggregatedTraceViewer",
-        "AggregatorUtility",
         "CheckpointIndexer",
-        "ComparatorUtility",
         "DFTUtilsAggregationError",
         "DFTUtilsCompressionError",
         "DFTUtilsError",
@@ -910,19 +972,23 @@ def install_extension_stub() -> None:
         "Indexer",
         "IndexerCheckpoint",
         "JsonDictValue",
-        "MetadataCollectorUtility",
         "Runtime",
         "SstArtifactRegistry",
         "TaskHandle",
         "TraceViewer",
     ]
     _function_symbols = [
+        "_dataframe_from_arrow",
+        "_series_from_arrow",
+        "_series_from_numpy",
         "build_sst_batch",
         "peek_default_runtime",
         "enable_aggregation_deterministic_ids",
         "enumerate_gzip_members",
         "get_default_runtime",
         "get_log_level",
+        "jit_run_op",
+        "memory_budget_advice",
         "move_artifacts",
         "plan_lpt_partition",
         "plan_work_units",
@@ -931,6 +997,8 @@ def install_extension_stub() -> None:
         "set_default_runtime",
         "set_log_color",
         "set_log_level",
+        "vec_eval",
+        "vec_eval_many",
     ]
 
     _local = locals()
@@ -943,4 +1011,28 @@ def install_extension_stub() -> None:
         getattr(ext, _name).__module__ = ext_name
 
     ext.__all__ = sorted(_class_symbols + _function_symbols)
+
+    # Module constants accessed by name.
+    ext.NUM_SHARDS = 0
+
+    # Fallback: any other native symbol (the _Native*/_TraceViewer handles, the
+    # arrow ops _join/_window/..., future additions) resolves to a permissive
+    # stub class so `from ..._ext import X`, `_ext.X`, and isinstance all work
+    # without enumerating every symbol here.
+    _generic_stubs: dict = {}
+
+    def _module_getattr(name: str) -> object:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        stub = _generic_stubs.get(name)
+        if stub is None:
+            stub = type(
+                name,
+                (_BaseNative,),
+                {"__module__": ext_name, "__doc__": "Native extension stub."},
+            )
+            _generic_stubs[name] = stub
+        return stub
+
+    ext.__getattr__ = _module_getattr  # type: ignore[attr-defined]
     sys.modules[ext_name] = ext

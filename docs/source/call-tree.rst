@@ -1,3 +1,5 @@
+:description: Build hierarchical call trees from DFTracer traces: reconstruct parent-child relationships, get statistics, and serialize to binary or JSON.
+
 Call Tree Utility
 =================
 
@@ -12,7 +14,7 @@ Overview
 
 The Call Tree utility is designed to perform the following tasks:
 
-- Parse plain text or gzipped DFTracer trace files (``.pfw``, ``.pfw.gz``) and extract function call information
+- Parse gzipped DFTracer trace files (``.pfw.gz``) and extract function call information
 - Build hierarchical call trees showing parent-child relationships between function calls
 - Support distributed processing using MPI for handling large-scale trace datasets
 - Serialize call trees in multiple formats (binary, JSON/Chrome Tracing)
@@ -21,7 +23,7 @@ The Call Tree utility is designed to perform the following tasks:
 .. mermaid::
 
    graph LR
-       Input["Trace Files<br/>(.pfw, .pfw.gz)"] --> Parse["Parse Events"]
+       Input["Trace Files<br/>(.pfw.gz)"] --> Parse["Parse Events"]
        Parse --> Build["Build Call Tree"]
        Build --> Tree["CallTree"]
        Tree --> Stats["Statistics<br/>(CallTreeStats)"]
@@ -56,7 +58,8 @@ Types
        size_t num_levels;
        size_t num_leaf_nodes;
        size_t num_processes;
-       int max_depth;
+       int max_depth;             // alias for num_levels - 1
+       size_t unique_processes;   // alias for num_processes
        std::vector<double> avg_time_per_level_us;
        std::vector<size_t> nodes_per_level;
    };
@@ -136,12 +139,10 @@ CallTree
 Serialization
 -------------
 
-Serialization moved to coroutine-based ``save_binary`` / ``save_arrow``
-free functions in ``dftracer/utils/call_tree/mpi/serializable.h``. The
-legacy ``CallTree::save_to_file`` / ``save_to_json`` / ``load_from_file``
-methods have been removed; the API now exposes
-``CallTree::internal_tree()`` for direct access to the underlying
-``internal::CallTree`` consumed by the save/load coroutines.
+Serialization uses the coroutine-based ``save_binary`` / ``save_arrow`` free
+functions in ``dftracer/utils/call_tree/mpi/serializable.h``, which consume
+``CallTree::internal_tree()`` (direct access to the underlying
+``internal::CallTree``).
 
 **Save to binary format:**
 
@@ -202,15 +203,19 @@ Both loaders are coroutines that return a fresh ``internal::CallTree``:
    auto task = make_task([](CoroScope& scope) -> coro::CoroTask<void> {
        auto loaded = co_await load_binary(&scope, "output.calltree");
        // or: auto loaded = co_await load_arrow(&scope, "output.arrow");
-       printf("Loaded tree: %zu nodes\n", loaded->num_nodes());
+       printf("Loaded tree: %zu process graphs\n", loaded->size());
        co_return;
    }, "load");
 
-**Save to text file (still available on the high-level API):**
+**Text output:**
+
+There is no direct to-file text export on ``CallTree``; ``print_depth_first``
+writes to stdout only, so redirect the process output to capture it to a
+file:
 
 .. code-block:: cpp
 
-   tree.print_depth_first_to_file("output.txt", 5);  // Max depth 5
+   tree.print_depth_first(5);  // Max depth 5, written to stdout
 
 Output Formats
 --------------

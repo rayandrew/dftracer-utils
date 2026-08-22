@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="40 76 396 452" role="img" aria-label="DFTracer Utils">
+  <g fill="none" stroke="#0a1626" stroke-width="7" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M 367.7,136.2 A 200,200 0 0 0 71.7,384.5 Q 54,404 70,428 Q 108,400 144.2,350.7 A 120,120 0 0 1 321.8,201.7 Z" fill="#df4a3b"/>
+    <path d="M 350.5,160.8 A 170,170 0 0 0 98.9,371.8 Q 114,392 144.2,350.7 A 120,120 0 0 1 321.8,201.7 Z" fill="#b8322a" stroke="none"/>
+    <path d="M 132,344 Q 104,396 84,462 L 158,470 Q 176,422 176,382 Z" fill="#eef4f9"/>
+    <path d="M 128,296 A 128,128 0 0 1 384,296 L 380,392 L 176,383 Q 137,377 130,343 Z" fill="#eef4f9"/>
+    <path d="M 143.2,337 A 120,120 0 1 1 368.8,337 L 353.7,331.6 A 104,104 0 1 0 158.3,331.6 Z" fill="rgba(10,22,38,0.12)" stroke="none"/>
+    <path d="M 256,400 L 378,404 Q 378,462 336,504 Q 288,454 262,416 Q 252,406 256,400 Z" fill="#eef4f9"/>
+    <circle cx="240" cy="352" r="21" fill="#ffffff"/>
+    <circle cx="240" cy="352" r="8" fill="#0a1626" stroke="none"/>
+  </g>
+</svg>

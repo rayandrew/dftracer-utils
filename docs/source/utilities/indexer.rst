@@ -1,3 +1,5 @@
+:description: The indexing infrastructure that builds a .dftindex store - checkpoints, bloom filters, statistics, aggregation - from one decompression pass.
+
 Indexer
 =================
 
@@ -66,12 +68,13 @@ IndexResolverUtility
 --------------------
 
 Resolves the index directory for a given trace file, building the index on
-demand when ``auto_build_index`` is set. Lives in
-``composites/dft/indexing/`` because it depends on the DFT visitor set.
+demand when ``auto_build_index`` is set. Lives under ``trace/indexing/``
+(namespace ``dftracer::utils::trace::indexing``) because it depends on the
+DFT aggregation config.
 
 .. code-block:: cpp
 
-   #include <dftracer/utils/utilities/composites/dft/indexing/index_resolver_utility.h>
+   #include <dftracer/utils/trace/indexing/index_resolver_utility.h>
 
 IndexDatabase
 -------------
@@ -98,7 +101,7 @@ additive, idempotent schema across column families.
 TraceReader
 -----------
 
-Unified reader for all trace file formats. Auto-selects between sequential decompression and indexed random access based on ``.idx`` presence. Supports gzip and plain text files.
+Unified reader for gzip-compressed trace files (``.pfw.gz``). Auto-selects between sequential decompression and indexed random access based on ``.dftindex`` presence.
 
 Two methods cover all reading modes:
 
@@ -167,7 +170,7 @@ Two methods cover all reading modes:
 IndexVisitor
 ------------
 
-Interface for processing decompressed lines during index building. Implementations receive each line and its checkpoint index.
+Interface for processing decompressed chunks during index building. Implementations receive each chunk (a batch of lines) and its checkpoint index.
 
 .. code-block:: cpp
 
@@ -177,25 +180,31 @@ Interface for processing decompressed lines during index building. Implementatio
    public:
        virtual ~IndexVisitor() = default;
        virtual void begin(std::size_t num_checkpoints) = 0;
-       virtual void on_checkpoint(std::size_t checkpoint_idx) = 0;
-       virtual void on_line(std::string_view line,
-                            std::size_t checkpoint_idx) = 0;
-       virtual void finalize(IndexDatabase& db, int file_id) = 0;
+       virtual coro::CoroTask<void> on_checkpoint(std::size_t checkpoint_idx) = 0;
+       virtual coro::CoroTask<void> on_chunk(const char* data, std::size_t len,
+                                             std::size_t checkpoint_idx) = 0;
+       virtual void finalize(IndexDatabaseWriterContext& writer, int file_id) = 0;
    };
 
-Built-in event visitors live in ``composites/dft/visitors/`` (they extend
-``DftEventVisitor`` and are wrapped by ``DftEventDispatcher``, which
-implements ``IndexVisitor``):
-
-- **BloomVisitor** (``composites/dft/visitors/bloom_visitor.h``) - parses
-  JSON events, populates bloom filters and chunk statistics
-- **AggregationVisitor** (``composites/dft/aggregators/aggregation_visitor.h``)
-  - emits per-chunk aggregation and system-metric merge operands
+Index building itself no longer goes through public ``IndexVisitor``
+subclasses. Bloom filters and chunk statistics are populated by the
+internal fold-based scan core: ``BloomCore``
+(:cpp:class:`dftracer::utils::trace::visitors::BloomCore`, in
+``trace/visitors/bloom_core.h``) is a stateless per-chunk harvest/persist
+core driven from the shared POD batch scan by an internal ``BloomFold``,
+and aggregation merge operands are produced the same way by an internal
+``AggregationFold``. Both fold drivers live under ``src/`` and are not
+public API. ``IndexVisitor`` remains the extension point for
+line-callback-style consumers of the checkpoint scan (for example the
+index-to-view and sink-writer drivers), but there are no built-in visitor
+classes to subclass directly.
 
 Low-level IndexerFactory
 ------------------------
 
-Creates checkpoint indexers with automatic format detection (GZIP vs TAR.GZ). Used internally by the index build pipeline.
+Creates checkpoint indexers with automatic format detection (currently
+GZIP only; an unrecognized format returns ``nullptr``). Used internally by
+the index build pipeline.
 
 .. code-block:: cpp
 
@@ -203,9 +212,11 @@ Creates checkpoint indexers with automatic format detection (GZIP vs TAR.GZ). Us
 
    using namespace dftracer::utils::utilities::indexer::internal;
 
+   // Passing an empty index_path auto-generates a .dftindex root next to
+   // the input file.
    auto indexer = IndexerFactory::create(
        "trace.pfw.gz",     // Input file
-       "trace.pfw.gz.idx", // Output index path
+       "",                 // Output index path (empty = auto-generate)
        32 * 1024 * 1024,   // Checkpoint size (32MB)
        true                // Force rebuild
    );
@@ -213,73 +224,59 @@ Creates checkpoint indexers with automatic format detection (GZIP vs TAR.GZ). Us
    co_await indexer->build_async();
 
    std::size_t num_lines = indexer->get_num_lines();
-   auto checkpoints = indexer->get_checkpoints();
+   auto members = indexer->get_members();  // std::vector<GzipMemberRecord>
 
 Python API
 ----------
 
 **Indexer:**
 
+``Indexer`` takes ``directory`` (scanned for trace files) or an explicit
+``files`` list; at least one must be given. ``ensure_indexed()`` resolves
+which files need work and builds them (checkpoint + bloom tiers by default).
+
 .. code-block:: python
 
    from dftracer.utils import Indexer
 
-   # Checkpoint-only build
-   with Indexer("trace.pfw.gz") as indexer:
+   # Checkpoint + bloom build over an explicit file list
+   with Indexer(files=["trace.pfw.gz"]) as indexer:
        indexer.build()
-       print(f"Lines: {indexer.get_num_lines()}")
 
-   # Single-pass build with bloom
-   with Indexer("trace.pfw.gz", build_bloom=True) as indexer:
+   # Resolve, then build only if needed
+   with Indexer(files=["trace.pfw.gz"], build_bloom=True) as indexer:
+       status = indexer.ensure_indexed()
+       print(status.ready, status.needs_work)
+
+   # Single-file checkpoint-level details (lines, max bytes, members)
+   with Indexer(files=["trace.pfw.gz"]) as indexer:
        indexer.build()
-       assert indexer.has_bloom
-
-   # Incremental: add bloom to existing index
-   with Indexer("trace.pfw.gz", build_bloom=True) as indexer:
-       indexer.build()  # reuses checkpoints, adds bloom only
-
-   # Wrapper cleanup only; the shared .dftindex store remains available
-   indexer = Indexer("trace.pfw.gz")
-   indexer.build()
-   indexer.close()
+       ckpt = indexer.get_checkpoint_indexer("trace.pfw.gz")
+       print(f"Lines: {ckpt.get_num_lines()}")
 
    # With explicit Runtime for thread pool control
    from dftracer.utils import Runtime
 
    with Runtime(threads=8) as rt:
-       indexer = Indexer("trace.pfw.gz", build_bloom=True, runtime=rt)
-       indexer.build()  # uses rt's thread pool
+       with Indexer(files=["trace.pfw.gz"], build_bloom=True, runtime=rt) as indexer:
+           indexer.build()  # uses rt's thread pool
 
-       # TraceReader can share the same Runtime
-       reader = TraceReader("trace.pfw.gz", runtime=rt)
-       for line in reader.iter_lines():
-           process(line)
+**TraceViewer:**
 
-**TraceReader:**
+The Python bindings read trace data through ``TraceViewer`` (a lazy,
+Arrow-native builder over the index), not through a Python ``TraceReader``
+- ``TraceReader`` is a C++-only class (see above).
 
 .. code-block:: python
 
-   from dftracer.utils import TraceReader
+   from dftracer.utils import TraceViewer
 
-   # Auto-selects sequential vs indexed reading
-   reader = TraceReader("trace.pfw.gz")
-   lines = reader.read_lines()
-
-   # Line range
-   partial = reader.read_lines(start_line=100, end_line=200)
-
-   # Properties
-   print(reader.has_index)    # True if .dftindex exists
-   print(reader.num_lines)    # precise line count
-
-   # Context manager
-   with TraceReader("trace.pfw.gz") as reader:
-       for line in reader.read_lines():
-           event = json.loads(line)
+   # files is a path, list of paths, or a directory (scanned recursively)
+   tv = TraceViewer(["trace.pfw.gz"])
+   df = tv.filter("name == 'read'").collect()
 
 See Also
 --------
 
-- :doc:`/cli` - Command-line tools (``dftracer_index``, ``dftracer_reader``)
-- :doc:`composites` - Bloom filter and chunk indexing composites
-- :doc:`/cpp_api/dft_indexing` - C++ API reference for indexing classes
+- :doc:`/cli` - Command-line tools (``dftracer_index``)
+- :doc:`/cpp_api/indexer` - C++ API reference for indexing classes

@@ -1,3 +1,5 @@
+:description: Set up a dftracer-utils development environment: clone, install dev dependencies, and build the C++ components with the CMake presets.
+
 Developer's Guide
 =================
 
@@ -25,9 +27,8 @@ Development Setup
 
    .. code-block:: bash
 
-      mkdir build && cd build
-      cmake ..
-      make
+      cmake --preset dev
+      cmake --build --preset dev
 
 Running Tests
 -------------
@@ -37,15 +38,16 @@ Python Tests
 
 .. code-block:: bash
 
-   pytest tests/
+   make test-py
 
 C++ Tests
 ~~~~~~~~~
 
 .. code-block:: bash
 
-   cd build
-   ctest
+   cmake --preset tests
+   cmake --build --preset tests
+   ctest --preset tests --output-on-failure
 
 Code Coverage
 -------------
@@ -54,7 +56,7 @@ To run tests with coverage:
 
 .. code-block:: bash
 
-   ./coverage.sh
+   make coverage
 
 Building Documentation
 ----------------------
@@ -113,7 +115,7 @@ Conventions beyond formatting (checked in review):
 - **C++20**, no compiler extensions. Use ``#ifndef`` header guards, not
   ``#pragma once``.
 - **Namespaces mirror directories** (``dftracer::utils``,
-  ``dftracer::utils::utilities``, ``...::behaviors``, ``...::tags``).
+  ``dftracer::utils::utilities``, ``...::internal``).
 - **Constants** are ``UPPER_SNAKE_CASE`` (not ``kCamelCase``); keep
   module-specific constants with their module, not everything in
   ``common/constants.h``.
@@ -154,7 +156,7 @@ All levels including Trace are compiled in by default; build with
 ``-DDFTRACER_UTILS_LOGGER_LEVEL_TRACE=OFF`` to strip every Trace-level construct
 (the scope tracer and coroutine auto-tracing) for a minimal build. Set the
 runtime level without a rebuild via ``DFTRACER_UTILS_LOG_LEVEL`` (see
-:doc:`installation`), and control color with ``ColorMode`` / ``NO_COLOR`` /
+:doc:`getting-started/installation`), and control color with ``ColorMode`` / ``NO_COLOR`` /
 ``FORCE_COLOR``.
 
 **Scope tracing.** ``DFTRACER_UTILS_TRACE_SCOPE`` logs ``-> label`` on entry and
@@ -417,15 +419,15 @@ For hot loops, reuse a single ``HasherUtility`` instance with ``reset()``:
     for (const auto& event : events) {
         hasher.reset();  // Clear state before each hash
         hasher.update(event.data);
-        auto hash = hasher.finalize();
+        auto hash = hasher.get_hash();
         // ... use hash ...
     }
-    
+
     // WRONG: allocating per-event is expensive
     // for (const auto& event : events) {
     //     HasherUtility temp_hasher;  // BAD!
     //     temp_hasher.update(event.data);
-    //     auto hash = temp_hasher.finalize();
+    //     auto hash = temp_hasher.get_hash();
     // }
 
 Anti-Patterns to Avoid
@@ -460,9 +462,9 @@ Never store it across the parser's or the input buffer's lifetime.
         // data owns its copy; safe to use after the parser is destroyed
     }
 
-**Instantiating IOExecutor directly**
+**Instantiating Executor directly**
 
-``IOExecutor`` is internal to the Pipeline. Never create it directly; use ``Pipeline`` or task framework instead.
+``Executor`` (``core/pipeline/executor.h``) is internal to the Pipeline. Never create it directly; use ``Pipeline`` or the task framework instead.
 
 **Per-event SQL indexing**
 
@@ -481,9 +483,9 @@ Avoid querying the database for every event. Use bloom filters and per-chunk sta
         bloom.add_chunk_stats(chunk);
     }
 
-**Old Pipeline API**
+**Concurrency**
 
-All new binaries must use the coroutine + channel pattern. Do not use the old synchronous ``Pipeline`` API.
+Binaries use the coroutine + channel pattern for async work.
 
 **Batch materialization**
 

@@ -1,107 +1,52 @@
+:description: Index of the C++20 engine API: the coroutine runtime, columnar DataFrame, query builder, trace-analysis layer, and plugin SDK.
+
 C++ API Reference
 =================
 
-This section contains the C++ API documentation for dftracer utilities.
+The C++20 engine: the coroutine runtime, the columnar DataFrame, the query
+builder, the trace-analysis layer, and the plugin SDK. Every page renders C++
+classes and namespaces from the source through Doxygen and Breathe. For the
+stable C ABI, see :doc:`../c_api/index`.
 
-.. note::
-   The C++ API documentation is generated using Doxygen and Breathe.
-   Make sure to run Doxygen before building the documentation.
-
-.. toctree::
-    :maxdepth: 2
-    :caption: C++ Components:
-
-    core_infrastructure
-    error_handling
-    rocksdb
-    reader
-    indexer
-    pipeline
-    coro
-    task_graph
-    utilities
-    arrow
-    io
-    scheduler
-    dft_aggregators
-    dft_indexing
-    api/index
-
-Overview
---------
-
-The dftracer utilities C++ library is organized into several namespaces:
-
-- ``dftracer::utils`` - Core runtime (Pipeline, Executor, Scheduler) and data structures
-- ``dftracer::utils::utilities::reader`` - Trace file reading
-- ``dftracer::utils::utilities::indexer`` - Indexing capabilities
-- ``dftracer::utils::coro`` - C++20 coroutine primitives
-- ``dftracer::utils::task_graph`` - DAG-based task graph builder
-- ``dftracer::utils::utilities`` - Composable processing utilities
-- ``dftracer::utils::io`` - Async I/O backends (io_uring, kqueue, thread pool)
-- ``dftracer::utils::utilities::composites::dft::aggregators`` - Event aggregation pipeline
-- ``dftracer::utils::utilities::composites::dft::indexing`` - Bloom filter indexing system
-- ``dftracer::utils::utilities::common::arrow`` - Arrow data interchange (RecordBatchBuilder, IpcWriter)
-
-.. mermaid::
-
-   graph TB
-       subgraph Core["dftracer::utils (Core)"]
-           Pipeline["Pipeline"]
-           Executor["Executor"]
-           Scheduler["Scheduler"]
-           Watchdog["Watchdog"]
-           TimerService["TimerService"]
-       end
-
-       subgraph Coro["dftracer::utils::coro"]
-           CoroTask["CoroTask&lt;T&gt;"]
-           Channel["Channel&lt;T&gt;"]
-           Generator["Generator&lt;T&gt;"]
-           CoroScope["CoroScope"]
-       end
-
-       subgraph IO["dftracer::utils::io"]
-           IoBackend["IoBackend"]
-           IoAwaitable["IoAwaitable"]
-       end
-
-       subgraph Utilities["dftracer::utils::utilities"]
-           Reader["Reader"]
-           Indexer["Indexer"]
-           Compression["Compression"]
-           Hash["Hash"]
-           FileIO["FileIO"]
-           Text["Text"]
-           Filesystem["Filesystem"]
-           Statistics["Statistics"]
-           Arrow["Arrow"]
-       end
-
-       subgraph DFT["dftracer::utils::composites::dft"]
-           Aggregators["Aggregators"]
-           Indexing["Indexing"]
-           Views["Views"]
-           CallTree["Call Tree"]
-       end
-
-       subgraph TaskGraph["dftracer::utils::task_graph"]
-           TG["TaskGraph"]
-           TGrp["TaskGroup"]
-       end
-
-       TG --> Pipeline
-       Pipeline --> Executor
-       Pipeline --> Scheduler
-       Executor --> IoBackend
-       Executor --> CoroTask
-       Watchdog --> Executor
-       TimerService --> Executor
-       DFT --> Utilities
-       Aggregators --> Channel
-       Indexing --> Channel
-
-Main Classes
+Architecture
 ------------
 
-See the individual component pages above for detailed API documentation.
+The five layered libraries and how they build on one another. ``core`` is the
+foundation; each arrow points to the library built on top, up to the top domain
+layer that composes all below it.
+
+.. mermaid:: /_generated/architecture.mmd
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Engine
+
+   runtime
+   coro
+   io
+   task_graph
+   rocksdb
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Data
+
+   dataframe
+   query
+   arrow
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Traces
+
+   reader
+   indexer
+   trace
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Extending and serving
+
+   plugins
+   server
+   utilities
