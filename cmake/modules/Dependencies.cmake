@@ -96,6 +96,17 @@ function(need_unordered_dense)
       FORCE
       YES)
   endif()
+
+  # Public dependency: our installed headers include <ankerl/unordered_dense.h>,
+  # so a consumer (or a plugin that reaches the parser path) building against the
+  # install prefix needs it there. The upstream UNORDERED_DENSE_INSTALL export
+  # does not land in our prefix, so install the single header explicitly, as
+  # simdjson and concurrentqueue are, matching the $<INSTALL_INTERFACE> dir.
+  if(DEFINED unordered_dense_SOURCE_DIR)
+    install(
+      FILES ${unordered_dense_SOURCE_DIR}/include/ankerl/unordered_dense.h
+      DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ankerl)
+  endif()
 endfunction()
 
 function(link_unordered_dense TARGET_NAME)
@@ -197,6 +208,63 @@ function(link_tl_expected TARGET_NAME)
       FATAL_ERROR
         "link_tl_expected: No tl::expected found! Call need_tl_expected() first."
     )
+  endif()
+endfunction()
+
+# ==============================================================================
+# pfr - non-Boost PFR: compile-time reflection of aggregates (plugin codegen)
+# ==============================================================================
+
+function(need_pfr)
+  if(NOT pfr_ADDED)
+    cpmaddpackage(
+      NAME
+      pfr
+      GITHUB_REPOSITORY
+      apolukhin/pfr_non_boost
+      VERSION
+      2.3.2
+      GIT_TAG
+      "2.3.2"
+      DOWNLOAD_ONLY
+      YES)
+  endif()
+
+  if(pfr_ADDED)
+    if(NOT TARGET pfr::pfr)
+      add_library(pfr INTERFACE)
+      # SYSTEM: pfr is a vendored header-only dep; keep its own warnings
+      # (e.g. -Wshadow in core_name20) out of our build.
+      target_include_directories(
+        pfr SYSTEM INTERFACE $<BUILD_INTERFACE:${pfr_SOURCE_DIR}/include>
+                             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+      add_library(pfr::pfr ALIAS pfr)
+
+      install(
+        DIRECTORY ${pfr_SOURCE_DIR}/include/pfr/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pfr
+        FILES_MATCHING
+        PATTERN "*.hpp")
+      install(FILES ${pfr_SOURCE_DIR}/include/pfr.hpp
+              DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    endif()
+
+    dftracer_utils_ok("Added pfr (non-Boost) header-only library via CPM")
+  endif()
+endfunction()
+
+function(link_pfr TARGET_NAME)
+  if(NOT TARGET_NAME)
+    message(FATAL_ERROR "link_pfr: TARGET_NAME is required")
+  endif()
+  if(NOT TARGET ${TARGET_NAME})
+    message(FATAL_ERROR "link_pfr: Target '${TARGET_NAME}' does not exist")
+  endif()
+  if(TARGET pfr::pfr)
+    target_link_libraries(${TARGET_NAME} PUBLIC pfr::pfr)
+    dftracer_utils_ok("Linked ${TARGET_NAME} to pfr::pfr")
+  else()
+    message(FATAL_ERROR "link_pfr: pfr not found! Call need_pfr() first.")
   endif()
 endfunction()
 
@@ -507,6 +575,10 @@ function(need_rocksdb)
           target_compile_options(rocksdb PRIVATE -frtti)
           target_compile_options(rocksdb PUBLIC -Wno-conversion)
         endif()
+        # -Wrestrict is a gcc-12 false positive in rocksdb's std::string code.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+          target_compile_options(rocksdb PRIVATE -Wno-restrict)
+        endif()
         install(
           TARGETS rocksdb
           EXPORT rocksdbTargets
@@ -525,6 +597,10 @@ function(need_rocksdb)
         if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
           target_compile_options(rocksdb-shared PRIVATE -frtti)
           target_compile_options(rocksdb-shared PUBLIC -Wno-conversion)
+        endif()
+        # -Wrestrict is a gcc-12 false positive in rocksdb's std::string code.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+          target_compile_options(rocksdb-shared PRIVATE -Wno-restrict)
         endif()
         install(
           TARGETS rocksdb-shared
@@ -878,32 +954,58 @@ function(_try_zlib_ng OUT_VAR)
   # have properties or further aliases set on them.
   set(ZLIB_NG_TARGETS)
   if(DFTRACER_UTILS_BUILD_SHARED AND TARGET zlib-ng)
-    get_target_property(_zng_type zlib-ng TYPE)
+    # zlib-ng may be an ALIAS (compat mode) - resolve to the real target before
+    # mutating/aliasing, and guard the alias-adds against reconfigure.
+    get_target_property(_zng_shared_alias zlib-ng ALIASED_TARGET)
+    if(_zng_shared_alias)
+      set(_zng_shared ${_zng_shared_alias})
+    else()
+      set(_zng_shared zlib-ng)
+    endif()
+    get_target_property(_zng_type ${_zng_shared} TYPE)
     if(_zng_type STREQUAL "SHARED_LIBRARY")
       set_target_properties(
-        zlib-ng PROPERTIES OUTPUT_NAME dftracer_zlib LIBRARY_OUTPUT_DIRECTORY
-                                                     ${CMAKE_BINARY_DIR}/lib)
+        ${_zng_shared} PROPERTIES OUTPUT_NAME dftracer_zlib
+                                  LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
       target_include_directories(
-        zlib-ng PUBLIC $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-      add_library(dftracer_zlib_shared ALIAS zlib-ng)
-      add_library(dftracer::zlib ALIAS zlib-ng)
-      list(APPEND ZLIB_NG_TARGETS zlib-ng)
+        ${_zng_shared} PUBLIC $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+      if(NOT TARGET dftracer_zlib_shared)
+        add_library(dftracer_zlib_shared ALIAS ${_zng_shared})
+      endif()
+      if(NOT TARGET dftracer::zlib)
+        add_library(dftracer::zlib ALIAS ${_zng_shared})
+      endif()
+      list(APPEND ZLIB_NG_TARGETS ${_zng_shared})
       dftracer_utils_ok("Using zlib-ng (compat, shared) as dftracer_zlib")
     endif()
   endif()
 
   if(DFTRACER_UTILS_BUILD_STATIC AND TARGET zlib-ng-static)
+    # In ZLIB_COMPAT mode zlib-ng-static can itself be an ALIAS (to zlibstatic);
+    # set_target_properties/target_include_directories/install all reject alias
+    # targets, so resolve to the real one. Guard the alias-adds so a reconfigure
+    # (which rebuilds the target graph) does not redefine them.
+    get_target_property(_zng_static_alias zlib-ng-static ALIASED_TARGET)
+    if(_zng_static_alias)
+      set(_zng_static ${_zng_static_alias})
+    else()
+      set(_zng_static zlib-ng-static)
+    endif()
     set_target_properties(
-      zlib-ng-static PROPERTIES OUTPUT_NAME dftracer_zlib
+      ${_zng_static} PROPERTIES OUTPUT_NAME dftracer_zlib
                                 ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
     target_include_directories(
-      zlib-ng-static PUBLIC $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-    add_library(dftracer_zlib_static ALIAS zlib-ng-static)
-    add_library(dftracer::zlibstatic ALIAS zlib-ng-static)
-    if(NOT TARGET dftracer::zlib)
-      add_library(dftracer::zlib ALIAS zlib-ng-static)
+      ${_zng_static} PUBLIC $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    if(NOT TARGET dftracer_zlib_static)
+      add_library(dftracer_zlib_static ALIAS ${_zng_static})
     endif()
-    list(APPEND ZLIB_NG_TARGETS zlib-ng-static)
+    if(NOT TARGET dftracer::zlibstatic)
+      add_library(dftracer::zlibstatic ALIAS ${_zng_static})
+    endif()
+    if(NOT TARGET dftracer::zlib)
+      add_library(dftracer::zlib ALIAS ${_zng_static})
+    endif()
+    list(APPEND ZLIB_NG_TARGETS ${_zng_static})
     dftracer_utils_ok("Using zlib-ng (compat, static) as dftracer_zlib")
   endif()
 
@@ -925,8 +1027,10 @@ function(_try_zlib_ng OUT_VAR)
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/zlib)
 
   # Compat headers: zlib-ng generates zlib.h/zconf.h in its binary dir when
-  # ZLIB_COMPAT=ON. Fall back to source dir if generated copy is absent.
-  foreach(hdr zlib.h zconf.h)
+  # ZLIB_COMPAT=ON, and zlib_name_mangling.h (which zlib.h includes) is always
+  # generated into the binary dir. Fall back to source dir if a generated copy
+  # is absent.
+  foreach(hdr zlib.h zconf.h zlib_name_mangling.h)
     if(EXISTS "${zlib-ng_BINARY_DIR}/${hdr}")
       install(FILES "${zlib-ng_BINARY_DIR}/${hdr}"
               DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
@@ -1323,6 +1427,12 @@ function(need_zstd)
             PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
                        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
                        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+          # zstd's vendored legacy decoders trip GCC -Wmaybe-uninitialized;
+          # third-party source, so silence it on zstd's own targets only.
+          if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(${_zstd_t}
+                                   PRIVATE -Wno-maybe-uninitialized)
+          endif()
           if(DEFINED zstd_SOURCE_DIR)
             set_property(
               TARGET ${_zstd_t} APPEND PROPERTY INTERFACE_INCLUDE_DIRECTORIES
@@ -1733,6 +1843,42 @@ function(link_nanoarrow TARGET_NAME LIBRARY_TYPE)
     endif()
   endif()
 
+endfunction()
+
+# ==============================================================================
+# Highway (SIMD kernels for the vec engine); runtime-dispatched
+# ==============================================================================
+
+function(need_highway)
+  if(NOT highway_ADDED AND NOT TARGET hwy)
+    cpmaddpackage(
+      NAME
+      highway
+      GITHUB_REPOSITORY
+      google/highway
+      VERSION
+      1.4.0
+      GIT_TAG
+      1.4.0
+      OPTIONS
+      "HWY_ENABLE_TESTS OFF"
+      "HWY_ENABLE_EXAMPLES OFF"
+      "HWY_ENABLE_CONTRIB ON"
+      "HWY_ENABLE_INSTALL OFF")
+
+    if(highway_ADDED)
+      # Highway headers are third-party; treat as system to keep our strict
+      # warnings from flagging them.
+      if(TARGET hwy)
+        get_target_property(_hwy_inc hwy INTERFACE_INCLUDE_DIRECTORIES)
+        if(_hwy_inc)
+          set_target_properties(hwy PROPERTIES
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_hwy_inc}")
+        endif()
+      endif()
+      dftracer_utils_ok("Added highway ${highway_VERSION} SIMD library via CPM")
+    endif()
+  endif()
 endfunction()
 
 # ==============================================================================

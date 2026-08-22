@@ -216,6 +216,9 @@
       "name": "tests",
       "displayName": "Run Tests",
       "configurePreset": "tests",
+      "environment": {
+        "DFTRACER_UTILS_ELASTIC": "0"
+      },
       "execution": {
         "jobs": 0
       },
@@ -227,6 +230,9 @@
       "name": "coverage",
       "displayName": "Run Tests (coverage)",
       "configurePreset": "coverage",
+      "environment": {
+        "DFTRACER_UTILS_ELASTIC": "0"
+      },
       "execution": {
         "jobs": 0
       },
@@ -238,6 +244,9 @@
       "name": "asan",
       "displayName": "Run ASAN Tests",
       "configurePreset": "asan",
+      "environment": {
+        "DFTRACER_UTILS_ELASTIC": "0"
+      },
       "execution": {
         "jobs": 0
       },
@@ -250,7 +259,8 @@
       "displayName": "Run TSAN Tests",
       "configurePreset": "tsan",
       "environment": {
-        "TSAN_OPTIONS": "suppressions=${sourceDir}/tests/tsan/tsan.supp"
+        "TSAN_OPTIONS": "suppressions=${sourceDir}/tests/tsan/tsan.supp",
+        "DFTRACER_UTILS_ELASTIC": "0"
       },
       "execution": {
         "jobs": 0
@@ -263,6 +273,9 @@
       "name": "ubsan",
       "displayName": "Run UBSAN Tests",
       "configurePreset": "ubsan",
+      "environment": {
+        "DFTRACER_UTILS_ELASTIC": "0"
+      },
       "execution": {
         "jobs": 0
       },
@@ -274,6 +287,9 @@
       "name": "asan-ubsan",
       "displayName": "Run ASAN+UBSAN Tests",
       "configurePreset": "asan-ubsan",
+      "environment": {
+        "DFTRACER_UTILS_ELASTIC": "0"
+      },
       "execution": {
         "jobs": 0
       },
