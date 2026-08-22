@@ -4,7 +4,7 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <zlib.h>
@@ -24,7 +24,7 @@ extern "C" {
 size_t mb_to_b(double mb) { return static_cast<std::size_t>(mb * 1024 * 1024); }
 }  // extern "C"
 
-namespace dft_utils_test {
+namespace dftu_utils_test {
 bool build_index(const std::string& gz, const std::string& index_dir,
                  std::size_t sub_chunk_events, std::size_t checkpoint_size) {
     namespace indexer = dftracer::utils::utilities::indexer;
@@ -198,14 +198,13 @@ std::string TestEnvironment::create_test_gzip_file_impl() {
 }
 
 std::string TestEnvironment::get_index_path(const std::string& gz_file) {
-    return dftracer::utils::utilities::composites::dft::internal::
-        determine_index_path(gz_file, "");
+    return dftracer::utils::trace::internal::determine_index_path(gz_file, "");
 }
 
 std::string TestEnvironment::create_dft_test_file(int num_events) {
     static std::size_t file_counter = 0;
     std::string file_path =
-        test_dir + "/dft_trace_" + std::to_string(file_counter++) + ".trace";
+        test_dir + "/dftu_trace_" + std::to_string(file_counter++) + ".trace";
 
     std::ofstream ofs(file_path);
     if (!ofs.is_open()) {
@@ -243,7 +242,7 @@ std::string TestEnvironment::create_dft_test_file(int num_events) {
 std::string TestEnvironment::create_dft_multirun_gzip_file(
     int num_runs, std::uint64_t run_us, std::uint64_t gap_us) {
     static std::size_t multirun_counter = 0;
-    std::string plain_file = test_dir + "/dft_multirun_" +
+    std::string plain_file = test_dir + "/dftu_multirun_" +
                              std::to_string(multirun_counter++) + ".trace";
     std::ofstream ofs(plain_file);
     if (!ofs.is_open()) return "";
@@ -303,7 +302,7 @@ std::string TestEnvironment::create_dft_test_gzip_file(int num_events) {
 
     return gz_file;
 }
-}  // namespace dft_utils_test
+}  // namespace dftu_utils_test
 
 // C API implementations
 extern "C" {
@@ -315,8 +314,8 @@ test_environment_handle_t test_environment_create(void) {
 test_environment_handle_t test_environment_create_with_lines(
     std::size_t lines) {
     try {
-        auto* env = new dft_utils_test::TestEnvironment(
-            lines, dft_utils_test::Format::GZIP);
+        auto* env = new dftu_utils_test::TestEnvironment(
+            lines, dftu_utils_test::Format::GZIP);
         if (env->is_valid()) {
             return reinterpret_cast<test_environment_handle_t>(env);
         } else {
@@ -330,26 +329,27 @@ test_environment_handle_t test_environment_create_with_lines(
 
 void test_environment_destroy(test_environment_handle_t env) {
     if (env) {
-        auto* cpp_env = reinterpret_cast<dft_utils_test::TestEnvironment*>(env);
+        auto* cpp_env =
+            reinterpret_cast<dftu_utils_test::TestEnvironment*>(env);
         delete cpp_env;
     }
 }
 
 int test_environment_is_valid(test_environment_handle_t env) {
     if (!env) return 0;
-    auto* cpp_env = reinterpret_cast<dft_utils_test::TestEnvironment*>(env);
+    auto* cpp_env = reinterpret_cast<dftu_utils_test::TestEnvironment*>(env);
     return cpp_env->is_valid() ? 1 : 0;
 }
 
 const char* test_environment_get_dir(test_environment_handle_t env) {
     if (!env) return nullptr;
-    auto* cpp_env = reinterpret_cast<dft_utils_test::TestEnvironment*>(env);
+    auto* cpp_env = reinterpret_cast<dftu_utils_test::TestEnvironment*>(env);
     return cpp_env->get_dir().c_str();
 }
 
 char* test_make_unique_test_path(const char* name) {
     if (!name) return nullptr;
-    std::string path = dft_utils_test::make_unique_test_path(name).string();
+    std::string path = dftu_utils_test::make_unique_test_path(name).string();
     char* result = static_cast<char*>(malloc(path.length() + 1));
     if (result) {
         std::memcpy(result, path.c_str(), path.length() + 1);
@@ -359,7 +359,7 @@ char* test_make_unique_test_path(const char* name) {
 
 char* test_environment_create_test_gzip_file(test_environment_handle_t env) {
     if (!env) return nullptr;
-    auto* cpp_env = reinterpret_cast<dft_utils_test::TestEnvironment*>(env);
+    auto* cpp_env = reinterpret_cast<dftu_utils_test::TestEnvironment*>(env);
     std::string gz_file = cpp_env->create_test_gzip_file();
     if (gz_file.empty()) {
         return nullptr;
@@ -374,7 +374,7 @@ char* test_environment_create_test_gzip_file(test_environment_handle_t env) {
 char* test_environment_get_index_path(test_environment_handle_t env,
                                       const char* gz_file) {
     if (!env || !gz_file) return nullptr;
-    auto* cpp_env = reinterpret_cast<dft_utils_test::TestEnvironment*>(env);
+    auto* cpp_env = reinterpret_cast<dftu_utils_test::TestEnvironment*>(env);
     std::string index_path = cpp_env->get_index_path(gz_file);
     char* result = static_cast<char*>(malloc(index_path.length() + 1));
     if (result) {
@@ -386,13 +386,13 @@ char* test_environment_get_index_path(test_environment_handle_t env,
 char* test_environment_create_test_file_with_format(
     test_environment_handle_t env, test_format_t format) {
     if (!env) return nullptr;
-    auto* cpp_env = reinterpret_cast<dft_utils_test::TestEnvironment*>(env);
+    auto* cpp_env = reinterpret_cast<dftu_utils_test::TestEnvironment*>(env);
 
     (void)format;
-    dft_utils_test::Format cpp_format = dft_utils_test::Format::GZIP;
+    dftu_utils_test::Format cpp_format = dftu_utils_test::Format::GZIP;
 
     try {
-        dft_utils_test::TestEnvironment temp_env(
+        dftu_utils_test::TestEnvironment temp_env(
             cpp_env->get_dir().empty() ? 100 : 100, cpp_format);
         std::string file_path;
 
@@ -415,7 +415,7 @@ char* test_environment_create_test_file_with_format(
 int compress_file_to_gzip_c(const char* input_file, const char* output_file) {
     if (!input_file || !output_file) return 0;
     try {
-        return dft_utils_test::compress_file_to_gzip(input_file, output_file)
+        return dftu_utils_test::compress_file_to_gzip(input_file, output_file)
                    ? 1
                    : 0;
     } catch (...) {

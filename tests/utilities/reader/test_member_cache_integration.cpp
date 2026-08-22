@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -68,7 +69,7 @@ std::int64_t read_line_count(const std::string& gz, const std::string& idx) {
 TEST_SUITE("member_cache_integration") {
     TEST_CASE("cached reads match uncached, and coalesce decodes") {
         const int n = 4000;
-        auto dir = dft_utils_test::make_unique_test_path("mcache");
+        auto dir = dftu_utils_test::make_unique_test_path("mcache");
         fs::create_directories(dir);
         const std::string src = (dir / "src.pfw.gz").string();
         const std::string gz = (dir / "trace.pfw.gz").string();

@@ -37,6 +37,9 @@ set(TEST_CPP_SOURCES
     pipeline/test_pipeline.cpp
 
     pipeline/test_task_scope.cpp
+    pipeline/test_dynamic_workers.cpp
+    pipeline/test_pipeline_elasticity.cpp
+    pipeline/test_blocking_handoff.cpp
     pipeline/test_simple_scope.cpp
     pipeline/test_coro_scope.cpp
     pipeline/test_run_loop.cpp
@@ -204,6 +207,30 @@ endforeach()
 add_subdirectory(utilities)
 
 # +++++++++++++++++++++++++++++++++++++++++
+# Trace Library Tests
+# +++++++++++++++++++++++++++++++++++++++++
+
+add_subdirectory(trace)
+
+# +++++++++++++++++++++++++++++++++++++++++
+# Query Library Tests
+# +++++++++++++++++++++++++++++++++++++++++
+
+add_subdirectory(query)
+
+# +++++++++++++++++++++++++++++++++++++++++
+# DataFrame Library Tests
+# +++++++++++++++++++++++++++++++++++++++++
+
+add_subdirectory(dataframe)
+
+# +++++++++++++++++++++++++++++++++++++++++
+# Compose Contract Tests
+# +++++++++++++++++++++++++++++++++++++++++
+
+add_subdirectory(compose)
+
+# +++++++++++++++++++++++++++++++++++++++++
 # Binary Integration Tests
 # +++++++++++++++++++++++++++++++++++++++++
 
@@ -222,6 +249,7 @@ set(TEST_BINARY_SOURCES
     binaries/test_dftracer_replay.cpp
     binaries/test_dftracer_comparator.cpp
     binaries/test_dftracer_call_tree.cpp
+    binaries/test_dftracer_run.cpp
     )
 
 if(DFTRACER_UTILS_ENABLE_MPI)
@@ -316,6 +344,9 @@ foreach(test_file ${TEST_BINARY_SOURCES})
   elseif(bin_exec STREQUAL "binaries/test_dftracer_call_tree")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_CALL_TREE_PATH=$<TARGET_FILE:dftracer_call_tree>")
+  elseif(bin_exec STREQUAL "binaries/test_dftracer_run")
+    set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
+      "DFTRACER_RUN_PATH=$<TARGET_FILE:dftracer_run>;DFTRACER_EVENT_COUNTER_PLUGIN_PATH=$<TARGET_FILE:event_counter_plugin>;DFTRACER_DURATION_HISTOGRAM_PLUGIN_PATH=$<TARGET_FILE:duration_histogram_plugin>;DFTRACER_QUERY_FILTER_PLUGIN_PATH=$<TARGET_FILE:query_filter_plugin>;DFTRACER_TAG_PROVIDER_PLUGIN_PATH=$<TARGET_FILE:tag_provider_plugin>;DFTRACER_TAG_CONSUMER_PLUGIN_PATH=$<TARGET_FILE:tag_consumer_plugin>;DFTRACER_PERBATCH_PRODUCER_PLUGIN_PATH=$<TARGET_FILE:perbatch_producer_plugin>;DFTRACER_PERBATCH_CONSUMER_PLUGIN_PATH=$<TARGET_FILE:perbatch_consumer_plugin>;DFTRACER_DUR_STATS_PRODUCER_PLUGIN_PATH=$<TARGET_FILE:dur_stats_producer_plugin>;DFTRACER_DUR_STATS_CONSUMER_PLUGIN_PATH=$<TARGET_FILE:dur_stats_consumer_plugin>")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_call_tree_mpi")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_CALL_TREE_PATH=$<TARGET_FILE:dftracer_call_tree>;DFTRACER_CALL_TREE_MPI_PATH=$<TARGET_FILE:dftracer_call_tree_mpi>;MPIEXEC_EXECUTABLE=${MPIEXEC_EXECUTABLE};ASAN_OPTIONS=detect_leaks=0;LSAN_OPTIONS=detect_leaks=0")

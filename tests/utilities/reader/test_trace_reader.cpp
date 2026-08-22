@@ -1,7 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
 #include <dftracer/utils/utilities/reader/trace_reader.h>
@@ -17,8 +17,8 @@
 using namespace dftracer::utils::utilities::reader;
 using namespace dftracer::utils::utilities::indexer::internal;
 using namespace dftracer::utils::coro;
-using namespace dftracer::utils::utilities::composites::dft::internal;
-using namespace dft_utils_test;
+using namespace dftracer::utils::trace::internal;
+using namespace dftu_utils_test;
 
 namespace {
 
@@ -112,7 +112,7 @@ std::string gzip_fixture(const std::string& plain_path) {
     fs::create_directories(dir);
     const std::string gz_path =
         (dir / (fs::path(plain_path).filename().string() + ".gz")).string();
-    REQUIRE(dft_utils_test::compress_file_to_gzip(plain_path, gz_path));
+    REQUIRE(dftu_utils_test::compress_file_to_gzip(plain_path, gz_path));
     fs::remove(plain_path);
     return gz_path;
 }
@@ -580,10 +580,10 @@ TEST_SUITE("TraceReader") {
             }
         }
         std::string gz = pfw + ".gz";
-        REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
+        REQUIRE(dftu_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
-        REQUIRE(dft_utils_test::build_index(gz));
+        REQUIRE(dftu_utils_test::build_index(gz));
 
         TraceReader reader({.file_path = gz});
         REQUIRE(reader.has_index());
@@ -621,10 +621,10 @@ TEST_SUITE("TraceReader") {
             }
         }
         std::string gz = pfw + ".gz";
-        REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
+        REQUIRE(dftu_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
-        REQUIRE(dft_utils_test::build_index(gz));
+        REQUIRE(dftu_utils_test::build_index(gz));
 
         TraceReader reader({.file_path = gz});
         REQUIRE(reader.has_index());
@@ -675,11 +675,11 @@ TEST_SUITE("TraceReader") {
             }
         }
         std::string gz = pfw + ".gz";
-        REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
+        REQUIRE(dftu_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
-        REQUIRE(dft_utils_test::build_index(gz, "", 0,
-                                            /*checkpoint_size=*/32 * 1024));
+        REQUIRE(dftu_utils_test::build_index(gz, "", 0,
+                                             /*checkpoint_size=*/32 * 1024));
 
         TraceReader reader({.file_path = gz, .checkpoint_size = 32 * 1024});
         REQUIRE(reader.has_index());
@@ -830,11 +830,11 @@ TEST_SUITE("TraceReader::read_json") {
             }
         }
         std::string gz = pfw + ".gz";
-        REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
+        REQUIRE(dftu_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
-        REQUIRE(dft_utils_test::build_index(gz, "", 0,
-                                            /*checkpoint_size=*/32 * 1024));
+        REQUIRE(dftu_utils_test::build_index(gz, "", 0,
+                                             /*checkpoint_size=*/32 * 1024));
 
         TraceReader reader({.file_path = gz, .checkpoint_size = 32 * 1024});
         REQUIRE(reader.has_index());

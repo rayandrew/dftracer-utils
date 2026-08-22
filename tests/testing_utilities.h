@@ -109,7 +109,7 @@ char* test_make_unique_test_path(const char* name);
 #ifdef __cplusplus
 }
 
-namespace dft_utils_test {
+namespace dftu_utils_test {
 
 enum class Format { GZIP = 0 };
 
@@ -311,7 +311,7 @@ struct MpiTestEnv {
     }
 };
 #endif  // DFTRACER_UTILS_MPI_ENABLED
-}  // namespace dft_utils_test
+}  // namespace dftu_utils_test
 #endif
 
 #endif  // DFTRACER_UTILS_TESTS_TESTING_UTILITIES_H

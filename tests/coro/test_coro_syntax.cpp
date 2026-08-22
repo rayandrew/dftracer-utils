@@ -699,7 +699,7 @@ TEST_CASE("CoroTask - operator| fallback on success") {
             auto fallback = []() -> CoroTask<int> { co_return 0; };
 
             // Primary succeeds, fallback not executed
-            int result = co_await (primary() | fallback());
+            int result = co_await primary().or_else(fallback());
             co_return result;
         },
         "OrSuccessTest");
@@ -726,7 +726,7 @@ TEST_CASE("CoroTask - operator| fallback on failure") {
             auto fallback = []() -> CoroTask<int> { co_return 42; };
 
             // Primary fails, fallback executes
-            int result = co_await (primary() | fallback());
+            int result = co_await primary().or_else(fallback());
             co_return result;
         },
         "OrFallbackTest");
@@ -759,7 +759,7 @@ TEST_CASE("CoroTask<void> - operator| fallback") {
             };
 
             // Primary fails, fallback executes
-            co_await (primary() | fallback());
+            co_await primary().or_else(fallback());
         },
         "VoidOrTest");
 
@@ -790,7 +790,7 @@ TEST_CASE("CoroTask - Combining & and | operators") {
 
             // Combine: compute1 AND (compute2_primary OR compute2_fallback)
             auto [val1, val2] = co_await (
-                compute1() & (compute2_primary() | compute2_fallback()));
+                compute1() & compute2_primary().or_else(compute2_fallback()));
 
             co_return val1 + val2;
         },

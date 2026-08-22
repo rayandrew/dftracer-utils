@@ -13,7 +13,7 @@
 using namespace dftracer::utils::utilities::reader;
 using namespace dftracer::utils::utilities::trace_gen;
 using namespace dftracer::utils::coro;
-using namespace dft_utils_test;
+using namespace dftu_utils_test;
 
 namespace {
 

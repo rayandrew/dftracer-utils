@@ -10,7 +10,7 @@ import gzip
 
 import pytest
 
-import dftracer.utils as dft_utils
+import dftracer.utils as dftu_utils
 
 try:
     import dask  # noqa: F401
@@ -42,7 +42,7 @@ def test_typed_read_to_ipc_is_the_ipc_form_of_view_typed_frames(tmp_path):
     for p in files:
         _make_trace(p)
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=files,
         index_dir=idx,
         require_aggregation=AggregationConfig(time_interval_ms=100000),
@@ -76,13 +76,13 @@ def test_view_agg_tier_matches_raw_scan(tmp_path):
     for p in files:
         _make_trace(p)
     agg, noagg = str(tmp_path / "agg"), str(tmp_path / "noagg")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=files,
         index_dir=agg,
         require_aggregation=AggregationConfig(time_interval_ms=100000),
     ) as ix:
         ix.ensure_indexed()
-    with dft_utils.Indexer(files=files, index_dir=noagg) as ix:
+    with dftu_utils.Indexer(files=files, index_dir=noagg) as ix:
         ix.ensure_indexed()
 
     keys = ["name", "io_cat", "pid", "tid"]
@@ -124,13 +124,13 @@ def test_view_agg_tier_skew_kurt_pct_match_raw_scan(tmp_path):
     for p in files:
         _make_trace(p)
     agg, noagg = str(tmp_path / "agg"), str(tmp_path / "noagg")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=files,
         index_dir=agg,
         require_aggregation=AggregationConfig(time_interval_ms=100000, compute_percentiles=True),
     ) as ix:
         ix.ensure_indexed()
-    with dft_utils.Indexer(files=files, index_dir=noagg) as ix:
+    with dftu_utils.Indexer(files=files, index_dir=noagg) as ix:
         ix.ensure_indexed()
 
     metrics = ["skew:dur", "kurt:dur", "p50:dur", "p90:dur"]
@@ -163,13 +163,13 @@ def test_view_histogram_tier_matches_raw_scan(tmp_path):
     for p in files:
         _make_trace(p)
     agg, noagg = str(tmp_path / "agg"), str(tmp_path / "noagg")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=files,
         index_dir=agg,
         require_aggregation=AggregationConfig(time_interval_ms=100000, compute_percentiles=True),
     ) as ix:
         ix.ensure_indexed()
-    with dft_utils.Indexer(files=files, index_dir=noagg) as ix:
+    with dftu_utils.Indexer(files=files, index_dir=noagg) as ix:
         ix.ensure_indexed()
 
     def collect(idx):
@@ -215,7 +215,7 @@ def test_collect_typed_one_pass_returns_all_record_families(tmp_path):
                 '"ts":%d,"args":{"user_pct":%d}}\n' % (3000 + i, 40 + i)
             )
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=[p],
         index_dir=idx,
         require_aggregation=AggregationConfig(time_interval_ms=100000),
@@ -255,7 +255,7 @@ def test_collect_typed_cat_filter_matches_collect(tmp_path):
                 '"ts":%d,"dur":%d}\n' % (cat, 1000 + i, 10 + i)
             )
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=[p],
         index_dir=idx,
         require_aggregation=AggregationConfig(time_interval_ms=100000),
@@ -302,7 +302,7 @@ def test_view_typed_frames_maps_all_three_to_dfanalyzer_schema(tmp_path):
                 '"ts":%d,"args":{"user_pct":%d}}\n' % (3000 + i, 40 + i)
             )
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=[p],
         index_dir=idx,
         require_aggregation=AggregationConfig(time_interval_ms=100000),
@@ -348,7 +348,7 @@ def test_view_typed_frames_distributed_matches_single_node(tmp_path):
                 '"args":{"user_pct":%d,"hhash":"h%d"}}\n' % (3000 + i * 100, 40 + i, i % 4)
             )
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=[p],
         index_dir=idx,
         require_aggregation=AggregationConfig(time_interval_ms=100000),
@@ -396,7 +396,7 @@ def test_resolved_name_group_keys(tmp_path):
     for p, pid in zip(files, (1, 2)):
         _make_trace_with_fh(p, pid)
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(files=files, index_dir=idx) as ix:
+    with dftu_utils.Indexer(files=files, index_dir=idx) as ix:
         ix.ensure_indexed()
 
     def g(key):
@@ -423,7 +423,7 @@ def test_collect_typed_resolves_name_group_keys(tmp_path):
     for p, pid in zip(files, (1, 2)):
         _make_trace_with_fh(p, pid)
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=files,
         index_dir=idx,
         require_aggregation=AggregationConfig(time_interval_ms=100000),
@@ -451,7 +451,7 @@ def test_percentiles_from_view(tmp_path):
                 '"ts":%d,"dur":%d}\n' % (1000 + i, i + 1)
             )
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(files=[p], index_dir=idx) as ix:
+    with dftu_utils.Indexer(files=[p], index_dir=idx) as ix:
         ix.ensure_indexed()
     df = pa.table(
         TraceViewer([p], index_path=idx)
@@ -483,7 +483,7 @@ def test_skew_kurtosis_from_view(tmp_path):
                 '"ts":%d,"dur":%d}\n' % (1000 + i, v)
             )
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(files=[p], index_dir=idx) as ix:
+    with dftu_utils.Indexer(files=[p], index_dir=idx) as ix:
         ix.ensure_indexed()
     df = pa.table(
         TraceViewer([p], index_path=idx).group_by("name").agg("skew:dur", "kurt:dur").collect()
@@ -520,7 +520,7 @@ def test_view_typed_frames_folds_files_into_buckets(tmp_path):
                     % (1000 + i, 10 + k, 100 + k, k)
                 )
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=[p],
         index_dir=idx,
         require_aggregation=AggregationConfig(time_interval_ms=100000),
@@ -602,7 +602,7 @@ def test_fileless_index_serves_non_file_queries(tmp_path):
 
     keyed, fileless = str(tmp_path / "keyed"), str(tmp_path / "fileless")
     for idx, by_file in ((keyed, True), (fileless, False)):
-        with dft_utils.Indexer(
+        with dftu_utils.Indexer(
             files=[p],
             index_dir=idx,
             require_aggregation=AggregationConfig(time_interval_ms=100000, group_by_file=by_file),
@@ -631,7 +631,7 @@ def test_group_key_transforms_coarsen_without_losing_totals(tmp_path):
     p = str(tmp_path / "t.pfw.gz")
     _make_trace_with_paths(p, 1, paths)
     idx = str(tmp_path / "idx")
-    with dft_utils.Indexer(files=[p], index_dir=idx) as ix:
+    with dftu_utils.Indexer(files=[p], index_dir=idx) as ix:
         ix.ensure_indexed()
 
     def group(expr):
@@ -671,9 +671,9 @@ def test_group_key_transform_applies_on_both_read_paths(tmp_path):
     _make_trace_with_paths(p, 1, paths)
 
     scan_idx, tier_idx = str(tmp_path / "scan"), str(tmp_path / "tier")
-    with dft_utils.Indexer(files=[p], index_dir=scan_idx) as ix:
+    with dftu_utils.Indexer(files=[p], index_dir=scan_idx) as ix:
         ix.ensure_indexed()
-    with dft_utils.Indexer(
+    with dftu_utils.Indexer(
         files=[p],
         index_dir=tier_idx,
         require_aggregation=AggregationConfig(time_interval_ms=100000),

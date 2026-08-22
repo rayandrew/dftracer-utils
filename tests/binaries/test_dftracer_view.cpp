@@ -2,9 +2,9 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregator_utility.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/views/sharded_view.h>
+#include <dftracer/utils/trace/aggregators/aggregator_utility.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/views/sharded_view.h>
 #include <dftracer/utils/utilities/fileio/compress/gzip_rechunker.h>
 #include <doctest/doctest.h>
 #include <fcntl.h>
@@ -25,7 +25,7 @@
 
 namespace {
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -38,7 +38,7 @@ std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
 
 // Rechunk a single-member fixture into a multi-member trace whose members are
 // about `member_bytes` uncompressed, for exercising ingest member handling.
-std::string make_multimember_pfw_gz(dft_utils_test::TestEnvironment& env,
+std::string make_multimember_pfw_gz(dftu_utils_test::TestEnvironment& env,
                                     int num_events, std::size_t member_bytes,
                                     int id) {
     std::string single = create_pfw_gz(env, num_events, id);
@@ -125,10 +125,10 @@ std::size_t count_lines(const std::string& s) {
 
 // Create a trace in its own subdir and build an aggregated index (tier) over it
 // via the aggregator; returns the shard's .dftindex path.
-std::string build_aggregated_shard(dft_utils_test::TestEnvironment& env,
+std::string build_aggregated_shard(dftu_utils_test::TestEnvironment& env,
                                    const std::string& tag, int num_events) {
-    namespace agg = dftracer::utils::utilities::composites::dft::aggregators;
-    namespace internal = dftracer::utils::utilities::composites::dft::internal;
+    namespace agg = dftracer::utils::trace::aggregators;
+    namespace internal = dftracer::utils::trace::internal;
     std::string dir = env.get_dir() + "/" + tag;
     fs::create_directories(dir);
     std::string src = env.create_dft_test_gzip_file(num_events);
@@ -144,10 +144,8 @@ std::string build_aggregated_shard(dft_utils_test::TestEnvironment& env,
         [&](dftracer::utils::CoroScope& ctx)
             -> dftracer::utils::coro::CoroTask<void> {
             agg::AggregatorUtility u;
-            u.bind_context(ctx);
-            auto gen = u.process(input);
+            auto gen = u(ctx, input);
             while (auto batch = co_await gen.next()) (void)batch;
-            u.unbind_context();
             co_return;
         });
     rt.submit(std::move(task), "build-shard").wait();
@@ -209,7 +207,7 @@ TEST_SUITE("DFTracerView") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -227,7 +225,7 @@ TEST_SUITE("DFTracerView") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -245,7 +243,7 @@ TEST_SUITE("DFTracerView") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         auto f = create_pfw_gz(env, 50, 0);
         REQUIRE(!f.empty());
@@ -269,7 +267,7 @@ TEST_SUITE("DFTracerView") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -292,7 +290,7 @@ TEST_SUITE("DFTracerView") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         // Inputs in their own dir so the .pfw.gz output is not rescanned as
@@ -324,7 +322,7 @@ TEST_SUITE("DFTracerView") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -346,7 +344,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 50, 0).empty());
 
@@ -371,7 +369,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 50, 0).empty());
 
@@ -400,14 +398,13 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found; skipping");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         std::string sa = build_aggregated_shard(env, "sa", 50);
         std::string sb = build_aggregated_shard(env, "sb", 40);
         std::string root = env.get_dir() + "/set";
-        dftracer::utils::utilities::composites::dft::views::write_shard_set(
-            root, {sa, sb});
+        dftracer::utils::trace::views::write_shard_set(root, {sa, sb});
 
         // A flat directory with the same two traces for the baseline query.
         std::string both = env.get_dir() + "/both";
@@ -436,7 +433,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found; skipping");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         std::string dir = env.get_dir() + "/sel";
         fs::create_directories(dir);
@@ -447,7 +444,7 @@ TEST_SUITE("DFTracerView") {
                 << "\n";
         }
         std::string gz = pfw + ".gz";
-        REQUIRE(dft_utils_test::compress_file_to_gzip(pfw, gz));
+        REQUIRE(dftu_utils_test::compress_file_to_gzip(pfw, gz));
         fs::remove(pfw);
 
         std::string cap = env.get_dir() + "/cap.txt";
@@ -472,7 +469,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 50, 0).empty());
 
@@ -496,7 +493,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 50, 0).empty());
 
@@ -511,7 +508,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 50, 0).empty());
 
@@ -538,7 +535,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 50, 0).empty());
 
@@ -566,7 +563,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 50, 0).empty());
 
@@ -581,7 +578,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 50, 0).empty());
 
@@ -598,7 +595,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         std::string orig = create_pfw_gz(env, 50, 0);
         REQUIRE(!orig.empty());
@@ -623,7 +620,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!make_multimember_pfw_gz(env, 200, 4096, 0).empty());
 
@@ -642,7 +639,7 @@ TEST_SUITE("DFTracerView") {
             MESSAGE("dftracer_view binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         std::string mm = make_multimember_pfw_gz(env, 200, 8192, 0);
         REQUIRE(!mm.empty());

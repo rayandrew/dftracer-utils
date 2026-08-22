@@ -9,10 +9,10 @@
 #include <string>
 #include <vector>
 
-using dft_utils_test::find_binary_by_name;
-using dft_utils_test::find_mpi_launcher;
-using dft_utils_test::run_mpi;
-using dft_utils_test::TestEnvironment;
+using dftu_utils_test::find_binary_by_name;
+using dftu_utils_test::find_mpi_launcher;
+using dftu_utils_test::run_mpi;
+using dftu_utils_test::TestEnvironment;
 
 namespace {
 

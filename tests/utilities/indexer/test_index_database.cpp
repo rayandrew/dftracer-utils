@@ -17,7 +17,7 @@ using dftracer::utils::utilities::indexer::IndexDatabase;
 
 TEST_SUITE("IndexDatabase") {
     TEST_CASE("normalizes legacy .idx-style input to root-local .dftindex") {
-        auto root = dft_utils_test::make_unique_test_path("idx_root");
+        auto root = dftu_utils_test::make_unique_test_path("idx_root");
         fs::create_directories(root);
         auto legacy_like = (root / "trace.pfw.gz.idx").string();
 
@@ -26,7 +26,7 @@ TEST_SUITE("IndexDatabase") {
     }
 
     TEST_CASE("file registry is shared within one .dftindex root") {
-        auto root = dft_utils_test::make_unique_test_path("idx_shared");
+        auto root = dftu_utils_test::make_unique_test_path("idx_shared");
         fs::create_directories(root);
 
         IndexDatabase db1((root / ".dftindex").string());
@@ -57,7 +57,7 @@ TEST_SUITE("IndexDatabase") {
     }
 
     TEST_CASE("rebuild clears per-file bloom data before reuse") {
-        auto root = dft_utils_test::make_unique_test_path("idx_rebuild");
+        auto root = dftu_utils_test::make_unique_test_path("idx_rebuild");
         fs::create_directories(root);
 
         IndexDatabase db((root / ".dftindex").string());
@@ -101,7 +101,7 @@ TEST_SUITE("IndexDatabase") {
     }
 
     TEST_CASE("writer context batches multiple files and all are readable") {
-        auto root = dft_utils_test::make_unique_test_path("idx_writer_ctx");
+        auto root = dftu_utils_test::make_unique_test_path("idx_writer_ctx");
         fs::create_directories(root);
 
         IndexDatabase db((root / ".dftindex").string());
@@ -155,7 +155,7 @@ TEST_SUITE("IndexDatabase") {
     // map (FILE_PID_TID_COUNTS, written by the bloom/stats pass); same pid
     // across tids collapses to one.
     TEST_CASE("PID query - distinct PIDs from pid:tid counts") {
-        auto root = dft_utils_test::make_unique_test_path("idx_pid_single");
+        auto root = dftu_utils_test::make_unique_test_path("idx_pid_single");
         fs::create_directories(root);
 
         IndexDatabase db((root / ".dftindex").string());
@@ -183,7 +183,7 @@ TEST_SUITE("IndexDatabase") {
     }
 
     TEST_CASE("PID query - non-existent file returns empty set") {
-        auto root = dft_utils_test::make_unique_test_path("idx_pid_empty");
+        auto root = dftu_utils_test::make_unique_test_path("idx_pid_empty");
         fs::create_directories(root);
 
         IndexDatabase db((root / ".dftindex").string());
@@ -194,7 +194,7 @@ TEST_SUITE("IndexDatabase") {
     }
 
     TEST_CASE("PID query - all file PIDs") {
-        auto root = dft_utils_test::make_unique_test_path("idx_pid_all");
+        auto root = dftu_utils_test::make_unique_test_path("idx_pid_all");
         fs::create_directories(root);
 
         IndexDatabase db((root / ".dftindex").string());
@@ -238,7 +238,7 @@ TEST_SUITE("IndexDatabase") {
     }
 
     TEST_CASE("PID query - large PIDs") {
-        auto root = dft_utils_test::make_unique_test_path("idx_pid_large");
+        auto root = dftu_utils_test::make_unique_test_path("idx_pid_large");
         fs::create_directories(root);
 
         IndexDatabase db((root / ".dftindex").string());
@@ -265,7 +265,7 @@ TEST_SUITE("IndexDatabase") {
     }
 
     TEST_CASE("column store round-trips and unions across files") {
-        auto root = dft_utils_test::make_unique_test_path("idx_columns");
+        auto root = dftu_utils_test::make_unique_test_path("idx_columns");
         fs::create_directories(root);
         IndexDatabase db((root / ".dftindex").string());
 
@@ -309,7 +309,7 @@ std::string write_file(const fs::path& path, std::string_view contents) {
 
 TEST_SUITE("IndexDatabase staleness") {
     TEST_CASE("get_file_stat round-trips stored mtime and size") {
-        auto root = dft_utils_test::make_unique_test_path("stale_stat");
+        auto root = dftu_utils_test::make_unique_test_path("stale_stat");
         fs::create_directories(root);
         auto a = write_file(root / "a.pfw", "hello world");
 
@@ -324,7 +324,7 @@ TEST_SUITE("IndexDatabase staleness") {
     }
 
     TEST_CASE("fresh index reports nothing stale") {
-        auto root = dft_utils_test::make_unique_test_path("stale_fresh");
+        auto root = dftu_utils_test::make_unique_test_path("stale_fresh");
         fs::create_directories(root);
         auto a = write_file(root / "a.pfw", "aaa");
         auto b = write_file(root / "b.pfw", "bbbbb");
@@ -341,7 +341,7 @@ TEST_SUITE("IndexDatabase staleness") {
     }
 
     TEST_CASE("size change is detected as changed") {
-        auto root = dft_utils_test::make_unique_test_path("stale_size");
+        auto root = dftu_utils_test::make_unique_test_path("stale_size");
         fs::create_directories(root);
         auto a = write_file(root / "a.pfw", "original");
 
@@ -358,7 +358,7 @@ TEST_SUITE("IndexDatabase staleness") {
     }
 
     TEST_CASE("mtime change with same size is detected as changed") {
-        auto root = dft_utils_test::make_unique_test_path("stale_mtime");
+        auto root = dftu_utils_test::make_unique_test_path("stale_mtime");
         fs::create_directories(root);
         auto a = write_file(root / "a.pfw", "same-size-content");
 
@@ -375,7 +375,7 @@ TEST_SUITE("IndexDatabase staleness") {
     }
 
     TEST_CASE("newly added file is reported as added") {
-        auto root = dft_utils_test::make_unique_test_path("stale_added");
+        auto root = dftu_utils_test::make_unique_test_path("stale_added");
         fs::create_directories(root);
         auto a = write_file(root / "a.pfw", "aaa");
 
@@ -391,7 +391,7 @@ TEST_SUITE("IndexDatabase staleness") {
     }
 
     TEST_CASE("file removed from disk is reported as removed") {
-        auto root = dft_utils_test::make_unique_test_path("stale_removed");
+        auto root = dftu_utils_test::make_unique_test_path("stale_removed");
         fs::create_directories(root);
         auto a = write_file(root / "a.pfw", "aaa");
         auto b = write_file(root / "b.pfw", "bbb");
@@ -406,7 +406,7 @@ TEST_SUITE("IndexDatabase staleness") {
     }
 
     TEST_CASE("outdated schema forces a full rebuild") {
-        auto root = dft_utils_test::make_unique_test_path("stale_schema");
+        auto root = dftu_utils_test::make_unique_test_path("stale_schema");
         fs::create_directories(root);
         auto a = write_file(root / "a.pfw", "aaa");
 

@@ -42,7 +42,7 @@ int run_process(const std::string& binary,
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -92,7 +92,7 @@ TEST_SUITE("DFTracerCallTree") {
             MESSAGE("skipping: binary not found");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 100, 0).empty());
 
@@ -109,7 +109,7 @@ TEST_SUITE("DFTracerCallTree") {
             MESSAGE("skipping: binary not found");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         for (int i = 0; i < 3; ++i) {
             REQUIRE(!create_pfw_gz(env, 200, i).empty());

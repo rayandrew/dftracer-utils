@@ -3,8 +3,8 @@
 #include <dftracer/utils/core/rocksdb/db_manager.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
-#include <dftracer/utils/utilities/composites/dft/event.h>
-#include <dftracer/utils/utilities/composites/dft/visitors/bloom_core.h>
+#include <dftracer/utils/trace/event.h>
+#include <dftracer/utils/trace/visitors/bloom_core.h>
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -16,10 +16,12 @@
 #include <simdjson.h>
 #include <testing_utilities.h>
 
+#include <memory>
+
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities::indexer;
-using namespace dftracer::utils::utilities::composites::dft::visitors;
-using namespace dft_utils_test;
+using namespace dftracer::utils::trace::visitors;
+using namespace dftu_utils_test;
 
 namespace {
 
@@ -90,7 +92,8 @@ std::pair<std::string, std::vector<std::uint64_t>> write_multi_member_gz(
     return {path.string(), offsets};
 }
 
-std::string dft_lines(int start_id, int count, const std::string& name = "op") {
+std::string dftu_lines(int start_id, int count,
+                       const std::string& name = "op") {
     std::string out;
     for (int i = 0; i < count; ++i) {
         out +=
@@ -188,7 +191,7 @@ TEST_SUITE("IndexBuilder") {
 
     TEST_CASE("Member table covers every gzip member") {
         const std::vector<std::string> texts = {
-            dft_lines(0, 40), dft_lines(40, 25), dft_lines(65, 35)};
+            dftu_lines(0, 40), dftu_lines(40, 25), dftu_lines(65, 35)};
         auto [gz_file, c_offsets] = write_multi_member_gz(texts);
         const std::uint64_t file_size = fs::file_size(gz_file);
 
@@ -220,7 +223,7 @@ TEST_SUITE("IndexBuilder") {
 
     TEST_CASE("Sub-chunk zone-maps cover every event within a member") {
         const std::vector<std::string> texts = {
-            dft_lines(0, 40), dft_lines(40, 25), dft_lines(65, 35)};
+            dftu_lines(0, 40), dftu_lines(40, 25), dftu_lines(65, 35)};
         auto [gz_file, c_offsets] = write_multi_member_gz(texts);
 
         const std::size_t sub = 10;
@@ -255,7 +258,7 @@ TEST_SUITE("IndexBuilder") {
 
     TEST_CASE("Pruner chunks are gzip members") {
         const std::vector<std::string> texts = {
-            dft_lines(0, 40), dft_lines(40, 25, "rare"), dft_lines(65, 35)};
+            dftu_lines(0, 40), dftu_lines(40, 25, "rare"), dftu_lines(65, 35)};
         auto [gz_file, c_offsets] = write_multi_member_gz(texts);
 
         auto result = build_one(gz_file);
@@ -289,7 +292,7 @@ TEST_SUITE("IndexBuilder") {
     }
 
     TEST_CASE("Member table records a single-member file") {
-        auto [gz_file, c_offsets] = write_multi_member_gz({dft_lines(0, 30)});
+        auto [gz_file, c_offsets] = write_multi_member_gz({dftu_lines(0, 30)});
 
         auto result = build_one(gz_file);
         REQUIRE(result.success);

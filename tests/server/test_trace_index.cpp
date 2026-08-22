@@ -17,7 +17,7 @@ using namespace dftracer::utils::server;
 
 /// Helper: create a DFTracer gzip file with .pfw.gz extension
 /// (TraceIndex scans for .pfw and .pfw.gz patterns).
-static std::string create_pfw_gz(dft_utils_test::TestEnvironment& env,
+static std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env,
                                  int num_events, int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -34,7 +34,7 @@ static std::string create_pfw_gz(dft_utils_test::TestEnvironment& env,
 // ============================================================================
 
 TEST_CASE("TraceIndex - discovers .pfw.gz files") {
-    dft_utils_test::TestEnvironment env(100);
+    dftu_utils_test::TestEnvironment env(100);
     REQUIRE(env.is_valid());
 
     auto file1 = create_pfw_gz(env, 50, 1);
@@ -70,7 +70,7 @@ TEST_CASE("TraceIndex - discovers .pfw.gz files") {
 }
 
 TEST_CASE("TraceIndex - find_file by path") {
-    dft_utils_test::TestEnvironment env(100);
+    dftu_utils_test::TestEnvironment env(100);
     REQUIRE(env.is_valid());
 
     auto file = create_pfw_gz(env, 50, 1);
@@ -105,7 +105,7 @@ TEST_CASE("TraceIndex - find_file by path") {
 }
 
 TEST_CASE("TraceIndex - find_file returns nullptr for missing file") {
-    dft_utils_test::TestEnvironment env(100);
+    dftu_utils_test::TestEnvironment env(100);
     REQUIRE(env.is_valid());
 
     auto file = create_pfw_gz(env, 50, 1);
@@ -137,7 +137,7 @@ TEST_CASE("TraceIndex - find_file returns nullptr for missing file") {
 }
 
 TEST_CASE("TraceIndex - file_at by index") {
-    dft_utils_test::TestEnvironment env(100);
+    dftu_utils_test::TestEnvironment env(100);
     REQUIRE(env.is_valid());
 
     auto file = create_pfw_gz(env, 50, 1);
@@ -174,7 +174,7 @@ TEST_CASE("TraceIndex - file_at by index") {
 }
 
 TEST_CASE("TraceIndex - empty directory") {
-    auto dir = dft_utils_test::make_unique_test_path("trace_index_empty");
+    auto dir = dftu_utils_test::make_unique_test_path("trace_index_empty");
     fs::create_directories(dir);
 
     ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 2});

@@ -21,7 +21,7 @@
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities::indexer::internal;
 using namespace dftracer::utils::utilities::reader::internal;
-using namespace dft_utils_test;
+using namespace dftu_utils_test;
 
 // Helper function to create a test file with variable line lengths
 static std::string create_variable_line_test_file(

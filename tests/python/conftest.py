@@ -2,6 +2,10 @@
 
 import os
 
+# Force an eager default runtime so tests are deterministic (the extension reads
+# this when it lazily builds the default runtime). Set before importing the ext.
+os.environ.setdefault("DFTRACER_UTILS_ELASTIC", "0")
+
 
 def pytest_configure(config):
     config.addinivalue_line(

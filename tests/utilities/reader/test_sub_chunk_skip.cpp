@@ -2,6 +2,8 @@
 #include <dftracer/utils/core/common/config.h>
 #include <doctest/doctest.h>
 
+#include <memory>
+
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 
 #include <dftracer/utils/core/coro/coro.h>
@@ -107,7 +109,7 @@ void build_index(const std::string& gz, const std::string& index_dir,
 TEST_SUITE("sub_chunk_skip") {
     TEST_CASE("skip returns the same rows as a full scan (multi-member)") {
         const int n = 4000;
-        auto dir = dft_utils_test::make_unique_test_path("sub_skip");
+        auto dir = dftu_utils_test::make_unique_test_path("sub_skip");
         fs::create_directories(dir);
         const std::string src = (dir / "src.pfw.gz").string();
         const std::string gz = (dir / "trace.pfw.gz").string();

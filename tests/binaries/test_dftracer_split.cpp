@@ -17,7 +17,7 @@
 
 namespace {
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -141,7 +141,7 @@ TEST_SUITE("DFTracerSplit") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 100, 0);
@@ -162,7 +162,7 @@ TEST_SUITE("DFTracerSplit") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         // Large enough to exceed a 1 MB uncompressed member.
         auto f = create_pfw_gz(env, 40000, 0);
@@ -195,7 +195,7 @@ TEST_SUITE("DFTracerSplit") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -214,7 +214,7 @@ TEST_SUITE("DFTracerSplit") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         const int num_events = 80;
@@ -240,7 +240,7 @@ TEST_SUITE("DFTracerSplit") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         REQUIRE(!create_pfw_gz(env, 30, 0).empty());
@@ -261,7 +261,7 @@ TEST_SUITE("DFTracerSplit") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         std::string out_dir = env.get_dir() + "/split_empty";

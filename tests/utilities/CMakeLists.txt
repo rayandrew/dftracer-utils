@@ -12,56 +12,10 @@
 set(UTILITIES_TEST_SOURCES
     # Call Tree
     call_tree/test_call_tree_internal.cpp
+    call_tree/test_critical_path.cpp
+    call_tree/test_flamegraph.cpp
 
-    # Composites
-    composites/test_batch_processor.cpp
-    composites/test_chunk_verifier.cpp
-    composites/test_directory_file_processor.cpp
-    composites/test_file_compressor.cpp
-    composites/test_file_decompressor.cpp
-    composites/test_indexed_file_reader.cpp
-
-    # DFT Composites
-    composites/dft/test_parse_inflated.cpp
-    composites/dft/test_schema.cpp
-    composites/dft/test_trace_config.cpp
-    composites/dft/test_chunk_extractor.cpp
-    composites/dft/test_event_collector.cpp
-    composites/dft/test_index_builder.cpp
-    composites/dft/test_metadata_collector.cpp
-    composites/dft/test_time_metric.cpp
-
-    # DFT Indexing Composites
-    composites/dft/indexing/test_bloom_filter.cpp
-    composites/dft/indexing/test_scalable_bloom_filter.cpp
-    composites/dft/indexing/test_chunk_statistics.cpp
-    composites/dft/indexing/test_chunk_indexer.cpp
-    composites/dft/indexing/test_chunk_pruner.cpp
-    composites/dft/indexing/test_sub_chunk_prune.cpp
-    composites/dft/indexing/test_resolved_field_rewriter.cpp
-    composites/dft/indexing/test_shard_manifest.cpp
-
-    # DFT Views Composites
-    composites/dft/views/test_view_definition.cpp
-    composites/dft/views/test_view_planner.cpp
-    composites/dft/views/test_view_scanner.cpp
-    composites/dft/views/test_view_scan.cpp
-    composites/dft/views/test_view_aggregate.cpp
-    composites/dft/views/test_view_mv.cpp
-    composites/dft/views/test_coverage.cpp
-    composites/dft/views/test_fold.cpp
-    composites/dft/views/test_rollup_store.cpp
-    composites/dft/views/test_dict_fold.cpp
-    composites/dft/views/test_bloom_fold.cpp
-    composites/dft/views/test_raw_gzip_fuse.cpp
-    composites/dft/views/test_event_source.cpp
-    composites/dft/views/test_aggfold.cpp
-    composites/dft/views/test_sharded_view.cpp
-
-    # DFT Statistics Composites
-    composites/dft/statistics/test_trace_statistics.cpp
-    composites/dft/statistics/test_statistics_aggregator.cpp
-    composites/dft/statistics/test_statistics_query.cpp
+    # Statistics
     common/statistics/test_log2_histogram.cpp
     common/statistics/test_timestamp_histogram.cpp
 
@@ -71,34 +25,11 @@ set(UTILITIES_TEST_SOURCES
 
     # DLIO config generation
     dlio/test_barrier_simulator.cpp
-    composites/dft/statistics/test_detailed_statistics.cpp
 
-    # Query language
-    common/query/test_parser.cpp
-    common/query/test_evaluator.cpp
-    common/query/test_query.cpp
-    common/query/test_subsumption.cpp
-
-    # DFT Aggregator Composites
+    # Sketches
     common/statistics/test_ddsketch.cpp
     common/statistics/test_distinct_sketch.cpp
-    composites/dft/aggregators/test_aggregation_metrics.cpp
-    composites/dft/aggregators/test_aggregation_rollup.cpp
-    composites/dft/aggregators/test_aggregation_key.cpp
-    composites/dft/aggregators/test_aggregation_config.cpp
-    composites/dft/aggregators/test_aggregation_serialization.cpp
-    composites/dft/aggregators/test_aggregator_utility.cpp
-    composites/dft/aggregators/test_chunk_aggregator_utility.cpp
-    composites/dft/aggregators/test_event_aggregator_utility.cpp
-    composites/dft/aggregators/test_aggregation_augmentation.cpp
-    composites/dft/aggregators/test_system_metrics.cpp
-    composites/dft/aggregators/test_system_metrics_merge_operator.cpp
-
-    # DFT Comparator Composites
-    composites/dft/comparator/test_comparison_result.cpp
-    composites/dft/comparator/test_comparison_config.cpp
-    composites/dft/comparator/test_is_data_transfer_op.cpp
-    composites/dft/comparator/test_tree_table_formatter.cpp
+    common/statistics/test_field_stat.cpp
 
     # Indexer
     indexer/test_rocksdb_storage.cpp
@@ -118,13 +49,13 @@ set(UTILITIES_TEST_SOURCES
 
     # Hash
     hash/test_hasher_utility.cpp
-    hash/test_mt_hasher.cpp
-    hash/test_std_hasher.cpp
 
     # I/O
     fileio/test_file_reader.cpp
-    fileio/test_streaming_file_reader.cpp
     fileio/test_streaming_file_writer.cpp
+    fileio/test_indexed_file_reader.cpp
+    fileio/test_file_compressor.cpp
+    fileio/test_file_decompressor.cpp
 
     # I/O Parallel
     fileio/parallel/test_layout_sizing.cpp
@@ -147,7 +78,28 @@ set(UTILITIES_TEST_SOURCES
 
     # Text
     text/test_line_filter.cpp
-    text/test_line_splitter.cpp
+
+    # Plugins (reflected utility ABI)
+    plugins/test_reflected_utilities.cpp
+    plugins/test_plugin_host_services.cpp
+    plugins/test_plugin_io_writer.cpp
+    plugins/test_plugin_cxx_ergonomics.cpp
+    plugins/test_plugin_cxx_wrappers.cpp
+    plugins/test_plugin_abi_features.cpp
+    plugins/test_plugin_versioning.cpp
+    plugins/test_plugin_comms.cpp
+    plugins/test_plugin_ports.cpp
+    plugins/test_plugin_handles.cpp
+    plugins/test_plugin_results.cpp
+    plugins/test_plugin_map.cpp
+    plugins/test_map_join.cpp
+    plugins/test_map_join_arrow.cpp
+    plugins/test_map_grouping.cpp
+    plugins/test_map_grouping_arrow.cpp
+    plugins/test_map_unnest.cpp
+    plugins/test_map_unnest_arrow.cpp
+    plugins/test_monoid_serialize.cpp
+    plugins/test_plugin_planner.cpp
 )
 
 # +++++++++++++++++++++++++++++++++++++++++
@@ -183,6 +135,122 @@ if(DFTRACER_UTILS_ENABLE_ARROW)
   add_test(NAME utilities/${arrow_bin_exec} COMMAND ${arrow_target})
   set_tests_properties(utilities/${arrow_bin_exec} PROPERTIES
                        WORKING_DIRECTORY "${arrow_workdir}")
+
+  set(JOIN_TEST_SOURCE common/arrow/test_arrow_join.cpp)
+  string(REPLACE ".cpp" "" join_bin_exec ${JOIN_TEST_SOURCE})
+  string(REPLACE "/" "_" join_target "utilities_${join_bin_exec}")
+
+  add_executable(${join_target} ${JOIN_TEST_SOURCE})
+  target_include_directories(${join_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  target_link_libraries(${join_target} PRIVATE doctest::doctest dftracer_utils testing_utilities)
+  link_nanoarrow(${join_target} STATIC)
+  target_set_warnings(${join_target})
+
+  get_filename_component(join_bin_dir ${join_bin_exec} DIRECTORY)
+  get_filename_component(join_bin_name ${join_bin_exec} NAME)
+  if(join_bin_dir)
+    set_target_properties(${join_target} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${join_bin_dir}")
+  endif()
+  set_target_properties(${join_target} PROPERTIES OUTPUT_NAME ${join_bin_name})
+
+  if(DFTRACER_UTILS_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${join_target} PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+    target_link_libraries(${join_target} PRIVATE --coverage)
+  endif()
+
+  set(join_workdir "${CMAKE_CURRENT_BINARY_DIR}/workdirs/${join_target}")
+  file(MAKE_DIRECTORY "${join_workdir}")
+  add_test(NAME utilities/${join_bin_exec} COMMAND ${join_target})
+  set_tests_properties(utilities/${join_bin_exec} PROPERTIES
+                       WORKING_DIRECTORY "${join_workdir}")
+
+  set(WINDOW_TEST_SOURCE common/arrow/test_arrow_window.cpp)
+  string(REPLACE ".cpp" "" window_bin_exec ${WINDOW_TEST_SOURCE})
+  string(REPLACE "/" "_" window_target "utilities_${window_bin_exec}")
+
+  add_executable(${window_target} ${WINDOW_TEST_SOURCE})
+  target_include_directories(${window_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  target_link_libraries(${window_target} PRIVATE doctest::doctest dftracer_utils testing_utilities)
+  link_nanoarrow(${window_target} STATIC)
+  target_set_warnings(${window_target})
+
+  get_filename_component(window_bin_dir ${window_bin_exec} DIRECTORY)
+  get_filename_component(window_bin_name ${window_bin_exec} NAME)
+  if(window_bin_dir)
+    set_target_properties(${window_target} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${window_bin_dir}")
+  endif()
+  set_target_properties(${window_target} PROPERTIES OUTPUT_NAME ${window_bin_name})
+
+  if(DFTRACER_UTILS_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${window_target} PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+    target_link_libraries(${window_target} PRIVATE --coverage)
+  endif()
+
+  set(window_workdir "${CMAKE_CURRENT_BINARY_DIR}/workdirs/${window_target}")
+  file(MAKE_DIRECTORY "${window_workdir}")
+  add_test(NAME utilities/${window_bin_exec} COMMAND ${window_target})
+  set_tests_properties(utilities/${window_bin_exec} PROPERTIES
+                       WORKING_DIRECTORY "${window_workdir}")
+
+  set(GAPFILL_TEST_SOURCE common/arrow/test_arrow_gapfill.cpp)
+  string(REPLACE ".cpp" "" gapfill_bin_exec ${GAPFILL_TEST_SOURCE})
+  string(REPLACE "/" "_" gapfill_target "utilities_${gapfill_bin_exec}")
+
+  add_executable(${gapfill_target} ${GAPFILL_TEST_SOURCE})
+  target_include_directories(${gapfill_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  target_link_libraries(${gapfill_target} PRIVATE doctest::doctest dftracer_utils testing_utilities)
+  link_nanoarrow(${gapfill_target} STATIC)
+  target_set_warnings(${gapfill_target})
+
+  get_filename_component(gapfill_bin_dir ${gapfill_bin_exec} DIRECTORY)
+  get_filename_component(gapfill_bin_name ${gapfill_bin_exec} NAME)
+  if(gapfill_bin_dir)
+    set_target_properties(${gapfill_target} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${gapfill_bin_dir}")
+  endif()
+  set_target_properties(${gapfill_target} PROPERTIES OUTPUT_NAME ${gapfill_bin_name})
+
+  if(DFTRACER_UTILS_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${gapfill_target} PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+    target_link_libraries(${gapfill_target} PRIVATE --coverage)
+  endif()
+
+  set(gapfill_workdir "${CMAKE_CURRENT_BINARY_DIR}/workdirs/${gapfill_target}")
+  file(MAKE_DIRECTORY "${gapfill_workdir}")
+  add_test(NAME utilities/${gapfill_bin_exec} COMMAND ${gapfill_target})
+  set_tests_properties(utilities/${gapfill_bin_exec} PROPERTIES
+                       WORKING_DIRECTORY "${gapfill_workdir}")
+
+  set(ATTRIBUTION_TEST_SOURCE common/arrow/test_arrow_attribution.cpp)
+  string(REPLACE ".cpp" "" attribution_bin_exec ${ATTRIBUTION_TEST_SOURCE})
+  string(REPLACE "/" "_" attribution_target "utilities_${attribution_bin_exec}")
+
+  add_executable(${attribution_target} ${ATTRIBUTION_TEST_SOURCE})
+  target_include_directories(${attribution_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+  target_link_libraries(${attribution_target} PRIVATE doctest::doctest dftracer_utils testing_utilities)
+  link_nanoarrow(${attribution_target} STATIC)
+  target_set_warnings(${attribution_target})
+
+  get_filename_component(attribution_bin_dir ${attribution_bin_exec} DIRECTORY)
+  get_filename_component(attribution_bin_name ${attribution_bin_exec} NAME)
+  if(attribution_bin_dir)
+    set_target_properties(${attribution_target} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${attribution_bin_dir}")
+  endif()
+  set_target_properties(${attribution_target} PROPERTIES OUTPUT_NAME ${attribution_bin_name})
+
+  if(DFTRACER_UTILS_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${attribution_target} PRIVATE --coverage -fprofile-arcs -ftest-coverage)
+    target_link_libraries(${attribution_target} PRIVATE --coverage)
+  endif()
+
+  set(attribution_workdir "${CMAKE_CURRENT_BINARY_DIR}/workdirs/${attribution_target}")
+  file(MAKE_DIRECTORY "${attribution_workdir}")
+  add_test(NAME utilities/${attribution_bin_exec} COMMAND ${attribution_target})
+  set_tests_properties(utilities/${attribution_bin_exec} PROPERTIES
+                       WORKING_DIRECTORY "${attribution_workdir}")
 endif()
 
 # +++++++++++++++++++++++++++++++++++++++++
@@ -295,3 +363,33 @@ foreach(test_file ${UTILITIES_TEST_SOURCES})
   set_tests_properties(utilities/${bin_exec} PROPERTIES
                        WORKING_DIRECTORY "${test_working_directory}")
 endforeach()
+
+# +++++++++++++++++++++++++++++++++++++++++
+# Plugin C-ABI test: per-ABI C consumers (compiled as C) driven by a C++ host
+# harness, so the plugin C ABIs are exercised from real C, not just C++.
+# +++++++++++++++++++++++++++++++++++++++++
+
+set(cabi_target utilities_plugins_test_plugin_c_abi)
+set(cabi_sources plugins/test_plugin_c_abi.cpp
+                 plugins/compose_abi_c_consumer.c
+                 plugins/query_abi_c_consumer.c
+                 plugins/sketch_abi_c_consumer.c
+                 plugins/util_abi_c_consumer.c
+                 plugins/trace_abi_c_consumer.c
+                 plugins/io_abi_c_consumer.c
+                 plugins/writer_abi_c_consumer.c)
+if(DFTRACER_UTILS_ENABLE_ARROW)
+  list(APPEND cabi_sources plugins/arrow_abi_c_consumer.c)
+endif()
+add_executable(${cabi_target} ${cabi_sources})
+target_include_directories(${cabi_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(${cabi_target} PRIVATE doctest::doctest dftracer_utils
+                                             testing_utilities)
+target_enable_coroutine(${cabi_target})
+if(DFTRACER_UTILS_ENABLE_ARROW)
+  target_compile_definitions(${cabi_target} PRIVATE DFTU_TEST_HAS_ARROW)
+  link_nanoarrow(${cabi_target} STATIC)
+endif()
+set_target_properties(${cabi_target} PROPERTIES OUTPUT_NAME test_plugin_c_abi
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins")
+add_test(NAME utilities/plugins/test_plugin_c_abi COMMAND ${cabi_target})

@@ -2,6 +2,8 @@
 #include <dftracer/utils/utilities/text/line_filter.h>
 #include <doctest/doctest.h>
 
+#include <memory>
+
 using namespace dftracer::utils::utilities::text;
 using namespace dftracer::utils::utilities::fileio::lines;
 
@@ -14,7 +16,7 @@ TEST_CASE("LineFilterUtility - Basic functionality") {
         };
 
         FilterableLine input{Line{"ERROR: Something went wrong", 1}, predicate};
-        auto result = filter->process(input).get();
+        auto result = (*filter)(input).get();
 
         REQUIRE(result.has_value());
         CHECK(result->content == "ERROR: Something went wrong");
@@ -27,14 +29,14 @@ TEST_CASE("LineFilterUtility - Basic functionality") {
         };
 
         FilterableLine input{Line{"INFO: Everything is fine", 1}, predicate};
-        auto result = filter->process(input).get();
+        auto result = (*filter)(input).get();
 
         CHECK_FALSE(result.has_value());
     }
 
     SUBCASE("No predicate - pass through") {
         FilterableLine input{Line{"Any content", 1}, nullptr};
-        auto result = filter->process(input).get();
+        auto result = (*filter)(input).get();
 
         REQUIRE(result.has_value());
         CHECK(result->content == "Any content");
@@ -52,8 +54,8 @@ TEST_CASE("LineFilterUtility - Different predicates") {
         FilterableLine match{Line{"ERROR: Bad thing", 1}, has_prefix};
         FilterableLine no_match{Line{"Warning: ERROR occurred", 2}, has_prefix};
 
-        CHECK(filter->process(match).get().has_value());
-        CHECK_FALSE(filter->process(no_match).get().has_value());
+        CHECK((*filter)(match).get().has_value());
+        CHECK_FALSE((*filter)(no_match).get().has_value());
     }
 
     SUBCASE("Filter by line number") {
@@ -64,8 +66,8 @@ TEST_CASE("LineFilterUtility - Different predicates") {
         FilterableLine odd{Line{"Content", 1}, is_even_line};
         FilterableLine even{Line{"Content", 2}, is_even_line};
 
-        CHECK_FALSE(filter->process(odd).get().has_value());
-        CHECK(filter->process(even).get().has_value());
+        CHECK_FALSE((*filter)(odd).get().has_value());
+        CHECK((*filter)(even).get().has_value());
     }
 
     SUBCASE("Filter by length") {
@@ -76,8 +78,8 @@ TEST_CASE("LineFilterUtility - Different predicates") {
         FilterableLine short_line{Line{"Short", 1}, is_long};
         FilterableLine long_line{Line{"This is a very long line", 2}, is_long};
 
-        CHECK_FALSE(filter->process(short_line).get().has_value());
-        CHECK(filter->process(long_line).get().has_value());
+        CHECK_FALSE((*filter)(short_line).get().has_value());
+        CHECK((*filter)(long_line).get().has_value());
     }
 
     SUBCASE("Filter empty lines") {
@@ -88,8 +90,8 @@ TEST_CASE("LineFilterUtility - Different predicates") {
         FilterableLine empty{Line{"", 1}, is_not_empty};
         FilterableLine not_empty{Line{"Content", 2}, is_not_empty};
 
-        CHECK_FALSE(filter->process(empty).get().has_value());
-        CHECK(filter->process(not_empty).get().has_value());
+        CHECK_FALSE((*filter)(empty).get().has_value());
+        CHECK((*filter)(not_empty).get().has_value());
     }
 }
 
@@ -109,9 +111,9 @@ TEST_CASE("LineFilterUtility - Complex filtering scenarios") {
         FilterableLine only_critical{Line{"CRITICAL warning", 3},
                                      error_and_critical};
 
-        CHECK(filter->process(both).get().has_value());
-        CHECK_FALSE(filter->process(only_error).get().has_value());
-        CHECK_FALSE(filter->process(only_critical).get().has_value());
+        CHECK((*filter)(both).get().has_value());
+        CHECK_FALSE((*filter)(only_error).get().has_value());
+        CHECK_FALSE((*filter)(only_critical).get().has_value());
     }
 
     SUBCASE("Multiple conditions - OR") {
@@ -125,9 +127,9 @@ TEST_CASE("LineFilterUtility - Complex filtering scenarios") {
                                error_or_warning};
         FilterableLine info{Line{"INFO: All good", 3}, error_or_warning};
 
-        CHECK(filter->process(error).get().has_value());
-        CHECK(filter->process(warning).get().has_value());
-        CHECK_FALSE(filter->process(info).get().has_value());
+        CHECK((*filter)(error).get().has_value());
+        CHECK((*filter)(warning).get().has_value());
+        CHECK_FALSE((*filter)(info).get().has_value());
     }
 
     SUBCASE("Negation filter") {
@@ -138,8 +140,8 @@ TEST_CASE("LineFilterUtility - Complex filtering scenarios") {
         FilterableLine debug{Line{"DEBUG: Trace info", 1}, not_debug};
         FilterableLine info{Line{"INFO: Something", 2}, not_debug};
 
-        CHECK_FALSE(filter->process(debug).get().has_value());
-        CHECK(filter->process(info).get().has_value());
+        CHECK_FALSE((*filter)(debug).get().has_value());
+        CHECK((*filter)(info).get().has_value());
     }
 }
 
@@ -153,8 +155,8 @@ TEST_CASE("LineFilterUtility - Edge cases") {
         FilterableLine empty_pass{Line{"", 1}, always_true};
         FilterableLine empty_fail{Line{"", 1}, always_false};
 
-        CHECK(filter->process(empty_pass).get().has_value());
-        CHECK_FALSE(filter->process(empty_fail).get().has_value());
+        CHECK((*filter)(empty_pass).get().has_value());
+        CHECK_FALSE((*filter)(empty_fail).get().has_value());
     }
 
     SUBCASE("Very long line") {
@@ -164,11 +166,11 @@ TEST_CASE("LineFilterUtility - Edge cases") {
         };
 
         FilterableLine no_y{Line{very_long, 1}, contains_y};
-        CHECK_FALSE(filter->process(no_y).get().has_value());
+        CHECK_FALSE((*filter)(no_y).get().has_value());
 
         std::string with_y = very_long + "y";
         FilterableLine has_y{Line{with_y, 1}, contains_y};
-        CHECK(filter->process(has_y).get().has_value());
+        CHECK((*filter)(has_y).get().has_value());
     }
 
     SUBCASE("Case-sensitive vs case-insensitive filtering") {
@@ -188,18 +190,18 @@ TEST_CASE("LineFilterUtility - Edge cases") {
         FilterableLine mixed{Line{"Error happened", 1}, case_sensitive};
 
         // Case-sensitive
-        CHECK(filter->process(upper).get().has_value());
-        CHECK_FALSE(filter->process(lower).get().has_value());
-        CHECK_FALSE(filter->process(mixed).get().has_value());
+        CHECK((*filter)(upper).get().has_value());
+        CHECK_FALSE((*filter)(lower).get().has_value());
+        CHECK_FALSE((*filter)(mixed).get().has_value());
 
         // Case-insensitive
         FilterableLine upper_ci{Line{"ERROR happened", 1}, case_insensitive};
         FilterableLine lower_ci{Line{"error happened", 1}, case_insensitive};
         FilterableLine mixed_ci{Line{"Error happened", 1}, case_insensitive};
 
-        CHECK(filter->process(upper_ci).get().has_value());
-        CHECK(filter->process(lower_ci).get().has_value());
-        CHECK(filter->process(mixed_ci).get().has_value());
+        CHECK((*filter)(upper_ci).get().has_value());
+        CHECK((*filter)(lower_ci).get().has_value());
+        CHECK((*filter)(mixed_ci).get().has_value());
     }
 }
 
@@ -221,7 +223,7 @@ TEST_CASE("LineFilterUtility - Practical use cases") {
         std::vector<Line> filtered;
         for (const auto& log : logs) {
             auto result =
-                filter->process(FilterableLine{log, is_error_or_above}).get();
+                (*filter)(FilterableLine{log, is_error_or_above}).get();
             if (result.has_value()) {
                 filtered.push_back(*result);
             }
@@ -253,8 +255,7 @@ TEST_CASE("LineFilterUtility - Practical use cases") {
 
         std::vector<Line> filtered;
         for (const auto& line : lines) {
-            auto result =
-                filter->process(FilterableLine{line, not_comment}).get();
+            auto result = (*filter)(FilterableLine{line, not_comment}).get();
             if (result.has_value()) {
                 filtered.push_back(*result);
             }

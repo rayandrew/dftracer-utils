@@ -35,6 +35,12 @@ REQUIRED_PATTERNS = (
     "dftracer/bin/dftracer_index",
     "dftracer/bin/ldb",
     "dftracer/bin/sst_dump",
+    # Plugin headers a pip-installed wheel needs to compile JIT plugins and the
+    # dftracer_plugin CLI scaffold: prims.h is included by jit-generated code,
+    # plugin.h by the CLI scaffold, abi.h by both.
+    "dftracer/utils/include/dftracer/utils/plugins/abi.h",
+    "dftracer/utils/include/dftracer/utils/plugins/prims.h",
+    "dftracer/utils/include/dftracer/utils/plugins/plugin.h",
 )
 
 

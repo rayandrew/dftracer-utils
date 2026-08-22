@@ -15,7 +15,7 @@ using namespace dftracer::utils::utilities::fileio::lines;
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities::indexer::internal;
 using namespace dftracer::utils::utilities::reader::internal;
-using namespace dft_utils_test;
+using namespace dftu_utils_test;
 
 TEST_SUITE("IndexedFileLineIterator") {
     TEST_CASE("IndexedFileLineIterator - Basic Operations with Line Range" *

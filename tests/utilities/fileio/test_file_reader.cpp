@@ -11,7 +11,7 @@
 using namespace dftracer::utils::utilities::fileio;
 using namespace dftracer::utils::utilities::filesystem;
 using namespace dftracer::utils::utilities::text;
-using namespace dft_utils_test;
+using namespace dftu_utils_test;
 
 TEST_CASE("FileReaderUtility - Basic Operations") {
     FileReaderUtility reader;
@@ -26,7 +26,7 @@ TEST_CASE("FileReaderUtility - Basic Operations") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.content == "Hello, World!\nThis is a test file.\n");
         CHECK(content.size() == 35);
@@ -41,7 +41,7 @@ TEST_CASE("FileReaderUtility - Basic Operations") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.content.empty());
         CHECK(content.size() == 0);
@@ -58,7 +58,7 @@ TEST_CASE("FileReaderUtility - Basic Operations") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.content.find("Special: !@#$%^&*()") != std::string::npos);
         CHECK(content.content.find("こんにちは") != std::string::npos);
@@ -72,7 +72,7 @@ TEST_CASE("FileReaderUtility - Error Handling") {
 
     SUBCASE("Non-existent file") {
         FileEntry entry{"non_existent_file_12345.txt"};
-        CHECK_THROWS_AS(reader.process(entry).get(), std::runtime_error);
+        CHECK_THROWS_AS(reader(entry).get(), std::runtime_error);
     }
 
     SUBCASE("Directory instead of file") {
@@ -80,7 +80,7 @@ TEST_CASE("FileReaderUtility - Error Handling") {
         fs::create_directory(test_dir);
 
         FileEntry entry{test_dir};
-        CHECK_THROWS_AS(reader.process(entry).get(), std::runtime_error);
+        CHECK_THROWS_AS(reader(entry).get(), std::runtime_error);
 
         fs::remove(test_dir);
     }
@@ -97,7 +97,7 @@ TEST_CASE("FileReaderUtility - Different File Sizes") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.size() == 1);
         CHECK(content.content == "x");
@@ -114,7 +114,7 @@ TEST_CASE("FileReaderUtility - Different File Sizes") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.size() == 1024);
 
@@ -130,7 +130,7 @@ TEST_CASE("FileReaderUtility - Different File Sizes") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.size() == 100 * 1024);
 
@@ -149,7 +149,7 @@ TEST_CASE("FileReaderUtility - Different Content Types") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.size() == 5);
         CHECK(content.content == "\n\n\n\n\n");
@@ -166,7 +166,7 @@ TEST_CASE("FileReaderUtility - Different Content Types") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.content.find("Line 1") != std::string::npos);
         CHECK(content.content.find("Line 2") != std::string::npos);
@@ -182,7 +182,7 @@ TEST_CASE("FileReaderUtility - Different Content Types") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.content == "No newline at end");
 
@@ -204,7 +204,7 @@ TEST_CASE("FileReaderUtility - Real World Scenarios") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.content.find("INFO: Application started") !=
               std::string::npos);
@@ -224,7 +224,7 @@ TEST_CASE("FileReaderUtility - Real World Scenarios") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.content.find("id,name,value") != std::string::npos);
         CHECK(content.content.find("Alice") != std::string::npos);
@@ -243,7 +243,7 @@ TEST_CASE("FileReaderUtility - Real World Scenarios") {
         }
 
         FileEntry entry{test_file};
-        Text content = reader.process(entry).get();
+        Text content = reader(entry).get();
 
         CHECK(content.content.find("\"name\": \"test\"") != std::string::npos);
         CHECK(content.content.find("\"value\": 42") != std::string::npos);
@@ -271,12 +271,12 @@ TEST_CASE("FileReaderUtility - Composition with DirectoryScanner") {
 
     // Scan and read
     DirectoryScannerUtilityInput dir{test_dir};
-    auto files = scanner.process(dir).get();
+    auto files = scanner(dir).get();
 
     int files_read = 0;
     for (const auto& file : files) {
         if (file.is_regular_file) {
-            Text content = reader.process(file).get();
+            Text content = reader(file).get();
             CHECK(content.size() > 0);
             files_read++;
         }

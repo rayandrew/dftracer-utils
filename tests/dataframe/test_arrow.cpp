@@ -1,0 +1,84 @@
+#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/core/common/config.h>
+#include <doctest/doctest.h>
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#ifdef DFTRACER_UTILS_ENABLE_ARROW
+#include <dftracer/utils/dataframe/arrow.h>
+
+using dftracer::utils::dataframe::DataFrame;
+using dftracer::utils::dataframe::OwnedArrow;
+using dftracer::utils::dataframe::Series;
+
+TEST_SUITE("dataframe_arrow_public") {
+    TEST_CASE("Series round-trips through the public Arrow bridge") {
+        std::vector<std::int64_t> vals = {10, 20, 30, 40};
+        Series s = Series::flat_i64(vals.data(),
+                                    static_cast<std::int64_t>(vals.size()));
+
+        OwnedArrow a = s.to_arrow();
+        CHECK(static_cast<bool>(a));
+
+        Series back = Series::from_arrow(a.schema(), a.array());
+        REQUIRE(back.valid());
+        REQUIRE(back.length() == 4);
+        const std::int64_t* d = back.data<std::int64_t>();
+        REQUIRE(d != nullptr);
+        for (std::size_t i = 0; i < vals.size(); ++i) CHECK(d[i] == vals[i]);
+    }
+
+    TEST_CASE("String Series round-trips through the public Arrow bridge") {
+        Series s = Series::strings({"alpha", "beta", "gamma"});
+
+        OwnedArrow a = s.to_arrow();
+        Series back = Series::from_arrow(a.schema(), a.array());
+        REQUIRE(back.valid());
+        REQUIRE(back.length() == 3);
+        CHECK(back.string_at(0) == "alpha");
+        CHECK(back.string_at(1) == "beta");
+        CHECK(back.string_at(2) == "gamma");
+    }
+
+    TEST_CASE("DataFrame round-trips schema, columns, and values") {
+        std::vector<std::int64_t> ints = {1, 2, 3};
+        std::vector<double> reals = {1.5, 2.5, 3.5};
+
+        DataFrame df;
+        df.names = {"id", "value"};
+        df.columns.push_back(Series::flat_i64(
+            ints.data(), static_cast<std::int64_t>(ints.size())));
+        df.columns.push_back(Series::flat_f64(
+            reals.data(), static_cast<std::int64_t>(reals.size())));
+
+        OwnedArrow a = df.to_arrow();
+        CHECK(static_cast<bool>(a));
+
+        DataFrame back = DataFrame::from_arrow(a.schema(), a.array());
+        REQUIRE(back.num_columns() == 2);
+        REQUIRE(back.num_rows() == 3);
+        REQUIRE(back.names.size() == 2);
+        CHECK(back.names[0] == "id");
+        CHECK(back.names[1] == "value");
+
+        Series id = back.column("id");
+        Series value = back.column("value");
+        REQUIRE(id.valid());
+        REQUIRE(value.valid());
+        const std::int64_t* idp = id.data<std::int64_t>();
+        const double* vp = value.data<double>();
+        REQUIRE(idp != nullptr);
+        REQUIRE(vp != nullptr);
+        for (std::size_t i = 0; i < ints.size(); ++i) {
+            CHECK(idp[i] == ints[i]);
+            CHECK(vp[i] == doctest::Approx(reals[i]));
+        }
+    }
+}
+#else
+TEST_SUITE("dataframe_arrow_public") {
+    TEST_CASE("Arrow disabled: nothing to exercise") { CHECK(true); }
+}
+#endif

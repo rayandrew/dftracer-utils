@@ -62,52 +62,52 @@ void tearDown(void) {
 void test_format_indexer_creation_and_destruction(void) {
     printf("Testing %s indexer creation/destruction\n", g_format_name);
 
-    dft_indexer_handle_t indexer =
-        dft_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
+    dftu_indexer_handle_t indexer =
+        dftu_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
     TEST_ASSERT_NOT_NULL(indexer);
 
     if (indexer) {
-        dft_indexer_destroy(indexer);
+        dftu_indexer_destroy(indexer);
     }
 }
 
 void test_format_index_building(void) {
     printf("Testing %s index building\n", g_format_name);
 
-    dft_indexer_handle_t indexer =
-        dft_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
+    dftu_indexer_handle_t indexer =
+        dftu_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
     TEST_ASSERT_NOT_NULL(indexer);
 
-    int result = dft_indexer_build(indexer);
+    int result = dftu_indexer_build(indexer);
     TEST_ASSERT_EQUAL_INT(0, result);
 
     // Verify line count is reasonable
-    uint64_t line_count = dft_indexer_get_num_lines(indexer);
+    uint64_t line_count = dftu_indexer_get_num_lines(indexer);
     TEST_ASSERT_TRUE(line_count > 0);
     printf("  %s format has %lu lines\n", g_format_name,
            (unsigned long)line_count);
 
-    dft_indexer_destroy(indexer);
+    dftu_indexer_destroy(indexer);
 }
 
 void test_format_reader_creation_and_basic_reading(void) {
     printf("Testing %s reader creation and basic reading\n", g_format_name);
 
     // Build index first
-    dft_indexer_handle_t indexer =
-        dft_indexer_create(g_test_file, g_idx_file, mb_to_b(0.5), 0);
+    dftu_indexer_handle_t indexer =
+        dftu_indexer_create(g_test_file, g_idx_file, mb_to_b(0.5), 0);
     TEST_ASSERT_NOT_NULL(indexer);
 
-    int result = dft_indexer_build(indexer);
+    int result = dftu_indexer_build(indexer);
     TEST_ASSERT_EQUAL_INT(0, result);
 
     // Create reader
-    dft_reader_handle_t reader = dft_reader_create_with_indexer(indexer);
+    dftu_reader_handle_t reader = dftu_reader_create_with_indexer(indexer);
     TEST_ASSERT_NOT_NULL(reader);
 
     // Get max bytes
     size_t max_bytes;
-    result = dft_reader_get_max_bytes(reader, &max_bytes);
+    result = dftu_reader_get_max_bytes(reader, &max_bytes);
     TEST_ASSERT_EQUAL_INT(0, result);
     TEST_ASSERT_TRUE(max_bytes > 0);
     printf("  %s format max bytes: %zu\n", g_format_name, max_bytes);
@@ -119,8 +119,8 @@ void test_format_reader_creation_and_basic_reading(void) {
     char* output = NULL;
 
     int bytes_read;
-    while ((bytes_read = dft_reader_read(reader, 0, 100, buffer, buffer_size)) >
-           0) {
+    while ((bytes_read =
+                dftu_reader_read(reader, 0, 100, buffer, buffer_size)) > 0) {
         output = realloc(output, total_bytes + bytes_read);
         TEST_ASSERT_NOT_NULL(output);
         memcpy(output + total_bytes, buffer, bytes_read);
@@ -136,23 +136,23 @@ void test_format_reader_creation_and_basic_reading(void) {
     TEST_ASSERT_NOT_NULL(strstr(output, "\"message\": "));
 
     free(output);
-    dft_reader_destroy(reader);
-    dft_indexer_destroy(indexer);
+    dftu_reader_destroy(reader);
+    dftu_indexer_destroy(indexer);
 }
 
 void test_format_json_boundary_detection(void) {
     printf("Testing %s JSON boundary detection\n", g_format_name);
 
     // Build index first
-    dft_indexer_handle_t indexer =
-        dft_indexer_create(g_test_file, g_idx_file, mb_to_b(0.5), 0);
+    dftu_indexer_handle_t indexer =
+        dftu_indexer_create(g_test_file, g_idx_file, mb_to_b(0.5), 0);
     TEST_ASSERT_NOT_NULL(indexer);
 
-    int result = dft_indexer_build(indexer);
+    int result = dftu_indexer_build(indexer);
     TEST_ASSERT_EQUAL_INT(0, result);
 
     // Create reader
-    dft_reader_handle_t reader = dft_reader_create_with_indexer(indexer);
+    dftu_reader_handle_t reader = dftu_reader_create_with_indexer(indexer);
     TEST_ASSERT_NOT_NULL(reader);
 
     char buffer[1024];
@@ -161,8 +161,8 @@ void test_format_json_boundary_detection(void) {
 
     // Read with JSON boundary detection
     int bytes_read;
-    while ((bytes_read = dft_reader_read_line_bytes(reader, 0, 150, buffer,
-                                                    sizeof(buffer))) > 0) {
+    while ((bytes_read = dftu_reader_read_line_bytes(reader, 0, 150, buffer,
+                                                     sizeof(buffer))) > 0) {
         output = realloc(output, total_bytes + bytes_read);
         TEST_ASSERT_NOT_NULL(output);
         memcpy(output + total_bytes, buffer, bytes_read);
@@ -186,8 +186,8 @@ void test_format_json_boundary_detection(void) {
         free(output);
     }
 
-    dft_reader_destroy(reader);
-    dft_indexer_destroy(indexer);
+    dftu_reader_destroy(reader);
+    dftu_indexer_destroy(indexer);
 }
 
 // TAR.GZ specific tests
@@ -199,19 +199,19 @@ void test_tar_gz_multiple_files_detection(void) {
     printf("Testing TAR.GZ multiple files detection\n");
 
     // Build index first
-    dft_indexer_handle_t indexer =
-        dft_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
+    dftu_indexer_handle_t indexer =
+        dftu_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
     TEST_ASSERT_NOT_NULL(indexer);
 
-    int result = dft_indexer_build(indexer);
+    int result = dftu_indexer_build(indexer);
     TEST_ASSERT_EQUAL_INT(0, result);
 
     // Create reader and read full content
-    dft_reader_handle_t reader = dft_reader_create_with_indexer(indexer);
+    dftu_reader_handle_t reader = dftu_reader_create_with_indexer(indexer);
     TEST_ASSERT_NOT_NULL(reader);
 
     size_t max_bytes;
-    result = dft_reader_get_max_bytes(reader, &max_bytes);
+    result = dftu_reader_get_max_bytes(reader, &max_bytes);
     TEST_ASSERT_EQUAL_INT(0, result);
 
     char* full_content = malloc(max_bytes + 1);
@@ -220,8 +220,8 @@ void test_tar_gz_multiple_files_detection(void) {
 
     char buffer[4096];
     int bytes_read;
-    while ((bytes_read = dft_reader_read(reader, 0, max_bytes, buffer,
-                                         sizeof(buffer))) > 0) {
+    while ((bytes_read = dftu_reader_read(reader, 0, max_bytes, buffer,
+                                          sizeof(buffer))) > 0) {
         memcpy(full_content + total_read, buffer, bytes_read);
         total_read += bytes_read;
     }
@@ -243,8 +243,8 @@ void test_tar_gz_multiple_files_detection(void) {
     TEST_ASSERT_TRUE(file_types_found >= 2);
 
     free(full_content);
-    dft_reader_destroy(reader);
-    dft_indexer_destroy(indexer);
+    dftu_reader_destroy(reader);
+    dftu_indexer_destroy(indexer);
 }
 
 void test_tar_gz_directory_structure(void) {
@@ -255,21 +255,21 @@ void test_tar_gz_directory_structure(void) {
     printf("Testing TAR.GZ directory structure handling\n");
 
     // Build index first
-    dft_indexer_handle_t indexer =
-        dft_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
+    dftu_indexer_handle_t indexer =
+        dftu_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
     TEST_ASSERT_NOT_NULL(indexer);
 
-    int result = dft_indexer_build(indexer);
+    int result = dftu_indexer_build(indexer);
     TEST_ASSERT_EQUAL_INT(0, result);
 
     // Should successfully index files in subdirectories
-    uint64_t line_count = dft_indexer_get_num_lines(indexer);
+    uint64_t line_count = dftu_indexer_get_num_lines(indexer);
     TEST_ASSERT_TRUE(line_count > 0);
 
     printf("  TAR.GZ with directories indexed %lu lines\n",
            (unsigned long)line_count);
 
-    dft_indexer_destroy(indexer);
+    dftu_indexer_destroy(indexer);
 }
 
 // GZIP specific tests
@@ -281,19 +281,19 @@ void test_gzip_single_file_structure(void) {
     printf("Testing GZIP single file structure\n");
 
     // Build index first
-    dft_indexer_handle_t indexer =
-        dft_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
+    dftu_indexer_handle_t indexer =
+        dftu_indexer_create(g_test_file, g_idx_file, mb_to_b(1.0), 0);
     TEST_ASSERT_NOT_NULL(indexer);
 
-    int result = dft_indexer_build(indexer);
+    int result = dftu_indexer_build(indexer);
     TEST_ASSERT_EQUAL_INT(0, result);
 
     // Create reader and read some content
-    dft_reader_handle_t reader = dft_reader_create_with_indexer(indexer);
+    dftu_reader_handle_t reader = dftu_reader_create_with_indexer(indexer);
     TEST_ASSERT_NOT_NULL(reader);
 
     char buffer[1024];
-    int bytes_read = dft_reader_read(reader, 0, 500, buffer, sizeof(buffer));
+    int bytes_read = dftu_reader_read(reader, 0, 500, buffer, sizeof(buffer));
     TEST_ASSERT_TRUE(bytes_read > 0);
 
     // Should NOT contain file field (that's TAR.GZ specific)
@@ -304,8 +304,8 @@ void test_gzip_single_file_structure(void) {
 
     printf("  GZIP single file verified (no file field found)\n");
 
-    dft_reader_destroy(reader);
-    dft_indexer_destroy(indexer);
+    dftu_reader_destroy(reader);
+    dftu_indexer_destroy(indexer);
 }
 
 // Macro to run a test with both formats

@@ -34,7 +34,7 @@ class GzTraceWriter {
     void close() {
         if (closed_) return;
         closed_ = true;
-        dft_utils_test::write_gz_trace(path_, buffer_.str());
+        dftu_utils_test::write_gz_trace(path_, buffer_.str());
     }
 
    private:
@@ -229,7 +229,8 @@ TEST_SUITE("DFTracerReplay") {
             return;
         }
 
-        fs::path temp_dir = dft_utils_test::make_unique_test_path("replay_dry");
+        fs::path temp_dir =
+            dftu_utils_test::make_unique_test_path("replay_dry");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 5);
@@ -253,7 +254,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_nosleep");
+            dftu_utils_test::make_unique_test_path("replay_nosleep");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 5);
@@ -276,7 +277,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_notiming");
+            dftu_utils_test::make_unique_test_path("replay_notiming");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 5);
@@ -299,7 +300,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_filter_cat");
+            dftu_utils_test::make_unique_test_path("replay_filter_cat");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "multi_category.pfw.gz").string();
         create_multi_category_trace(trace_file);
@@ -324,7 +325,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_filter_multi");
+            dftu_utils_test::make_unique_test_path("replay_filter_multi");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "multi_category.pfw.gz").string();
         create_multi_category_trace(trace_file);
@@ -345,7 +346,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_filter_func");
+            dftu_utils_test::make_unique_test_path("replay_filter_func");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "multi_category.pfw.gz").string();
         create_multi_category_trace(trace_file);
@@ -368,7 +369,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_max_events");
+            dftu_utils_test::make_unique_test_path("replay_max_events");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 20);
@@ -391,7 +392,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_sample50");
+            dftu_utils_test::make_unique_test_path("replay_sample50");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "large_trace.pfw.gz").string();
         create_sample_trace(trace_file, 100);
@@ -416,7 +417,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_sample25");
+            dftu_utils_test::make_unique_test_path("replay_sample25");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "large_trace.pfw.gz").string();
         create_sample_trace(trace_file, 100);
@@ -440,7 +441,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_sample_bad");
+            dftu_utils_test::make_unique_test_path("replay_sample_bad");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "test_trace.pfw.gz").string();
         create_sample_trace(trace_file, 10);
@@ -461,7 +462,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_timing");
+            dftu_utils_test::make_unique_test_path("replay_timing");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "perf_trace.pfw.gz").string();
         create_sample_trace(trace_file, 10);
@@ -482,7 +483,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_bench");
+            dftu_utils_test::make_unique_test_path("replay_bench");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "perf_trace.pfw.gz").string();
         create_sample_trace(trace_file, 50);
@@ -510,7 +511,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_verbose");
+            dftu_utils_test::make_unique_test_path("replay_verbose");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "stats_trace.pfw.gz").string();
         create_sample_trace(trace_file, 5);
@@ -533,7 +534,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_stats");
+            dftu_utils_test::make_unique_test_path("replay_stats");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "stats_trace.pfw.gz").string();
         create_multi_category_trace(trace_file);
@@ -556,7 +557,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_perfunc");
+            dftu_utils_test::make_unique_test_path("replay_perfunc");
         fs::create_directories(temp_dir);
         std::string trace_file = (temp_dir / "stats_trace.pfw.gz").string();
         create_multi_category_trace(trace_file);
@@ -590,7 +591,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_bad_fmt");
+            dftu_utils_test::make_unique_test_path("replay_bad_fmt");
         fs::create_directories(temp_dir);
         std::string bad_trace = (temp_dir / "bad_trace.pfw.gz").string();
 
@@ -614,7 +615,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_empty");
+            dftu_utils_test::make_unique_test_path("replay_empty");
         fs::create_directories(temp_dir);
         std::string empty_trace = (temp_dir / "empty_trace.pfw.gz").string();
 
@@ -640,7 +641,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_multi");
+            dftu_utils_test::make_unique_test_path("replay_multi");
         fs::create_directories(temp_dir);
         std::string trace1 = (temp_dir / "trace1.pfw").string();
         std::string trace2 = (temp_dir / "trace2.pfw").string();
@@ -665,7 +666,8 @@ TEST_SUITE("DFTracerReplay") {
             return;
         }
 
-        fs::path temp_dir = dft_utils_test::make_unique_test_path("replay_dir");
+        fs::path temp_dir =
+            dftu_utils_test::make_unique_test_path("replay_dir");
         fs::create_directories(temp_dir);
         fs::path trace_dir = temp_dir / "traces";
         fs::create_directories(trace_dir);
@@ -789,7 +791,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_stress");
+            dftu_utils_test::make_unique_test_path("replay_stress");
         fs::create_directories(temp_dir);
         std::string large_trace = (temp_dir / "large_trace.pfw.gz").string();
         create_sample_trace(large_trace, 1000);
@@ -816,7 +818,7 @@ TEST_SUITE("DFTracerReplay") {
         }
 
         fs::path temp_dir =
-            dft_utils_test::make_unique_test_path("replay_stress2");
+            dftu_utils_test::make_unique_test_path("replay_stress2");
         fs::create_directories(temp_dir);
         std::string large_trace = (temp_dir / "large_trace2.pfw").string();
         create_sample_trace(large_trace, 500);

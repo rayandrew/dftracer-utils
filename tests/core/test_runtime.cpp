@@ -35,6 +35,57 @@ static CoroTask<void> throw_void_async() {
 
 }  // namespace
 
+TEST_CASE("Runtime - parallel_for covers the range exactly once") {
+    Runtime rt(4);
+    const std::int64_t n = 100000;
+    std::vector<std::int32_t> hits(n, 0);
+    rt.parallel_for(n, 4096, [&](std::int64_t begin, std::int64_t end) {
+        for (std::int64_t i = begin; i < end; ++i) hits[i]++;
+    });
+    for (std::int64_t i = 0; i < n; ++i) REQUIRE(hits[i] == 1);
+}
+
+TEST_CASE("Runtime - parallel_reduce matches a serial sum") {
+    Runtime rt(4);
+    const std::int64_t n = 200000;
+    std::int64_t expected = 0;
+    for (std::int64_t i = 0; i < n; ++i) expected += i;
+    std::int64_t got = rt.parallel_reduce(
+        n, 4096, std::int64_t{0},
+        [](std::int64_t b, std::int64_t e) {
+            std::int64_t s = 0;
+            for (std::int64_t i = b; i < e; ++i) s += i;
+            return s;
+        },
+        [](std::int64_t a, std::int64_t b) { return a + b; });
+    CHECK(got == expected);
+}
+
+TEST_CASE("Runtime - parallel_for is serial for a single chunk") {
+    Runtime rt(4);
+    // grain >= n -> one chunk -> body called once inline, no fork-join.
+    int calls = 0;
+    rt.parallel_for(1000, 100000, [&](std::int64_t b, std::int64_t e) {
+        ++calls;
+        CHECK(b == 0);
+        CHECK(e == 1000);
+    });
+    CHECK(calls == 1);
+}
+
+TEST_CASE("Runtime - nested parallel_for runs the inner loop serial") {
+    Runtime rt(4);
+    // The inner parallel_for must see in_parallel_region() and run inline, so
+    // every outer chunk's inner call fires exactly once.
+    std::atomic<int> inner_calls{0};
+    rt.parallel_for(8, 1, [&](std::int64_t, std::int64_t) {
+        rt.parallel_for(1000, 8, [&](std::int64_t, std::int64_t) {
+            inner_calls.fetch_add(1);
+        });
+    });
+    CHECK(inner_calls.load() == 8);  // 8 outer chunks x 1 inner (serial) each
+}
+
 TEST_CASE("Runtime - submit returns correct value") {
     Runtime rt(2);
     auto result = rt.submit(add_async(3, 4), "add").get();
