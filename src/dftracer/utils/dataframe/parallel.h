@@ -1,0 +1,67 @@
+#ifndef DFTRACER_UTILS_DATAFRAME_PARALLEL_H
+#define DFTRACER_UTILS_DATAFRAME_PARALLEL_H
+
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+// A parallelism seam for the dataframe kernels. dataframe is a leaf library
+// with no runtime dependency, so it runs serial by default; a host (the core
+// coroutine runtime, or a distributed engine) installs a backend once at
+// startup, and data-parallel kernels then fan out through it. This keeps
+// dataframe's C ABI clean and portable while letting the same kernels
+// parallelize wherever a backend is present.
+namespace dftracer::utils::dataframe {
+
+/// A backend runs `body(body_ctx, begin, end)` over disjoint sub-ranges
+/// covering [0, n), possibly concurrently, and returns only when all have
+/// finished. `grain` is the chunk size the caller suggests.
+using ParallelForFn = void (*)(void* ctx, std::int64_t n, std::int64_t grain,
+                               void (*body)(void* body_ctx, std::int64_t begin,
+                                            std::int64_t end),
+                               void* body_ctx);
+
+/// Install the backend (nullptr restores serial). Set once at startup.
+void set_parallel_backend(ParallelForFn fn, void* ctx);
+
+namespace detail {
+/// Dispatch through the backend, or run serial when none is installed or
+/// `n <= grain` (so small work never pays the fan-out cost).
+void parallel_for_dispatch(std::int64_t n, std::int64_t grain,
+                           void (*body)(void*, std::int64_t, std::int64_t),
+                           void* body_ctx);
+}  // namespace detail
+
+/// Run `body(begin, end)` over [0, n) in grain-sized chunks. Blocks until all
+/// chunks finish. `body` must be safe to run concurrently on disjoint ranges.
+template <class Body>
+void parallel_for(std::int64_t n, std::int64_t grain, Body&& body) {
+    using B = std::remove_reference_t<Body>;
+    auto thunk = [](void* p, std::int64_t begin, std::int64_t end) {
+        (*static_cast<B*>(p))(begin, end);
+    };
+    detail::parallel_for_dispatch(n, grain, thunk, &body);
+}
+
+/// Data-parallel reduction over [0, n): `map(begin, end)` produces a partial
+/// per chunk, combined pairwise by `combine`. `identity` must be a neutral
+/// element for `combine`. `T` must be copyable.
+template <class T, class Map, class Combine>
+T parallel_reduce(std::int64_t n, std::int64_t grain, T identity, Map&& map,
+                  Combine&& combine) {
+    if (n <= 0) return identity;
+    const std::int64_t chunks = (n + grain - 1) / grain;
+    if (chunks <= 1) return combine(std::move(identity), map(0, n));
+    std::vector<T> partials(static_cast<std::size_t>(chunks), identity);
+    parallel_for(n, grain, [&](std::int64_t b, std::int64_t e) {
+        partials[static_cast<std::size_t>(b / grain)] = map(b, e);
+    });
+    T acc = std::move(identity);
+    for (T& p : partials) acc = combine(std::move(acc), std::move(p));
+    return acc;
+}
+
+}  // namespace dftracer::utils::dataframe
+
+#endif  // DFTRACER_UTILS_DATAFRAME_PARALLEL_H

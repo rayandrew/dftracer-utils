@@ -1,0 +1,514 @@
+#ifndef DFTRACER_UTILS_DATAFRAME_SERIES_H
+#define DFTRACER_UTILS_DATAFRAME_SERIES_H
+
+#include <dftracer/utils/core/common/config.h>
+#include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/scalar.h>
+#include <dftracer/utils/dataframe/types.h>
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#ifdef DFTRACER_UTILS_ENABLE_ARROW
+struct ArrowSchema;
+struct ArrowArray;
+#endif
+
+namespace dftracer::utils::dataframe {
+
+struct DataFrame;
+#ifdef DFTRACER_UTILS_ENABLE_ARROW
+class OwnedArrow;
+#endif
+
+/// A typed column. Move-only owning wrapper over the C ABI handle; the buffers,
+/// encoding, and null handling live behind it. Typed accessors are inline
+/// (zero-cost) for in-tree callers; the C ABI is the stable cross-boundary
+/// seam.
+class Series {
+   public:
+    Series() = default;
+    explicit Series(dftu_series* handle) noexcept : handle_(handle) {}
+
+    ~Series() {
+        if (handle_ != nullptr) dftu_series_free(handle_);
+    }
+
+    Series(Series&& other) noexcept : handle_(other.handle_) {
+        other.handle_ = nullptr;
+    }
+    Series& operator=(Series&& other) noexcept {
+        if (this != &other) {
+            if (handle_ != nullptr) dftu_series_free(handle_);
+            handle_ = other.handle_;
+            other.handle_ = nullptr;
+        }
+        return *this;
+    }
+    Series(const Series&) = delete;
+    Series& operator=(const Series&) = delete;
+
+    /// Build a FLAT column copying `n` fixed-width values of `type` from
+    /// `data`. `validity` is an Arrow-layout bitmap (1 = valid) or null for no
+    /// nulls.
+    static Series flat(TypeId type, const void* data, std::int64_t n,
+                       const std::uint8_t* validity = nullptr) {
+        return Series{dftu_series_new_flat(static_cast<dftu_dtype>(type), data,
+                                           n, validity)};
+    }
+    static Series flat_i64(const std::int64_t* data, std::int64_t n,
+                           const std::uint8_t* validity = nullptr) {
+        return flat(TypeId::Int64, data, n, validity);
+    }
+    static Series flat_f64(const double* data, std::int64_t n,
+                           const std::uint8_t* validity = nullptr) {
+        return flat(TypeId::Float64, data, n, validity);
+    }
+
+    /// Build a FLAT column BORROWING `n` fixed-width values of `type` from
+    /// `data` with NO copy: the column's data buffer points straight at `data`.
+    /// The caller must keep `data` alive until `release(release_ctx)` runs,
+    /// which happens exactly once when the column's last reference is dropped
+    /// (Series destruction, possibly off the creating thread). Pass a null
+    /// `release` to borrow static or otherwise-owned memory. `validity` is
+    /// copied if non-null (usually null). Returns an invalid Series for a
+    /// variable-width type (String/Binary), where borrowing a single flat
+    /// buffer is not meaningful. Mirrors dftu_series_new_flat_borrowed.
+    static Series from_borrowed(TypeId type, const void* data, std::int64_t n,
+                                const std::uint8_t* validity = nullptr,
+                                void (*release)(void* ctx) = nullptr,
+                                void* release_ctx = nullptr) {
+        return Series{
+            dftu_series_new_flat_borrowed(static_cast<dftu_dtype>(type), data,
+                                          n, validity, release, release_ctx)};
+    }
+
+    /// Build a FLAT column BORROWING `data` and taking ownership of `owner`.
+    /// `data` must point into storage kept alive by `owner` (a std::vector, a
+    /// std::unique_ptr, a std::shared_ptr, a buffer view, ...); the column
+    /// borrows the buffer with no copy and destroys `owner` exactly once when
+    /// its last reference is dropped, freeing whatever backs `data`. On a
+    /// variable-width `type` the borrow is rejected and `owner` is destroyed
+    /// before an invalid Series is returned. `validity` is copied if non-null.
+    template <class Owner, class = std::enable_if_t<!std::is_convertible_v<
+                               Owner&&, const std::uint8_t*>>>
+    static Series from_borrowed(TypeId type, const void* data, std::int64_t n,
+                                Owner&& owner,
+                                const std::uint8_t* validity = nullptr) {
+        using Held = std::decay_t<Owner>;
+        auto* held = new Held(std::forward<Owner>(owner));
+        // A rejected borrow (variable-width) runs release() itself, so `held`
+        // is freed there; never double-free it here.
+        return Series{dftu_series_new_flat_borrowed(
+            static_cast<dftu_dtype>(type), data, n, validity,
+            [](void* ctx) { delete static_cast<Held*>(ctx); }, held)};
+    }
+
+    /// Build a FLAT String column from `values` (offsets + concatenated bytes).
+    static Series strings(const std::vector<std::string>& values) {
+        std::vector<std::int32_t> offsets(values.size() + 1, 0);
+        std::string data;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            data += values[i];
+            offsets[i + 1] = static_cast<std::int32_t>(data.size());
+        }
+        return Series{dftu_series_new_string(
+            static_cast<dftu_dtype>(TypeId::String), offsets.data(),
+            data.data(), static_cast<std::int64_t>(values.size()), nullptr)};
+    }
+
+    /// Build a STRUCT column from field `names` and `columns` (each the same
+    /// length, aligned to names); takes ownership of the field columns. The
+    /// columns are move-only, so pass them in a vector built by move.
+    static Series structs(std::vector<std::string> names,
+                          std::vector<Series> columns) {
+        std::vector<dftu_series*> handles;
+        std::vector<const char*> cnames;
+        handles.reserve(columns.size());
+        cnames.reserve(names.size());
+        for (Series& c : columns) handles.push_back(c.release());
+        for (const std::string& s : names) cnames.push_back(s.c_str());
+        return Series{
+            dftu_series_new_struct(handles.data(), cnames.data(),
+                                   static_cast<std::int32_t>(handles.size()))};
+    }
+
+    /// Build a LIST column: `offsets` (n+1 entries) index into `values`; takes
+    /// ownership of `values`.
+    static Series list(const std::vector<std::int32_t>& offsets,
+                       Series values) {
+        return Series{dftu_series_new_list(
+            offsets.data(), static_cast<std::int64_t>(offsets.size()) - 1,
+            values.release())};
+    }
+
+    bool valid() const noexcept { return handle_ != nullptr; }
+    dftu_series* handle() const noexcept { return handle_; }
+    /// Relinquish ownership of the handle (for transferring into a nested
+    /// column); the Series becomes empty.
+    dftu_series* release() noexcept {
+        dftu_series* h = handle_;
+        handle_ = nullptr;
+        return h;
+    }
+
+    TypeId type() const noexcept {
+        return static_cast<TypeId>(dftu_series_type(handle_));
+    }
+    Encoding encoding() const noexcept {
+        return static_cast<Encoding>(dftu_series_encoding(handle_));
+    }
+    std::int64_t length() const noexcept { return dftu_series_length(handle_); }
+    std::int64_t null_count() const noexcept {
+        return dftu_series_null_count(handle_);
+    }
+    /// Whether row `i` is null (a column with no validity is all-valid).
+    bool is_null(std::int64_t i) const noexcept {
+        return dftu_series_is_null(handle_, i) != 0;
+    }
+
+    /// Raw FLAT value buffer as `T*`; null unless the column is FLAT.
+    template <class T>
+    const T* data() const noexcept {
+        return static_cast<const T*>(dftu_series_data(handle_));
+    }
+
+    /// Value of a FLAT String/Binary column at `i`. Undefined for other types.
+    std::string_view string_at(std::int64_t i) const noexcept {
+        const std::int32_t* off = dftu_series_offsets(handle_);
+        const char* d = static_cast<const char*>(dftu_series_data(handle_));
+        return std::string_view(d + off[i],
+                                static_cast<std::size_t>(off[i + 1] - off[i]));
+    }
+
+    /// int32 offset buffer (length+1 entries) of a String/Binary or List
+    /// column, or null for fixed-width types.
+    const std::int32_t* offsets() const noexcept {
+        return dftu_series_offsets(handle_);
+    }
+
+    /// Child count: 1 for a List, the field count for a Struct, else 0.
+    std::int64_t num_children() const noexcept {
+        return dftu_series_num_children(handle_);
+    }
+
+    /// Child column `i` (List: 0 = values; Struct: field i). Invalid if out of
+    /// range.
+    Series child(std::int64_t i) const noexcept {
+        return Series{dftu_series_child(handle_, static_cast<std::int32_t>(i))};
+    }
+
+    /// A new owned column sharing this column's buffers zero-copy (refcount
+    /// bump, no data copy).
+    Series share() const noexcept { return Series{dftu_series_share(handle_)}; }
+
+    /// A zero-copy view of the FLAT rows [offset, offset+len); invalid unless
+    /// FLAT, fixed-width, and no-null.
+    Series slice(std::int64_t offset, std::int64_t len) const noexcept {
+        return Series{dftu_series_slice(handle_, offset, len)};
+    }
+
+    // Each returns a new owned Series (move-only) so calls chain; binary ops
+    // need FLAT numeric columns of equal length and are invalid on a mismatch.
+    Series add(const Series& other) const;
+    Series sub(const Series& other) const;
+    Series mul(const Series& other) const;
+    Series div(const Series& other) const;
+
+    Scalar sum() const;
+    Scalar min() const;
+    Scalar max() const;
+    Scalar product() const;
+    Scalar mode() const;           ///< most frequent non-null value (hash)
+    bool all() const;              ///< every non-null Bool bit set
+    bool any() const;              ///< at least one non-null Bool bit set
+    std::int64_t arg_min() const;  ///< index of min non-null value (-1 if none)
+    std::int64_t arg_max() const;  ///< index of max non-null value (-1 if none)
+    std::int64_t count() const;    ///< non-null row count
+    double mean() const;
+    double variance(bool sample = true) const;
+    double stddev(bool sample = true) const;
+    double skewness() const;
+    double kurtosis() const;
+    double quantile(double q) const;
+    double median() const;
+    std::int64_t nunique() const;
+
+    /// The distinct values of this column and their counts, as a DataFrame with
+    /// columns `value` (this column's type) and `count` (Int64), most-frequent
+    /// first.
+    DataFrame value_counts() const;
+
+    /// Rank of each row (`method` selects the tie-break), ascending unless
+    /// `descending`, as a Float64 column; nulls rank last with a NaN rank.
+    Series rank(RankMethod method, bool descending = false) const;
+    /// Rolling-window reduction (`op` = Sum/Mean/Min/Max) over `window`
+    /// trailing rows (first window-1 null), as Float64.
+    Series rolling(RollingOp op, std::int64_t window) const;
+    /// Rolling sample variance / std over `window` trailing rows (first
+    /// window-1 null), as Float64.
+    Series rolling_var(std::int64_t window) const;
+    Series rolling_std(std::int64_t window) const;
+    /// Rolling median / quantile (`q` in [0,1]) over `window` trailing rows
+    /// (first window-1 null), as Float64.
+    Series rolling_median(std::int64_t window) const;
+    Series rolling_quantile(std::int64_t window, double q) const;
+    /// Exponentially weighted mean / sample std, smoothing `alpha` in (0,1], as
+    /// Float64 (ewm_std row 0 is null).
+    Series ewm_mean(double alpha) const;
+    Series ewm_std(double alpha) const;
+    /// Bin values by the ascending `breaks` edges (count of breaks <= x) ->
+    /// Int32; a null input row yields a null bin.
+    Series cut(const Series& breaks) const;
+    /// Bin values by the column's `q`-quantile edges -> Int32 (bins 0..q-1).
+    Series qcut(std::int32_t q) const;
+    /// Lower-bound insertion index of each `values` element into this (assumed
+    /// sorted) column -> Int64.
+    Series search_sorted(const Series& values) const;
+    /// Linearly interpolate null interior values; leading/trailing nulls stay
+    /// null -> Float64.
+    Series interpolate() const;
+    /// Sum of x[i]*y[i] over the non-null pairs with `other` (SIMD f64).
+    Scalar dot(const Series& other) const;
+
+    Series cast(TypeId target) const;
+    /// Unary numeric primitive (`op` = Ilog2/BitWidth/Popcount/Clz/Ctz/Mix64)
+    /// over a FLAT Int64/Uint64 column, producing an Int64 column; invalid
+    /// unless the input is a 64-bit integer column.
+    Series prim(PrimOp op) const;
+    Series abs() const;
+    Series clip(dftu_scalar lo, dftu_scalar hi) const;
+    /// Clamp to [lo, hi] with natural C++ values (clip(0, 100)); the bounds
+    /// convert to this column's element type.
+    template <class Lo, class Hi,
+              class = std::enable_if_t<std::is_arithmetic_v<Lo> &&
+                                       std::is_arithmetic_v<Hi>>>
+    Series clip(Lo lo, Hi hi) const {
+        return clip(to_scalar_(lo), to_scalar_(hi));
+    }
+    Series round() const;
+    Series fillna(dftu_scalar fill) const;
+    /// Replace nulls with a natural C++ value (fillna(0), fillna(1.5)); the
+    /// fill converts to this column's element type.
+    template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+    Series fillna(T fill) const {
+        return fillna(to_scalar_(fill));
+    }
+    Series cumsum() const;
+    Series cummax() const;
+    Series cummin() const;
+    Series cum_prod() const;
+    Series cum_count() const;
+    Series ceil() const;
+    Series floor() const;
+    Series trunc() const;
+    Series sign() const;
+    Series negate() const;
+    Series diff() const;
+    Series pct_change() const;
+    Series sqrt() const;
+    Series exp() const;
+    Series log() const;
+    Series unique() const;
+    Series dictionary_encode() const;
+
+    Series is_nan() const;         ///< Bool mask: value is NaN (floats).
+    Series is_finite() const;      ///< Bool mask: value is finite.
+    Series is_infinite() const;    ///< Bool mask: value is +/-Inf (floats).
+    Series is_unique() const;      ///< Bool mask: value occurs exactly once.
+    Series is_duplicated() const;  ///< Bool mask: value is repeated.
+    /// Whether the column is sorted ascending (or descending); single scan.
+    bool is_sorted(bool descending = false) const;
+    Series drop_nulls() const;  ///< Selection over the non-null rows.
+    /// Bool mask, true where the value is present in `values`.
+    Series is_in(const Series& values) const;
+    /// Rows sorted ascending (or descending): take(argsort(v, descending)).
+    Series sort(bool descending = false) const;
+    Series head(std::int64_t n) const;  ///< First n rows (n clamped to length).
+    Series tail(std::int64_t n) const;  ///< Last n rows (n clamped to length).
+    Series reverse() const;             ///< Rows in reverse order.
+    /// Shift rows by n (positive = lag, negative = lead); vacated rows null.
+    Series shift(std::int64_t n) const;
+    Series top_k(std::int64_t k) const;     ///< The k largest rows, best-first.
+    Series bottom_k(std::int64_t k) const;  ///< The k smallest rows.
+    /// A deterministic sample of n distinct rows (mix64(index, seed) hash).
+    Series sample(std::int64_t n, std::uint64_t seed = 0) const;
+
+#ifdef DFTRACER_UTILS_ENABLE_ARROW
+    /// Export this column through the Arrow C Data Interface (zero copy: the
+    /// exported buffers alias this column's and are kept alive by the returned
+    /// owner's release callbacks). Include
+    /// <dftracer/utils/dataframe/arrow.h> for the OwnedArrow definition.
+    OwnedArrow to_arrow() const;
+
+    /// Import an Arrow array (viewed through `schema`) as a Series, wrapping
+    /// its buffers zero copy. ADOPTS `array`: ownership of its buffers moves
+    /// into the returned Series (the array's release runs when the Series is
+    /// destroyed) and the passed array is marked released, so the caller must
+    /// not release it again. `schema` is only read. An invalid Series on an
+    /// unsupported type.
+    static Series from_arrow(const ArrowSchema* schema,
+                             const ArrowArray* array);
+#endif
+
+    Series argsort(bool descending = false) const;
+    Series take(const std::vector<std::int64_t>& indices) const;
+    Series materialize() const;
+    /// Keep the rows where the bit-packed Bool `mask` (same length) is true.
+    Series filter(const Series& mask) const;
+
+    Series str_eq(std::string_view rhs) const;
+    Series str_contains(std::string_view needle) const;
+    Series str_starts_with(std::string_view prefix) const;
+    Series str_ends_with(std::string_view suffix) const;
+    /// Bool mask: the whole string matches the ECMAScript regex `pattern`.
+    Series str_matches(std::string_view pattern) const;
+    /// Bool mask: the string matches the SQL LIKE / glob `pattern` (`%` any
+    /// run,
+    /// `_` one char, `\` escapes a literal `%`/`_`/`\`).
+    Series str_like(std::string_view pattern) const;
+    Series str_len_bytes() const;  ///< Int64 per-row byte length.
+    Series str_len_chars() const;  ///< Int64 per-row UTF-8 codepoint count.
+    /// Int64 byte index of the first `needle`, or -1.
+    Series str_find(std::string_view needle) const;
+    Series to_lowercase() const;  ///< ASCII case fold (non-ASCII unchanged).
+    Series to_uppercase() const;  ///< ASCII case fold (non-ASCII unchanged).
+    Series str_strip() const;     ///< Trim ASCII whitespace both ends.
+    Series str_lstrip() const;    ///< Trim ASCII whitespace left.
+    Series str_rstrip() const;    ///< Trim ASCII whitespace right.
+    /// Replace the first / all literal `pat` with `repl` (empty `pat` = no-op).
+    Series str_replace(std::string_view pat, std::string_view repl) const;
+    Series str_replace_all(std::string_view pat, std::string_view repl) const;
+    /// Substring by byte offset (negative `start` from end; negative `length`
+    /// to end; clamped).
+    Series str_slice(std::int64_t start, std::int64_t length) const;
+    /// Pad to `width` bytes with `fill` on the left / right.
+    Series str_pad_start(std::int64_t width, char fill = ' ') const;
+    Series str_pad_end(std::int64_t width, char fill = ' ') const;
+    /// Left-pad with '0' to `width` after an optional sign (Python zfill).
+    Series str_zfill(std::int64_t width) const;
+    /// Split each row on literal `sep` -> List<String> column.
+    Series str_split(std::string_view sep) const;
+
+    Series logical_and(const Series& other) const;
+    Series logical_or(const Series& other) const;
+    Series logical_not() const;
+
+    /// Compare against a scalar, returning a bit-packed Bool mask; the scalar
+    /// is converted to this column's element type (exact for i64).
+    template <class T>
+    Series gt(T v) const {
+        return compare_(DFTU_CMP_GT, v);
+    }
+    template <class T>
+    Series ge(T v) const {
+        return compare_(DFTU_CMP_GE, v);
+    }
+    template <class T>
+    Series lt(T v) const {
+        return compare_(DFTU_CMP_LT, v);
+    }
+    template <class T>
+    Series le(T v) const {
+        return compare_(DFTU_CMP_LE, v);
+    }
+    template <class T>
+    Series eq(T v) const {
+        return compare_(DFTU_CMP_EQ, v);
+    }
+    template <class T>
+    Series ne(T v) const {
+        return compare_(DFTU_CMP_NE, v);
+    }
+
+    /// Bit-packed Bool mask, true where lo <= value <= hi (inclusive); the
+    /// bounds convert to this column's element type.
+    template <class T>
+    Series is_between(T lo, T hi) const {
+        return Series{
+            dftu_series_is_between(handle_, to_scalar_(lo), to_scalar_(hi))};
+    }
+
+    // Comparison operators return a mask (columnar convention), so equality
+    // stays as eq()/ne() rather than operator==.
+    Series operator+(const Series& o) const { return add(o); }
+    Series operator-(const Series& o) const { return sub(o); }
+    Series operator*(const Series& o) const { return mul(o); }
+    Series operator/(const Series& o) const { return div(o); }
+
+    // Scalar arithmetic (elementwise against a constant), mirroring the
+    // Series-Series operators; the scalar converts to this column's element
+    // type. A Series right operand takes the non-template overloads above.
+    template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+    Series operator+(T v) const {
+        return Series{dftu_series_add_scalar(handle_, to_scalar_(v))};
+    }
+    template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+    Series operator-(T v) const {
+        return Series{dftu_series_sub_scalar(handle_, to_scalar_(v))};
+    }
+    template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+    Series operator*(T v) const {
+        return Series{dftu_series_mul_scalar(handle_, to_scalar_(v))};
+    }
+    template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+    Series operator/(T v) const {
+        return Series{dftu_series_div_scalar(handle_, to_scalar_(v))};
+    }
+    Series operator&(const Series& o) const { return logical_and(o); }
+    Series operator|(const Series& o) const { return logical_or(o); }
+    Series operator~() const { return logical_not(); }
+    template <class T>
+    Series operator<(T v) const {
+        return lt(v);
+    }
+    template <class T>
+    Series operator<=(T v) const {
+        return le(v);
+    }
+    template <class T>
+    Series operator>(T v) const {
+        return gt(v);
+    }
+    template <class T>
+    Series operator>=(T v) const {
+        return ge(v);
+    }
+
+   private:
+    template <class T>
+    static dftu_scalar to_scalar_(T v) {
+        return to_scalar(v);
+    }
+
+    template <class T>
+    Series compare_(std::int32_t op, T v) const {
+        return Series{dftu_series_compare(handle_, static_cast<dftu_cmp_op>(op),
+                                          to_scalar_(v))};
+    }
+
+    dftu_series* handle_ = nullptr;
+};
+
+// Reflected scalar arithmetic: `v + s`, `v * s` (commutative) and `v - s`.
+// Reflected division `v / s` is intentionally absent (no reciprocal kernel).
+template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+inline Series operator+(T v, const Series& s) {
+    return s + v;
+}
+template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+inline Series operator*(T v, const Series& s) {
+    return s * v;
+}
+template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+inline Series operator-(T v, const Series& s) {
+    return s * (-1) + v;
+}
+
+}  // namespace dftracer::utils::dataframe
+
+#endif  // DFTRACER_UTILS_DATAFRAME_SERIES_H
