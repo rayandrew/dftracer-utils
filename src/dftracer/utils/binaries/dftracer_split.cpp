@@ -1,3 +1,4 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/scoped_fd.h>
 #include <dftracer/utils/core/io/io.h>
@@ -6,9 +7,8 @@
 #include <dftracer/utils/core/task_graph/task_graph.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
-#include <dftracer/utils/core/utilities/utility_adapter.h>
-#include <dftracer/utils/utilities/composites/composites.h>
-#include <dftracer/utils/utilities/composites/dft/chunk_extractor_utility.h>
+#include <dftracer/utils/trace/chunk_extractor_utility.h>
+#include <dftracer/utils/trace/trace.h>
 #include <dftracer/utils/utilities/fileio/compress/gzip_rechunker.h>
 #include <dftracer/utils/utilities/fileio/types/types.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
@@ -20,15 +20,12 @@
 #include <chrono>
 #include <cinttypes>
 
-#include "common_cli.h"
-
 using namespace dftracer::utils;
 using namespace dftracer::utils::task_graph;
-using Metadata = utilities::composites::dft::MetadataCollectorUtilityOutput;
-using ChunkManifest =
-    utilities::composites::dft::internal::DFTracerChunkManifest;
-using ExtractInput = utilities::composites::dft::ChunkExtractorUtilityInput;
-using ExtractResult = utilities::composites::dft::ChunkExtractorUtilityOutput;
+using Metadata = trace::MetadataCollectorUtilityOutput;
+using ChunkManifest = trace::internal::DFTracerChunkManifest;
+using ExtractInput = trace::ChunkExtractorUtilityInput;
+using ExtractResult = trace::ChunkExtractorUtilityOutput;
 
 class SplitArgParse : public cli::ArgParse {
    public:
@@ -200,8 +197,8 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
 
     if (force) {
         const std::string shared_index_path =
-            utilities::composites::dft::internal::determine_index_path(
-                input_files.front(), index_dir);
+            trace::internal::determine_index_path(input_files.front(),
+                                                  index_dir);
         if (fs::exists(shared_index_path)) {
             DFTRACER_UTILS_LOG_INFO("Clearing shared index store: %s",
                                     shared_index_path.c_str());
@@ -219,9 +216,8 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
     auto batch_index_task = make_task(
         [input_files_ptr, checkpoint_size, index_dir,
          executor_threads](CoroScope& ctx) -> coro::CoroTask<void> {
-            auto index_path =
-                utilities::composites::dft::internal::determine_index_path(
-                    input_files_ptr->front(), index_dir);
+            auto index_path = trace::internal::determine_index_path(
+                input_files_ptr->front(), index_dir);
             dftracer::utils::rocksdb::RocksDBManager::instance().reset(
                 index_path);
 
@@ -256,20 +252,16 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
             const auto& file_path = (*input_files_ptr)[idx];
 
             std::string index_path =
-                utilities::composites::dft::internal::determine_index_path(
-                    file_path, index_dir);
+                trace::internal::determine_index_path(file_path, index_dir);
 
             auto meta_input =
-                utilities::composites::dft::MetadataCollectorUtilityInput::
-                    from_file(file_path)
-                        .with_checkpoint_size(checkpoint_size)
-                        .with_force_rebuild(false)
-                        .with_index(index_path)
-                        .with_compute_hash(verify);
+                trace::MetadataCollectorUtilityInput::from_file(file_path)
+                    .with_checkpoint_size(checkpoint_size)
+                    .with_force_rebuild(false)
+                    .with_index(index_path)
+                    .with_compute_hash(verify);
 
-            co_return co_await utilities::composites::dft::
-                MetadataCollectorUtility{}
-                    .process(meta_input);
+            co_return co_await trace::MetadataCollectorUtility{}(meta_input);
         },
         {.name = "ProcessFile"});
 
@@ -286,13 +278,13 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
             DFTRACER_UTILS_LOG_INFO("Creating chunk mappings from %zu files...",
                                     all_metadata.size());
 
-            utilities::composites::dft::ChunkManifestMapperUtility mapper;
+            trace::ChunkManifestMapperUtility mapper;
             auto mapper_input =
-                utilities::composites::dft::ChunkManifestMapperUtilityInput::
-                    from_metadata(all_metadata)
-                        .with_target_size(static_cast<double>(chunk_size_mb));
+                trace::ChunkManifestMapperUtilityInput::from_metadata(
+                    all_metadata)
+                    .with_target_size(static_cast<double>(chunk_size_mb));
 
-            auto manifests = co_await mapper.process(mapper_input);
+            auto manifests = co_await mapper(mapper_input);
             DFTRACER_UTILS_LOG_INFO("Created %zu chunks", manifests.size());
             co_return manifests;
         },
@@ -335,9 +327,8 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
                      permits](CoroScope& s) -> coro::CoroTask<ExtractResult> {
                         co_await s.receive(permits);
                         try {
-                            utilities::composites::dft::ChunkExtractorUtility
-                                extractor;
-                            auto result = co_await extractor.process(input);
+                            trace::ChunkExtractorUtility extractor;
+                            auto result = co_await extractor(input);
                             permits->try_send(true);
                             co_return result;
                         } catch (...) {
@@ -379,8 +370,7 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
 
         task_verify_chunks = make_task(
             [](CoroScope&, const VerifyInput& input)
-                -> coro::CoroTask<
-                    utilities::composites::ChunkVerificationUtilityOutput> {
+                -> coro::CoroTask<trace::ChunkVerificationUtilityOutput> {
                 std::size_t output_hash = 0;
                 for (const auto& chunk : input.chunks) {
                     output_hash += chunk.event_hash;
@@ -392,10 +382,9 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
                     input_hash += meta.event_hash;
                 }
 
-                co_return utilities::composites::
-                    ChunkVerificationUtilityOutput::success(
-                        static_cast<std::uint64_t>(input_hash),
-                        static_cast<std::uint64_t>(output_hash));
+                co_return trace::ChunkVerificationUtilityOutput::success(
+                    static_cast<std::uint64_t>(input_hash),
+                    static_cast<std::uint64_t>(output_hash));
             },
             "VerifyChunks");
 
@@ -443,8 +432,7 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
 
     if (verify && task_verify_chunks) {
         auto verify_result =
-            task_verify_chunks
-                ->get<utilities::composites::ChunkVerificationUtilityOutput>();
+            task_verify_chunks->get<trace::ChunkVerificationUtilityOutput>();
 
         if (verify_result.input_hash == verify_result.output_hash) {
             std::printf(

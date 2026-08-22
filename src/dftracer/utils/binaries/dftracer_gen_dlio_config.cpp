@@ -1,10 +1,11 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/utils/timer.h>
+#include <dftracer/utils/trace/aggregators/aggregation_runner.h>
 #include <dftracer/utils/utilities/common/statistics/distributions.h>
 #include <dftracer/utils/utilities/common/statistics/mixture.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_runner.h>
 #include <dftracer/utils/utilities/dlio/barrier_simulator.h>
 #include <dftracer/utils/utilities/dlio/optimizer.h>
 #include <dftracer/utils/utilities/dlio/trace_loader.h>
@@ -20,11 +21,9 @@
 #include <variant>
 #include <vector>
 
-#include "common_cli.h"
-
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities;
-namespace agg = dftracer::utils::utilities::composites::dft::aggregators;
+namespace agg = dftracer::utils::trace::aggregators;
 namespace dlio = dftracer::utils::utilities::dlio;
 namespace stats = dftracer::utils::utilities::common::statistics;
 

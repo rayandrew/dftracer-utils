@@ -1,39 +1,36 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/logging.h>
-#include <dftracer/utils/core/coro/channel.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregators.h>
-#include <dftracer/utils/utilities/composites/dft/comparator/comparison_config.h>
-#include <dftracer/utils/utilities/composites/dft/comparator/comparison_result.h>
-#include <dftracer/utils/utilities/composites/dft/comparator/comparison_utility.h>
-#include <dftracer/utils/utilities/composites/dft/comparator/tree_table_formatter.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/index_resolver_utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/metadata_collector_utility.h>
+#include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/aggregators/aggregators.h>
+#include <dftracer/utils/trace/comparator/comparison_aggregation.h>
+#include <dftracer/utils/trace/comparator/comparison_config.h>
+#include <dftracer/utils/trace/comparator/comparison_result.h>
+#include <dftracer/utils/trace/comparator/comparison_utility.h>
+#include <dftracer/utils/trace/comparator/tree_table_formatter.h>
+#include <dftracer/utils/trace/indexing/index_resolver_utility.h>
+#include <dftracer/utils/trace/indexing/resolve_and_build.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/metadata_collector_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer.h>
 #include <unistd.h>
 
-#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <optional>
 
-#include "common_cli.h"
-
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities;
-using namespace dftracer::utils::utilities::composites::dft::aggregators;
-using namespace dftracer::utils::utilities::composites::dft::comparator;
-using dftracer::utils::utilities::composites::dft::indexing::ensure_index_fresh;
-using dftracer::utils::utilities::composites::dft::indexing::
-    IndexResolverUtility;
-using dftracer::utils::utilities::composites::dft::indexing::ResolverInput;
+using namespace dftracer::utils::trace::aggregators;
+using namespace dftracer::utils::trace::comparator;
+using dftracer::utils::trace::indexing::ensure_index_fresh;
+using dftracer::utils::trace::indexing::IndexResolverUtility;
+using dftracer::utils::trace::indexing::ResolverInput;
 using dftracer::utils::utilities::indexer::IndexBatchBuilderUtility;
 using dftracer::utils::utilities::indexer::IndexBuildBatchConfig;
 
@@ -155,128 +152,9 @@ void flatten_nodes(const ComparisonNode& node,
     }
 }
 
-static coro::CoroTask<void> process_file_task(
-    std::string file_path, coro::ChannelProducer<ChunkAggregatorInput> ch,
-    std::string index_dir, std::size_t checkpoint_size, bool force_rebuild,
-    AggregationConfig agg_config, std::optional<common::query::Query> query,
-    std::atomic<int>* global_chunk_idx_ptr, AggInternPtr intern) {
-    constexpr std::size_t CHUNK_SIZE_MB = 4;
-    constexpr std::size_t BATCH_SIZE_MB = 4;
-
-    [[maybe_unused]] auto producer_guard = ch.guard();
-
-    std::string index_path =
-        composites::dft::internal::determine_index_path(file_path, index_dir);
-
-    auto meta_input =
-        composites::dft::MetadataCollectorUtilityInput::from_file(file_path)
-            .with_checkpoint_size(checkpoint_size)
-            .with_force_rebuild(force_rebuild)
-            .with_index(index_path);
-    auto metadata =
-        co_await composites::dft::MetadataCollectorUtility{}.process(
-            meta_input);
-
-    if (!metadata.success) {
-        DFTRACER_UTILS_LOG_WARN("Skipping file: %s", file_path.c_str());
-        co_return;
-    }
-
-    FileChunkMapperUtility file_mapper;
-    auto mapper_input = FileChunkMapperInput::from_metadata(metadata)
-                            .with_config(agg_config)
-                            .with_intern(intern)
-                            .with_checkpoint_size(checkpoint_size)
-                            .with_target_chunk_size(CHUNK_SIZE_MB)
-                            .with_batch_size(BATCH_SIZE_MB * 1024 * 1024);
-    mapper_input.query = query;
-    auto file_chunks = co_await file_mapper.process(mapper_input);
-
-    int start_idx =
-        global_chunk_idx_ptr->fetch_add(static_cast<int>(file_chunks.size()));
-    for (int i = 0; i < static_cast<int>(file_chunks.size()); ++i) {
-        file_chunks[i].chunk_index = start_idx + i;
-    }
-
-    for (auto& chunk : file_chunks) {
-        if (!co_await ch.send(std::move(chunk))) {
-            co_return;
-        }
-    }
-    co_return;
-}
-
-static coro::CoroTask<void> chunk_worker_task(
-    std::shared_ptr<coro::Channel<ChunkAggregatorInput>> chunk_chan,
-    coro::ChannelProducer<ChunkAggregationOutput> rp,
-    std::shared_ptr<coro::Channel<ChunkAggregationOutput>> result_chan,
-    CoroScope* wctx_ptr) {
-    [[maybe_unused]] auto producer_guard = rp.guard();
-    while (auto input = co_await wctx_ptr->receive(chunk_chan)) {
-        ChunkAggregatorUtility agg;
-        auto output = co_await agg.process(*input);
-        if (!co_await result_chan->send(std::move(output))) {
-            co_return;
-        }
-    }
-    co_return;
-}
-
-static coro::CoroTask<EventAggregatorOutput> run_aggregation(
-    CoroScope& ctx, const std::vector<std::string>& input_files,
-    const AggregationConfig& agg_config,
-    const std::optional<common::query::Query>& query,
-    const std::string& index_dir, std::size_t checkpoint_size,
-    bool force_rebuild, std::size_t executor_threads) {
-    EventAggregator merger;
-    std::atomic<int> global_chunk_idx{0};
-
-    co_await ctx.scope([&](CoroScope& scope) -> coro::CoroTask<void> {
-        auto chunk_chan = coro::make_channel<ChunkAggregatorInput>(0);
-        auto result_chan = coro::make_channel<ChunkAggregationOutput>(2);
-
-        for (const auto& file_path : input_files) {
-            auto* global_chunk_idx_ptr = &global_chunk_idx;
-            scope.spawn(
-                [file_path, ch = chunk_chan->producer(), index_dir,
-                 checkpoint_size, force_rebuild, agg_config, query,
-                 global_chunk_idx_ptr, intern = merger.intern_table()](
-                    CoroScope& /*fctx*/) mutable -> coro::CoroTask<void> {
-                    co_await process_file_task(
-                        std::move(file_path), std::move(ch),
-                        std::move(index_dir), checkpoint_size, force_rebuild,
-                        std::move(agg_config), std::move(query),
-                        global_chunk_idx_ptr, std::move(intern));
-                });
-        }
-
-        for (std::size_t w = 0; w < executor_threads; ++w) {
-            (void)w;
-            scope.spawn([chunk_chan, rp = result_chan->producer(), result_chan](
-                            CoroScope& wctx) mutable -> coro::CoroTask<void> {
-                co_await chunk_worker_task(chunk_chan, std::move(rp),
-                                           result_chan, &wctx);
-            });
-        }
-
-        auto* merger_ptr = &merger;
-        scope.spawn(
-            [result_chan, merger_ptr](CoroScope& mctx) -> coro::CoroTask<void> {
-                while (auto output = co_await mctx.receive(result_chan)) {
-                    merger_ptr->merge_chunk(std::move(*output));
-                }
-                co_return;
-            });
-
-        co_return;
-    });
-
-    co_return merger.finalize();
-}
-
 struct AggSpec {
     AggregationConfig agg_cfg;
-    std::optional<common::query::Query> query;
+    std::optional<query::Query> query;
     const ComparisonNode* visitor;
 };
 
@@ -296,7 +174,7 @@ static coro::CoroTask<void> run_all_aggregations(
         results[ni].resize(plan.specs.size());
         for (std::size_t vi = 0; vi < plan.specs.size(); ++vi) {
             const auto& spec = plan.specs[vi];
-            results[ni][vi] = co_await run_aggregation(
+            results[ni][vi] = co_await run_comparison_aggregation(
                 ctx, files, spec.agg_cfg, spec.query, index_dir,
                 config.checkpoint_size, config.force_rebuild,
                 config.executor_threads);
@@ -411,7 +289,7 @@ static std::optional<std::vector<NodeAggPlan>> build_agg_plans(
             AggSpec spec;
             if (!visitor->composed_query.empty()) {
                 auto result =
-                    common::query::Query::from_string(visitor->composed_query);
+                    query::Query::from_string(visitor->composed_query);
                 if (!result) {
                     DFTRACER_UTILS_LOG_ERROR("Invalid query for node '%s': %s",
                                              visitor->name.c_str(),
@@ -496,7 +374,7 @@ static int run_comparator(const ComparatorArgParse* cli) {
             resolve_input.directory = path;
         }
 
-        auto result = co_await resolver.process(resolve_input);
+        auto result = co_await resolver(resolve_input);
         out_files = std::move(result.all_files);
 
         if (out_files.empty()) {
@@ -535,9 +413,9 @@ static int run_comparator(const ComparatorArgParse* cli) {
     std::vector<std::vector<EventAggregatorOutput>> baseline_results;
     std::vector<std::vector<EventAggregatorOutput>> variant_results;
 
-    auto baseline_index_path = composites::dft::internal::determine_index_path(
+    auto baseline_index_path = trace::internal::determine_index_path(
         config.baseline, config.baseline_index_dir);
-    auto variant_index_path = composites::dft::internal::determine_index_path(
+    auto variant_index_path = trace::internal::determine_index_path(
         config.variant, config.variant_index_dir);
     bool shared_index = baseline_index_path == variant_index_path;
 
@@ -684,7 +562,7 @@ static int run_comparator(const ComparatorArgParse* cli) {
                     variant_results[ni][0].total_files_processed;
 
                 ComparisonUtility cmp;
-                auto cmp_output = co_await cmp.process(cmp_input);
+                auto cmp_output = co_await cmp(cmp_input);
                 output.nodes.push_back(std::move(cmp_output->result));
             }
 

@@ -1,3 +1,4 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/constants.h>
 #include <dftracer/utils/core/coro/task.h>
@@ -19,8 +20,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
-
-#include "common_cli.h"
 
 using namespace dftracer::utils;
 using namespace dftracer::utils::server;
@@ -123,9 +122,12 @@ static coro::CoroTask<int> run_server(const ServerArgParse* cli) {
 
     auto pipeline_config =
         cli::build_pipeline_config("DFTracer Server", cli->pipeline);
+    // Steady-load, latency-sensitive service: keep the full pool warm rather
+    // than paying the elastic grow ramp on every request.
     pipeline_config.with_io_backend(io::IoBackendType::THREADPOOL)
         .with_io_batch_size(1)
         .with_watchdog(false)
+        .with_eager()
         .with_global_timeout(std::chrono::seconds(0))
         .with_task_timeout(std::chrono::seconds(0));
 

@@ -11,9 +11,9 @@
 
 namespace dftracer::utils::server {
 
-// Thread-safe, byte-bounded LRU cache of serialized viz responses. Trace data
-// is immutable for a server's lifetime, so a hit is always valid; entries are
-// evicted only to respect the byte budget.
+/// Thread-safe, byte-bounded LRU cache of serialized viz responses. Trace data
+/// is immutable for a server's lifetime, so a hit is always valid; entries are
+/// evicted only to respect the byte budget.
 class VizResultCache {
    public:
     explicit VizResultCache(std::size_t max_bytes) : max_bytes_(max_bytes) {}

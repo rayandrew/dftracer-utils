@@ -1,3 +1,4 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/archive_format.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/logging.h>
@@ -8,10 +9,10 @@
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/core/utils/string.h>
 #include <dftracer/utils/core/utils/timer.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/index_resolver_utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/metadata_collector_utility.h>
+#include <dftracer/utils/trace/indexing/index_resolver_utility.h>
+#include <dftracer/utils/trace/indexing/resolve_and_build.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/metadata_collector_utility.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -23,11 +24,9 @@
 #include <memory>
 #include <mutex>
 
-#include "common_cli.h"
-
 using namespace dftracer::utils;
-using namespace dftracer::utils::utilities::composites::dft;
-using namespace dftracer::utils::utilities::composites::dft::indexing;
+using namespace dftracer::utils::trace;
+using namespace dftracer::utils::trace::indexing;
 using dftracer::utils::utilities::indexer::FileRegistryEntry;
 using dftracer::utils::utilities::indexer::has_capability;
 using dftracer::utils::utilities::indexer::IndexBatchBuilderUtility;
@@ -317,7 +316,7 @@ static coro::CoroTask<void> auto_index_and_resolve(
     refresh_input.index_dir = index_dir;
     refresh_input.require_checkpoints = true;
 
-    auto refresh_result = co_await resolver.process(refresh_input);
+    auto refresh_result = co_await resolver(refresh_input);
 
     if (!refresh_result.cached.empty()) {
         indexed_groups[refresh_result.index_path] =
@@ -421,7 +420,7 @@ static coro::CoroTask<int> run_info(CoroScope& ctx, const InfoArgParse* cli) {
                 auto input = std::make_unique<ResolverInput>();
                 input->directory = directory;
                 input->index_dir = index_dir;
-                auto result = co_await resolver.process(*input);
+                auto result = co_await resolver(*input);
                 files = std::move(result.all_files);
                 if (!result.cached.empty()) {
                     indexed_groups[result.index_path] =
@@ -437,7 +436,7 @@ static coro::CoroTask<int> run_info(CoroScope& ctx, const InfoArgParse* cli) {
             auto input = std::make_unique<ResolverInput>();
             input->files = cli->files_args.value;
             input->index_dir = index_dir;
-            auto result = co_await resolver.process(*input);
+            auto result = co_await resolver(*input);
             files = std::move(result.all_files);
             if (!result.cached.empty()) {
                 indexed_groups[result.index_path] = std::move(result.cached);

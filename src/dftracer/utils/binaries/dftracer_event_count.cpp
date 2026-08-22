@@ -1,3 +1,4 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/coro/channel.h>
@@ -5,10 +6,10 @@
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/index_resolver_utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
+#include <dftracer/utils/trace/indexing/index_resolver_utility.h>
+#include <dftracer/utils/trace/indexing/resolve_and_build.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -21,12 +22,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "common_cli.h"
-
 using namespace dftracer::utils;
-using namespace dftracer::utils::utilities::composites::dft::indexing;
-using dftracer::utils::utilities::fileio::lines::sources::
-    async_streaming_gz_lines;
+using namespace dftracer::utils::trace::indexing;
 using dftracer::utils::utilities::indexer::IndexBatchBuilderUtility;
 using dftracer::utils::utilities::indexer::IndexBuildBatchConfig;
 
@@ -122,7 +119,7 @@ static int run_event_count(const EventCountArgParse* cli) {
     resolve_input.index_dir = index_dir;
     resolve_input.require_checkpoints = !force_rebuild;
 
-    auto resolve_result = resolver.process(resolve_input).get();
+    auto resolve_result = resolver(resolve_input).get();
 
     if (resolve_result.all_files.empty()) {
         DFTRACER_UTILS_LOG_ERROR("No .pfw or .pfw.gz files found in: %s",
@@ -185,8 +182,7 @@ static int run_event_count(const EventCountArgParse* cli) {
                 refresh_input.index_dir = index_dir;
                 refresh_input.require_checkpoints = true;
 
-                auto refresh_result =
-                    co_await re_resolver.process(refresh_input);
+                auto refresh_result = co_await re_resolver(refresh_input);
                 for (auto& entry : refresh_result.cached) {
                     indexed_entries.push_back(std::move(entry));
                 }
@@ -224,13 +220,17 @@ static int run_event_count(const EventCountArgParse* cli) {
                         [total_events_ptr = &total_events,
                          files_processed_ptr = &files_processed](
                             const FileWorkItem& item) -> coro::CoroTask<void> {
-                            std::size_t count = 0;
-                            auto gen = async_streaming_gz_lines(item.file_path);
-                            while (co_await gen.next()) {
-                                ++count;
-                            }
+                            // Un-indexed file: count parsed events with a
+                            // no-op View scan rather than reading raw lines.
+                            trace::views::View v =
+                                trace::views::View::from_file(item.file_path);
+                            trace::views::ExportStats vs =
+                                co_await v.for_each_batch(
+                                    [](std::size_t,
+                                       const std::vector<std::string_view>&) {},
+                                    1);
                             total_events_ptr->fetch_add(
-                                count, std::memory_order_relaxed);
+                                vs.events_matched, std::memory_order_relaxed);
                             files_processed_ptr->fetch_add(
                                 1, std::memory_order_relaxed);
                         });

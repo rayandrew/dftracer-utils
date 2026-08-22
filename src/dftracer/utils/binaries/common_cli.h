@@ -14,7 +14,7 @@
 #include <dftracer/utils/core/pipeline/pipeline_config.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
+#include <dftracer/utils/trace/indexing/resolve_and_build.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 
 #include <algorithm>
@@ -200,6 +200,7 @@ struct PipelineArgs : CliSchema {
     std::size_t executor_threads = 0;
     std::size_t io_threads = 0;
     bool time_profiling = false;
+    bool eager = false;
 
     PipelineArgs() = default;
 
@@ -220,12 +221,18 @@ struct PipelineArgs : CliSchema {
         p.add_argument("--time-profiling")
             .help("Print stage timing breakdown to stderr")
             .flag();
+        p.add_argument("--eager-thread-pools")
+            .help(
+                "Start the full worker pool up front instead of growing it on "
+                "demand (lower first-batch latency, holds all threads)")
+            .flag();
     }
 
     void parse_from(const argparse::ArgumentParser& p) override {
         executor_threads = p.get<std::size_t>("--executor-threads");
         io_threads = p.get<std::size_t>("--io-threads");
         time_profiling = p.get<bool>("--time-profiling");
+        eager = p.get<bool>("--eager-thread-pools");
     }
 
     bool validate() override {
@@ -240,6 +247,7 @@ struct PipelineArgs : CliSchema {
     void apply(PipelineConfig& config) const {
         config.with_compute_threads(executor_threads);
         config.with_io_threads(io_threads);
+        if (eager) config.with_eager();
     }
 };
 
@@ -435,7 +443,7 @@ inline coro::CoroTask<std::vector<std::string>> scan_directory_trace_files(
     utilities::filesystem::PatternDirectoryScannerUtility scanner;
     utilities::filesystem::PatternDirectoryScannerUtilityInput scan_input{
         directory, {".pfw", ".pfw.gz"}, recursive};
-    auto matched = co_await ctx.spawn(scanner, scan_input);
+    auto matched = co_await scanner(ctx, scan_input);
     std::vector<std::string> files;
     files.reserve(matched.size());
     for (const auto& entry : matched) {
@@ -498,8 +506,8 @@ inline coro::CoroTask<int> ensure_indexes_fresh_task(
     CoroScope& ctx, const std::string& directory,
     const std::vector<std::string>& files, const std::string& index_dir,
     bool force_rebuild) {
-    co_await utilities::composites::dft::indexing::ensure_indexes_fresh(
-        &ctx, directory, files, index_dir, force_rebuild);
+    co_await trace::indexing::ensure_indexes_fresh(&ctx, directory, files,
+                                                   index_dir, force_rebuild);
     co_return 0;
 }
 

@@ -3,6 +3,9 @@
 #include <dftracer/utils/core/common/transparent_string_hash.h>
 #include <dftracer/utils/core/coro/channel.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/json/json_doc_guard.h>
+#include <dftracer/utils/json/json_value.h>
+#include <dftracer/utils/query/query.h>
 #include <dftracer/utils/server/http_request.h>
 #include <dftracer/utils/server/http_response.h>
 #include <dftracer/utils/server/json_builder.h>
@@ -12,14 +15,11 @@
 #include <dftracer/utils/server/viz_api.h>
 #include <dftracer/utils/server/viz_internal.h>
 #include <dftracer/utils/server/viz_summary_build.h>
-#include <dftracer/utils/utilities/common/json/json_doc_guard.h>
-#include <dftracer/utils/utilities/common/json/json_value.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/schema.h>
-#include <dftracer/utils/utilities/composites/dft/views/view.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_planner_utility.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_scanner_utility.h>
+#include <dftracer/utils/trace/schema.h>
+#include <dftracer/utils/trace/views/view.h>
+#include <dftracer/utils/trace/views/view_definition.h>
+#include <dftracer/utils/trace/views/view_planner_utility.h>
+#include <dftracer/utils/trace/views/view_scanner_utility.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <simdjson.h>
@@ -42,9 +42,9 @@
 
 namespace dftracer::utils::server {
 
-using namespace dftracer::utils::utilities::composites::dft;
-using namespace dftracer::utils::utilities::composites::dft::views;
-using dftracer::utils::utilities::common::json::json_number;
+using namespace dftracer::utils::trace;
+using namespace dftracer::utils::trace::views;
+using dftracer::utils::json::json_number;
 
 // --- Activity summary ("mipmap") build -------------------------------------
 // Cells are shared and updated with relaxed atomics with no per-event lock:

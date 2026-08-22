@@ -1,3 +1,4 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/byte_view.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/coro/task.h>
@@ -5,10 +6,10 @@
 #include <dftracer/utils/core/rocksdb/db_manager.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_indexer_utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_pruner_utility.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/metadata_collector_utility.h>
+#include <dftracer/utils/trace/indexing/chunk_indexer_utility.h>
+#include <dftracer/utils/trace/indexing/chunk_pruner_utility.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/metadata_collector_utility.h>
 #include <dftracer/utils/utilities/fileio/streaming_file_writer_utility.h>
 #include <dftracer/utils/utilities/hash/hasher_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
@@ -24,12 +25,10 @@
 #include <string>
 #include <vector>
 
-#include "common_cli.h"
-
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities;
-using namespace dftracer::utils::utilities::composites::dft;
-using namespace dftracer::utils::utilities::composites::dft::indexing;
+using namespace dftracer::utils::trace;
+using namespace dftracer::utils::trace::indexing;
 using dftracer::utils::utilities::indexer::IndexBatchBuilderUtility;
 using dftracer::utils::utilities::indexer::IndexBuildBatchConfig;
 using dftracer::utils::utilities::indexer::IndexDatabase;
@@ -102,7 +101,7 @@ static coro::CoroTask<int> run_verify(
                               .with_checkpoint_size(ckpt_size)
                               .with_force_rebuild(false)
                               .with_index(index_path);
-        auto metadata = co_await MetadataCollectorUtility{}.process(meta_input);
+        auto metadata = co_await MetadataCollectorUtility{}(meta_input);
 
         if (!metadata.success) {
             std::fprintf(stderr, "  WARN: metadata failed for %s\n",
@@ -164,7 +163,7 @@ static coro::CoroTask<int> run_verify(
                     .with_batch_size(4 * 1024 * 1024);
 
                 ChunkIndexerUtility idx_util;
-                auto output = co_await idx_util.process(ci);
+                auto output = co_await idx_util(ci);
                 total_events += output.events_processed;
 
                 for (auto& [dim, bloom] : output.bloom_filters) {
@@ -248,13 +247,13 @@ static coro::CoroTask<int> run_verify(
                     }
                 }
 
-                auto parsed = common::query::Query::from_string(query_dsl);
+                auto parsed = query::Query::from_string(query_dsl);
                 if (!parsed) continue;
 
                 ChunkPrunerInput pruner_input{idx_path_q, abs_path,
                                               std::move(*parsed), nullptr};
                 ChunkPrunerUtility pruner;
-                auto result = co_await pruner.process(pruner_input);
+                auto result = co_await pruner(pruner_input);
 
                 total_chunks += result.total_checkpoints;
                 if (result.file_may_match) {

@@ -43,16 +43,16 @@ struct RouteParam {
     std::string name;
     std::string desc;
     bool required = false;
-    std::string example;  // default / example value shown in the explorer
+    std::string example;  ///< default / example value shown in the explorer
 };
 
 /// Optional documentation attached to a route. When `summary` is empty the
 /// route is treated as internal and left out of the generated docs.
 struct RouteDoc {
     std::string summary;
-    std::string tag;  // grouping, e.g. "Trace data" / "Visualization"
+    std::string tag;  ///< grouping, e.g. "Trace data" / "Visualization"
     std::vector<RouteParam> params;
-    std::string response_example;  // representative JSON response
+    std::string response_example;  ///< representative JSON response
 };
 
 /// A registered route plus its docs.

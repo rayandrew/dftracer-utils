@@ -2,6 +2,9 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/transparent_string_hash.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/json/json_doc_guard.h>
+#include <dftracer/utils/json/json_value.h>
+#include <dftracer/utils/query/query.h>
 #include <dftracer/utils/server/cursor.h>
 #include <dftracer/utils/server/http_request.h>
 #include <dftracer/utils/server/http_response.h>
@@ -9,17 +12,12 @@
 #include <dftracer/utils/server/router.h>
 #include <dftracer/utils/server/trace_api.h>
 #include <dftracer/utils/server/trace_index.h>
-#include <dftracer/utils/utilities/common/json/json_doc_guard.h>
-#include <dftracer/utils/utilities/common/json/json_value.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/index_resolver_utility.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/statistics/shared_index_statistics_reader.h>
-#include <dftracer/utils/utilities/composites/dft/statistics/statistics_aggregator_utility.h>
-#include <dftracer/utils/utilities/composites/dft/statistics/statistics_query_utility.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_planner_utility.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_scanner_utility.h>
+#include <dftracer/utils/trace/indexing/index_resolver_utility.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/statistics/statistics_query_utility.h>
+#include <dftracer/utils/trace/views/view_definition.h>
+#include <dftracer/utils/trace/views/view_planner_utility.h>
+#include <dftracer/utils/trace/views/view_scanner_utility.h>
 #include <simdjson.h>
 
 #include <cstddef>
@@ -29,10 +27,10 @@
 
 namespace dftracer::utils::server {
 
-using namespace dftracer::utils::utilities::composites::dft;
-using namespace dftracer::utils::utilities::composites::dft::indexing;
-using namespace dftracer::utils::utilities::composites::dft::statistics;
-using namespace dftracer::utils::utilities::composites::dft::views;
+using namespace dftracer::utils::trace;
+using namespace dftracer::utils::trace::indexing;
+using namespace dftracer::utils::trace::statistics;
+using namespace dftracer::utils::trace::views;
 
 // Hash metadata types that need smart filtering (FH, HH, SH).
 static const std::unordered_set<std::string> HASH_METADATA_NAMES = {"FH", "HH",

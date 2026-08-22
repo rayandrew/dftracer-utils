@@ -3,6 +3,9 @@
 #include <dftracer/utils/core/common/transparent_string_hash.h>
 #include <dftracer/utils/core/coro/channel.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/json/json_doc_guard.h>
+#include <dftracer/utils/json/json_value.h>
+#include <dftracer/utils/query/query.h>
 #include <dftracer/utils/server/http_request.h>
 #include <dftracer/utils/server/http_response.h>
 #include <dftracer/utils/server/json_builder.h>
@@ -15,14 +18,11 @@
 #include <dftracer/utils/server/viz_internal.h>
 #include <dftracer/utils/server/viz_scan.h>
 #include <dftracer/utils/server/viz_summary_build.h>
-#include <dftracer/utils/utilities/common/json/json_doc_guard.h>
-#include <dftracer/utils/utilities/common/json/json_value.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/views/view.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_aggregate.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_planner_utility.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_scanner_utility.h>
+#include <dftracer/utils/trace/views/view.h>
+#include <dftracer/utils/trace/views/view_aggregate.h>
+#include <dftracer/utils/trace/views/view_definition.h>
+#include <dftracer/utils/trace/views/view_planner_utility.h>
+#include <dftracer/utils/trace/views/view_scanner_utility.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <simdjson.h>
@@ -45,9 +45,9 @@
 
 namespace dftracer::utils::server {
 
-using namespace dftracer::utils::utilities::composites::dft;
-using namespace dftracer::utils::utilities::composites::dft::views;
-using dftracer::utils::utilities::common::json::json_number;
+using namespace dftracer::utils::trace;
+using namespace dftracer::utils::trace::views;
+using dftracer::utils::json::json_number;
 
 static const std::unordered_set<std::string> HASH_METADATA_NAMES = {"FH", "HH",
                                                                     "SH"};
@@ -129,8 +129,7 @@ static coro::CoroTask<HttpResponse> handle_viz_events(const HttpRequest& req,
 
     // Validate the optional raw DSL query before it is spliced into the view.
     auto query = params.get("query");
-    if (!query.empty() &&
-        !utilities::common::query::try_parse(query).has_value()) {
+    if (!query.empty() && !query::try_parse(query).has_value()) {
         co_return HttpResponse::bad_request("Invalid query: " +
                                             std::string(query));
     }
@@ -319,7 +318,8 @@ static constexpr double COVERAGE_BUCKETS = 8192.0;
 // Per-group accumulator that merges real events (from the View) with the
 // prorated contribution of ph=3 aggregates overlapping the window.
 struct StatAgg {
-    double count = 0;  // fractional: an aggregate contributes dft_cnt * overlap
+    double count =
+        0;  // fractional: an aggregate contributes dftu_cnt * overlap
     double total = 0;
     double min = std::numeric_limits<double>::infinity();
     double max = 0;
@@ -398,9 +398,7 @@ static std::string serialize_stats_body(std::uint64_t total_count,
 // `wall` value is derived from client-us begin/end and is already in us.
 static void scale_stat_durations(std::vector<StatRow>& rows, double& total_dur,
                                  TraceIndex::TimeMetric metric) {
-    const double us =
-        dftracer::utils::utilities::composites::dft::time_metric_us_scale(
-            metric);
+    const double us = dftracer::utils::trace::time_metric_us_scale(metric);
     if (us == 1.0) return;
     for (auto& r : rows) {
         r.total *= us;
@@ -567,8 +565,7 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
     double end = params.get_double("end", 0);
 
     auto query = params.get("query");
-    if (!query.empty() &&
-        !utilities::common::query::try_parse(query).has_value()) {
+    if (!query.empty() && !query::try_parse(query).has_value()) {
         co_return HttpResponse::bad_request("Invalid query: " +
                                             std::string(query));
     }
@@ -693,8 +690,15 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
             thread_local simdjson::dom::parser parser;
             thread_local std::string buf;
             for (auto ev : events) {
+                // simdjson's SIMD stages read up to SIMDJSON_PADDING bytes past
+                // the JSON; a bare std::string leaves those uninitialised.
+                // Zero- pad the reused buffer and parse only the event's
+                // length.
+                const std::size_t len = ev.size();
                 buf.assign(ev);
-                auto res = parser.parse(buf);
+                buf.resize(len + simdjson::SIMDJSON_PADDING);
+                auto res = parser.parse(buf.data(), len,
+                                        /*realloc_if_needed=*/false);
                 if (res.error()) continue;
                 auto root = res.value_unsafe();
                 if (!root.is_object()) continue;
@@ -725,7 +729,7 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
                     double cnt = 1, sum = 0, dmin = 0, dmax = 0;
                     auto args = root["args"];
                     if (!args.error() && args.is_object()) {
-                        auto c = args["dft_cnt"];
+                        auto c = args["dftu_cnt"];
                         if (!c.error()) cnt = json_number(c.value_unsafe());
                         auto sm = args["dur_sum"];
                         if (!sm.error())
@@ -768,11 +772,10 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
             double lo = std::max(begin, sb);
             double hi = std::min(end, static_cast<double>(sp.end));
             if (hi <= lo) continue;
-            auto pr = lp.parse(sp.json);
+            auto pr = lp.parse(simdjson::padded_string(sp.json));
             if (pr.error() || !pr.value_unsafe().is_object()) continue;
             auto root = pr.value_unsafe();
-            if (view.query &&
-                !view.query->evaluate(utilities::common::json::JsonValue(root)))
+            if (view.query && !view.query->evaluate(json::JsonValue(root)))
                 continue;
             double dur = static_cast<double>(sp.end - sp.begin);
             auto& a = byKey[extract_group_value(root, gcol)];
@@ -878,7 +881,7 @@ static coro::CoroTask<void> calltree_stream_worker(
             .with_time_range(begin, end)
             .with_scan_all_chunks(scan_all_chunks);
         ViewPlannerUtility builder;
-        auto build_output = co_await builder.process(builder_input);
+        auto build_output = co_await builder(builder_input);
         if (!build_output || !build_output->file_may_match) continue;
 
         file_buf->clear();
@@ -891,7 +894,7 @@ static coro::CoroTask<void> calltree_stream_worker(
                 .with_checkpoint_idx(c.checkpoint_idx)
                 .with_view(*view);
             ViewScannerUtility reader;
-            auto gen = reader.process(reader_input);
+            auto gen = reader(reader_input);
             while (auto batch = co_await gen.next()) {
                 FlameEv ev;
                 for (auto e : batch->events)
@@ -919,8 +922,7 @@ static coro::CoroTask<HttpResponse> handle_viz_calltree(
     double end = params.get_double("end", 0);
 
     auto query = params.get("query");
-    if (!query.empty() &&
-        !utilities::common::query::try_parse(query).has_value())
+    if (!query.empty() && !query::try_parse(query).has_value())
         co_return HttpResponse::bad_request("Invalid query: " +
                                             std::string(query));
 
@@ -1034,8 +1036,7 @@ static coro::CoroTask<HttpResponse> handle_viz_calltree(
 
     // Node total/self are summed native durations; scale to us for display.
     const double dur_us =
-        dftracer::utils::utilities::composites::dft::time_metric_us_scale(
-            index.time_metric());
+        dftracer::utils::trace::time_metric_us_scale(index.time_metric());
     if (dur_us != 1.0) {
         for (auto& n : arena) {
             n.total *= dur_us;
@@ -1088,8 +1089,7 @@ static coro::CoroTask<HttpResponse> handle_viz_histogram(
     double end = params.get_double("end", 0);
 
     auto query = params.get("query");
-    if (!query.empty() &&
-        !utilities::common::query::try_parse(query).has_value())
+    if (!query.empty() && !query::try_parse(query).has_value())
         co_return HttpResponse::bad_request("Invalid query: " +
                                             std::string(query));
 
@@ -1161,8 +1161,7 @@ static coro::CoroTask<HttpResponse> handle_viz_histogram(
 
     // Durations are in the trace's native unit; scale to us for display.
     const double dur_us =
-        dftracer::utils::utilities::composites::dft::time_metric_us_scale(
-            index.time_metric());
+        dftracer::utils::trace::time_metric_us_scale(index.time_metric());
     if (dur_us != 1.0)
         for (double& d : all) d *= dur_us;
 
@@ -1307,9 +1306,7 @@ static std::string serialize_density_body(
         nullptr) {
     // Blocks are positioned/sized in native threshold units; scale the visible
     // time fields (block ts/dur, duration sums, max_dur) to microseconds.
-    const double us =
-        dftracer::utils::utilities::composites::dft::time_metric_us_scale(
-            metric);
+    const double us = dftracer::utils::trace::time_metric_us_scale(metric);
     const double threshold_us = threshold * us;
     max_dur *= us;
     auto& b = scratch_json_builder();
@@ -1437,8 +1434,8 @@ static std::string serve_density_from_summary(
     // events aren't shifted off-screen on non-us traces (the us round-trip
     // loses at most sub-us, invisible on the timeline).
     const std::uint64_t native_global_min =
-        dftracer::utils::utilities::composites::dft::scale_between(
-            TraceIndex::TimeMetric::US, metric, display_global_min);
+        dftracer::utils::trace::scale_between(TraceIndex::TimeMetric::US,
+                                              metric, display_global_min);
     auto pid_s = params.get("pid");
     auto tid_s = params.get("tid");
     bool has_pid = !pid_s.empty();
@@ -1652,8 +1649,7 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     if (summary < 1) summary = 1;
 
     auto query = params.get("query");
-    if (!query.empty() &&
-        !utilities::common::query::try_parse(query).has_value()) {
+    if (!query.empty() && !query::try_parse(query).has_value()) {
         co_return HttpResponse::bad_request("Invalid query: " +
                                             std::string(query));
     }
@@ -1869,9 +1865,10 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     // phases split as fused partition branches so a single decode feeds both.
     auto p1run = make_window_view(begin, end)
                      .phase(views::Phase::Any)
-                     .partition(slots, scan_cap);
+                     .limit(scan_cap)
+                     .session();
     auto ev_out = p1run.fold<Acc>(
-        utilities::common::query::parse_or_throw("ph == 1 or ph == \"X\""),
+        query::parse_or_throw("ph == 1 or ph == \"X\""),
         [&group_col, threshold, begin](Acc& acc, const auto& jv,
                                        std::string_view raw) {
             double dur = 0;
@@ -1884,7 +1881,7 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
         },
         merge_acc);
     auto cs_out = p1run.fold<Acc>(
-        utilities::common::query::parse_or_throw("ph == 2 or ph == \"C\""),
+        query::parse_or_throw("ph == 2 or ph == \"C\""),
         [begin, threshold, ncols](Acc& acc, const auto& jv, std::string_view) {
             fold_counter_density(jv.element(), begin, threshold, ncols,
                                  acc.dens);
@@ -1894,7 +1891,7 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     // capture time, so keep each whole (all args intact for selection) and give
     // it a renderable span below once the aggregation window is known.
     auto ag_out = p1run.fold<Acc>(
-        utilities::common::query::parse_or_throw("ph == 3 or ph == \"A\""),
+        query::parse_or_throw("ph == 3 or ph == \"A\""),
         [](Acc& acc, const auto& jv, std::string_view raw) {
             collect_aggregated(jv.element(), raw, acc.agg);
         },
@@ -1953,10 +1950,10 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
         if (asb < begin) {
             auto er = make_window_view(asb, begin)
                           .phase(views::Phase::Any)
-                          .partition(slots, scan_cap);
+                          .limit(scan_cap)
+                          .session();
             auto eo = er.fold<Acc>(
-                utilities::common::query::parse_or_throw(
-                    "ph == 3 or ph == \"A\""),
+                query::parse_or_throw("ph == 3 or ph == \"A\""),
                 [](Acc& acc, const auto& jv, std::string_view raw) {
                     collect_aggregated(jv.element(), raw, acc.agg);
                 },
@@ -2220,9 +2217,7 @@ static std::string serve_counters_from_summary(
     }
     return serialize_counters_body(
         read, write, ops, original_begin, original_end, buckets,
-        bucket_us_out *
-            dftracer::utils::utilities::composites::dft::time_metric_us_scale(
-                metric),
+        bucket_us_out * dftracer::utils::trace::time_metric_us_scale(metric),
         false);
 }
 
@@ -2243,8 +2238,7 @@ static coro::CoroTask<HttpResponse> handle_viz_counters(
     if (buckets > 4000) buckets = 4000;
 
     auto query = params.get("query");
-    if (!query.empty() &&
-        !utilities::common::query::try_parse(query).has_value()) {
+    if (!query.empty() && !query::try_parse(query).has_value()) {
         co_return HttpResponse::bad_request("Invalid query: " +
                                             std::string(query));
     }
@@ -2333,8 +2327,7 @@ static coro::CoroTask<HttpResponse> handle_viz_counters(
         total.read_bytes, total.write_bytes, total.ops, original_begin,
         original_end, buckets,
         bucket_us *
-            dftracer::utils::utilities::composites::dft::time_metric_us_scale(
-                index.time_metric()),
+            dftracer::utils::trace::time_metric_us_scale(index.time_metric()),
         truncated);
     if (!req.cancel_token.cancelled()) index.viz_cache().put(cache_key, body);
     co_return HttpResponse::ok(std::move(body));
@@ -2592,8 +2585,7 @@ static coro::CoroTask<HttpResponse> handle_viz_proctree(
     std::vector<ProcNode> nodes;
     nodes.reserve(procs.size());
     const double proc_dur_us =
-        dftracer::utils::utilities::composites::dft::time_metric_us_scale(
-            index.time_metric());
+        dftracer::utils::trace::time_metric_us_scale(index.time_metric());
     for (auto& [fts, pid] : procs) {
         std::int64_t parent = -1;
         std::uint64_t spawn_ts = 0;

@@ -26,14 +26,14 @@
 #include <mpi.h>
 #endif
 
+#include <dftracer/utils/binaries/common_cli.h>
+
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
-
-#include "common_cli.h"
 
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities;

@@ -1,18 +1,20 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_config.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/shard_manifest.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/views/chunk_stats_source.h>
-#include <dftracer/utils/utilities/composites/dft/views/sharded_view.h>
-#include <dftracer/utils/utilities/composites/dft/views/view.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
+#include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/aggregators/aggregation_config.h>
+#include <dftracer/utils/trace/indexing/resolve_and_build.h>
+#include <dftracer/utils/trace/indexing/shard_manifest.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/views/chunk_stats_source.h>
+#include <dftracer/utils/trace/views/result_batch.h>
+#include <dftracer/utils/trace/views/sharded_view.h>
+#include <dftracer/utils/trace/views/view.h>
+#include <dftracer/utils/trace/views/view_definition.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer.h>
@@ -24,8 +26,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-#include "common_cli.h"
 
 // MPI is compiled in only when the build enabled it (config.h macro). The same
 // source then produces a distribution-capable dftracer_view; without MPI it is
@@ -42,8 +42,8 @@
 
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities;
-using namespace dftracer::utils::utilities::composites::dft;
-using namespace dftracer::utils::utilities::composites::dft::views;
+using namespace dftracer::utils::trace;
+using namespace dftracer::utils::trace::views;
 using namespace dftracer::utils::utilities::filesystem;
 
 #ifdef DFTRACER_UTILS_ENABLE_MPI
@@ -451,25 +451,46 @@ static bool parse_agg(const std::string& spec, std::vector<AggSpec>& out) {
     return true;
 }
 
+// Append one Batch cell as a JSON value (strings quoted, numerics bare). List
+// and struct columns (histograms) are not emitted by the CLI.
+static void append_cell_json(std::string& s, const dataframe::Series& c,
+                             std::int64_t i) {
+    switch (c.type()) {
+        case dataframe::TypeId::String:
+        case dataframe::TypeId::Binary:
+            s += "\"" + std::string(c.string_at(i)) + "\"";
+            break;
+        case dataframe::TypeId::Int64:
+            s += std::to_string(c.data<std::int64_t>()[i]);
+            break;
+        case dataframe::TypeId::Uint64:
+            s += std::to_string(c.data<std::uint64_t>()[i]);
+            break;
+        default: {
+            const double v = c.data<double>()[i];
+            s += (v == static_cast<double>(static_cast<std::int64_t>(v)))
+                     ? std::to_string(static_cast<std::int64_t>(v))
+                     : std::to_string(v);
+        }
+    }
+}
+
+static bool cli_emittable(dataframe::TypeId t) {
+    return t != dataframe::TypeId::List && t != dataframe::TypeId::Struct;
+}
+
 // Print a collect() result as one JSON object per row.
-static void print_table(FILE* out, const ResultTable& table) {
-    for (const auto& row : table.rows) {
+static void print_table(FILE* out, const dataframe::DataFrame& table) {
+    const std::int64_t nrows = table.num_rows();
+    for (std::int64_t r = 0; r < nrows; ++r) {
         std::string s = "{";
         bool first = true;
-        for (std::size_t i = 0; i < table.group_columns.size(); ++i) {
+        for (std::size_t c = 0; c < table.columns.size(); ++c) {
+            if (!cli_emittable(table.columns[c].type())) continue;
             if (!first) s += ",";
             first = false;
-            s += "\"" + table.group_columns[i] + "\":\"" + row.keys[i] + "\"";
-        }
-        for (std::size_t j = 0; j < table.value_columns.size(); ++j) {
-            if (!first) s += ",";
-            first = false;
-            double v = row.values[j];
-            std::string num =
-                (v == static_cast<double>(static_cast<std::int64_t>(v)))
-                    ? std::to_string(static_cast<std::int64_t>(v))
-                    : std::to_string(v);
-            s += "\"" + table.value_columns[j] + "\":" + num;
+            s += "\"" + table.names[c] + "\":";
+            append_cell_json(s, table.columns[c], r);
         }
         s += "}\n";
         std::fwrite(s.data(), 1, s.size(), out);
@@ -477,29 +498,58 @@ static void print_table(FILE* out, const ResultTable& table) {
 }
 
 // Emit a collect() result. Text goes to `out`; "arrow" writes an Arrow IPC file
-// to `path` (group columns as strings, value columns as doubles, text/ArgMax
-// columns as strings). Replaces the aggregator's Arrow output.
-static coro::CoroTask<int> emit_table(const ResultTable& table, bool arrow,
-                                      const std::string& path, FILE* out) {
+// to `path`, carrying each column with its native type (String, Int64, Uint64,
+// Double). Replaces the aggregator's Arrow output.
+static coro::CoroTask<int> emit_table(const dataframe::DataFrame& table,
+                                      bool arrow, const std::string& path,
+                                      FILE* out) {
 #ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
     if (arrow) {
         using common::arrow::ColumnType;
         using common::arrow::IpcWriter;
         using common::arrow::RecordBatchBuilder;
         std::vector<common::arrow::ColumnSpec> specs;
-        for (const auto& c : table.group_columns)
-            specs.push_back({c, ColumnType::STRING});
-        for (const auto& c : table.value_columns)
-            specs.push_back({c, ColumnType::DOUBLE});
-        for (const auto& c : table.text_columns)
-            specs.push_back({c, ColumnType::STRING});
+        std::vector<std::size_t> cols;  // table column index per builder column
+        for (std::size_t c = 0; c < table.columns.size(); ++c) {
+            ColumnType ct;
+            switch (table.columns[c].type()) {
+                case dataframe::TypeId::String:
+                case dataframe::TypeId::Binary:
+                    ct = ColumnType::STRING;
+                    break;
+                case dataframe::TypeId::Int64:
+                    ct = ColumnType::INT64;
+                    break;
+                case dataframe::TypeId::Uint64:
+                    ct = ColumnType::UINT64;
+                    break;
+                default:
+                    if (!cli_emittable(table.columns[c].type())) continue;
+                    ct = ColumnType::DOUBLE;
+            }
+            specs.push_back({table.names[c], ct});
+            cols.push_back(c);
+        }
         RecordBatchBuilder builder;
         builder.declare_schema(specs);
-        for (const auto& row : table.rows) {
-            std::size_t col = 0;
-            for (const auto& k : row.keys) builder.append_string(col++, k);
-            for (double v : row.values) builder.append_double(col++, v);
-            for (const auto& t : row.texts) builder.append_string(col++, t);
+        const std::int64_t nrows = table.num_rows();
+        for (std::int64_t r = 0; r < nrows; ++r) {
+            for (std::size_t k = 0; k < cols.size(); ++k) {
+                const dataframe::Series& col = table.columns[cols[k]];
+                switch (specs[k].type) {
+                    case ColumnType::STRING:
+                        builder.append_string(k, std::string(col.string_at(r)));
+                        break;
+                    case ColumnType::INT64:
+                        builder.append_int64(k, col.data<std::int64_t>()[r]);
+                        break;
+                    case ColumnType::UINT64:
+                        builder.append_uint64(k, col.data<std::uint64_t>()[r]);
+                        break;
+                    default:
+                        builder.append_double(k, col.data<double>()[r]);
+                }
+            }
             builder.end_row();
         }
         auto batch = builder.finish();
@@ -527,14 +577,17 @@ static coro::CoroTask<int> emit_table(const ResultTable& table, bool arrow,
 // Emit the three collect_typed() families to `out` as NDJSON rows, each family
 // preceded by a header on stderr so the sections stay identifiable when the
 // data stream is redirected.
-static void emit_typed(FILE* out, const TypedResult& tr) {
-    const std::pair<const char*, const ResultTable*> families[] = {
-        {"regular", &tr.regular},
-        {"aggregated", &tr.aggregated},
-        {"counters", &tr.counters},
+static void emit_typed(FILE* out, const dataframe::DataFrame& regular,
+                       const dataframe::DataFrame& aggregated,
+                       const dataframe::DataFrame& counters) {
+    const std::pair<const char*, const dataframe::DataFrame*> families[] = {
+        {"regular", &regular},
+        {"aggregated", &aggregated},
+        {"counters", &counters},
     };
     for (const auto& [name, table] : families) {
-        std::fprintf(stderr, "== %s (%zu rows) ==\n", name, table->rows.size());
+        std::fprintf(stderr, "== %s (%lld rows) ==\n", name,
+                     static_cast<long long>(table->num_rows()));
         print_table(out, *table);
     }
 }
@@ -586,7 +639,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         view.description = "Custom inline view";
     }
 
-    using common::query::Query;
+    using query::Query;
     std::optional<Query> query;
     if (!query_str.empty()) {
         auto result = Query::from_string(query_str);
@@ -636,9 +689,9 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         }
         if (query) {
             std::string combined = "(" + query->source() + ") and " + extra;
-            query = common::query::parse_or_throw(combined);
+            query = query::parse_or_throw(combined);
         } else {
-            query = common::query::parse_or_throw(extra);
+            query = query::parse_or_throw(extra);
         }
     }
 
@@ -741,15 +794,15 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
 
         PatternDirectoryScannerUtility scanner;
         PatternDirectoryScannerUtilityInput scan_input{
-            directory, {".pfw", ".pfw.gz"}, false};
-        auto matched = co_await scanner.process(scan_input);
+            directory, {".pfw.gz"}, false};
+        auto matched = co_await scanner(scan_input);
 
         for (const auto& entry : matched) {
             files.push_back(entry.path.string());
         }
 
         if (files.empty()) {
-            DFTRACER_UTILS_LOG_ERROR("No .pfw or .pfw.gz files found in: %s",
+            DFTRACER_UTILS_LOG_ERROR("No .pfw.gz files found in: %s",
                                      directory.c_str());
             co_return 1;
         }
@@ -931,10 +984,11 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                     if (counters) {
                         stats = merger.merge_counter_partials(pv, sink);
                     } else {
-                        auto table = merger.merge_partials_to_table(pv);
+                        dataframe::DataFrame table =
+                            merger.merge_partials_to_table(pv);
                         co_await emit_table(table, arrow, output_path,
                                             out_target);
-                        stats.events_matched = table.rows.size();
+                        stats.events_matched = table.num_rows();
                     }
 
                     // Catalog the per-rank shards so a later query autodetects
@@ -1016,9 +1070,10 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                 if (counters) {
                     stats = co_await sv.aggregate_counters(configure, sink);
                 } else {
-                    auto table = co_await sv.aggregate(configure);
+                    dataframe::DataFrame table =
+                        co_await sv.aggregate(configure);
                     co_await emit_table(table, arrow, output_path, out_target);
-                    stats.events_matched = table.rows.size();
+                    stats.events_matched = table.num_rows();
                 }
                 co_return;
             }
@@ -1047,16 +1102,16 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                              (unsigned long long)stats.events_matched);
             } else if (typed_mode) {
                 auto tr = co_await v.collect_typed();
-                emit_typed(out_target, tr);
-                stats.events_matched = tr.regular.rows.size() +
-                                       tr.aggregated.rows.size() +
-                                       tr.counters.rows.size();
+                emit_typed(out_target, tr.regular, tr.aggregated, tr.counters);
+                stats.events_matched = static_cast<std::uint64_t>(
+                    tr.regular.num_rows() + tr.aggregated.num_rows() +
+                    tr.counters.num_rows());
             } else if (counters) {
                 stats = co_await v.export_counters(sink);
             } else if (aggregate) {
-                auto table = co_await v.collect();
+                dataframe::DataFrame table = co_await collect_batch(v);
                 co_await emit_table(table, arrow, output_path, out_target);
-                stats.events_matched = table.rows.size();
+                stats.events_matched = table.num_rows();
             } else if (write_trace) {
                 // Fused: export_trace builds the index during the write (no
                 // re-inflate of the output) unless --no-index opts out.
@@ -1074,8 +1129,6 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
 
             if (out_file) std::fflush(out_file);
 
-            // Re-scan the written trace and confirm the event count
-            // round-trips.
             if (verify && write_trace) {
                 co_await verify_output(ctx, final_output, index_dir,
                                        checkpoint_size, configure,

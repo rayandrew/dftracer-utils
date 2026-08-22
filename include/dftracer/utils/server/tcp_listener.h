@@ -47,9 +47,9 @@ class TcpListener {
     uint16_t port() const { return port_; }
 
    private:
-    // Track live client fds so shutdown can interrupt handlers parked in recv
-    // on keep-alive connections (otherwise the accept loop breaks but the
-    // spawned handlers never return and the scope never joins).
+    /// Track live client fds so shutdown can interrupt handlers parked in recv
+    /// on keep-alive connections (otherwise the accept loop breaks but the
+    /// spawned handlers never return and the scope never joins).
     void track_active(int fd);
     void untrack_active(int fd);
     void shutdown_active();
