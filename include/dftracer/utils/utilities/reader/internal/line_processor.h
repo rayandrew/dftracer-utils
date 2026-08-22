@@ -77,8 +77,8 @@ extern "C" {
  * @param user_data User-provided data pointer
  * @return Non-zero to continue processing, 0 to stop early
  */
-typedef int (*dft_line_processor_callback_t)(const char* data, size_t length,
-                                             void* user_data);
+typedef int (*dftu_line_processor_callback_t)(const char* data, size_t length,
+                                              void* user_data);
 
 #ifdef __cplusplus
 }  // extern "C"

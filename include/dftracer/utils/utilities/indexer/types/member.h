@@ -1,7 +1,7 @@
 #ifndef DFTRACER_UTILS_UTILITIES_INDEXER_TYPES_MEMBER_H
 #define DFTRACER_UTILS_UTILITIES_INDEXER_TYPES_MEMBER_H
 
-#include <dftracer/utils/utilities/composites/dft/indexing/queries/queries.h>
+#include <dftracer/utils/trace/indexing/queries/queries.h>
 #include <dftracer/utils/utilities/indexer/internal/gzip_member_record.h>
 
 #include <cstdint>
@@ -9,7 +9,7 @@
 namespace dftracer::utils::utilities::indexer {
 
 using GzipMemberRecord = internal::GzipMemberRecord;
-using TimeBounds = composites::dft::indexing::queries::TimeBounds;
+using TimeBounds = trace::indexing::queries::TimeBounds;
 
 /// Uncompressed extent and line range of one pruner chunk. The authoritative
 /// chunk -> position mapping for every reader: derived from the gzip member

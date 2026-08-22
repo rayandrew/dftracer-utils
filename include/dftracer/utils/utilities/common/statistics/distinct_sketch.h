@@ -30,10 +30,10 @@ namespace dftracer::utils::utilities::common::statistics {
 template <std::uint32_t Precision = 13>
 class BasicDistinctSketch {
    public:
-    // Default 8192 registers: 8 KB dense, ~1.15% standard error once dense.
+    /// Default 8192 registers: 8 KB dense, ~1.15% standard error once dense.
     static constexpr std::uint32_t PRECISION = Precision;
     static constexpr std::uint32_t REGISTERS = 1u << PRECISION;
-    // Stay sparse (and exact) while the encoded pairs cost less than dense.
+    /// Stay sparse (and exact) while the encoded pairs cost less than dense.
     static constexpr std::size_t SPARSE_LIMIT = REGISTERS / 4;
 
     void add(std::string_view value) {
@@ -104,7 +104,7 @@ class BasicDistinctSketch {
 
    private:
     static constexpr double ALPHA = 0.7213 / (1.0 + 1.079 / REGISTERS);
-    // Below ~2.5m the linear-counting estimator is the more accurate one.
+    /// Below ~2.5m the linear-counting estimator is the more accurate one.
     static constexpr double LINEAR_THRESHOLD = 2.5 * REGISTERS;
 
     void apply_dense(std::uint64_t h) {

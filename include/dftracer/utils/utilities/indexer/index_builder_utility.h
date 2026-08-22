@@ -3,10 +3,8 @@
 
 #include <dftracer/utils/core/common/constants.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/core/utilities/tags/needs_context.h>
-#include <dftracer/utils/core/utilities/utility.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_drain.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_indexer_utility.h>
+#include <dftracer/utils/trace/aggregators/aggregation_drain.h>
+#include <dftracer/utils/trace/indexing/chunk_indexer_utility.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
 #include <dftracer/utils/utilities/indexer/internal/common/gzip_member_scanner.h>
 
@@ -24,9 +22,9 @@ class CoroScope;
 class StringIntern;
 }  // namespace dftracer::utils
 
-namespace dftracer::utils::utilities::composites::dft::views::detail {
+namespace dftracer::utils::trace::views::detail {
 class AggregationFold;
-}  // namespace dftracer::utils::utilities::composites::dft::views::detail
+}  // namespace dftracer::utils::trace::views::detail
 
 namespace dftracer::utils::utilities::indexer {
 
@@ -62,7 +60,7 @@ struct IndexBuildBatchConfig {
     /// the biggest per-event cost; only the raw-trace query path reads it, so
     /// an aggregation-only index (dfanalyzer) does not need it.
     bool build_bloom = true;
-    composites::dft::indexing::ChunkIndexerConfig bloom_config;
+    trace::indexing::ChunkIndexerConfig bloom_config;
     std::vector<std::string> bloom_dimensions;
     bool rebuild_root_summaries = true;
 
@@ -76,8 +74,8 @@ struct IndexBuildBatchConfig {
     /// fused-scan intern that produced its events. When set, the batch build
     /// steps an AggregationFold in the same single parse as bloom/dict and its
     /// per-file out-of-band outputs land in IndexBuildBatchResult::agg_outputs.
-    using AggFoldFactory = std::function<
-        std::unique_ptr<composites::dft::views::detail::AggregationFold>(
+    using AggFoldFactory =
+        std::function<std::unique_ptr<trace::views::detail::AggregationFold>(
             dftracer::utils::StringIntern& build_intern)>;
     AggFoldFactory agg_fold_factory;
 
@@ -143,7 +141,7 @@ struct IndexBuildBatchResult {
     /// Per-file aggregation-fold out-of-band outputs (observed keys, tracker,
     /// time bounds), for callers using agg_fold_factory. Drained via
     /// aggregators::merge_aggregation_folds.
-    std::vector<composites::dft::aggregators::AggFoldOutput> agg_outputs;
+    std::vector<trace::aggregators::AggFoldOutput> agg_outputs;
 };
 
 class IndexBatchBuilderUtility {

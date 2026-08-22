@@ -74,7 +74,7 @@ inline coro::AsyncGenerator<Line> async_indexed_file_lines(
 
     while (!stream->done() &&
            (!is_line_range || current_position <= config.end())) {
-        // Async read — this is the key difference from sync version
+        // Async read - this is the key difference from sync version
         std::size_t bytes_read = co_await stream->read_async(
             stream_buffer.data(), stream_buffer.size());
 

@@ -128,7 +128,7 @@ std::string encode_bloom_value(std::span<const unsigned char> blob,
 }
 
 std::string encode_chunk_statistics_value(
-    const composites::dft::indexing::ChunkStatistics& stats) {
+    const trace::indexing::ChunkStatistics& stats) {
     std::string value;
     append_u64(value, stats.total_events);
     append_u64(value, stats.min_timestamp_us);
@@ -166,20 +166,18 @@ std::string encode_chunk_statistics_value(
 
     // Per-cat and per-pid duration aggregates (tail: decoders built before this
     // stop after sub_zonemaps and leave these maps empty).
-    append_blob(
-        value, composites::dft::indexing::ChunkStatistics::serialize_sketch_map(
-                   stats.cat_duration_sketches));
+    append_blob(value, trace::indexing::ChunkStatistics::serialize_sketch_map(
+                           stats.cat_duration_sketches));
     append_string(value, stats.cat_duration_sums_json());
-    append_blob(
-        value, composites::dft::indexing::ChunkStatistics::serialize_sketch_map(
-                   stats.pid_duration_sketches));
+    append_blob(value, trace::indexing::ChunkStatistics::serialize_sketch_map(
+                           stats.pid_duration_sketches));
     append_string(value, stats.pid_duration_sums_json());
 
     return value;
 }
 
 std::string encode_chunk_dimension_stats_value(
-    const composites::dft::indexing::ChunkDimensionStats& stats,
+    const trace::indexing::ChunkDimensionStats& stats,
     std::size_t value_counts_cap) {
     std::string value;
     append_u64(value, stats.distinct_count);

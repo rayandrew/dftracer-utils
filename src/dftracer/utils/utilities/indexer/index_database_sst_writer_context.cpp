@@ -1,7 +1,7 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/rocksdb/database.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_merge_operator.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/system_metrics_merge_operator.h>
+#include <dftracer/utils/trace/aggregators/aggregation_merge_operator.h>
+#include <dftracer/utils/trace/aggregators/system_metrics_merge_operator.h>
 #include <dftracer/utils/utilities/indexer/error.h>
 #include <dftracer/utils/utilities/indexer/index_database_sst_writer_context.h>
 #include <dftracer/utils/utilities/indexer/internal/db_error.h>
@@ -399,8 +399,8 @@ IndexDatabaseSstWriterContext::commit() {
         buf.clear();
         buf.shrink_to_fit();
     };
-    composites::dft::aggregators::AggregationMergeOperator agg_merge_op;
-    composites::dft::aggregators::SystemMetricsMergeOperator sys_merge_op;
+    trace::aggregators::AggregationMergeOperator agg_merge_op;
+    trace::aggregators::SystemMetricsMergeOperator sys_merge_op;
     emit_mixed_into("aggregation.sst", aggregation_buf_, out.aggregation_sst,
                     &agg_merge_op);
     emit_mixed_into("system_metrics.sst", system_metrics_buf_,

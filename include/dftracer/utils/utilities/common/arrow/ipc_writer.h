@@ -23,9 +23,9 @@ namespace dftracer::utils::utilities::common::arrow {
  * readable by pyarrow, polars, and other Arrow implementations.
  */
 enum class IpcCompression {
-    NONE,  // Uncompressed (maximum compatibility)
+    NONE,  ///< Uncompressed (maximum compatibility)
 #ifdef DFTRACER_UTILS_ENABLE_ZSTD
-    ZSTD,  // zstd compression (best ratio/speed)
+    ZSTD,  ///< zstd compression (best ratio/speed)
 #endif
 };
 

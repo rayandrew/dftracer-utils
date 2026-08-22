@@ -6,14 +6,14 @@
 using namespace dftracer::utils::utilities::reader::internal;
 
 // Helper function to cast stream handle to C++ object
-static ReaderStream* cast_stream(dft_reader_stream_t stream) {
+static ReaderStream* cast_stream(dftu_reader_stream_t stream) {
     return static_cast<ReaderStream*>(stream);
 }
 
 extern "C" {
 
-size_t dft_reader_stream_read(dft_reader_stream_t stream, char* buffer,
-                              size_t buffer_size) {
+size_t dftu_reader_stream_read(dftu_reader_stream_t stream, char* buffer,
+                               size_t buffer_size) {
     if (!stream || !buffer || buffer_size == 0) {
         DFTRACER_UTILS_LOG_ERROR("%s", "Invalid stream handle or buffer");
         return 0;
@@ -27,7 +27,7 @@ size_t dft_reader_stream_read(dft_reader_stream_t stream, char* buffer,
     }
 }
 
-int dft_reader_stream_done(dft_reader_stream_t stream) {
+int dftu_reader_stream_done(dftu_reader_stream_t stream) {
     if (!stream) {
         DFTRACER_UTILS_LOG_ERROR("%s", "Invalid stream handle");
         return 1;  // Return done=true for invalid stream
@@ -41,7 +41,7 @@ int dft_reader_stream_done(dft_reader_stream_t stream) {
     }
 }
 
-void dft_reader_stream_reset(dft_reader_stream_t stream) {
+void dftu_reader_stream_reset(dftu_reader_stream_t stream) {
     if (!stream) {
         DFTRACER_UTILS_LOG_ERROR("%s", "Invalid stream handle");
         return;
@@ -54,7 +54,7 @@ void dft_reader_stream_reset(dft_reader_stream_t stream) {
     }
 }
 
-void dft_reader_stream_destroy(dft_reader_stream_t stream) {
+void dftu_reader_stream_destroy(dftu_reader_stream_t stream) {
     if (stream) {
         delete cast_stream(stream);
     }

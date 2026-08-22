@@ -32,22 +32,22 @@ extern "C" {
  * @brief Type of stream (C API).
  */
 typedef enum {
-    DFT_STREAM_TYPE_BYTES = 0, /** Raw bytes, no line awareness */
-    DFT_STREAM_TYPE_LINE_BYTES =
+    DFTU_STREAM_TYPE_BYTES = 0, /** Raw bytes, no line awareness */
+    DFTU_STREAM_TYPE_LINE_BYTES =
         1, /** Line-boundary-aligned bytes (one line at a time) */
-    DFT_STREAM_TYPE_MULTI_LINES_BYTES =
+    DFTU_STREAM_TYPE_MULTI_LINES_BYTES =
         2, /** Line-boundary-aligned bytes (multiple lines) */
-    DFT_STREAM_TYPE_LINE = 3,       /** Single parsed line per read() */
-    DFT_STREAM_TYPE_MULTI_LINES = 4 /** Multiple parsed lines per read() */
-} dft_stream_type_t;
+    DFTU_STREAM_TYPE_LINE = 3,       /** Single parsed line per read() */
+    DFTU_STREAM_TYPE_MULTI_LINES = 4 /** Multiple parsed lines per read() */
+} dftu_stream_type_t;
 
 /**
  * @brief Range type (C API).
  */
 typedef enum {
-    DFT_RANGE_TYPE_BYTES = 0, /** start/end are byte offsets */
-    DFT_RANGE_TYPE_LINES = 1  /** start/end are line numbers (1-based) */
-} dft_range_type_t;
+    DFTU_RANGE_TYPE_BYTES = 0, /** start/end are byte offsets */
+    DFTU_RANGE_TYPE_LINES = 1  /** start/end are line numbers (1-based) */
+} dftu_range_type_t;
 
 #ifdef __cplusplus
 }

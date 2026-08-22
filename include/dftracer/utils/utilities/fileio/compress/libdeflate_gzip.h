@@ -6,7 +6,7 @@
 #include <optional>
 #include <vector>
 
-// Opaque handles keep <libdeflate.h> out of this header.
+/// Opaque handles keep <libdeflate.h> out of this header.
 struct libdeflate_decompressor;
 struct libdeflate_compressor;
 
@@ -17,11 +17,11 @@ namespace dftracer::utils::utilities::fileio::compress {
 
 struct DecompressResult {
     std::size_t out_bytes;
-    std::size_t in_bytes;  // input consumed (this member's compressed length)
+    std::size_t in_bytes;  ///< input consumed (this member's compressed length)
 };
 
-// BadData is returned both for corrupt input and for a member not yet fully
-// buffered, so streaming callers should read more and retry before giving up.
+/// BadData is returned both for corrupt input and for a member not yet fully
+/// buffered, so streaming callers should read more and retry before giving up.
 enum class GzipDecode : std::uint8_t {
     Ok,
     BadData,
@@ -29,7 +29,7 @@ enum class GzipDecode : std::uint8_t {
     InsufficientSpace,
 };
 
-// Reusable, not thread-safe (one per thread), move-only.
+/// Reusable, not thread-safe (one per thread), move-only.
 class GzipMemberDecompressor {
    public:
     GzipMemberDecompressor();
@@ -39,13 +39,13 @@ class GzipMemberDecompressor {
     GzipMemberDecompressor(GzipMemberDecompressor&& other) noexcept;
     GzipMemberDecompressor& operator=(GzipMemberDecompressor&& other) noexcept;
 
-    // out_cap must be >= the member's uncompressed size. nullopt on failure.
+    /// out_cap must be >= the member's uncompressed size. nullopt on failure.
     std::optional<DecompressResult> decompress(const void* comp,
                                                std::size_t comp_len, void* out,
                                                std::size_t out_cap) const;
 
-    // Reports the exact status so streaming callers can tell InsufficientSpace
-    // from BadData. `result` is filled on Ok.
+    /// Reports the exact status so streaming callers can tell InsufficientSpace
+    /// from BadData. `result` is filled on Ok.
     GzipDecode decompress_status(const void* comp, std::size_t comp_len,
                                  void* out, std::size_t out_cap,
                                  DecompressResult& result) const;
@@ -60,8 +60,8 @@ class GzipMemberDecompressor {
     libdeflate_decompressor* d_;
 };
 
-// Compresses a whole buffer into one gzip member. Reusable, not thread-safe,
-// move-only.
+/// Compresses a whole buffer into one gzip member. Reusable, not thread-safe,
+/// move-only.
 class GzipMemberCompressor {
    public:
     explicit GzipMemberCompressor(int level = 6);
@@ -71,24 +71,24 @@ class GzipMemberCompressor {
     GzipMemberCompressor(GzipMemberCompressor&& other) noexcept;
     GzipMemberCompressor& operator=(GzipMemberCompressor&& other) noexcept;
 
-    // Worst-case compressed size, for sizing `out`.
+    /// Worst-case compressed size, for sizing `out`.
     std::size_t bound(std::size_t len) const;
 
-    // out_cap must be >= bound(len). nullopt if it did not fit.
+    /// out_cap must be >= bound(len). nullopt if it did not fit.
     std::optional<std::size_t> compress(const void* data, std::size_t len,
                                         void* out, std::size_t out_cap) const;
 
-    // Compress one gzip member into `out`, resized to the exact member length.
-    // `out`'s capacity is reused across calls, so a caller that keeps one
-    // scratch buffer pays no per-member heap allocation once it is warm.
-    // Returns false on failure (leaving `out` in an unspecified state). Prefer
-    // this over compress_member() on hot paths and over the manual
-    // bound()+resize()+ compress() dance everywhere.
+    /// Compress one gzip member into `out`, resized to the exact member length.
+    /// `out`'s capacity is reused across calls, so a caller that keeps one
+    /// scratch buffer pays no per-member heap allocation once it is warm.
+    /// Returns false on failure (leaving `out` in an unspecified state). Prefer
+    /// this over compress_member() on hot paths and over the manual
+    /// bound()+resize()+ compress() dance everywhere.
     bool compress_member_into(std::vector<std::uint8_t>& out, const void* data,
                               std::size_t len) const;
 
-    // One-shot convenience: allocates a fresh buffer per call. Prefer
-    // compress_member_into() when compressing repeatedly.
+    /// One-shot convenience: allocates a fresh buffer per call. Prefer
+    /// compress_member_into() when compressing repeatedly.
     std::optional<std::vector<std::uint8_t>> compress_member(
         const void* data, std::size_t len) const;
 

@@ -49,7 +49,7 @@ class LineIterator {
     bool is_end_;
 
    public:
-    // Iterator traits for STL compatibility
+    /// Iterator traits for STL compatibility
     using iterator_category = std::input_iterator_tag;
     using value_type = Line;
     using difference_type = std::ptrdiff_t;

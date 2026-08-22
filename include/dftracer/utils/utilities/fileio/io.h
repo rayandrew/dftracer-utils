@@ -9,7 +9,6 @@
 // File readers and writers
 #include <dftracer/utils/utilities/fileio/binary_file_reader_utility.h>
 #include <dftracer/utils/utilities/fileio/file_reader_utility.h>
-#include <dftracer/utils/utilities/fileio/streaming_file_reader_utility.h>
 #include <dftracer/utils/utilities/fileio/streaming_file_writer_utility.h>
 
 // I/O types

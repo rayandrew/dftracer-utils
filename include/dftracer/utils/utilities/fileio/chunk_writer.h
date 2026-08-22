@@ -18,15 +18,15 @@ struct ChunkWriterConfig {
     std::string output_dir;
     std::string base_name;
     std::size_t chunk_size_bytes = 256 * 1024 * 1024;
-    // Uncompressed bytes per gzip member within a compressed chunk. A positive
-    // value emits multi-member gzip (closed at line boundaries once the member
-    // exceeds this size) so readers can inflate/index members in parallel, and
-    // bounds peak memory to one member. 0 keeps a single member per chunk,
-    // which buffers the whole chunk (up to chunk_size_bytes) before
-    // compressing.
+    /// Uncompressed bytes per gzip member within a compressed chunk. A positive
+    /// value emits multi-member gzip (closed at line boundaries once the member
+    /// exceeds this size) so readers can inflate/index members in parallel, and
+    /// bounds peak memory to one member. 0 keeps a single member per chunk,
+    /// which buffers the whole chunk (up to chunk_size_bytes) before
+    /// compressing.
     std::size_t member_size_bytes = 0;
-    // Coalesce output into writes of this many bytes so I/O granularity suits a
-    // parallel filesystem (Lustre/GPFS) instead of many tiny writes.
+    /// Coalesce output into writes of this many bytes so I/O granularity suits
+    /// a parallel filesystem (Lustre/GPFS) instead of many tiny writes.
     std::size_t io_flush_bytes = 16 * 1024 * 1024;
     bool compress = true;
     int compression_level = 6;
@@ -81,11 +81,11 @@ class ChunkWriter {
     bool is_open() const { return open_; }
 
    private:
-    // Emits the accumulated buffer as one gzip member, or raw when compression
-    // is off.
+    /// Emits the accumulated buffer as one gzip member, or raw when compression
+    /// is off.
     coro::CoroTask<void> flush_member();
     void append_member(const char* data, std::size_t len);
-    // Coalesce writes to `io_flush_bytes` granularity for the PFS.
+    /// Coalesce writes to `io_flush_bytes` granularity for the PFS.
     coro::CoroTask<void> write_out(const char* data, std::size_t size);
     coro::CoroTask<void> flush_io();
     coro::CoroTask<void> finalize_current_chunk();
@@ -103,8 +103,8 @@ class ChunkWriter {
     std::size_t total_events_ = 0;
 
     static constexpr std::size_t WRITE_BUFFER_SIZE = 256 * 1024;
-    // Uncompressed bytes of the current gzip member (or the coalescing buffer
-    // for the uncompressed path).
+    /// Uncompressed bytes of the current gzip member (or the coalescing buffer
+    /// for the uncompressed path).
     std::vector<char> member_buffer_;
     std::vector<char> io_buffer_;
     std::vector<std::uint8_t> compressed_scratch_;

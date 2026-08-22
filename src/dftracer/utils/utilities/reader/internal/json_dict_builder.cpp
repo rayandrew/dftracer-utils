@@ -1,4 +1,4 @@
-#include <dftracer/utils/utilities/composites/dft/event.h>
+#include <dftracer/utils/trace/event.h>
 #include <dftracer/utils/utilities/reader/internal/json_dict_builder.h>
 
 namespace dftracer::utils::utilities::reader::internal {
@@ -35,7 +35,7 @@ void insert_simdjson_value(ArgsMap &map, std::string_view key,
         case simdjson::ondemand::json_type::object:
         case simdjson::ondemand::json_type::array: {
             std::string prefix(key);
-            composites::dft::detail::flatten_arg_ondemand(prefix, val, map);
+            trace::detail::flatten_arg_ondemand(prefix, val, map);
             break;
         }
         default:
@@ -43,8 +43,8 @@ void insert_simdjson_value(ArgsMap &map, std::string_view key,
     }
 }
 
-void parse_json_to_event(common::json::JsonParser &parser, JsonDictEvent &ev,
-                         const composites::dft::TimeScaleState &time_scale) {
+void parse_json_to_event(json::JsonParser &parser, JsonDictEvent &ev,
+                         const trace::TimeScaleState &time_scale) {
     ev.top.set_valid(true);
     const bool scale_time =
         time_scale.target && *time_scale.target != time_scale.metric;
@@ -54,7 +54,7 @@ void parse_json_to_event(common::json::JsonParser &parser, JsonDictEvent &ev,
             auto ri = val.get_int64();
             if (!ri.error() && ri.value_unsafe() >= 0) {
                 ev.top.insert(
-                    key, composites::dft::scale_between(
+                    key, trace::scale_between(
                              time_scale.metric, *time_scale.target,
                              static_cast<std::uint64_t>(ri.value_unsafe())));
             }

@@ -19,8 +19,7 @@ std::unordered_map<std::string, std::string> args_to_string_map(
     const ArgsMap& args) {
     std::unordered_map<std::string, std::string> out;
     args.for_each_member(
-        [&](std::string_view k,
-            dftracer::utils::utilities::composites::dft::ArgsValueProxy v) {
+        [&](std::string_view k, dftracer::utils::trace::ArgsValueProxy v) {
             std::string val;
             if (v.is_string())
                 val = v.get<std::string>();

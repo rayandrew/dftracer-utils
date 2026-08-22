@@ -20,17 +20,17 @@
 
 namespace dftracer::utils::utilities::fileio::compress {
 
-// The read and index paths decode a whole gzip member at once (libdeflate), so
-// a single foreign member larger than this cannot be handled with bounded
-// memory and must be rechunked first. Matches the reader's default guard.
+/// The read and index paths decode a whole gzip member at once (libdeflate), so
+/// a single foreign member larger than this cannot be handled with bounded
+/// memory and must be rechunked first. Matches the reader's default guard.
 inline constexpr std::size_t RECHUNK_MEMBER_CAP = std::size_t{1} << 31;
 
-// True if the file's first gzip member decodes to more than `cap` uncompressed
-// bytes, i.e. it would force an unbounded whole-member decode downstream and
-// must be rechunked first. A bounded first member (whether the file is single-
-// or multi-member) returns false, since the read/index paths handle it fine.
-// Bounded memory: decodes at most one member, discarding output, stopping once
-// output passes `cap`.
+/// True if the file's first gzip member decodes to more than `cap` uncompressed
+/// bytes, i.e. it would force an unbounded whole-member decode downstream and
+/// must be rechunked first. A bounded first member (whether the file is single-
+/// or multi-member) returns false, since the read/index paths handle it fine.
+/// Bounded memory: decodes at most one member, discarding output, stopping once
+/// output passes `cap`.
 inline coro::CoroTask<bool> gzip_needs_rechunk(int fd, std::uint64_t file_size,
                                                std::size_t cap) {
     if (file_size == 0) co_return false;
@@ -76,10 +76,10 @@ inline coro::CoroTask<bool> gzip_needs_rechunk(int fd, std::uint64_t file_size,
     co_return result;
 }
 
-// Decodes `in_path` (single huge member or otherwise) with zlib in bounded
-// memory and writes an equivalent multi-member gzip to `out_path`: identical
-// uncompressed bytes, re-framed into libdeflate members of about
-// `member_size` uncompressed bytes cut at newline boundaries.
+/// Decodes `in_path` (single huge member or otherwise) with zlib in bounded
+/// memory and writes an equivalent multi-member gzip to `out_path`: identical
+/// uncompressed bytes, re-framed into libdeflate members of about
+/// `member_size` uncompressed bytes cut at newline boundaries.
 inline coro::CoroTask<void> gzip_rechunk_to_members(const std::string& in_path,
                                                     const std::string& out_path,
                                                     std::size_t member_size,
@@ -191,11 +191,11 @@ inline coro::CoroTask<void> gzip_rechunk_to_members(const std::string& in_path,
     if (!member.empty()) co_await emit(member.size());
 }
 
-// If `path`'s first gzip member exceeds `member_size` uncompressed (a single
-// huge member), rechunk it to ~member_size members at `<dir>/<basename>` and
-// return that path; else return `path` unchanged. Non-destructive; a split copy
-// newer than the source is reused. `did_split` = true when a split copy is
-// returned. `member_size` 0 = default checkpoint size.
+/// If `path`'s first gzip member exceeds `member_size` uncompressed (a single
+/// huge member), rechunk it to ~member_size members at `<dir>/<basename>` and
+/// return that path; else return `path` unchanged. Non-destructive; a split
+/// copy newer than the source is reused. `did_split` = true when a split copy
+/// is returned. `member_size` 0 = default checkpoint size.
 inline coro::CoroTask<std::string> rechunk_to_dir_if_needed(
     std::string path, std::string dir, std::size_t member_size,
     bool& did_split) {

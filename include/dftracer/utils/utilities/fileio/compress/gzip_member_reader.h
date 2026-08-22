@@ -15,13 +15,13 @@
 
 namespace dftracer::utils::utilities::fileio::compress {
 
-// Yields each gzip member's decompressed bytes in order, as a string_view into
-// a reused buffer valid until the next step. Boundaries come from libdeflate's
-// consumed-byte count, so no header scanning is needed. Peak memory is one
-// decoded member: dftracer emits ~16MB members, so this is bounded in
-// practice. A single foreign member whose decoded size exceeds
-// `max_member_bytes` throws instead of decoding the whole file into memory;
-// the caller should re-chunk it with dftracer_split.
+/// Yields each gzip member's decompressed bytes in order, as a string_view into
+/// a reused buffer valid until the next step. Boundaries come from libdeflate's
+/// consumed-byte count, so no header scanning is needed. Peak memory is one
+/// decoded member: dftracer emits ~16MB members, so this is bounded in
+/// practice. A single foreign member whose decoded size exceeds
+/// `max_member_bytes` throws instead of decoding the whole file into memory;
+/// the caller should re-chunk it with dftracer_split.
 inline coro::AsyncGenerator<std::string_view> decode_gzip_members(
     int fd, std::uint64_t file_size,
     std::size_t max_member_bytes = std::size_t{1} << 31) {

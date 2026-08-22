@@ -92,7 +92,7 @@ class StreamingFileWriterUtility {
         }
     }
 
-    // Non-copyable
+    /// Non-copyable
     StreamingFileWriterUtility(const StreamingFileWriterUtility&) = delete;
     StreamingFileWriterUtility& operator=(const StreamingFileWriterUtility&) =
         delete;

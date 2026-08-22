@@ -10,9 +10,9 @@
 
 namespace dftracer::utils::utilities::common::statistics {
 
-// Lightweight min/max/mean/count accumulator with an optional DDSketch backing
-// for quantile queries. When no sketch is attached, quantile() falls back to a
-// uniform interpolation between observed min and max.
+/// Lightweight min/max/mean/count accumulator with an optional DDSketch backing
+/// for quantile queries. When no sketch is attached, quantile() falls back to a
+/// uniform interpolation between observed min and max.
 class Statistic {
    public:
     Statistic() = default;

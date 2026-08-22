@@ -22,7 +22,7 @@ namespace dftracer::utils::utilities::fileio::lines {
  */
 struct Line {
     std::string_view content;
-    std::size_t line_number;  // 1-based line number
+    std::size_t line_number;  ///< 1-based line number
 
     Line() : line_number(0) {}
     Line(std::string_view content_, std::size_t line_number_)
@@ -47,11 +47,11 @@ struct Line {
  * @endcode
  */
 struct LineReadInput {
-    std::string file_path;   // Path to the archive file
-    std::string index_path;  // Path to the `.dftindex` store
-                             // (empty for plain files)
-    std::size_t start_line;  // Starting line (1-based, inclusive), 0 = start
-    std::size_t end_line;    // Ending line (1-based, inclusive), 0 = end
+    std::string file_path;   ///< Path to the archive file
+    std::string index_path;  ///< Path to the `.dftindex` store
+                             ///< (empty for plain files)
+    std::size_t start_line;  ///< Starting line (1-based, inclusive), 0 = start
+    std::size_t end_line;    ///< Ending line (1-based, inclusive), 0 = end
 
     LineReadInput() : start_line(0), end_line(0) {}
 
@@ -95,7 +95,7 @@ struct LineReadInput {
  */
 struct Lines {
     std::vector<Line> lines;
-    std::vector<std::string> storage;  // Owns string data for zero-copy views
+    std::vector<std::string> storage;  ///< Owns string data for zero-copy views
 
     Lines() = default;
 

@@ -12,33 +12,32 @@ extern "C" {
 #endif
 
 // Forward declare indexer handle from indexer C API
-typedef void *dft_indexer_handle_t;
+typedef void *dftu_indexer_handle_t;
 
 /**
  * Opaque handle for DFT reader
  */
-typedef void *dft_reader_handle_t;
-dft_reader_handle_t dft_reader_create(const char *gz_path,
-                                      const char *index_path,
-                                      size_t index_ckpt_size);
-dft_reader_handle_t dft_reader_create_with_indexer(
-    dft_indexer_handle_t indexer);
-void dft_reader_destroy(dft_reader_handle_t reader);
-int dft_reader_get_max_bytes(dft_reader_handle_t reader, size_t *max_bytes);
-int dft_reader_get_num_lines(dft_reader_handle_t reader, size_t *num_lines);
-int dft_reader_read(dft_reader_handle_t reader, size_t start_bytes,
-                    size_t end_bytes, char *buffer, size_t buffer_size);
-int dft_reader_read_line_bytes(dft_reader_handle_t reader, size_t start_bytes,
-                               size_t end_bytes, char *buffer,
-                               size_t buffer_size);
-int dft_reader_read_lines(dft_reader_handle_t reader, size_t start_line,
-                          size_t end_line, char *buffer, size_t buffer_size,
-                          size_t *bytes_written);
-int dft_reader_read_lines_with_processor(dft_reader_handle_t reader,
-                                         size_t start_line, size_t end_line,
-                                         dft_line_processor_callback_t callback,
-                                         void *user_data);
-void dft_reader_reset(dft_reader_handle_t reader);
+typedef void *dftu_reader_handle_t;
+dftu_reader_handle_t dftu_reader_create(const char *gz_path,
+                                        const char *index_path,
+                                        size_t index_ckpt_size);
+dftu_reader_handle_t dftu_reader_create_with_indexer(
+    dftu_indexer_handle_t indexer);
+void dftu_reader_destroy(dftu_reader_handle_t reader);
+int dftu_reader_get_max_bytes(dftu_reader_handle_t reader, size_t *max_bytes);
+int dftu_reader_get_num_lines(dftu_reader_handle_t reader, size_t *num_lines);
+int dftu_reader_read(dftu_reader_handle_t reader, size_t start_bytes,
+                     size_t end_bytes, char *buffer, size_t buffer_size);
+int dftu_reader_read_line_bytes(dftu_reader_handle_t reader, size_t start_bytes,
+                                size_t end_bytes, char *buffer,
+                                size_t buffer_size);
+int dftu_reader_read_lines(dftu_reader_handle_t reader, size_t start_line,
+                           size_t end_line, char *buffer, size_t buffer_size,
+                           size_t *bytes_written);
+int dftu_reader_read_lines_with_processor(
+    dftu_reader_handle_t reader, size_t start_line, size_t end_line,
+    dftu_line_processor_callback_t callback, void *user_data);
+void dftu_reader_reset(dftu_reader_handle_t reader);
 
 /**
  * Create a stream for incremental reading with configuration.
@@ -47,8 +46,8 @@ void dft_reader_reset(dft_reader_handle_t reader);
  * @param config Stream configuration (type, range, buffer size)
  * @return Stream handle, or NULL on error
  */
-dft_reader_stream_t dft_reader_stream(dft_reader_handle_t reader,
-                                      const dft_stream_config_t *config);
+dftu_reader_stream_t dftu_reader_stream(dftu_reader_handle_t reader,
+                                        const dftu_stream_config_t *config);
 
 #ifdef __cplusplus
 }  // extern "C"

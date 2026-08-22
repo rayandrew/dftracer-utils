@@ -8,18 +8,18 @@ using namespace dftracer::utils::utilities::indexer::internal;
 
 extern "C" {
 
-static int validate_handle(dft_indexer_handle_t indexer) {
+static int validate_handle(dftu_indexer_handle_t indexer) {
     return indexer ? 0 : -1;
 }
 
-static std::shared_ptr<Indexer> *cast_indexer(dft_indexer_handle_t indexer) {
+static std::shared_ptr<Indexer> *cast_indexer(dftu_indexer_handle_t indexer) {
     return static_cast<std::shared_ptr<Indexer> *>(indexer);
 }
 
-dft_indexer_handle_t dft_indexer_create(const char *gz_path,
-                                        const char *index_path,
-                                        uint64_t checkpoint_size,
-                                        int force_rebuild) {
+dftu_indexer_handle_t dftu_indexer_create(const char *gz_path,
+                                          const char *index_path,
+                                          uint64_t checkpoint_size,
+                                          int force_rebuild) {
     if (!gz_path || !index_path || checkpoint_size == 0) {
         DFTRACER_UTILS_LOG_ERROR("%s",
                                  "Invalid parameters for indexer creation");
@@ -30,7 +30,7 @@ dft_indexer_handle_t dft_indexer_create(const char *gz_path,
         auto indexer = IndexerFactory::create(
             gz_path, index_path, checkpoint_size, force_rebuild != 0);
         if (indexer) {
-            return static_cast<dft_indexer_handle_t>(
+            return static_cast<dftu_indexer_handle_t>(
                 new std::shared_ptr<Indexer>(indexer));
         }
         return nullptr;
@@ -40,7 +40,7 @@ dft_indexer_handle_t dft_indexer_create(const char *gz_path,
     }
 }
 
-int dft_indexer_build(dft_indexer_handle_t indexer) {
+int dftu_indexer_build(dftu_indexer_handle_t indexer) {
     if (validate_handle(indexer) < 0) {
         return -1;
     }
@@ -54,7 +54,7 @@ int dft_indexer_build(dft_indexer_handle_t indexer) {
     }
 }
 
-int dft_indexer_need_rebuild(dft_indexer_handle_t indexer) {
+int dftu_indexer_need_rebuild(dftu_indexer_handle_t indexer) {
     if (validate_handle(indexer)) {
         return -1;
     }
@@ -68,7 +68,7 @@ int dft_indexer_need_rebuild(dft_indexer_handle_t indexer) {
     }
 }
 
-int dft_indexer_exists(dft_indexer_handle_t indexer) {
+int dftu_indexer_exists(dftu_indexer_handle_t indexer) {
     if (validate_handle(indexer) < 0) {
         return -1;
     }
@@ -82,7 +82,7 @@ int dft_indexer_exists(dft_indexer_handle_t indexer) {
     }
 }
 
-uint64_t dft_indexer_get_max_bytes(dft_indexer_handle_t indexer) {
+uint64_t dftu_indexer_get_max_bytes(dftu_indexer_handle_t indexer) {
     if (validate_handle(indexer) < 0) {
         return 0;
     }
@@ -95,7 +95,7 @@ uint64_t dft_indexer_get_max_bytes(dft_indexer_handle_t indexer) {
     }
 }
 
-uint64_t dft_indexer_get_num_lines(dft_indexer_handle_t indexer) {
+uint64_t dftu_indexer_get_num_lines(dftu_indexer_handle_t indexer) {
     if (validate_handle(indexer) < 0) {
         return 0;
     }
@@ -108,7 +108,7 @@ uint64_t dft_indexer_get_num_lines(dft_indexer_handle_t indexer) {
     }
 }
 
-void dft_indexer_destroy(dft_indexer_handle_t indexer) {
+void dftu_indexer_destroy(dftu_indexer_handle_t indexer) {
     if (indexer) {
         delete cast_indexer(indexer);
     }

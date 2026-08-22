@@ -1,6 +1,6 @@
 #include <dftracer/utils/call_tree/json_serializer.h>
-#include <dftracer/utils/utilities/composites/dft/args_map.h>
-#include <dftracer/utils/utilities/composites/dft/schema.h>
+#include <dftracer/utils/trace/args_map.h>
+#include <dftracer/utils/trace/schema.h>
 
 #include <cstdio>
 #include <cstring>
@@ -9,9 +9,9 @@
 namespace dftracer::utils::call_tree {
 namespace internal {
 
-namespace dft = utilities::composites::dft;
+namespace dft = trace;
 
-using dftracer::utils::utilities::composites::dft::ArgsValueProxy;
+using dftracer::utils::trace::ArgsValueProxy;
 
 JsonSerializer::JsonSerializer() : hostname_hash_("") {}
 

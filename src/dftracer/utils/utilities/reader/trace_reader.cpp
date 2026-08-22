@@ -1,11 +1,11 @@
 #include <dftracer/utils/core/common/archive_format.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/utils/string.h>
-#include <dftracer/utils/utilities/common/json/json_value.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_pruner_utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolved_field_rewriter.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/json/json_value.h>
+#include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/indexing/chunk_pruner_utility.h>
+#include <dftracer/utils/trace/indexing/resolved_field_rewriter.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
@@ -30,13 +30,13 @@
 
 namespace dftracer::utils::utilities::reader {
 
-namespace dft_internal = composites::dft::internal;
-namespace indexing = composites::dft::indexing;
-using common::json::JsonValue;
-using common::query::Query;
-using composites::dft::indexing::ChunkPrunerInput;
-using composites::dft::indexing::ChunkPrunerUtility;
+namespace dftu_internal = trace::internal;
+namespace indexing = trace::indexing;
 using indexer::internal::IndexerFactory;
+using json::JsonValue;
+using query::Query;
+using trace::indexing::ChunkPrunerInput;
+using trace::indexing::ChunkPrunerUtility;
 
 using internal::build_prefilter;
 using internal::LinePrefilter;
@@ -214,7 +214,7 @@ coro::AsyncGenerator<Line> read_lines_indexed(
         range_type == internal::RangeType::BYTE_RANGE) {
         ChunkPrunerInput pruner_input{index_path, file_path, *query, nullptr};
         ChunkPrunerUtility pruner;
-        auto pruner_out = co_await pruner.process(pruner_input);
+        auto pruner_out = co_await pruner(pruner_input);
         if (pruner_out.success && !pruner_out.file_may_match) {
             co_return;
         }
@@ -345,7 +345,7 @@ coro::AsyncGenerator<std::span<const char>> read_chunks_indexed(
     if (query && !index_path.empty() && !config.skip_pruning) {
         ChunkPrunerInput pruner_input{index_path, file_path, *query, nullptr};
         ChunkPrunerUtility pruner;
-        auto pruner_out = co_await pruner.process(pruner_input);
+        auto pruner_out = co_await pruner(pruner_input);
         if (pruner_out.success && !pruner_out.file_may_match) {
             co_return;
         }
@@ -430,8 +430,8 @@ TraceReader::TraceReader(TraceReaderConfig config)
 
 void TraceReader::probe_index() {
     format_ = IndexerFactory::detect_format(config_.file_path);
-    index_path_ = dft_internal::determine_index_path(config_.file_path,
-                                                     config_.index_dir);
+    index_path_ = dftu_internal::determine_index_path(config_.file_path,
+                                                      config_.index_dir);
     has_index_ = format_ == ArchiveFormat::GZIP && fs::exists(index_path_);
     // Do not trust an index whose source changed since it was built; fall back
     // to a raw read rather than serving stale data. Records predating stat
@@ -473,10 +473,10 @@ void TraceReader::ensure_metadata_cached() {
     metadata_cached_ = true;
 }
 
-coro::CoroTask<composites::dft::TimeMetric> TraceReader::read_time_metric(
+coro::CoroTask<trace::TimeMetric> TraceReader::read_time_metric(
     std::size_t max_lines) {
-    using composites::dft::DFTracerEvent;
-    using composites::dft::TimeMetric;
+    using trace::DFTracerEvent;
+    using trace::TimeMetric;
 
     ReadConfig probe;
     probe.end_line = max_lines;
@@ -492,9 +492,9 @@ coro::CoroTask<composites::dft::TimeMetric> TraceReader::read_time_metric(
         auto doc = parser.parse(start, len);
         if (doc.error()) continue;
         DFTracerEvent event;
-        if (!DFTracerEvent::parse(common::json::JsonValue(doc.value()), event))
+        if (!DFTracerEvent::parse(json::JsonValue(doc.value()), event))
             continue;
-        if (composites::dft::extract_time_metric(event, metric)) break;
+        if (trace::extract_time_metric(event, metric)) break;
         // CM precedes timeline events; stop once past the metadata header.
         if (event.is_event()) break;
     }
@@ -534,7 +534,7 @@ coro::AsyncGenerator<Line> TraceReader::read_lines(ReadConfig config) {
     std::optional<Query> query;
     if (!config.query.empty()) {
         auto parsed = Query::from_string(config.query);
-        if (!parsed) throw common::query::QueryParseError(parsed.error());
+        if (!parsed) throw query::QueryParseError(parsed.error());
         query = std::move(*parsed);
     }
 
@@ -554,7 +554,7 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
     std::optional<Query> query;
     if (!config.query.empty()) {
         auto parsed = Query::from_string(config.query);
-        if (!parsed) throw common::query::QueryParseError(parsed.error());
+        if (!parsed) throw query::QueryParseError(parsed.error());
         query = std::move(*parsed);
     }
 
@@ -599,7 +599,7 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
                                              config_.file_path, config, query);
 
         simdjson::ondemand::parser bulk_parser;
-        common::json::JsonParser yield_parser;
+        json::JsonParser yield_parser;
 
         while (auto chunk_opt = co_await chunk_gen.next()) {
             auto chunk = *chunk_opt;
@@ -633,7 +633,7 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
                     if (!all_present) continue;
                     doc.rewind();
                 } else if (query) {
-                    common::query::ValueMap fields;
+                    query::ValueMap fields;
                     auto obj = doc.get_object();
                     if (obj.error()) continue;
                     for (auto field : obj.value()) {
@@ -684,7 +684,7 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
     config.chunk_prune_only = true;
     auto line_gen = read_lines(config);
 
-    common::json::JsonParser parser;
+    json::JsonParser parser;
 
     while (auto opt = co_await line_gen.next()) {
         const char* trimmed;
@@ -695,7 +695,7 @@ coro::AsyncGenerator<JsonLine> TraceReader::read_json(ReadConfig config) {
         if (!parser.parse(std::string_view(trimmed, trimmed_len))) continue;
 
         if (query) {
-            common::query::ValueMap fields;
+            query::ValueMap fields;
             std::vector<std::string> nested_keys;
             parser.for_each_field(
                 [&](std::string_view key, simdjson::ondemand::value val) {
@@ -758,11 +758,11 @@ coro::AsyncGenerator<std::span<const char>> TraceReader::read_raw(
         if (!config.query.empty() && !index_path_.empty() &&
             range_type == internal::RangeType::BYTE_RANGE) {
             auto parsed = Query::from_string(config.query);
-            if (!parsed) throw common::query::QueryParseError(parsed.error());
+            if (!parsed) throw query::QueryParseError(parsed.error());
             ChunkPrunerInput pruner_input{index_path_, config_.file_path,
                                           std::move(*parsed), nullptr};
             ChunkPrunerUtility pruner;
-            auto pruner_out = co_await pruner.process(pruner_input);
+            auto pruner_out = co_await pruner(pruner_input);
             if (pruner_out.success && !pruner_out.file_may_match) {
                 co_return;
             }

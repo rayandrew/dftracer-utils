@@ -3,9 +3,9 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/coro/when_all.h>
-#include <dftracer/utils/utilities/common/json/parser.h>
-#include <dftracer/utils/utilities/composites/dft/event.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/json/parser.h>
+#include <dftracer/utils/trace/event.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer.h>
 #include <dftracer/utils/utilities/reader/trace_reader.h>
 #include <dftracer/utils/utilities/replay/replay.h>
@@ -209,7 +209,7 @@ ReplayResult ReplayEngine::replay(const std::vector<std::string>& trace_files) {
     return aggregated_result;
 }
 
-bool ReplayEngine::process_trace_line(common::json::JsonParser& parser,
+bool ReplayEngine::process_trace_line(json::JsonParser& parser,
                                       ReplayResult& result) {
     Trace trace;
     if (!parse_trace_json(parser, trace)) {
@@ -302,13 +302,12 @@ void ReplayEngine::dispatch_trace(const Trace& trace, ReplayResult& result) {
     }
 }
 
-bool ReplayEngine::parse_trace_json(common::json::JsonParser& parser,
-                                    Trace& trace) {
-    composites::dft::DFTracerEvent ev;
+bool ReplayEngine::parse_trace_json(json::JsonParser& parser, Trace& trace) {
+    trace::DFTracerEvent ev;
     // parse_ondemand returns false only when no "ph" was found; other fields
     // are still populated. Match the legacy DOM-based behavior, which keyed
     // validity on a non-empty name and treated missing ph as Regular.
-    composites::dft::DFTracerEvent::parse_ondemand(parser, ev);
+    trace::DFTracerEvent::parse_ondemand(parser, ev);
 
     if (ev.name.empty()) {
         return false;

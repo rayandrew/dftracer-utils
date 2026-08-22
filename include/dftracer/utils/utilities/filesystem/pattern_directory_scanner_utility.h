@@ -2,8 +2,7 @@
 #define DFTRACER_UTILS_UTILITIES_FILESYSTEM_PATTERN_DIRECTORY_SCANNER_H
 
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/core/utilities/tags/needs_context.h>
-#include <dftracer/utils/core/utilities/utilities.h>
+#include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/utilities/filesystem/directory_scanner_utility.h>
 
 #include <algorithm>
@@ -19,7 +18,7 @@ struct PatternDirectoryScannerUtilityInput {
     std::string path;
     bool recursive = false;
     bool populate_size = true;
-    std::vector<std::string> patterns;  // e.g., {".pfw", ".pfw.gz", "*.txt"}
+    std::vector<std::string> patterns;  ///< e.g., {".pfw", ".pfw.gz", "*.txt"}
 
     PatternDirectoryScannerUtilityInput() = default;
 
@@ -60,40 +59,28 @@ struct PatternDirectoryScannerUtilityInput {
  *
  * Usage:
  * @code
- * PatternDirectoryScanner scanner;
- * auto files = scanner.process(
- *     PatternDirectory{"/path/to/dir", {".pfw", ".pfw.gz"}}
- * );
+ * PatternDirectoryScannerUtility scanner;
+ * auto files = co_await scanner(
+ *     PatternDirectoryScannerUtilityInput{"/path/to/dir", {".pfw",
+ * ".pfw.gz"}});
  * @endcode
  */
-class PatternDirectoryScannerUtility
-    : public utilities::Utility<PatternDirectoryScannerUtilityInput,
-                                std::vector<FileEntry>,
-                                utilities::tags::NeedsContext> {
-   private:
-    DirectoryScannerUtility base_scanner_;
-
+class PatternDirectoryScannerUtility {
    public:
-    PatternDirectoryScannerUtility() = default;
-
     /**
      * @brief Scan directory and filter by patterns.
      *
+     * @param ctx Coroutine scope for async execution
      * @param input Directory path, patterns, and recursive flag
      * @return Vector of file entries matching patterns
      */
-    coro::CoroTask<std::vector<FileEntry>> process(
-        const PatternDirectoryScannerUtilityInput& input) override {
-        // Step 1: Use base DirectoryScanner
+    coro::CoroTask<std::vector<FileEntry>> operator()(
+        CoroScope& ctx,
+        const PatternDirectoryScannerUtilityInput& input) const {
         DirectoryScannerUtilityInput dir_input{input.path, input.recursive,
                                                input.populate_size};
-        std::vector<FileEntry> all_entries;
-        if (this->has_context()) {
-            all_entries =
-                co_await this->context().spawn(base_scanner_, dir_input);
-        } else {
-            all_entries = co_await base_scanner_.process(dir_input);
-        }
+        std::vector<FileEntry> all_entries =
+            co_await base_scanner_(ctx, dir_input);
 
         // Step 2: Filter by patterns
         std::vector<FileEntry> matched_entries;
@@ -113,7 +100,15 @@ class PatternDirectoryScannerUtility
         co_return matched_entries;
     }
 
+    /// Scope-less overload: opens its own CoroScope on the current executor.
+    coro::CoroTask<std::vector<FileEntry>> operator()(
+        const PatternDirectoryScannerUtilityInput& input) const {
+        return with_scope(*this, input);
+    }
+
    private:
+    DirectoryScannerUtility base_scanner_;
+
     /**
      * @brief Check if a path matches any of the given patterns.
      */

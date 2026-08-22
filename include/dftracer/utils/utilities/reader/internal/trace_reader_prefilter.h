@@ -1,7 +1,7 @@
 #ifndef DFTRACER_UTILS_UTILITIES_READER_INTERNAL_TRACE_READER_PREFILTER_H
 #define DFTRACER_UTILS_UTILITIES_READER_INTERNAL_TRACE_READER_PREFILTER_H
 
-#include <dftracer/utils/utilities/common/query/query.h>
+#include <dftracer/utils/query/query.h>
 #include <simdjson.h>
 
 #include <cstdint>
@@ -55,10 +55,10 @@ struct CompiledEqProbe {
     bool b_val = false;
 };
 
-LinePrefilter build_prefilter(const common::query::Query& q);
+LinePrefilter build_prefilter(const query::Query& q);
 
 std::optional<std::vector<CompiledEqProbe>> try_compile_eq_probes(
-    const common::query::QueryNode& node);
+    const query::QueryNode& node);
 
 bool eval_compiled_eq(const std::vector<CompiledEqProbe>& probes,
                       simdjson::ondemand::document_reference doc);

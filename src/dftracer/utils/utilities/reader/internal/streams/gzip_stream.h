@@ -192,7 +192,19 @@ class GzipStream : public StreamBase {
             co_return;
         }
 
-        use_member_ = co_await try_initialize_with_member(start_bytes_);
+        // Inlined rather than a helper coroutine: GCC 12's coroutine frontend
+        // miscompiles this small frame's resume-index dispatch, so the co_await
+        // stays in the caller's frame. See docs/concepts/coroutine-caveats.
+        use_member_ = false;
+        if (indexer_ && indexer_->find_member(start_bytes_, member_)) {
+            use_member_ =
+                co_await inflater_.seek_to_member(fd_, file_offset_, member_);
+            if (use_member_)
+                DFTRACER_UTILS_LOG_DEBUG(
+                    "Using member %" PRIu64 " at uncompressed offset %" PRIu64
+                    " for target %zu",
+                    member_.member_idx, member_.uc_offset, start_bytes_);
+        }
 
         if (!use_member_) {
             if (!co_await inflater_.initialize(
@@ -210,22 +222,6 @@ class GzipStream : public StreamBase {
     /// Hook for derived streams to seek to their own start once the base
     /// stream is positioned.
     virtual coro::CoroTask<void> on_initialized() { co_return; }
-
-    // A member start is a self-contained gzip stream, so the seek needs no
-    // dictionary and no bit priming. Files with no member table (never
-    // indexed) decode from the beginning instead.
-    coro::CoroTask<bool> try_initialize_with_member(std::size_t start_bytes) {
-        if (!indexer_ || !indexer_->find_member(start_bytes, member_))
-            co_return false;
-        if (!co_await inflater_.seek_to_member(fd_, file_offset_, member_)) {
-            co_return false;
-        }
-        DFTRACER_UTILS_LOG_DEBUG(
-            "Using member %" PRIu64 " at uncompressed offset %" PRIu64
-            " for target %zu",
-            member_.member_idx, member_.uc_offset, start_bytes);
-        co_return true;
-    }
 
     /// Uncompressed offset the stream sits at right after a seek, and the
     /// base every skip measures from. Derived streams must ask here rather

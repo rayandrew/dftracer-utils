@@ -1,10 +1,10 @@
 #include <dftracer/utils/utilities/reader/trace_reader.h>
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #include <dftracer/utils/core/common/string_arena.h>
+#include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/indexing/resolved_field_rewriter.h>
+#include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/utilities/common/arrow/column_builder.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolved_field_rewriter.h>
-#include <dftracer/utils/utilities/composites/dft/schema.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/reader/internal/reader.h>
 #include <dftracer/utils/utilities/reader/internal/trace_reader_prefilter.h>
@@ -19,8 +19,7 @@
 
 namespace dftracer::utils::utilities::reader {
 
-namespace indexing = composites::dft::indexing;
-using common::query::Query;
+namespace indexing = trace::indexing;
 using internal::build_prefilter;
 using internal::CompiledEqProbe;
 using internal::eval_compiled_eq;
@@ -29,6 +28,7 @@ using internal::ondemand_to_literal;
 using internal::read_chunks_indexed;
 using internal::strip_ndjson_bookends;
 using internal::try_compile_eq_probes;
+using query::Query;
 
 namespace {
 
@@ -211,7 +211,7 @@ bool arrow_row_from_doc(RecordBatchBuilder& builder,
 
 void collect_query_fields(simdjson::ondemand::document_reference doc,
                           const Query& query, bool check_dotted,
-                          common::query::ValueMap& out);
+                          query::ValueMap& out);
 
 // Build a simdjson-padded buffer containing only the lines in `chunk` that
 // pass the line-level prefilter. For queries with no useful prefilter, the
@@ -242,7 +242,7 @@ std::string collect_matching_lines(std::span<const char> chunk,
 // of object nesting. Fields not referenced by the query are skipped.
 void collect_query_fields(simdjson::ondemand::document_reference doc,
                           const Query& query, bool check_dotted,
-                          common::query::ValueMap& out) {
+                          query::ValueMap& out) {
     auto obj = doc.get_object();
     if (obj.error()) return;
     for (auto field : obj.value()) {
@@ -281,7 +281,7 @@ coro::AsyncGenerator<ArrowExportResult> TraceReader::read_arrow(
     std::optional<Query> query;
     if (!config.query.empty()) {
         auto parsed = Query::from_string(config.query);
-        if (!parsed) throw common::query::QueryParseError(parsed.error());
+        if (!parsed) throw query::QueryParseError(parsed.error());
         query = std::move(*parsed);
     }
 
@@ -461,8 +461,7 @@ coro::AsyncGenerator<ArrowExportResult> TraceReader::read_arrow(
                 auto ph = doc.find_field_unordered("ph");
                 if (!ph.error()) {
                     auto pv = ph.value_unsafe();
-                    if (composites::dft::read_phase(pv) ==
-                        composites::dft::RecordPhase::METADATA) {
+                    if (trace::read_phase(pv) == trace::RecordPhase::METADATA) {
                         is_meta = true;
                     }
                 }
@@ -484,7 +483,7 @@ coro::AsyncGenerator<ArrowExportResult> TraceReader::read_arrow(
                 if (use_compiled) {
                     if (!eval_compiled_eq(compiled_probes, doc)) continue;
                 } else {
-                    common::query::ValueMap fields;
+                    query::ValueMap fields;
                     collect_query_fields(doc, *query, query_has_dotted, fields);
                     if (!query->evaluate(fields)) continue;
                 }

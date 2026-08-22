@@ -3,10 +3,10 @@
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/core/rocksdb/db_manager.h>
 #include <dftracer/utils/core/rocksdb/key_codec.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_merge_operator.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/association_tracker.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/system_metrics_merge_operator.h>
+#include <dftracer/utils/trace/aggregators/aggregation_merge_operator.h>
+#include <dftracer/utils/trace/aggregators/aggregation_serialization.h>
+#include <dftracer/utils/trace/aggregators/association_tracker.h>
+#include <dftracer/utils/trace/aggregators/system_metrics_merge_operator.h>
 #include <dftracer/utils/utilities/indexer/error.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/index_database_sst_writer_context.h>
@@ -153,7 +153,7 @@ ChunkStatistics decode_chunk_statistics_value(std::string_view value) {
         auto count = static_cast<std::size_t>(cursor.u32());
         stats.sub_zonemaps.reserve(count);
         for (std::size_t i = 0; i < count; ++i) {
-            composites::dft::indexing::SubChunkZoneMap z;
+            trace::indexing::SubChunkZoneMap z;
             z.event_count = cursor.u64();
             z.min_timestamp_us = cursor.u64();
             z.max_timestamp_us = cursor.u64();
@@ -314,10 +314,8 @@ namespace {
 }
 
 rocks::RocksDatabase::CfOptionsOverride make_aggregation_cf_override() {
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        AggregationMergeOperator;
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        SystemMetricsMergeOperator;
+    using dftracer::utils::trace::aggregators::AggregationMergeOperator;
+    using dftracer::utils::trace::aggregators::SystemMetricsMergeOperator;
     auto agg_merge_op = std::make_shared<AggregationMergeOperator>();
     auto sys_merge_op = std::make_shared<SystemMetricsMergeOperator>();
     return [agg_merge_op, sys_merge_op](const std::string& cf_name,
@@ -449,12 +447,9 @@ void IndexDatabase::rebuild_root_summaries() {
 void IndexDatabase::write_agg_global_config(std::uint64_t time_interval_us,
                                             std::uint32_t config_hash,
                                             bool group_by_file) {
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        AGG_GLOBAL_CONFIG_KEY;
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        AggGlobalConfig;
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        serialize_agg_global_config;
+    using dftracer::utils::trace::aggregators::AGG_GLOBAL_CONFIG_KEY;
+    using dftracer::utils::trace::aggregators::AggGlobalConfig;
+    using dftracer::utils::trace::aggregators::serialize_agg_global_config;
 
     AggGlobalConfig cfg;
     cfg.time_interval_us = time_interval_us;
@@ -470,8 +465,7 @@ void IndexDatabase::write_agg_global_config(std::uint64_t time_interval_us,
 
 void IndexDatabase::write_aggregation_tracker(
     const std::vector<std::string>& blobs) {
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        AssociationTracker;
+    using dftracer::utils::trace::aggregators::AssociationTracker;
 
     AssociationTracker unified;
     for (const auto& b : blobs) {
@@ -488,8 +482,7 @@ void IndexDatabase::write_aggregation_tracker(
 }
 
 void IndexDatabase::write_agg_file_markers(const std::vector<int>& file_ids) {
-    using dftracer::utils::utilities::composites::dft::aggregators::
-        make_agg_file_key;
+    using dftracer::utils::trace::aggregators::make_agg_file_key;
 
     auto batch = impl_->db_->begin_batch();
     for (int file_id : file_ids) {

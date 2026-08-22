@@ -6,8 +6,8 @@
 #include <dftracer/utils/core/common/constants.h>
 #include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/common/json/parser.h>
-#include <dftracer/utils/utilities/composites/dft/time_metric.h>
+#include <dftracer/utils/json/parser.h>
+#include <dftracer/utils/trace/time_metric.h>
 #include <dftracer/utils/utilities/fileio/lines/line_types.h>
 #include <dftracer/utils/utilities/reader/internal/reader.h>
 #include <dftracer/utils/utilities/reader/internal/stream_type.h>
@@ -24,8 +24,8 @@
 
 namespace dftracer::utils::utilities::reader {
 
-using common::json::JsonParser;
 using fileio::lines::Line;
+using json::JsonParser;
 
 struct JsonLine {
     std::string_view content;
@@ -96,9 +96,9 @@ struct ReadConfig {
     /// match the native index and are unaffected.
     TimeNormalization normalize_time = TimeNormalization::None;
 
-    // Sub-chunk skip for a single member (see ArrowWorkItem). When
-    // sub_event_counts is non-empty, the reader counts data events (ph != "M")
-    // and skips those whose bucket has sub_keep == 0 before parse/eval.
+    /// Sub-chunk skip for a single member (see ArrowWorkItem). When
+    /// sub_event_counts is non-empty, the reader counts data events (ph != "M")
+    /// and skips those whose bucket has sub_keep == 0 before parse/eval.
     std::vector<std::uint32_t> sub_event_counts;
     std::vector<char> sub_keep;
 
@@ -137,7 +137,7 @@ class TraceReader {
     /// Resolve the file's native time unit from its leading `CM` time_metric
     /// metadata by scanning up to `max_lines` header lines. Returns US when no
     /// `CM` is declared. Independent of any query filter.
-    coro::CoroTask<composites::dft::TimeMetric> read_time_metric(
+    coro::CoroTask<trace::TimeMetric> read_time_metric(
         std::size_t max_lines = 256);
 
     /// True if a `.dftindex` database was found at construction time.

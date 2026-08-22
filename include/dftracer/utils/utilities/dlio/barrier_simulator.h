@@ -95,16 +95,16 @@ struct BarrierSimulationResult {
 
 class BarrierSimulator {
    public:
-    // preprocess_sampler may be empty; pass {} to use trace-derived
-    // getitem/preprocess stats.
+    /// preprocess_sampler may be empty; pass {} to use trace-derived
+    /// getitem/preprocess stats.
     BarrierSimulationResult simulate(
         const BarrierSimulatorContext& context, std::uint64_t base_seed,
         const Sampler& fetch_block_sampler,
         const Sampler& preprocess_sampler = {}) const;
 };
 
-// 1 - Kolmogorov-Smirnov statistic between the two empirical distributions.
-// Returns 1.0 for perfect match, 0.0 for fully disjoint.
+/// 1 - Kolmogorov-Smirnov statistic between the two empirical distributions.
+/// Returns 1.0 for perfect match, 0.0 for fully disjoint.
 double cdf_similarity(const std::vector<double>& a,
                       const std::vector<double>& b);
 

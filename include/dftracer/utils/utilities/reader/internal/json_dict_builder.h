@@ -1,9 +1,9 @@
 #ifndef DFTRACER_UTILS_UTILITIES_READER_INTERNAL_JSON_DICT_BUILDER_H
 #define DFTRACER_UTILS_UTILITIES_READER_INTERNAL_JSON_DICT_BUILDER_H
 
-#include <dftracer/utils/utilities/common/json/parser.h>
-#include <dftracer/utils/utilities/composites/dft/args_map.h>
-#include <dftracer/utils/utilities/composites/dft/time_metric.h>
+#include <dftracer/utils/json/parser.h>
+#include <dftracer/utils/trace/args_map.h>
+#include <dftracer/utils/trace/time_metric.h>
 #include <simdjson.h>
 
 #include <string_view>
@@ -11,7 +11,7 @@
 
 namespace dftracer::utils::utilities::reader::internal {
 
-using ArgsMap = dftracer::utils::utilities::composites::dft::ArgsMap;
+using ArgsMap = dftracer::utils::trace::ArgsMap;
 
 // One parsed JSON event split into top-level fields (`top`) and the nested
 // "args" object (`args`), each held as an ArgsMap.
@@ -33,9 +33,8 @@ void insert_simdjson_value(ArgsMap &map, std::string_view key,
 // object into ev.args and all other fields into ev.top. When `time_scale`
 // requests a target unit, top-level ts/dur are scaled from the file's native
 // unit into it.
-void parse_json_to_event(
-    common::json::JsonParser &parser, JsonDictEvent &ev,
-    const composites::dft::TimeScaleState &time_scale = {});
+void parse_json_to_event(json::JsonParser &parser, JsonDictEvent &ev,
+                         const trace::TimeScaleState &time_scale = {});
 
 }  // namespace dftracer::utils::utilities::reader::internal
 

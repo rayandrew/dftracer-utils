@@ -3,9 +3,9 @@
 
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/core/rocksdb/db_manager.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/queries/queries.h>
+#include <dftracer/utils/trace/indexing/chunk_dimension_stats.h>
+#include <dftracer/utils/trace/indexing/chunk_statistics.h>
+#include <dftracer/utils/trace/indexing/queries/queries.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
 #include <dftracer/utils/utilities/indexer/index_file_entry_capability.h>
 
@@ -38,13 +38,13 @@ class IndexDatabaseWriterContext : public IndexBatchSink {
 
     void commit();
 
-    // Read-through queries (needed by visitors during write)
+    /// Read-through queries (needed by visitors during write)
     bool has_file_scalar_stats(int file_id) const;
 
-    // Schema initialisation
+    /// Schema initialisation
     void init_schema();
 
-    // Registry/capability writes
+    /// Registry/capability writes
     int get_or_create_file_info(
         std::string_view path, std::uint64_t file_hash,
         IndexFileEntryCapability caps = IndexFileEntryCapability::NONE,
@@ -54,12 +54,12 @@ class IndexDatabaseWriterContext : public IndexBatchSink {
                                        IndexFileEntryCapability caps);
     void add_file_capability(int file_id, IndexFileEntryCapability cap);
 
-    // Metadata
+    /// Metadata
     void insert_file_metadata(int file_id, std::uint64_t checkpoint_size,
                               std::uint64_t total_lines,
                               std::uint64_t total_uc_size) override;
 
-    // Bloom inserts
+    /// Bloom inserts
     void insert_chunk_bloom_filter(int file_id, std::uint64_t checkpoint_idx,
                                    std::string_view dimension,
                                    std::span<const unsigned char> blob_data,
@@ -112,7 +112,7 @@ class IndexDatabaseWriterContext : public IndexBatchSink {
     void insert_hash_table_entry(std::uint8_t type, std::string_view hash,
                                  std::string_view name) override;
 
-    // Aggregation / system-metrics CF writes.
+    /// Aggregation / system-metrics CF writes.
     void insert_aggregation_merge(std::string_view key,
                                   std::string_view operand) override;
 

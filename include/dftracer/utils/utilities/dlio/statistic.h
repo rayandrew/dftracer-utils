@@ -23,11 +23,11 @@ struct ComponentTimeMetrics {
 
 struct Boundary {
     std::int64_t time;
-    int delta;  // +1 start, -1 end
+    int delta;  ///< +1 start, -1 end
 };
 
-// Sweep-line union of [start, end] intervals encoded as boundaries.
-// Times are in microseconds; return value is seconds.
+/// Sweep-line union of [start, end] intervals encoded as boundaries.
+/// Times are in microseconds; return value is seconds.
 double sweep_union(std::vector<Boundary>& boundaries);
 
 }  // namespace dftracer::utils::utilities::dlio

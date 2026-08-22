@@ -5,7 +5,7 @@
 #include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
-#include <dftracer/utils/utilities/common/json/parser.h>
+#include <dftracer/utils/json/parser.h>
 #include <dftracer/utils/utilities/replay/trace.h>
 
 #include <chrono>
@@ -24,78 +24,79 @@ namespace dftracer::utils::utilities::replay {
  * Configuration options for trace replay
  */
 struct ReplayConfig {
-    // Execution options
-    bool maintain_timing = true;  // Maintain original timing between operations
-    bool dry_run = false;        // Only parse and log operations, don't execute
-    bool dftracer_mode = false;  // Use DFTracer sleep-based replay mode
-    bool no_sleep = false;       // Disable sleep calls in dftracer mode
-    double timing_scale =
-        1.0;  // Scale timing (1.0 = original, 0.5 = 2x faster, 2.0 = 2x slower)
-    std::uint64_t start_time_offset = 0;  // Offset to add to all timestamps
-    std::string output_directory;  // Directory for creating files (empty = use
-                                   // original paths)
+    /// Execution options
+    bool maintain_timing =
+        true;              ///< Maintain original timing between operations
+    bool dry_run = false;  ///< Only parse and log operations, don't execute
+    bool dftracer_mode = false;  ///< Use DFTracer sleep-based replay mode
+    bool no_sleep = false;       ///< Disable sleep calls in dftracer mode
+    double timing_scale = 1.0;   ///< Scale timing (1.0 = original, 0.5 = 2x
+                                 ///< faster, 2.0 = 2x slower)
+    std::uint64_t start_time_offset = 0;  ///< Offset to add to all timestamps
+    std::string output_directory;  ///< Directory for creating files (empty =
+                                   ///< use original paths)
     std::size_t max_file_size =
-        1024 * 1024 * 100;         // Max file size to create (100MB default)
+        1024 * 1024 * 100;         ///< Max file size to create (100MB default)
 
-    // Function and category filters
+    /// Function and category filters
     std::unordered_set<std::string>
-        filter_functions;    // Only replay these functions (empty = all)
+        filter_functions;    ///< Only replay these functions (empty = all)
     std::unordered_set<std::string>
-        exclude_functions;   // Exclude these functions
+        exclude_functions;   ///< Exclude these functions
     std::unordered_set<std::string>
-        filter_categories;   // Only replay these categories
+        filter_categories;   ///< Only replay these categories
     std::unordered_set<std::string>
-        exclude_categories;  // Exclude these categories
+        exclude_categories;  ///< Exclude these categories
 
-    // Process/Thread filters
+    /// Process/Thread filters
     std::unordered_set<std::uint32_t>
-        filter_pids;  // Only replay these PIDs (empty = all)
+        filter_pids;  ///< Only replay these PIDs (empty = all)
     std::unordered_set<std::uint32_t>
-        filter_tids;  // Only replay these TIDs (empty = all)
-    std::unordered_set<std::uint32_t> exclude_pids;  // Exclude these PIDs
-    std::unordered_set<std::uint32_t> exclude_tids;  // Exclude these TIDs
+        filter_tids;  ///< Only replay these TIDs (empty = all)
+    std::unordered_set<std::uint32_t> exclude_pids;  ///< Exclude these PIDs
+    std::unordered_set<std::uint32_t> exclude_tids;  ///< Exclude these TIDs
 
-    // Timestamp filters (microseconds)
+    /// Timestamp filters (microseconds)
     std::uint64_t start_timestamp =
-        0;           // Only replay events after this timestamp
+        0;           ///< Only replay events after this timestamp
     std::uint64_t end_timestamp =
-        UINT64_MAX;  // Only replay events before this timestamp
+        UINT64_MAX;  ///< Only replay events before this timestamp
 
-    // Operation size filters
+    /// Operation size filters
     std::int64_t min_operation_size =
-        -1;  // Only replay operations >= this size
+        -1;  ///< Only replay operations >= this size
     std::int64_t max_operation_size =
-        -1;  // Only replay operations <= this size
+        -1;  ///< Only replay operations <= this size
 
-    // Level/depth filter (for hierarchical traces)
-    int min_level = -1;  // Only replay operations at or above this level
-    int max_level = -1;  // Only replay operations at or below this level
+    /// Level/depth filter (for hierarchical traces)
+    int min_level = -1;  ///< Only replay operations at or above this level
+    int max_level = -1;  ///< Only replay operations at or below this level
 
-    // Sampling options
-    double sampling_rate = 1.0;        // Replay rate (1.0 = all, 0.1 = 10%)
-    std::uint64_t sample_seed = 0;     // Random seed for sampling
-    bool sample_deterministic = true;  // Use deterministic sampling vs random
+    /// Sampling options
+    double sampling_rate = 1.0;        ///< Replay rate (1.0 = all, 0.1 = 10%)
+    std::uint64_t sample_seed = 0;     ///< Random seed for sampling
+    bool sample_deterministic = true;  ///< Use deterministic sampling vs random
 
-    // Resource limits
-    std::size_t max_events = 0;  // Maximum events to replay (0 = unlimited)
-    std::size_t max_open_files = 1024;  // Maximum open file descriptors
+    /// Resource limits
+    std::size_t max_events = 0;  ///< Maximum events to replay (0 = unlimited)
+    std::size_t max_open_files = 1024;  ///< Maximum open file descriptors
 
-    // Call tree options
+    /// Call tree options
     bool use_call_tree =
-        false;  // Use call tree structure for hierarchical replay
+        false;  ///< Use call tree structure for hierarchical replay
     bool hierarchical_replay =
-        false;  // Replay in hierarchical order (depth-first)
+        false;  ///< Replay in hierarchical order (depth-first)
     bool respect_call_hierarchy =
-        true;   // Respect parent-child relationships in timing
+        true;   ///< Respect parent-child relationships in timing
 
-    // MPI options
-    int mpi_rank = 0;  // MPI rank of this process
-    int mpi_size = 1;  // Total number of MPI processes
+    /// MPI options
+    int mpi_rank = 0;  ///< MPI rank of this process
+    int mpi_size = 1;  ///< Total number of MPI processes
 
-    // Optional observation hook fired in dispatch_trace after apply_timing
-    // returns and before the executor runs. Used by fidelity tests to
-    // measure dispatch lateness vs. the trace's wall-clock anchor; left
-    // unset in production so the per-event branch is the only cost.
+    /// Optional observation hook fired in dispatch_trace after apply_timing
+    /// returns and before the executor runs. Used by fidelity tests to
+    /// measure dispatch lateness vs. the trace's wall-clock anchor; left
+    /// unset in production so the per-event branch is the only cost.
     std::function<void(const Trace&, std::chrono::steady_clock::time_point)>
         on_dispatch;
 };
@@ -110,12 +111,12 @@ struct ReplayResult {
     std::size_t failed_events = 0;
     std::chrono::microseconds total_duration{0};
     std::chrono::microseconds execution_duration{0};
-    // Keys are non-owning views into the replay StringIntern pool.
+    /// Keys are non-owning views into the replay StringIntern pool.
     std::unordered_map<std::string_view, std::size_t> function_counts;
     std::unordered_map<std::string_view, std::size_t> category_counts;
     std::vector<std::string> error_messages;
 
-    // Extended statistics
+    /// Extended statistics
     std::unordered_map<std::uint32_t, std::size_t> pid_counts;
     std::unordered_map<std::uint32_t, std::size_t> tid_counts;
     std::size_t total_bytes_read = 0;
@@ -123,7 +124,7 @@ struct ReplayResult {
     std::uint64_t first_timestamp = UINT64_MAX;
     std::uint64_t last_timestamp = 0;
 
-    // Call tree statistics
+    /// Call tree statistics
     std::size_t total_nodes = 0;
     std::size_t tree_depth = 0;
     std::size_t unique_processes = 0;
@@ -172,9 +173,9 @@ class PosixExecutor : public TraceExecutor {
     std::string get_name() const override { return "POSIX"; }
 
    private:
-    // Keys are interned via the replay StringIntern pool.
+    /// Keys are interned via the replay StringIntern pool.
     std::unordered_map<std::string_view, int> open_files_;
-    // Scratch buffer reused across reads and writes.
+    /// Scratch buffer reused across reads and writes.
     std::vector<char> io_buffer_;
 
     bool execute_open(const Trace& trace, const ReplayConfig& config);
@@ -184,7 +185,7 @@ class PosixExecutor : public TraceExecutor {
     bool execute_seek(const Trace& trace, const ReplayConfig& config);
     bool execute_stat(const Trace& trace, const ReplayConfig& config);
 
-    // Ensure io_buffer_ has at least `size` bytes; grow with 'A' fill.
+    /// Ensure io_buffer_ has at least `size` bytes; grow with 'A' fill.
     void ensure_io_buffer(std::size_t size);
 };
 
@@ -269,9 +270,8 @@ class ReplayEngine {
      * Public so callers driving their own TraceReader::read_json loop can
      * feed events in directly without going through replay(file).
      */
-    bool process_trace_line(
-        dftracer::utils::utilities::common::json::JsonParser& parser,
-        ReplayResult& result);
+    bool process_trace_line(dftracer::utils::json::JsonParser& parser,
+                            ReplayResult& result);
 
     /**
      * Stream parsed Trace events from the given trace files. Drives
@@ -285,7 +285,7 @@ class ReplayEngine {
      * Drive a producer/consumer pipeline that decouples read+parse from
      * timing+execute. The producer fills a bounded channel from
      * stream_traces; a single consumer drains it and dispatches events
-     * (apply_timing → executor->execute). Read latency is hidden behind
+     * (apply_timing -> executor->execute). Read latency is hidden behind
      * the consumer's per-event work + sleep_for, eliminating the
      * dispatch lateness that the sequential path accumulates on large
      * gz-compressed traces.
@@ -318,9 +318,8 @@ class ReplayEngine {
     /**
      * Populate a Trace from a parsed JsonParser document.
      */
-    bool parse_trace_json(
-        dftracer::utils::utilities::common::json::JsonParser& parser,
-        Trace& trace);
+    bool parse_trace_json(dftracer::utils::json::JsonParser& parser,
+                          Trace& trace);
 
     /**
      * Apply timing logic before executing trace

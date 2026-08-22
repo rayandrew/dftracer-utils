@@ -1,0 +1,30 @@
+#ifndef DFTRACER_UTILS_TRACE_VIEWS_VIEW_COUNTER_FORMAT_H
+#define DFTRACER_UTILS_TRACE_VIEWS_VIEW_COUNTER_FORMAT_H
+
+#include <dftracer/utils/trace/views/view.h>
+#include <dftracer/utils/trace/views/view_aggregate.h>
+#include <dftracer/utils/trace/views/view_plan.h>
+
+#include <string>
+#include <vector>
+
+// Emitting aggregate rows/groups as dftracer ph="C" counter events: group
+// columns map to name/cat/pid/tid/ts, everything else becomes args.
+namespace dftracer::utils::trace::views::detail {
+
+// One aggregate group -> one ph="C" counter event JSON line. `keys` aligns to
+// `group_cols`, `values` to `value_cols`.
+std::string counter_line(const std::vector<std::string>& group_cols,
+                         const std::vector<std::string>& keys,
+                         const std::vector<std::string>& value_cols,
+                         const std::vector<double>& values);
+
+// One merged group -> one ph="C" counter event written to `sink`. Each event
+// carries its own args (its own dynamic columns), so no global schema is
+// needed.
+void emit_group_counter(const std::string& key, const AggAccum& a,
+                        const ViewPlan& plan, ExportSink& sink);
+
+}  // namespace dftracer::utils::trace::views::detail
+
+#endif  // DFTRACER_UTILS_TRACE_VIEWS_VIEW_COUNTER_FORMAT_H

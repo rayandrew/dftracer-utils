@@ -4,9 +4,9 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/coro/channel.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/composites/dft/views/aggregation_fold.h>
-#include <dftracer/utils/utilities/composites/dft/views/bloom_fold.h>
-#include <dftracer/utils/utilities/composites/dft/views/dict_fold.h>
+#include <dftracer/utils/trace/views/aggregation_fold.h>
+#include <dftracer/utils/trace/views/bloom_fold.h>
+#include <dftracer/utils/trace/views/dict_fold.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
 #include <dftracer/utils/utilities/indexer/internal/gzip/gzip_indexer.h>
 
@@ -19,9 +19,9 @@
 
 namespace dftracer::utils::utilities::indexer::internal {
 
-using composites::dft::views::detail::AggregationFold;
-using composites::dft::views::detail::BloomFold;
-using composites::dft::views::detail::DictFold;
+using trace::views::detail::AggregationFold;
+using trace::views::detail::BloomFold;
+using trace::views::detail::DictFold;
 
 struct ParsedIndexJob {
     int file_id = 0;

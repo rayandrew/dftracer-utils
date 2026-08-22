@@ -77,7 +77,7 @@ class ParallelWriter {
 
 struct WriterConfig {
     FileLayout layout = FileLayout::STRIPED;
-    std::size_t stripe_size = 0;  // PFS stripe; 0 disables padded layout
+    std::size_t stripe_size = 0;  ///< PFS stripe; 0 disables padded layout
     bool gzip = false;
 };
 
@@ -101,8 +101,8 @@ struct WriterRequest {
 /// member offsets.
 struct ConfiguredWriter {
     std::unique_ptr<ParallelWriter> writer;
-    LayoutInfo layout;    // resolved layout (striped-with-no-stripe -> sharded)
-    WriterSizing sizing;  // num_workers / flush_threshold / buffer_capacity
+    LayoutInfo layout;  ///< resolved layout (striped-with-no-stripe -> sharded)
+    WriterSizing sizing;  ///< num_workers / flush_threshold / buffer_capacity
 };
 
 /// Detect the target filesystem's layout, apply the padded-vs-atomic gate and

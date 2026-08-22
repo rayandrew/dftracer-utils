@@ -9,7 +9,7 @@ namespace dftracer::utils::utilities::common::statistics {
 
 class TimestampHistogram {
    public:
-    static constexpr std::uint64_t BIN_WIDTH_US = 100'000;  // 100ms
+    static constexpr std::uint64_t BIN_WIDTH_US = 100'000;  ///< 100ms
 
     TimestampHistogram() = default;
 
@@ -49,7 +49,7 @@ class TimestampHistogram {
     }
 
    private:
-    // Sorted by bin_index. Sparse: only non-zero bins stored.
+    /// Sorted by bin_index. Sparse: only non-zero bins stored.
     std::vector<std::pair<std::uint64_t, std::uint64_t>> bins_;
     std::uint64_t total_count_ = 0;
 };

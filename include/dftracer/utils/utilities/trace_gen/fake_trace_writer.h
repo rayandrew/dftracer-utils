@@ -4,7 +4,7 @@
 #include <dftracer/utils/core/common/byte_view.h>
 #include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/composites/dft/schema.h>
+#include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/fileio/streaming_file_writer_utility.h>
 #include <dftracer/utils/utilities/hash/hasher_utility.h>
@@ -15,9 +15,9 @@
 #include <string>
 #include <vector>
 
-// Synthetic chrome/Perfetto trace emission (gzip .pfw.gz). A production
-// utility for generating trace files with known patterns; consumed by the
-// dftracer_gen_fake_trace binary and available to tests that need fixtures.
+/// Synthetic chrome/Perfetto trace emission (gzip .pfw.gz). A production
+/// utility for generating trace files with known patterns; consumed by the
+/// dftracer_gen_fake_trace binary and available to tests that need fixtures.
 namespace dftracer::utils::utilities::trace_gen {
 
 // ---------------------------------------------------------------------------
@@ -74,24 +74,24 @@ class TraceWriter {
     std::size_t flush_threshold_;
 };
 
-// Deterministic 16-char hex hash using the project's HasherUtility
+/// Deterministic 16-char hex hash using the project's HasherUtility
 inline std::string make_hash(const std::string& name) {
     hash::HasherUtility hasher;
     hasher.reset();
-    auto h = hasher.process(name).get();
+    auto h = hasher.process(name);
     char buf[17];
     std::snprintf(buf, sizeof(buf), "%016llx",
                   static_cast<unsigned long long>(h.value));
     return std::string(buf);
 }
 
-// +/-30% random variance around base
+/// +/-30% random variance around base
 inline std::uint64_t jitter(std::mt19937_64& rng, std::uint64_t base) {
     std::uniform_real_distribution<double> dist(0.7, 1.3);
     return static_cast<std::uint64_t>(static_cast<double>(base) * dist(rng));
 }
 
-// Escape a JSON string value (no surrounding quotes)
+/// Escape a JSON string value (no surrounding quotes)
 inline void json_escape(std::string& out, const std::string& s) {
     for (char c : s) {
         switch (c) {
@@ -108,11 +108,11 @@ inline void json_escape(std::string& out, const std::string& s) {
     }
 }
 
-namespace dft = composites::dft;
+namespace dft = trace;
 
-// Metadata event: {"name":"HH"/"FH"/"SH","ph":4,"type":1,
-//                  "args":{"hhash":"...","name":"...","value":"..."}}
-// Hash and tracer-bookkeeping metadata is the DFTRACER layer.
+/// Metadata event: {"name":"HH"/"FH"/"SH","ph":4,"type":1,
+///                  "args":{"hhash":"...","name":"...","value":"..."}}
+/// Hash and tracer-bookkeeping metadata is the DFTRACER layer.
 inline void emit_metadata(TraceWriter& w, const std::string& kind,
                           const std::string& hhash,
                           const std::string& resolved_name,
@@ -139,7 +139,7 @@ inline void emit_metadata(TraceWriter& w, const std::string& kind,
     w.write(buf);
 }
 
-// Regular complete event (duration, ph=1)
+/// Regular complete event (duration, ph=1)
 struct EventArgs {
     std::uint64_t id = 0;
     std::uint64_t pid = 0;
@@ -152,9 +152,9 @@ struct EventArgs {
     std::string hhash;
     std::string fhash;
     std::string cmd_hash;
-    // Instrumentation layer. Unknown lets emit_event infer it from cat.
+    /// Instrumentation layer. Unknown lets emit_event infer it from cat.
     dft::EventType type = dft::EventType::UNKNOWN;
-    // Optional extra args appended verbatim (no leading comma)
+    /// Optional extra args appended verbatim (no leading comma)
     std::string extra;
 };
 
