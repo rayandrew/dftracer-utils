@@ -6,9 +6,11 @@
 
 namespace dftracer::utils {
 
-// Avalanching pointer hash (murmur3/splitmix64 finalizer round). Pointer
-// values are typically aligned, so their low bits carry poor entropy; mixing
-// gives good distribution for both open-addressing maps and shard selection.
+/// Avalanching pointer hash: one round of MurmurHash3's fmix64 finalizer by
+/// Austin Appleby (public domain, https://github.com/aappleby/smhasher).
+/// Pointer values are typically aligned, so their low bits carry poor entropy;
+/// mixing gives good distribution for both open-addressing maps and shard
+/// selection.
 struct PtrHash {
     using is_avalanching = void;
     std::size_t operator()(const void* p) const noexcept {

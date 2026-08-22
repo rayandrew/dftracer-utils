@@ -105,11 +105,11 @@ class Channel : public std::enable_shared_from_this<Channel<T>> {
 
         ~ProducerGuard() { release(); }
 
-        // Non-copyable
+        /// Non-copyable
         ProducerGuard(const ProducerGuard&) = delete;
         ProducerGuard& operator=(const ProducerGuard&) = delete;
 
-        // Movable
+        /// Movable
         ProducerGuard(ProducerGuard&& other) noexcept
             : channel_(other.channel_), shared_(std::move(other.shared_)) {
             other.channel_ = nullptr;
@@ -771,7 +771,7 @@ class Channel : public std::enable_shared_from_this<Channel<T>> {
 
     ~Channel() { close(); }
 
-    // Non-copyable, non-movable (moodycamel queue is non-movable)
+    /// Non-copyable, non-movable (moodycamel queue is non-movable)
     Channel(const Channel&) = delete;
     Channel& operator=(const Channel&) = delete;
     Channel(Channel&&) = delete;
@@ -1097,7 +1097,7 @@ class ChannelProducer {
         }
     }
 
-    // Movable
+    /// Movable
     ChannelProducer(ChannelProducer&& other) noexcept
         : raw_(other.raw_),
           shared_(std::move(other.shared_)),
@@ -1120,7 +1120,7 @@ class ChannelProducer {
         return *this;
     }
 
-    // Non-copyable
+    /// Non-copyable
     ChannelProducer(const ChannelProducer&) = delete;
     ChannelProducer& operator=(const ChannelProducer&) = delete;
 

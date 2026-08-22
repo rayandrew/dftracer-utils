@@ -9,8 +9,8 @@
 
 namespace dftracer::utils {
 
-// Bump arena for string_views that must survive until a later flush point
-// (e.g. an Arrow builder.finish()).  Not thread-safe.
+/// Bump arena for string_views that must survive until a later flush point
+/// (e.g. an Arrow builder.finish()).  Not thread-safe.
 struct StringArena {
     static constexpr std::size_t BLOCK_SIZE = 64 * 1024;
     std::vector<std::vector<char>> blocks;

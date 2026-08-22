@@ -1973,6 +1973,15 @@ TEST_CASE("Cancellation - when_any with cancellation of remaining tasks") {
     ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
 
+    // The race needs all three blocking tasks running at once for the fast one
+    // to win; with fewer workers than tasks (the Valgrind 2-thread cap) the
+    // fast task is stranded and a slow task wins, so skip rather than assert an
+    // order the scheduler cannot guarantee.
+    if (executor.get_num_threads() < 3) {
+        executor.shutdown();
+        return;
+    }
+
     auto parent_task = make_task(
         [](CoroScope& ctx) { return when_any_cancellation_parent_func(ctx); },
         "ParentWithCancellation");
@@ -2106,6 +2115,14 @@ static coro::CoroTask<int> multi_timeout_func(CoroScope& ctx) {
 TEST_CASE("Timeout - Multiple tasks with different timeouts") {
     ThreadPoolExecutor executor(ExecutorConfig{.num_threads = 4});
     Scheduler scheduler(&executor);
+
+    // Needs all three blocking tasks running concurrently for the 50ms task to
+    // win; under the Valgrind 2-thread cap it is stranded behind the slow
+    // tasks, so skip rather than assert an unschedulable order.
+    if (executor.get_num_threads() < 3) {
+        executor.shutdown();
+        return;
+    }
 
     auto parent_task = make_task(multi_timeout_func, "ParentMultiTimeout");
 

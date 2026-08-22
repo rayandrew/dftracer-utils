@@ -69,7 +69,7 @@
 #define DFTRACER_OPTIMAL_ALIGNMENT 128
 #endif
 
-// Convenience macro for aligned buffer declarations
+/// Convenience macro for aligned buffer declarations
 #define DFTRACER_ALIGNED_BUFFER(type, name, size) \
     alignas(DFTRACER_OPTIMAL_ALIGNMENT) type name[size]
 

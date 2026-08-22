@@ -7,8 +7,8 @@ namespace dftracer::utils {
  * Enumeration of supported archive formats
  */
 enum class ArchiveFormat {
-    GZIP,    // Standard GZIP file
-    UNKNOWN  // Unrecognized or unsupported format
+    GZIP,    ///< Standard GZIP file
+    UNKNOWN  ///< Unrecognized or unsupported format
 };
 
 inline const char* get_format_name(ArchiveFormat format) {

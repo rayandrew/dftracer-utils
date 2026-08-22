@@ -7,6 +7,8 @@
 
 namespace dftracer::utils::hash {
 
+// FNV-1a, 64-bit, by Glenn Fowler, Landon Curt Noll, and Phong Vo (public
+// domain): http://www.isthe.com/chongo/tech/comp/fnv/
 inline constexpr std::uint64_t FNV1A_OFFSET_BASIS = 0xcbf29ce484222325ULL;
 inline constexpr std::uint64_t FNV1A_PRIME = 0x00000100000001B3ULL;
 
@@ -20,13 +22,23 @@ inline std::uint64_t fnv1a_hash(const void* data, std::size_t len) {
     return hash;
 }
 
-inline std::uint64_t fnv1a_hash(std::string_view data) {
-    return fnv1a_hash(data.data(), data.size());
+/// constexpr so an id can be minted at compile time (e.g. an error domain);
+/// same value as the byte-buffer overload.
+inline constexpr std::uint64_t fnv1a_hash(std::string_view data) {
+    std::uint64_t hash = FNV1A_OFFSET_BASIS;
+    for (char c : data) {
+        hash ^= static_cast<std::uint8_t>(c);
+        hash *= FNV1A_PRIME;
+    }
+    return hash;
 }
 
 /// FNV-1a avalanches poorly: multiplication only carries low bits upward, so
 /// bit i of the result depends on input bits 0..i. Callers taking a bit slice
 /// (a bucket index, a truncated id, a sketch register) need this first.
+///
+/// The mix is MurmurHash3's fmix64 finalizer by Austin Appleby (public domain):
+/// https://github.com/aappleby/smhasher
 inline std::uint64_t fnv1a_mix(std::uint64_t h) {
     h ^= h >> 33;
     h *= 0xff51afd7ed558ccdULL;

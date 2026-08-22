@@ -16,10 +16,10 @@
 
 namespace dftracer::utils::io {
 
-// Copy `count` bytes from `in_fd` at `offset` to `out_fd`, using the platform's
-// native sendfile where available and a portable pread+write loop otherwise.
-// Returns the number of bytes transferred, or a negative value on error (the
-// caller maps a negative return to -errno).
+/// Copy `count` bytes from `in_fd` at `offset` to `out_fd`, using the
+/// platform's native sendfile where available and a portable pread+write loop
+/// otherwise. Returns the number of bytes transferred, or a negative value on
+/// error (the caller maps a negative return to -errno).
 inline ssize_t platform_sendfile(int out_fd, int in_fd, off_t offset,
                                  std::size_t count) {
 #ifdef __linux__

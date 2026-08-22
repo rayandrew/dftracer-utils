@@ -6,7 +6,7 @@
 
 namespace dftracer::utils::coro {
 
-// Forward declarations
+/// Forward declarations
 template <typename T>
 class CoroTask;
 
@@ -48,7 +48,7 @@ inline constexpr bool is_generator_v = is_generator<T>::value;
 
 namespace detail {
 
-// Check if type has await_ready, await_suspend, await_resume
+/// Check if type has await_ready, await_suspend, await_resume
 template <typename T, typename = void>
 struct has_awaitable_interface : std::false_type {};
 
@@ -224,7 +224,7 @@ class ReadyAwaitable {
     T await_resume() { return std::move(value_); }
 };
 
-// Specialization for void
+/// Specialization for void
 template <>
 class ReadyAwaitable<void> {
    public:

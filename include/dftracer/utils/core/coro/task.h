@@ -37,8 +37,8 @@ struct PromiseBase {
     std::atomic<bool>* cancellation_token_{nullptr};
     PromiseBase* root_promise_{nullptr};
 #if DFTRACER_UTILS_LOGGER_TRACE_ENABLED
-    void* trace_handle_{nullptr};      // logging::coro_trace enter/leave handle
-    const char* trace_file_{nullptr};  // coroutine definition site
+    void* trace_handle_{nullptr};  ///< logging::coro_trace enter/leave handle
+    const char* trace_file_{nullptr};  ///< coroutine definition site
     std::uint_least32_t trace_line_{0};
 #endif
 
@@ -60,8 +60,8 @@ struct PromiseBase {
 
 namespace detail {
 
-// Result storage for the promise. Non-void stores the value and provides
-// return_value; void provides return_void instead.
+/// Result storage for the promise. Non-void stores the value and provides
+/// return_value; void provides return_void instead.
 template <typename T>
 struct ResultHolder {
     T result_;
@@ -73,7 +73,7 @@ struct ResultHolder<void> {
     void return_void() noexcept {}
 };
 
-// Lazy invoke-result so std::invoke_result_t<Func, void> is never formed.
+/// Lazy invoke-result so std::invoke_result_t<Func, void> is never formed.
 template <typename F, typename U>
 struct invoke_res {
     using type = std::invoke_result_t<F, U>;
@@ -84,8 +84,8 @@ struct invoke_res<F, void> {
     using type = std::invoke_result_t<F>;
 };
 
-// Result element type for operator& (AND): tuple of both for non-void left,
-// just the right's type when the left is void.
+/// Result element type for operator& (AND): tuple of both for non-void left,
+/// just the right's type when the left is void.
 template <typename A, typename B>
 struct and_value {
     using type = std::tuple<A, B>;
@@ -151,16 +151,16 @@ class CoroTask {
 
         void unhandled_exception() { exception_ = std::current_exception(); }
 
-        // Pass YieldAwaitable through unmodified so it is not
-        // double-wrapped by YieldCheckAwaitable.
+        /// Pass YieldAwaitable through unmodified so it is not
+        /// double-wrapped by YieldCheckAwaitable.
         coro::YieldAwaitable await_transform(coro::YieldAwaitable y) noexcept {
             return y;
         }
 
-        // Wrap every other awaitable in a timeslice check.
-        // Movable rvalue awaitables are moved into the wrapper so
-        // the temporary does not dangle across a suspension.
-        // Lvalue awaitables and non-movable rvalues stay as refs.
+        /// Wrap every other awaitable in a timeslice check.
+        /// Movable rvalue awaitables are moved into the wrapper so
+        /// the temporary does not dangle across a suspension.
+        /// Lvalue awaitables and non-movable rvalues stay as refs.
         template <typename U>
         auto await_transform(U&& awaitable) noexcept {
             if constexpr (std::is_lvalue_reference_v<U>) {
@@ -179,7 +179,7 @@ class CoroTask {
     std::coroutine_handle<promise_type> coro_handle_;
 
    public:
-    // Type alias for result type (used by combinators)
+    /// Type alias for result type (used by combinators)
     using value_type = T;
     using result_type = T;
 
@@ -201,7 +201,7 @@ class CoroTask {
         }
     }
 
-    // Move-only semantics (coroutine handle is unique)
+    /// Move-only semantics (coroutine handle is unique)
     CoroTask(const CoroTask&) = delete;
     CoroTask& operator=(const CoroTask&) = delete;
 
@@ -469,17 +469,18 @@ class CoroTask {
     }
 
     /**
-     * Operator| for OR/fallback composition - try first, fall back to second
+     * or_else - OR/fallback composition: run this task, and if it throws, run
+     * the fallback instead. Yields whichever succeeds.
+     *
      * @param fallback Fallback task to run if this task fails
      * @return CoroTask<T> with result from whichever succeeds
      *
      * Usage:
      * @code
-     * auto result = co_await (primary_task() | fallback_task());
+     * auto result = co_await primary_task().or_else(fallback_task());
      * @endcode
      */
-    friend auto operator|(CoroTask<T>&& primary, CoroTask<T>&& fallback)
-        -> CoroTask<T> {
+    auto or_else(CoroTask<T>&& fallback) && -> CoroTask<T> {
         return [](CoroTask<T> prim, CoroTask<T> fall) -> CoroTask<T> {
             std::exception_ptr primary_exception;
             try {
@@ -501,8 +502,8 @@ class CoroTask {
                 }
             }
             throw DFTUtilsException(ErrorCode::INTERNAL,
-                                    "Unreachable code in operator| reached");
-        }(std::move(primary), std::move(fallback));
+                                    "Unreachable code in or_else reached");
+        }(std::move(*this), std::move(fallback));
     }
 };
 

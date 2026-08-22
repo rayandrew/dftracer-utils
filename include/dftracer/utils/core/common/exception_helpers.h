@@ -6,8 +6,8 @@
 
 namespace dftracer::utils {
 
-// Move the stored exception out, clear the slot, then rethrow. Clearing first
-// prevents rethrowing the same exception twice if the holder is awaited again.
+/// Move the stored exception out, clear the slot, then rethrow. Clearing first
+/// prevents rethrowing the same exception twice if the holder is awaited again.
 [[noreturn]] inline void rethrow_and_clear(std::exception_ptr& ex) {
     auto e = std::move(ex);
     ex = nullptr;

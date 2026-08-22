@@ -43,7 +43,7 @@ class MPIUtils {
      */
     static MPIUtils& instance();
 
-    // Delete copy and move constructors/operators
+    /// Delete copy and move constructors/operators
     MPIUtils(const MPIUtils&) = delete;
     MPIUtils& operator=(const MPIUtils&) = delete;
     MPIUtils(MPIUtils&&) = delete;
@@ -89,59 +89,6 @@ class MPIUtils {
      */
     void barrier();
 
-    /**
-     * Broadcast a string from root to all ranks
-     * @param str String to broadcast (modified on non-root ranks)
-     * @param root Root rank (default 0)
-     */
-    /**
-     * Broadcast a vector of uint32_t from root to all ranks
-     * @param values Vector to broadcast (modified on non-root ranks)
-     * @param root Root rank (default 0)
-     */
-    /**
-     * Broadcast a single integer from root to all ranks
-     * @param value Integer to broadcast (modified on non-root ranks)
-     * @param root Root rank (default 0)
-     */
-    /**
-     * Gather integers from all ranks to root
-     * @param send_value Value to send from this rank
-     * @param recv_values Vector to receive values (only valid on root)
-     * @param root Root rank (default 0)
-     */
-    /**
-     * Gatherv - gather variable-sized data from all ranks to root
-     * @param send_data Data to send from this rank
-     * @param recv_data Buffer to receive data (only valid on root)
-     * @param recv_counts Number of elements from each rank (only valid on root)
-     * @param displacements Displacements for each rank (only valid on root)
-     * @param root Root rank (default 0)
-     */
-    /**
-     * Allgather - gather data from all ranks to all ranks
-     * @param send_value Value to send from this rank
-     * @param recv_values Vector to receive all values (resized to world_size)
-     */
-    /**
-     * Allgatherv - gather variable-sized data from all ranks to all ranks
-     * @param send_data Data to send from this rank
-     * @param recv_data Buffer to receive all data
-     * @param recv_sizes Number of elements from each rank
-     * @param displacements Displacements for each rank
-     */
-    /**
-     * Reduce to root - sum operation
-     * @param send_value Value to reduce from this rank
-     * @param recv_value Result (only valid on root)
-     * @param root Root rank (default 0)
-     */
-    /**
-     * Reduce to root - max operation for double
-     * @param send_value Value to reduce from this rank
-     * @param recv_value Result (only valid on root)
-     * @param root Root rank (default 0)
-     */
    private:
     /**
      * Private constructor for singleton

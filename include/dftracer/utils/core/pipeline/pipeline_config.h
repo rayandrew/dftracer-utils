@@ -8,20 +8,20 @@
 #include <exception>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace dftracer::utils {
 
-// Forward declarations
 class Task;
 
 /**
  * Error handling policy for pipeline execution
  */
 enum class ErrorPolicy {
-    FAIL_FAST,  // Stop immediately on first error (default)
-    CONTINUE,   // Continue other branches, skip children of failed tasks
-    CUSTOM      // User-provided handler
+    FAIL_FAST,  ///< Stop immediately on first error (default)
+    CONTINUE,   ///< Continue other branches, skip children of failed tasks
+    CUSTOM      ///< User-provided handler
 };
 
 /**
@@ -32,51 +32,53 @@ using ErrorHandler =
     std::function<void(std::shared_ptr<Task>, std::exception_ptr)>;
 
 /**
- * Configuration  for Pipeline execution
+ * Configuration for Pipeline execution.
  *
  * Thread Architecture:
  * - Executor threads: Worker pool that executes task functions (compute
  * threads)
  * - Watchdog: Optional monitoring thread for hang detection
- * - Watchdog: Optional monitoring thread for hang detection
  *
  * Usage (Fluent API):
  *   auto config = PipelineConfig()
  *       .with_name("MyPipeline")
- *       .with_compute_threads(16)  // CPU-bound work
- *       .with_error_policy(ErrorPolicy::FAIL_FAST)
+ *       .with_compute_threads(16)
  *       .with_error_policy(ErrorPolicy::FAIL_FAST)
  *       .with_watchdog(true)
  *       .with_global_timeout(std::chrono::seconds(30))
  *       .with_task_timeout(std::chrono::seconds(10));
  */
 struct PipelineConfig {
-    std::string name = "";  // Pipeline name
+    std::string name = "";
     std::size_t executor_threads =
-        0;                  // 0 = hardware_concurrency (compute threads)
-    ErrorPolicy error_policy = ErrorPolicy::FAIL_FAST;  // Error handling policy
+        0;  ///< 0 = hardware_concurrency (compute threads)
+    /// Elastic floor: workers to start with, growing toward executor_threads on
+    /// backlog and idle-retiring back down. 0 = eager (full pool up front, no
+    /// resizing). Unset = resolve from the DFTRACER_UTILS_ELASTIC env default
+    /// at construction; an explicit value
+    /// (with_eager/with_elastic/with_min_workers) always wins, so a test can
+    /// pin either path regardless of the env.
+    std::optional<std::size_t> min_workers;
+    std::chrono::milliseconds elastic_keepalive{250};
+    ErrorPolicy error_policy = ErrorPolicy::FAIL_FAST;
     ErrorHandler error_handler =
-        nullptr;                  // Custom error handler (for CUSTOM policy)
-    bool enable_watchdog = true;  // Hang detection
-    std::chrono::seconds global_timeout{0};        // 0 = wait forever
-    std::chrono::seconds default_task_timeout{0};  // 0 = wait forever
-    std::chrono::seconds watchdog_interval{1};     // Check frequency
+        nullptr;                  ///< Custom error handler (for CUSTOM policy)
+    bool enable_watchdog = true;  ///< Hang detection
+    std::chrono::seconds global_timeout{0};        ///< 0 = wait forever
+    std::chrono::seconds default_task_timeout{0};  ///< 0 = wait forever
+    std::chrono::seconds watchdog_interval{1};
     std::chrono::seconds long_task_warning_threshold{
-        300};     // Warning threshold (5 minutes)
+        300};     ///< Warning threshold (5 minutes)
     std::chrono::seconds executor_idle_timeout{
-        300};     // Executor idle timeout (5 minutes)
+        300};     ///< Executor idle timeout (5 minutes)
     std::chrono::seconds executor_deadlock_timeout{
-        600};     // Executor deadlock timeout (10 minutes)
+        600};     ///< Executor deadlock timeout (10 minutes)
     std::chrono::microseconds timeslice_duration{
-        10'000};  // Coroutine yield timeslice (10ms, 0 = disabled)
-    std::size_t io_thread_count = 0;   // 0 = hardware_concurrency
-    io::IoBackendType io_backend_type =
-        io::IoBackendType::AUTO;       // Backend selection
-    unsigned io_batch_threshold = 16;  // SQE batch threshold (0 = per-op)
+        10'000};  ///< Coroutine yield timeslice (10ms, 0 = disabled)
+    std::size_t io_thread_count = 0;   ///< 0 = hardware_concurrency
+    io::IoBackendType io_backend_type = io::IoBackendType::AUTO;
+    unsigned io_batch_threshold = 16;  ///< SQE batch threshold (0 = per-op)
 
-    /**
-     * Set pipeline name
-     */
     PipelineConfig& with_name(std::string pipeline_name) {
         name = std::move(pipeline_name);
         return *this;
@@ -92,8 +94,33 @@ struct PipelineConfig {
     }
 
     /**
-     * Set error handling policy
+     * Pin the elastic floor (workers to start with, growing to
+     * executor_threads on demand). 0 = eager. Overrides the env default.
      */
+    PipelineConfig& with_min_workers(std::size_t workers) {
+        min_workers = workers;
+        return *this;
+    }
+
+    /**
+     * Pin an elastic pool: start at one worker and grow on demand. Overrides
+     * the env default, so a test can exercise the elastic path
+     * deterministically.
+     */
+    PipelineConfig& with_elastic() {
+        min_workers = 1;
+        return *this;
+    }
+
+    /**
+     * Pin an eager pool: full pool up front, never resized. Overrides the env
+     * default. For a latency-sensitive service, or to test the eager path.
+     */
+    PipelineConfig& with_eager() {
+        min_workers = 0;
+        return *this;
+    }
+
     PipelineConfig& with_error_policy(ErrorPolicy policy) {
         error_policy = policy;
         return *this;
@@ -108,9 +135,6 @@ struct PipelineConfig {
         return *this;
     }
 
-    /**
-     * Enable/disable watchdog
-     */
     PipelineConfig& with_watchdog(bool enabled) {
         enable_watchdog = enabled;
         return *this;
@@ -132,33 +156,21 @@ struct PipelineConfig {
         return *this;
     }
 
-    /**
-     * Set watchdog check interval
-     */
     PipelineConfig& with_watchdog_interval(std::chrono::seconds interval) {
         watchdog_interval = interval;
         return *this;
     }
 
-    /**
-     * Set long-running task warning threshold
-     */
     PipelineConfig& with_warning_threshold(std::chrono::seconds threshold) {
         long_task_warning_threshold = threshold;
         return *this;
     }
 
-    /**
-     * Set executor idle timeout
-     */
     PipelineConfig& with_executor_idle_timeout(std::chrono::seconds timeout) {
         executor_idle_timeout = timeout;
         return *this;
     }
 
-    /**
-     * Set executor deadlock timeout
-     */
     PipelineConfig& with_executor_deadlock_timeout(
         std::chrono::seconds timeout) {
         executor_deadlock_timeout = timeout;
@@ -208,9 +220,6 @@ struct PipelineConfig {
             .with_watchdog(true);
     }
 
-    /**
-     * Create default configuration
-     */
     static PipelineConfig default_config() {
         PipelineConfig config;
         config.executor_threads = 0;  // hardware_concurrency

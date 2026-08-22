@@ -33,7 +33,7 @@ class JoinHandle {
    public:
     JoinHandle() = default;
 
-    // Non-copyable, non-movable (stack-bound lifetime)
+    /// Non-copyable, non-movable (stack-bound lifetime)
     JoinHandle(const JoinHandle&) = delete;
     JoinHandle& operator=(const JoinHandle&) = delete;
     JoinHandle(JoinHandle&&) = delete;
@@ -83,7 +83,7 @@ class JoinHandle {
     }
 
    private:
-    std::atomic<std::size_t> pending_{1};  // 1 = joiner's slot
+    std::atomic<std::size_t> pending_{1};  ///< 1 = joiner's slot
     std::atomic<void*> continuation_{nullptr};
 };
 

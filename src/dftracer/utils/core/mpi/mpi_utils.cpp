@@ -5,20 +5,6 @@ namespace dftracer::utils::mpi {
 
 namespace {
 
-#ifdef DFTRACER_UTILS_MPI_ENABLED
-// Prefix-sum recv_counts into displacements; returns the total element count.
-int compute_displacements(const std::vector<int>& recv_counts, int world_size,
-                          std::vector<int>& displacements) {
-    displacements.resize(world_size);
-    int total = 0;
-    for (int i = 0; i < world_size; i++) {
-        displacements[i] = total;
-        total += recv_counts[i];
-    }
-    return total;
-}
-#endif
-
 // Single-rank fallback: the gathered result is just the local send buffer.
 template <typename T>
 void serial_gatherv_fallback(const std::vector<T>& send_data,

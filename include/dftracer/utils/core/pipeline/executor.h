@@ -31,89 +31,79 @@ class CoroScope;
 class Scheduler;
 
 struct ExecutorConfig {
-    std::size_t num_threads = 0;   // 0 = hardware_concurrency
+    std::size_t num_threads = 0;  ///< 0 = hardware_concurrency; the RUNNING cap
+    /// Elastic floor. 0 = num_threads (eager: spawn the full pool up front, no
+    /// resizing). Set 1..num_threads to run an elastic pool: start at this many
+    /// workers, grow toward num_threads on backlog, idle-retire back to it - so
+    /// a mostly-idle runtime does not hold hardware_concurrency threads
+    /// (matters on shared HPC login nodes).
+    std::size_t min_workers = 0;
+    /// Elastic keep-alive: an idle worker above min_workers is retired only
+    /// after it has been idle this long.
+    std::chrono::milliseconds elastic_keepalive{250};
     std::chrono::seconds idle_timeout{5};
     std::chrono::seconds deadlock_timeout{10};
-    std::size_t io_pool_size = 0;  // 0 = hardware_concurrency
+    std::size_t io_pool_size = 0;  ///< 0 = hardware_concurrency
     io::IoBackendType io_backend_type = io::IoBackendType::AUTO;
     unsigned io_batch_threshold = 16;
 };
 
-/**
- * Task information for progress tracking
- */
 struct TaskInfo {
     TaskIndex task_id;
-    TaskIndex parent_task_id;  // -1 for root tasks
+    TaskIndex parent_task_id;  ///< -1 for root tasks
     std::string name;
-    std::size_t worker_id;     // Which worker is executing
+    std::size_t worker_id;
 
     enum State {
-        QUEUED,                // In queue (shared or local)
-        RUNNING,               // Currently executing
-        WAITING,               // Waiting for child tasks
-        COMPLETED,             // Successfully finished
-        FAILED                 // Failed with error
+        QUEUED,     ///< In queue (shared or local)
+        RUNNING,    ///< Currently executing
+        WAITING,    ///< Waiting for child tasks
+        COMPLETED,  ///< Successfully finished
+        FAILED      ///< Failed with error
     } state;
 
     std::chrono::steady_clock::time_point queued_at;
     std::chrono::steady_clock::time_point started_at;
     std::chrono::steady_clock::time_point completed_at;
 
-    // Child tracking
     std::vector<TaskIndex> child_task_ids;
     std::atomic<std::size_t> completed_children{0};
 
-    // Error info
     std::string error_message;
 
-    // Queue location
     enum Location { SHARED_QUEUE, LOCAL_QUEUE, EXECUTING, DONE } location;
 };
 
-/**
- * Task progress information
- */
 struct TaskProgress {
     TaskIndex task_id;
     std::string name;
-    std::string state;  // "queued", "running", "waiting", "completed", "failed"
+    std::string
+        state;  ///< "queued", "running", "waiting", "completed", "failed"
 
-    // Timing
     double queued_duration_ms;
     double execution_duration_ms;
 
-    // Progress
     std::size_t total_subtasks;
     std::size_t completed_subtasks;
-    double progress_percentage;  // 0-100
+    double progress_percentage;  ///< 0-100
 
-    // Location
-    // "shared_queue", "worker_2_local", "executing_on_worker_3"
+    /// "shared_queue", "worker_2_local", "executing_on_worker_3"
     std::string location;
 
-    // Children
-    std::vector<TaskProgress> children;  // Recursive structure!
+    std::vector<TaskProgress> children;
 };
 
-/**
- * Executor progress report
- */
 struct ExecutorProgress {
-    // Overall stats
     std::size_t total_tasks_submitted;
     std::size_t tasks_queued;
     std::size_t tasks_running;
     std::size_t tasks_completed;
     std::size_t tasks_failed;
 
-    // Queue depths
     std::vector<std::size_t> worker_queue_depths;
 
-    // Task tree (root tasks with their children)
     std::vector<TaskProgress> root_tasks;
 
-    // Worker states
     struct WorkerStatus {
         std::size_t worker_id;
         bool is_idle;
@@ -123,14 +113,11 @@ struct ExecutorProgress {
     };
     std::vector<WorkerStatus> workers;
 
-    // Errors
-    // task_id, error_msg
+    /// (task_id, error_msg)
     std::vector<std::pair<TaskIndex, std::string>> recent_errors;
 };
 
-/**
- * Executor - where coroutines get resumed.
- */
+/// Executor - where coroutines get resumed.
 class Executor {
    public:
     virtual ~Executor() = default;
@@ -162,6 +149,13 @@ class Executor {
 
     /// Sets current(), returning the previous value.
     static Executor* set_current(Executor* e) noexcept;
+
+    /// Blocking handoff around a synchronous wait made from a worker thread.
+    /// enter_blocking() releases the worker's run slot and keeps the pool
+    /// saturated; exit_blocking() reclaims a slot before it resumes. Paired,
+    /// same thread, no-op off a worker thread. Default: no handoff.
+    virtual void enter_blocking() {}
+    virtual void exit_blocking() {}
 };
 
 /**
@@ -193,6 +187,28 @@ class TaskExecutor : public Executor {
 
     virtual bool is_responsive() const = 0;
     virtual ExecutorProgress get_progress() const = 0;
+};
+
+/// RAII blocking handoff: releases the worker's run-permit for the scope and
+/// reclaims it on exit, keeping the pool saturated across a synchronous wait.
+/// Default-constructed it targets the calling thread's executor; pass an
+/// explicit one, or nullptr to disable. Same thread; no-op off a worker.
+class BlockingRegion {
+   public:
+    BlockingRegion() noexcept : exec_(Executor::current()) {
+        if (exec_) exec_->enter_blocking();
+    }
+    explicit BlockingRegion(Executor* exec) noexcept : exec_(exec) {
+        if (exec_) exec_->enter_blocking();
+    }
+    ~BlockingRegion() {
+        if (exec_) exec_->exit_blocking();
+    }
+    BlockingRegion(const BlockingRegion&) = delete;
+    BlockingRegion& operator=(const BlockingRegion&) = delete;
+
+   private:
+    Executor* exec_;
 };
 
 /// Build the executor described by `config`. The implementation is chosen

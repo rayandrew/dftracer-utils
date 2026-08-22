@@ -12,23 +12,23 @@ namespace dftracer::utils {
 class Executor;
 namespace coro {
 
-// Common suspension/completion coordination shared by when_all / when_any
-// shared-state structs. Holds the awaiting coroutine, its executor, and the
-// CompletionLatch that guards the suspend-vs-complete race.
+/// Common suspension/completion coordination shared by when_all / when_any
+/// shared-state structs. Holds the awaiting coroutine, its executor, and the
+/// CompletionLatch that guards the suspend-vs-complete race.
 struct CompletionState {
     std::coroutine_handle<> awaiting_coroutine_{};
     Executor* executor_{nullptr};
     CompletionLatch latch_;
 
-    // Called by await_suspend after deciding to suspend but before returning.
+    /// Called by await_suspend after deciding to suspend but before returning.
     void mark_suspended_and_check_completion() {
         if (latch_.on_suspended())
             resume_continuation(executor_, awaiting_coroutine_);
     }
 };
 
-// All-of accounting: resumes only after every child completes, recording the
-// first exception observed.
+/// All-of accounting: resumes only after every child completes, recording the
+/// first exception observed.
 struct WhenAllCompletionState : CompletionState {
     std::exception_ptr exception_;
     std::atomic<bool> has_exception_{false};
@@ -55,8 +55,8 @@ struct WhenAllCompletionState : CompletionState {
     }
 };
 
-// First-of accounting: resumes as soon as the first child completes (winner of
-// the latch).
+/// First-of accounting: resumes as soon as the first child completes (winner of
+/// the latch).
 struct WhenAnyCompletionState : CompletionState {
     void on_first_complete() {
         if (latch_.on_completed())

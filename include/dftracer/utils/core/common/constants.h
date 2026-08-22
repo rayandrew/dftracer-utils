@@ -8,43 +8,43 @@
 namespace dftracer::utils::constants {
 namespace indexer {
 static constexpr std::size_t ZLIB_WINDOW_SIZE = 32768;
-static constexpr int ZLIB_GZIP_WINDOW_BITS = 31;    // 15 + 16 for gzip format
-static constexpr int ZLIB_FORMAT_WINDOW_BITS = 15;  // zlib format
-static constexpr int ZLIB_RAW_WINDOW_BITS = -15;    // raw deflate, no header
-// GZIP member magic bytes.
+static constexpr int ZLIB_GZIP_WINDOW_BITS = 31;    ///< 15 + 16 for gzip format
+static constexpr int ZLIB_FORMAT_WINDOW_BITS = 15;  ///< zlib format
+static constexpr int ZLIB_RAW_WINDOW_BITS = -15;    ///< raw deflate, no header
+/// GZIP member magic bytes.
 static constexpr unsigned char GZIP_MAGIC_BYTE_0 = 0x1f;
 static constexpr unsigned char GZIP_MAGIC_BYTE_1 = 0x8b;
 #if defined(__APPLE__)
 static constexpr std::size_t INFLATE_BUFFER_SIZE =
-    131072;  // 128KB (macOS 512KB thread stack)
+    131072;  ///< 128KB (macOS 512KB thread stack)
 #else
-static constexpr std::size_t INFLATE_BUFFER_SIZE = 262144;  // 256KB
+static constexpr std::size_t INFLATE_BUFFER_SIZE = 262144;  ///< 256KB
 #endif
 static constexpr std::uint64_t DEFAULT_CHECKPOINT_SIZE =
-    32 * 1024 * 1024;  // 32MB
+    32 * 1024 * 1024;  ///< 32MB
 inline const char* EXTENSION = ".dftindex";
 }  // namespace indexer
 
 namespace reader {
-static constexpr std::size_t DEFAULT_BUFFER_SIZE = 65536;  // 64KB
-static constexpr std::size_t SKIP_BUFFER_SIZE = 131072;    // 128KB
+static constexpr std::size_t DEFAULT_BUFFER_SIZE = 65536;  ///< 64KB
+static constexpr std::size_t SKIP_BUFFER_SIZE = 131072;    ///< 128KB
 static constexpr std::size_t FILE_IO_BUFFER_SIZE =
-    262144;                                                // 256KB for file I/O
+    262144;  ///< 256KB for file I/O
 }  // namespace reader
 
 namespace rocksdb {
-// ZSTD dictionary training tuning shared by every DB-open path.
+/// ZSTD dictionary training tuning shared by every DB-open path.
 static constexpr int ZSTD_COMPRESSION_LEVEL = 9;
-static constexpr std::size_t ZSTD_MAX_DICT_BYTES = 262144;        // 256KB
-static constexpr std::size_t ZSTD_MAX_TRAIN_BYTES = 1024 * 1024;  // 1MB
+static constexpr std::size_t ZSTD_MAX_DICT_BYTES = 262144;        ///< 256KB
+static constexpr std::size_t ZSTD_MAX_TRAIN_BYTES = 1024 * 1024;  ///< 1MB
 
 static constexpr std::size_t BLOCK_CACHE_BYTES = 512ULL * 1024 * 1024;
-// Total memtable budget across every column family, capped by a shared
-// WriteBufferManager so many CFs or many per-node workers cannot each reserve
-// their own write buffers.
+/// Total memtable budget across every column family, capped by a shared
+/// WriteBufferManager so many CFs or many per-node workers cannot each reserve
+/// their own write buffers.
 static constexpr std::size_t WRITE_BUFFER_BYTES = 512ULL * 1024 * 1024;
-// Point-lookup families read one small value per get, so they want small
-// blocks and a filter rather than the scan-oriented defaults.
+/// Point-lookup families read one small value per get, so they want small
+/// blocks and a filter rather than the scan-oriented defaults.
 static constexpr std::size_t POINT_LOOKUP_BLOCK_SIZE = 4 * 1024;
 static constexpr double BLOOM_BITS_PER_KEY = 10.0;
 }  // namespace rocksdb

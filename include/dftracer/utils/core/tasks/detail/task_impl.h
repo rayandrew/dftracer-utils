@@ -1,5 +1,5 @@
-#ifndef DFTRACER_UTILS_CORE_TASKS_TASK_IMPL_H
-#define DFTRACER_UTILS_CORE_TASKS_TASK_IMPL_H
+#ifndef DFTRACER_UTILS_CORE_TASKS_DETAIL_TASK_IMPL_H
+#define DFTRACER_UTILS_CORE_TASKS_DETAIL_TASK_IMPL_H
 
 #include <dftracer/utils/core/coro/coroutine_traits.h>
 #include <dftracer/utils/core/pipeline/error.h>
@@ -257,4 +257,4 @@ auto Task::with_combiner(Func&& combiner) -> std::enable_if_t<
 
 }  // namespace dftracer::utils
 
-#endif  // DFTRACER_UTILS_CORE_TASKS_TASK_IMPL_H
+#endif  // DFTRACER_UTILS_CORE_TASKS_DETAIL_TASK_IMPL_H

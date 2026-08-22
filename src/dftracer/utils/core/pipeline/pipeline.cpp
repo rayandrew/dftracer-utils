@@ -15,6 +15,12 @@ Pipeline::Pipeline(const PipelineConfig& config)
       error_handler_(config.error_handler) {
     ExecutorConfig exec_cfg;
     exec_cfg.num_threads = config.executor_threads;
+    // Explicit config wins; unset resolves from the env default (elastic unless
+    // DFTRACER_UTILS_ELASTIC is off), so tests can pin either path.
+    exec_cfg.min_workers = config.min_workers.has_value()
+                               ? *config.min_workers
+                               : (elastic_default_enabled() ? 1 : 0);
+    exec_cfg.elastic_keepalive = config.elastic_keepalive;
     exec_cfg.idle_timeout = config.executor_idle_timeout;
     exec_cfg.deadlock_timeout = config.executor_deadlock_timeout;
     exec_cfg.io_pool_size = config.io_thread_count;
@@ -50,12 +56,12 @@ void Pipeline::set_source(std::shared_ptr<Task> source) {
                             "Source task cannot be null");
     }
     source_ = source;
-    validated_ = false;  // Need to revalidate
+    validated_ = false;
 }
 
 void Pipeline::set_destination(std::shared_ptr<Task> destination) {
     destination_ = destination;
-    validated_ = false;  // Need to revalidate
+    validated_ = false;
 }
 
 void Pipeline::set_source(
@@ -66,15 +72,11 @@ void Pipeline::set_source(
     }
 
     if (sources.size() == 1) {
-        // Single source - no need for NoOpTask
         set_source(*sources.begin());
         return;
     }
 
-    // Multiple sources - create NoOpTask
     auto noop = make_noop_task("__start__");
-
-    // Connect all sources as children of noop
     for (auto& source : sources) {
         if (!source) {
             throw PipelineError(PipelineError::VALIDATION_ERROR,
@@ -95,15 +97,11 @@ void Pipeline::set_destination(
     }
 
     if (destinations.size() == 1) {
-        // Single destination - no need for NoOpTask
         set_destination(*destinations.begin());
         return;
     }
 
-    // Multiple destinations - create NoOpTask
     auto noop = make_noop_task("__end__");
-
-    // Connect all destinations as parents of noop
     for (auto& dest : destinations) {
         if (!dest) {
             throw PipelineError(PipelineError::VALIDATION_ERROR,
@@ -123,15 +121,11 @@ void Pipeline::set_source(const std::vector<std::shared_ptr<Task>>& sources) {
     }
 
     if (sources.size() == 1) {
-        // Single source - no need for NoOpTask
         set_source(sources[0]);
         return;
     }
 
-    // Multiple sources - create NoOpTask
     auto noop = make_noop_task("__start__");
-
-    // Connect all sources as children of noop
     for (const auto& source : sources) {
         if (!source) {
             throw PipelineError(PipelineError::VALIDATION_ERROR,
@@ -152,15 +146,11 @@ void Pipeline::set_destination(
     }
 
     if (destinations.size() == 1) {
-        // Single destination - no need for NoOpTask
         set_destination(destinations[0]);
         return;
     }
 
-    // Multiple destinations - create NoOpTask
     auto noop = make_noop_task("__end__");
-
-    // Connect all destinations as parents of noop
     for (const auto& dest : destinations) {
         if (!dest) {
             throw PipelineError(PipelineError::VALIDATION_ERROR,
@@ -180,17 +170,14 @@ bool Pipeline::validate() {
         return false;
     }
 
-    // Collect all tasks
     collect_all_tasks();
 
-    // Check for cycles
     if (has_cycles()) {
         DFTRACER_UTILS_LOG_ERROR("%s",
                                  "Pipeline validation failed: cycle detected");
         return false;
     }
 
-    // If destination is set, check reachability
     if (destination_ && !validate_reachability()) {
         DFTRACER_UTILS_LOG_ERROR("%s",
                                  "Pipeline validation failed: destination not "
@@ -205,7 +192,6 @@ bool Pipeline::validate() {
 }
 
 PipelineOutput Pipeline::execute(const std::any& input) {
-    // Validate if not already done
     if (!validated_) {
         if (!validate()) {
             throw PipelineError(PipelineError::VALIDATION_ERROR,
@@ -215,41 +201,31 @@ PipelineOutput Pipeline::execute(const std::any& input) {
 
     DFTRACER_UTILS_LOG_DEBUG("Executing pipeline '%s'", name_.c_str());
 
-    // Set error policy and handler
     scheduler_->set_error_policy(error_policy_);
     if (error_handler_) {
         scheduler_->set_error_handler(error_handler_);
     }
 
-    // Wrap input in std::any if not already wrapped
     std::any wrapped_input = input;
 
-    // Execute via scheduler
     scheduler_->schedule(source_, wrapped_input);
 
-    // Extract results
     PipelineOutput output;
 
     if (destination_) {
-        // Single destination
         try {
             output[destination_->get_id()] = destination_->result().get();
         } catch (...) {
-            // If error policy is FAIL_FAST, rethrow
-            // Otherwise (CONTINUE/CUSTOM), skip failed destination
             if (error_policy_ == ErrorPolicy::FAIL_FAST) {
                 throw;
             }
         }
     } else {
-        // All terminal tasks (tasks with no children)
         for (const auto& task : all_tasks_) {
             if (task->get_children().empty()) {
                 try {
                     output[task->get_id()] = task->result().get();
                 } catch (...) {
-                    // If error policy is FAIL_FAST, rethrow
-                    // Otherwise (CONTINUE/CUSTOM), skip failed task
                     if (error_policy_ == ErrorPolicy::FAIL_FAST) {
                         throw;
                     }
@@ -349,14 +325,12 @@ bool Pipeline::has_cycles_dfs(std::shared_ptr<Task> task,
     TaskIndex id = task->get_id();
 
     if (rec_stack.find(id) != rec_stack.end()) {
-        // Found cycle
         DFTRACER_UTILS_LOG_ERROR("Cycle detected at task '%s'",
                                  task->get_name());
         return true;
     }
 
     if (visited.find(id) != visited.end()) {
-        // Already processed
         return false;
     }
 

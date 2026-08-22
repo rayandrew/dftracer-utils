@@ -5,7 +5,9 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <string>
+#include <utility>
 
 namespace dftracer::utils {
 
@@ -26,13 +28,18 @@ struct TaskHandle {
 
 /// Typed handle that can return a value via .get().
 /// .wait() re-raises stored exceptions (same as .get() but discards value).
+///
+/// The result is held via shared_ptr so get() can move it out even for a
+/// move-only T (a shared_future's get() only yields a const ref). get() is
+/// therefore single-use for a move-only T: a second get() sees a moved-from
+/// value.
 template <typename T>
 struct TypedTaskHandle {
-    std::shared_future<T> future;
+    std::shared_future<std::shared_ptr<T>> future;
     TaskIndex id{-1};
     std::string name;
 
-    T get() { return future.get(); }
+    T get() { return std::move(*future.get()); }
     void wait() { static_cast<void>(future.get()); }
     bool done() const {
         return future.wait_for(std::chrono::seconds(0)) ==

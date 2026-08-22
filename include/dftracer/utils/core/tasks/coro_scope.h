@@ -12,9 +12,6 @@
 #include <dftracer/utils/core/coro/spawn_future.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/pipeline/executor.h>
-#include <dftracer/utils/core/utilities/tags/needs_context.h>
-#include <dftracer/utils/core/utilities/utility.h>
-#include <dftracer/utils/core/utilities/utility_traits.h>
 
 #include <atomic>
 #include <cstddef>
@@ -73,7 +70,7 @@ class CoroScope {
     std::vector<coro::Coro> coroutines_;
     std::atomic<bool> joined_{false};
 
-    // Cancellation support
+    /// Cancellation support
     std::shared_ptr<std::atomic<bool>> cancellation_requested_{
         std::make_shared<std::atomic<bool>>(false)};
 
@@ -253,32 +250,6 @@ class CoroScope {
                            cancellation_requested_, state);
         enqueue_coro(c);
         return coro::SpawnFuture<R>(std::move(state));
-    }
-
-    template <typename UtilityT, typename InputT,
-              typename DecayedUtility = std::remove_reference_t<UtilityT>,
-              typename R = typename DecayedUtility::Output,
-              std::enable_if_t<
-                  utilities::detail::has_process_v<DecayedUtility, InputT, R>,
-                  int> = 0>
-    coro::SpawnFuture<R> spawn(UtilityT& utility, InputT input) {
-        return spawn([utility_ptr = &utility, input = std::move(input)](
-                         CoroScope& child_scope) mutable -> coro::CoroTask<R> {
-            if constexpr (utilities::has_tag_v<utilities::tags::NeedsContext,
-                                               DecayedUtility>) {
-                utility_ptr->set_context(child_scope);
-                try {
-                    R result = co_await utility_ptr->process(input);
-                    utility_ptr->clear_context();
-                    co_return result;
-                } catch (...) {
-                    utility_ptr->clear_context();
-                    throw;
-                }
-            } else {
-                co_return co_await utility_ptr->process(input);
-            }
-        });
     }
 
     // ====================================================================
@@ -584,6 +555,45 @@ template <typename Func, typename... Args>
 inline coro::CoroTask<void> run_coro_scope(Func scope_func, Args... args) {
     return run_coro_scope(Executor::current(), std::move(scope_func),
                           std::move(args)...);
+}
+
+namespace detail {
+template <typename T>
+struct with_scope_value;
+template <typename T>
+struct with_scope_value<coro::CoroTask<T>> {
+    using type = T;
+};
+}  // namespace detail
+
+/**
+ * @brief Invoke a scope-taking op with a fresh scope: the dependency-injection
+ * seam for context ops.
+ *
+ * A context op is `operator()(CoroScope&, In) -> CoroTask<Out>`: a caller
+ * injects its own scope so the op composes into a larger fan-out. with_scope is
+ * the standalone contract - it opens a CoroScope on the current executor, runs
+ * the op, and joins - so an op can offer a scope-less overload:
+ * @code
+ * coro::CoroTask<Out> operator()(const In& in) const {
+ *     return with_scope(*this, in);
+ * }
+ * @endcode
+ *
+ * @p Out must be default-constructible. Requires a current executor.
+ */
+template <typename Op, typename In>
+coro::CoroTask<typename detail::with_scope_value<
+    std::invoke_result_t<const Op&, CoroScope&, const In&>>::type>
+with_scope(const Op& op, In in) {
+    typename detail::with_scope_value<
+        std::invoke_result_t<const Op&, CoroScope&, const In&>>::type result;
+    co_await run_coro_scope(
+        Executor::current(),
+        [&op, &in, &result](CoroScope& s) -> coro::CoroTask<void> {
+            result = co_await op(s, in);
+        });
+    co_return result;
 }
 
 }  // namespace dftracer::utils

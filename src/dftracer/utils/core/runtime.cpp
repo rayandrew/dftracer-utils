@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -193,6 +195,45 @@ std::size_t Runtime::threads() const { return threads_; }
 
 std::size_t Runtime::io_threads() const {
     return executor_ ? executor_->get_io_pool_size() : 0;
+}
+
+namespace {
+std::mutex g_default_mtx;
+std::shared_ptr<Runtime> g_default_runtime;
+}  // namespace
+
+bool elastic_default_enabled() {
+    if (auto e = Env::get<std::string_view>("DFTRACER_UTILS_ELASTIC");
+        e.has_value()) {
+        return !(*e == "0" || *e == "false" || *e == "off");
+    }
+    return true;
+}
+
+std::shared_ptr<Runtime> default_runtime_shared() {
+    std::lock_guard<std::mutex> lock(g_default_mtx);
+    if (!g_default_runtime) {
+        // Elastic (grow on demand) so a mostly-idle shared default - a CLI
+        // between queries, a Python session - does not squat hardware_
+        // concurrency threads on a shared node. Latency-sensitive consumers
+        // (the server) build their own eager runtime.
+        ExecutorConfig cfg;
+        cfg.min_workers = elastic_default_enabled() ? 1 : 0;
+        g_default_runtime = std::make_shared<Runtime>(cfg);
+    }
+    return g_default_runtime;
+}
+
+Runtime& default_runtime() { return *default_runtime_shared(); }
+
+std::shared_ptr<Runtime> peek_default_runtime() {
+    std::lock_guard<std::mutex> lock(g_default_mtx);
+    return g_default_runtime;
+}
+
+void set_default_runtime(std::shared_ptr<Runtime> rt) {
+    std::lock_guard<std::mutex> lock(g_default_mtx);
+    g_default_runtime = std::move(rt);
 }
 
 }  // namespace dftracer::utils

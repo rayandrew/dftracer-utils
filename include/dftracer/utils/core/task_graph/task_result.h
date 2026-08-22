@@ -124,7 +124,7 @@ class TaskResult {
    private:
     std::shared_ptr<T> data_;
 
-    // Default size estimation
+    /// Default size estimation
     template <typename U>
     static std::size_t estimate_size(const U& value) {
         // For simple types, use sizeof

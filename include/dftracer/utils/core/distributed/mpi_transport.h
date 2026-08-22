@@ -21,7 +21,7 @@
 
 namespace dftracer::utils::distributed {
 
-// Transport backed by MPI collectives over `comm` (default MPI_COMM_WORLD).
+/// Transport backed by MPI collectives over `comm` (default MPI_COMM_WORLD).
 class MpiTransport : public Transport {
    public:
     explicit MpiTransport(MPI_Comm comm = MPI_COMM_WORLD) : comm_(comm) {
@@ -58,10 +58,11 @@ class MpiTransport : public Transport {
     int size_ = 1;
 };
 
-// Cap this rank's worker threads to its node-local share of cores so N ranks on
-// a node do not each spawn `cores` threads and oversubscribe (ranks on separate
-// nodes are independent). Applied via DFTRACER_UTILS_THREADS, so call it before
-// any runtime work. This is Dask's per-node worker/thread split for MPI.
+/// Cap this rank's worker threads to its node-local share of cores so N ranks
+/// on a node do not each spawn `cores` threads and oversubscribe (ranks on
+/// separate nodes are independent). Applied via DFTRACER_UTILS_THREADS, so call
+/// it before any runtime work. This is Dask's per-node worker/thread split for
+/// MPI.
 inline void set_local_thread_budget(MPI_Comm comm = MPI_COMM_WORLD) {
     int rank = 0;
     MPI_Comm_rank(comm, &rank);

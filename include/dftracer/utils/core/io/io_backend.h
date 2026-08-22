@@ -17,11 +17,12 @@ using IoCompletionFn = void (*)(void *context, ssize_t result) noexcept;
 
 /// Backend selection preference.
 enum class IoBackendType {
-    AUTO,  // Runtime detection: io_uring > epoll/kqueue+threadpool > threadpool
-    IO_URING,           // Force io_uring (Linux only, fails if unavailable)
-    EPOLL_THREADPOOL,   // Force epoll + thread pool (Linux only)
-    KQUEUE_THREADPOOL,  // Force kqueue + thread pool (macOS/BSD only)
-    THREADPOOL          // Force pure thread pool
+    AUTO,      ///< Runtime detection: io_uring > epoll/kqueue+threadpool >
+               ///< threadpool
+    IO_URING,  ///< Force io_uring (Linux only, fails if unavailable)
+    EPOLL_THREADPOOL,   ///< Force epoll + thread pool (Linux only)
+    KQUEUE_THREADPOOL,  ///< Force kqueue + thread pool (macOS/BSD only)
+    THREADPOOL          ///< Force pure thread pool
 };
 
 /// Abstract I/O backend interface.

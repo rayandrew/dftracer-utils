@@ -24,7 +24,7 @@ namespace dftracer::utils {
 class CoroScope;
 class Task;
 
-// Forward declaration for use in template methods
+/// Forward declaration for use in template methods
 template <typename Func>
 std::shared_ptr<Task> make_task(
     Func&& func, std::string_view name = "",
@@ -43,30 +43,30 @@ std::shared_ptr<Task> make_task(
  */
 class Task : public std::enable_shared_from_this<Task> {
    private:
-    std::string name_;          // User-provided name (or empty)
-    std::source_location loc_;  // Caller location
+    std::string name_;          ///< User-provided name (or empty)
+    std::source_location loc_;  ///< Caller location
 
     std::function<coro::CoroTask<std::any>(CoroScope&, const std::any&)> func_;
 
     std::type_index input_type_;
     std::type_index output_type_;
 
-    // DAG structure
+    /// DAG structure
     std::vector<std::weak_ptr<Task>> parents_;
     std::vector<std::shared_ptr<Task>> children_;
     std::atomic<int> pending_parents_count_{0};
 
-    // Result management
+    /// Result management
     TaskResult result_;
 
-    // Optional combiner for multiple parents
+    /// Optional combiner for multiple parents
     std::function<std::any(const std::vector<std::any>&)> input_combiner_;
     bool has_custom_combiner_{false};
 
-    // Optional initial input (for tasks without dependencies)
+    /// Optional initial input (for tasks without dependencies)
     std::optional<std::any> initial_input_;
 
-    // Optional timeout for this task (0 = no timeout)
+    /// Optional timeout for this task (0 = no timeout)
     std::chrono::milliseconds timeout_{0};
 
    public:
@@ -438,7 +438,7 @@ class Task : public std::enable_shared_from_this<Task> {
     /**
      * Wrap different function signatures to common signature
      *
-     * ⭐ Returns function that produces CoroTask<std::any>
+     * Returns function that produces CoroTask<std::any>
      */
     template <typename Func>
     std::function<coro::CoroTask<std::any>(CoroScope&, const std::any&)>
@@ -561,6 +561,6 @@ inline std::shared_ptr<Task> operator^(std::shared_ptr<Task> source,
 
 // Include template implementations
 
-#include <dftracer/utils/core/tasks/task_impl.h>
+#include <dftracer/utils/core/tasks/detail/task_impl.h>
 
 #endif  // DFTRACER_UTILS_CORE_TASKS_TASK_H

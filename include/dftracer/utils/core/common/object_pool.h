@@ -30,10 +30,10 @@ struct alignas(16) TaggedHead {
     std::uint64_t tag;
 };
 
-// ABA-safe via a 16-byte compare-and-swap (CMPXCHG16B on x86-64 with -mcx16,
-// CASP/LSE on AArch64 with -march=armv8.1-a+). The pointer is stored verbatim,
-// so it works on any address layout. Used only when the 16-byte atomic is
-// lock-free; otherwise TreiberStackPacked is selected.
+/// ABA-safe via a 16-byte compare-and-swap (CMPXCHG16B on x86-64 with -mcx16,
+/// CASP/LSE on AArch64 with -march=armv8.1-a+). The pointer is stored verbatim,
+/// so it works on any address layout. Used only when the 16-byte atomic is
+/// lock-free; otherwise TreiberStackPacked is selected.
 class TreiberStackDwcas : TreiberBase {
     std::atomic<TaggedHead> head_;
 
@@ -65,11 +65,11 @@ class TreiberStackDwcas : TreiberBase {
     }
 };
 
-// Fallback without a lock-free 16-byte CAS: pack the pointer plus a 16-bit ABA
-// tag into one 64-bit atomic. The pointer is recovered by masking only (zero
-// extend); it must NOT be sign-extended from bit 47, since AArch64 user
-// pointers legitimately have bit 47 set (the kernel/user split is bit 55, not
-// 47) and sign-extending corrupts them. Assumes a 48-bit VA; no 52-bit/LVA.
+/// Fallback without a lock-free 16-byte CAS: pack the pointer plus a 16-bit ABA
+/// tag into one 64-bit atomic. The pointer is recovered by masking only (zero
+/// extend); it must NOT be sign-extended from bit 47, since AArch64 user
+/// pointers legitimately have bit 47 set (the kernel/user split is bit 55, not
+/// 47) and sign-extending corrupts them. Assumes a 48-bit VA; no 52-bit/LVA.
 class TreiberStackPacked : TreiberBase {
     std::atomic<std::uint64_t> head_;
 
@@ -120,7 +120,7 @@ class TreiberStackPacked : TreiberBase {
 
 }  // namespace detail
 
-// DWCAS when the 16-byte atomic is lock-free, else the packed fallback.
+/// DWCAS when the 16-byte atomic is lock-free, else the packed fallback.
 using TreiberStack =
     std::conditional_t<std::atomic<detail::TaggedHead>::is_always_lock_free,
                        detail::TreiberStackDwcas, detail::TreiberStackPacked>;
@@ -175,8 +175,8 @@ class ObjectPool {
         }
     }
 
-    // Reserved header holding the free-list `next`; max-aligned so the payload
-    // past it keeps default-new alignment.
+    /// Reserved header holding the free-list `next`; max-aligned so the payload
+    /// past it keeps default-new alignment.
     static constexpr std::size_t BLOCK_HEADER = alignof(std::max_align_t);
     static_assert(BLOCK_HEADER >= sizeof(void*),
                   "block header must hold a next pointer");

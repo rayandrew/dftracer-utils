@@ -2,7 +2,7 @@
 #define DFTRACER_UTILS_CALL_TREE_INTERNAL_TRACE_READER_H
 
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/common/json/parser.h>
+#include <dftracer/utils/json/parser.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -29,9 +29,8 @@ class TraceReader {
     bool read_directory(const std::string& directory,
                         const std::string& pattern, CallTree& graph);
 
-    bool process_trace_line(
-        dftracer::utils::utilities::common::json::JsonParser& parser,
-        CallTree& graph);
+    bool process_trace_line(dftracer::utils::json::JsonParser& parser,
+                            CallTree& graph);
     bool process_trace_line(const std::string& line, CallTree& graph);
 };
 

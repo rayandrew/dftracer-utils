@@ -24,25 +24,25 @@ struct SubmitContext {
 /// Holds the return value of the underlying syscall (bytes read/written,
 /// fd for open, 0 for close) or a negative errno on failure.
 struct IoAwaitable {
-    // Set by the backend when the operation completes
+    /// Set by the backend when the operation completes
     ssize_t result_ = 0;
 
-    // Coroutine handle to resume on completion
+    /// Coroutine handle to resume on completion
     std::coroutine_handle<> handle_{};
 
-    // Opaque pointer to a SubmitContext (backend-specific).
-    // The backend creates a heap-allocated SubmitContext subclass in
-    // submit_*(), stores a pointer here. await_suspend calls
-    // ctx->submit(ctx, this) to trigger the I/O operation.
-    // The backend is responsible for freeing the SubmitContext.
+    /// Opaque pointer to a SubmitContext (backend-specific).
+    /// The backend creates a heap-allocated SubmitContext subclass in
+    /// submit_*(), stores a pointer here. await_suspend calls
+    /// ctx->submit(ctx, this) to trigger the I/O operation.
+    /// The backend is responsible for freeing the SubmitContext.
     SubmitContext* submit_ctx_ = nullptr;
 
-    // True when result is already available (sync fallback path)
+    /// True when result is already available (sync fallback path)
     bool ready_ = false;
 
     bool await_ready() const noexcept { return ready_; }
 
-    // Declared here, defined in io_awaitable.cpp
+    /// Declared here, defined in io_awaitable.cpp
     void await_suspend(std::coroutine_handle<> h) noexcept;
 
     ssize_t await_resume() const noexcept { return result_; }

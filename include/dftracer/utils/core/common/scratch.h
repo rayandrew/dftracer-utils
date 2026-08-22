@@ -20,7 +20,7 @@ const std::string& scratch_root() noexcept;
 bool should_stage(const std::string& dest) noexcept;
 
 /// A per-invocation scratch working directory:
-///   <scratch_root>/<user>/dftracer-utils/<unique-id>/
+///   `<scratch_root>/<user>/dftracer-utils/<unique-id>/`
 /// meant to hold all build artifacts for one run (e.g. `.dftindex` plus any
 /// per-worker subdirs) so cleanup is a single directory removal. The directory
 /// is removed on destruction unless release() is called.

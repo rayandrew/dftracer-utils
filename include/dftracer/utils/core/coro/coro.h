@@ -114,7 +114,7 @@ struct CoroPromise {
     void unhandled_exception() { exception = std::current_exception(); }
 };
 
-// Out-of-line: needs CoroPromise to be complete.
+/// Out-of-line: needs CoroPromise to be complete.
 inline std::coroutine_handle<CoroPromise> Coro::release() {
     auto h = handle_;
     h.promise().released = true;
