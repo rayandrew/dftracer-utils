@@ -1,3 +1,5 @@
+:description: Reference for the dftracer_* command-line tools and their shared pipeline, indexing, and query flags for working with trace files.
+
 Command-Line Tools
 ==================
 
@@ -20,20 +22,17 @@ repeated in each tool's section.
 - ``--io-threads <count>`` - Number of I/O threads (default: number of CPU
   cores)
 - ``--time-profiling`` - Print stage timing breakdown to stderr
+- ``--eager-thread-pools`` - Start the full worker pool up front instead of
+  growing it on demand (lower first-batch latency, holds all threads)
 
 **Indexing** (``IndexingArgs``)
 
 - ``--index-dir <path>`` - Directory for ``.dftindex`` stores
 - ``--checkpoint-size <bytes>`` - Checkpoint size for gzip indexing in bytes
-  (default: 33554432 B / 32 MB)
+  (default: 33554432 B / 32 MB). This is also the gzip member size: the
+  checkpoint is the pruning/decode unit, so trace-writing tools (``split``)
+  size their output gzip members to match. See :ref:`multi-member-gzip`.
 - ``-f, --force`` - Force index recreation
-
-**Compression** (``CompressionArgs``)
-
-- ``--gzip-member-size <MB>`` - Uncompressed gzip member size in MB within each
-  compressed output file (default: 8; ``0`` = single member). Exposed by the
-  trace-writing tools (``split``, ``merge``). See
-  :ref:`multi-member-gzip`.
 
 **Query** (``QueryArgs``)
 
@@ -59,23 +58,23 @@ repeated in each tool's section.
 **Inputs** (``DirectoryArgs`` / ``FilesArgs``)
 
 - ``-d, --directory <path>`` - Directory containing trace files
-- ``--files <files...>`` - Trace files (``.pfw``, ``.pfw.gz``)
+- ``--files <files...>`` - Trace files (``.pfw.gz``)
 
 **Logging**
 
 - ``--log-level <level>`` - Logging verbosity: ``trace``, ``debug``, ``info``
   (default), ``warn``, ``error``, or ``off``. Available on every tool; overrides
   the ``DFTRACER_UTILS_LOG_LEVEL`` environment variable (see
-  :doc:`installation`).
+  :doc:`getting-started/installation`).
 
 .. _multi-member-gzip:
 
 Multi-member gzip output
 ------------------------
 
-The trace-writing tools (``split``, ``merge``) emit
-**multi-member gzip**: each compressed ``.pfw.gz`` file is a sequence of
-independent gzip members rather than one monolithic stream.
+The trace-writing tools (``split``) emit **multi-member gzip**: each
+compressed ``.pfw.gz`` file is a sequence of independent gzip members rather
+than one monolithic stream.
 
 **Why it matters.** A single-member gzip stream can only be inflated serially,
 so indexing and reading a large file is limited to one core per file.
@@ -85,61 +84,20 @@ and the parallel index build). This is what keeps large traces fast without
 first building an index. The native DFTracer runtime writes multi-member gzip;
 tools that re-chunk traces should preserve that shape.
 
-**Sizing.** ``--gzip-member-size`` is measured in **uncompressed** MB because a
-member is a unit of parallel inflate/parse **work**, which is proportional to
-uncompressed bytes. This is intentionally a different unit from the tools'
-``--chunk-size`` (which controls the **compressed** on-disk file size):
+**Sizing.** The gzip member size is the same knob as the index checkpoint
+size, ``--checkpoint-size`` (uncompressed bytes), because the gzip member is
+the pruning/checkpoint unit. This is intentionally a different unit from the
+tools' ``--chunk-size`` (which controls the **compressed** on-disk file size):
 
 - ``--chunk-size`` (compressed) - how big each output file is on disk.
-- ``--gzip-member-size`` (uncompressed) - the intra-file parallelism granularity.
+- ``--checkpoint-size`` (uncompressed) - the intra-file parallelism granularity.
 
 Because a chunk is sized in compressed bytes (roughly 10x smaller than
 uncompressed), a chunk comfortably holds many members. For example a 32 MB
-compressed chunk is ~300 MB uncompressed, so ``--gzip-member-size 4`` yields
-roughly ``300 / 4 ≈ 75`` members. Smaller members give more parallelism at a
-small compression-ratio cost (each member resets the deflate dictionary);
+compressed chunk is ~300 MB uncompressed, so a 4 MB ``--checkpoint-size``
+yields roughly 75 members (300 / 4). Smaller members give more parallelism at
+a small compression-ratio cost (each member resets the deflate dictionary);
 larger members compress slightly better with coarser parallelism.
-``--gzip-member-size 0`` restores single-member output.
-
-dftracer_reader
----------------
-
-**Description:** DFTracer utility for reading and indexing compressed files (GZIP, TAR.GZ)
-
-**Usage:**
-
-.. code-block:: bash
-
-   dftracer_reader [OPTIONS] file
-
-**Arguments:**
-
-- ``file`` - Compressed file to process (GZIP, TAR.GZ) [required]
-
-**Options:**
-
-- ``-i, --index <path>`` - Index file to use (default: auto-generated in temp directory)
-- ``-s, --start <bytes>`` - Start position in bytes (default: -1)
-- ``-e, --end <bytes>`` - End position in bytes (default: -1)
-- ``-c, --checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
-- ``-f, --force-rebuild`` - Force rebuild of index even if it exists
-- ``--check`` - Check if index is valid
-- ``--read-buffer-size <bytes>`` - Size of the read buffer in bytes (default: 1MB)
-- ``--mode <mode>`` - Set the reading mode: bytes, line_bytes, or lines (default: bytes)
-- ``--index-dir <path>`` - Directory to store index files (default: system temp directory)
-
-**Example:**
-
-.. code-block:: bash
-
-   # Read bytes 100-200 from a compressed file
-   dftracer_reader --start 100 --end 200 trace.pfw.gz
-
-   # Read in line mode
-   dftracer_reader --mode lines --start 1 --end 100 trace.pfw.gz
-
-   # Build index with custom checkpoint size
-   dftracer_reader --checkpoint-size 20971520 trace.pfw.gz
 
 dftracer_info
 -------------
@@ -178,42 +136,6 @@ dftracer_info
    # Analyze with 4 threads
    dftracer_info --executor-threads 4 -d ./traces
 
-dftracer_merge
---------------
-
-**Description:** Merge DFTracer .pfw or .pfw.gz files into a single JSON array file using pipeline processing
-
-**Usage:**
-
-.. code-block:: bash
-
-   dftracer_merge [OPTIONS]
-
-**Options:**
-
-- ``-d, --directory <path>`` - Directory containing .pfw or .pfw.gz files (default: .)
-- ``-o, --output <path>`` - Output file path (should have .pfw extension) (default: combined.pfw)
-- ``-f, --force`` - Override existing output file and force index recreation
-- ``-c, --compress`` - Compress output file with gzip
-- ``-g, --gzip-only`` - Process only .pfw.gz files
-- ``--gzip-member-size <MB>`` - Uncompressed gzip member size in MB in the compressed output (default: 8; ``0`` = single member). See :ref:`multi-member-gzip`.
-- ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
-- ``--executor-threads <count>`` - Number of worker threads for parallel processing (default: number of CPU cores)
-- ``--index-dir <path>`` - Directory to store index files (default: system temp directory)
-
-**Example:**
-
-.. code-block:: bash
-
-   # Merge all .pfw/.pfw.gz files in current directory
-   dftracer_merge -o merged.pfw
-
-   # Merge files from specific directory with compression
-   dftracer_merge -d ./logs -o output.pfw -c
-
-   # Merge with parallel processing
-   dftracer_merge -d ./traces -o combined.pfw --executor-threads 8
-
 dftracer_split
 --------------
 
@@ -228,13 +150,13 @@ dftracer_split
 **Options:**
 
 - ``-n, --app-name <name>`` - Application name for output files (default: app)
-- ``-d, --directory <path>`` - Input directory containing .pfw or .pfw.gz files (default: .)
+- ``-d, --directory <path>`` - Input directory containing .pfw.gz files (default: .)
 - ``-o, --output <dir>`` - Output directory for split files (default: ./split)
 - ``-s, --chunk-size <MB>`` - Output file size in MB, approximate **compressed** on-disk size (default: 4)
-- ``--gzip-member-size <MB>`` - **Uncompressed** gzip member size in MB within each output file (default: 8; ``0`` = single member). See :ref:`multi-member-gzip`.
 - ``-f, --force`` - Override existing files and force index recreation
 - ``-c, --compress`` - Compress output files with gzip (default: true)
-- ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
+- ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes; also
+  the gzip member size (default: 33554432 B / 32 MB)
 - ``--executor-threads <count>`` - Number of worker threads for parallel processing (default: number of CPU cores)
 - ``--index-dir <path>`` - Directory to store index files (default: system temp directory)
 - ``--verify`` - Verify output chunks match input by comparing event IDs
@@ -242,9 +164,10 @@ dftracer_split
 .. note::
 
    ``--chunk-size`` is **compressed** (the resulting on-disk file size), while
-   ``--gzip-member-size`` is **uncompressed** (the parallel-work granularity).
-   They are orthogonal: a 32 MB compressed chunk holds ~300 MB uncompressed, so
-   at 8 MB members it contains ~37 members. See :ref:`multi-member-gzip`.
+   ``--checkpoint-size`` is **uncompressed** (the parallel-work / gzip member
+   granularity). They are orthogonal: a 32 MB compressed chunk holds ~300 MB
+   uncompressed, so at an 8 MB checkpoint size it contains ~37 members. See
+   :ref:`multi-member-gzip`.
 
 **Example:**
 
@@ -256,8 +179,8 @@ dftracer_split
    # Split with 10MB chunks and custom app name
    dftracer_split -d ./traces -s 10 -n myapp -o ./chunks
 
-   # Larger chunks with fine-grained 4 MB members for more read parallelism
-   dftracer_split -d ./traces -s 256 --gzip-member-size 4 -o ./chunks
+   # Larger chunks with a fine-grained 4 MB checkpoint size for more read parallelism
+   dftracer_split -d ./traces -s 256 --checkpoint-size 4194304 -o ./chunks
 
    # Split without compression and verify output
    dftracer_split -d ./data -c false --verify -o ./output
@@ -265,7 +188,7 @@ dftracer_split
 dftracer_event_count
 --------------------
 
-**Description:** Count valid events in DFTracer .pfw or .pfw.gz files using pipeline processing
+**Description:** Count valid events in DFTracer .pfw.gz files using pipeline processing
 
 **Usage:**
 
@@ -275,7 +198,7 @@ dftracer_event_count
 
 **Options:**
 
-- ``-d, --directory <path>`` - Directory containing .pfw or .pfw.gz files (default: .)
+- ``-d, --directory <path>`` - Directory containing .pfw.gz files (default: .)
 - ``-f, --force`` - Force index recreation
 - ``-c, --checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
 - ``--executor-threads <count>`` - Number of worker threads for parallel processing (default: number of CPU cores)
@@ -297,7 +220,7 @@ dftracer_event_count
 dftracer_validate
 -----------------
 
-**Description:** Validate DFTracer ``.pfw`` / ``.pfw.gz`` trace files by
+**Description:** Validate DFTracer ``.pfw.gz`` trace files by
 confirming every non-wrapper line is valid JSON. A fast, parallel C++
 equivalent of the ``dftracer_validate`` shell script.
 
@@ -310,7 +233,7 @@ equivalent of the ``dftracer_validate`` shell script.
 **Options:**
 
 - ``-d, --directory <path>`` - Directory scanned recursively (and in parallel)
-  for ``.pfw`` / ``.pfw.gz`` files
+  for ``.pfw.gz`` files
 - ``--files <files...>`` - Explicit trace files to validate
 - ``--executor-threads <count>`` - Worker threads for parallel validation
   (default: number of CPU cores)
@@ -348,6 +271,8 @@ dftracer_pgzip
 **Options:**
 
 - ``-d, --directory <path>`` - Directory containing .pfw files (default: .)
+- ``-l, --compression-level <0-12>`` - Compression level (default: 6)
+- ``--chunk-size <bytes>`` - Chunk size in bytes for parallel compression (default: 4194304 B / 4 MB)
 - ``--executor-threads <count>`` - Number of worker threads for parallel processing (default: number of CPU cores)
 
 **Example:**
@@ -359,6 +284,9 @@ dftracer_pgzip
 
     # Compress files in a specific directory with debug logging
     dftracer_pgzip -d ./logs --log-level debug
+
+    # Maximum compression with a larger parallel chunk size
+    dftracer_pgzip -d ./logs -l 12 --chunk-size 8388608
 
     # Compress with 16 threads
     dftracer_pgzip -d ./traces --executor-threads 16
@@ -376,24 +304,33 @@ dftracer_server
 
 **Options:**
 
-- ``-b, --bind <address>`` - Bind address (default: 0.0.0.0)
+- ``-b, --bind <address>`` - Bind address (default: 127.0.0.1; use 0.0.0.0 to expose on all interfaces)
 - ``-p, --port <number>`` - Listen port (default: 8080)
 - ``-d, --directory <path>`` - Directory containing trace files [required]
-- ``--index-dir <path>`` - Directory for bloom/checkpoint index files (default: same as --directory)
+- ``--index-dir <path>`` - Directory for root-local ``.dftindex`` stores (default: same as --directory)
+- ``--token <token>`` - Optional access token; when set, every request must
+  supply it via ``?token=`` or an ``Authorization: Bearer <token>`` header
+- ``--checkpoint-size <bytes>`` - Decompression checkpoint interval in bytes
+  for auto-indexing (default: 33554432 B / 32 MB). Smaller = finer zoom-in
+  seeks, larger index
+- ``--member-cache-size <bytes>`` - Bytes of decoded gzip members retained to
+  share across concurrent queries (0 disables retention but still coalesces
+  in-flight decodes; default: 1073741824 B / 1 GB)
 - ``--executor-threads <count>`` - Number of worker threads (default: number of CPU cores)
 
 **Example:**
 
 .. code-block:: bash
 
-     # Start server on default port 8080
+     # Start server on default port 8080, bound to localhost
      dftracer_server -d ./traces
 
-     # Start server on custom port with specific bind address
-     dftracer_server -b 127.0.0.1 -p 9000 -d ./traces
+     # Expose on all interfaces on a custom port
+     dftracer_server -b 0.0.0.0 -p 9000 -d ./traces
 
-     # Start with custom index directory and thread count
-     dftracer_server -d ./traces --index-dir /var/cache/dftracer_indexes --executor-threads 8
+     # Start with custom index directory, an access token, and thread count
+     dftracer_server -d ./traces --index-dir /var/cache/dftracer_indexes \
+         --token secret123 --executor-threads 8
 
 dftracer_stats
 --------------
@@ -408,14 +345,16 @@ dftracer_stats
 
 **Options:**
 
-- ``-d, --directory <path>`` - Directory containing .pfw or .pfw.gz files (default: .)
+- ``-d, --directory <path>`` - Directory containing .pfw.gz files (default: .)
 - ``--files <files...>`` - Explicit list of trace files
 - ``--index-dir <path>`` - Directory to store index files (default: system temp directory)
 - ``--report <type>`` - Report type: summary, categories, names, pid_tids, time_range, duration, top-names, top-categories, detailed (default: summary)
-- ``--top-n <count>`` - Top N entries to show in detailed report (0=all, default: 10)
-- ``--top-n-pid-tid <count>`` - Top N PID:TID pairs to show (default: 10)
+- ``--top-n <count>`` - Number of results for top-N queries (0=show all, default: 0)
+- ``--top-n-pid-tid <count>`` - Max PID:TID pairs to display (0=show all, default: 10)
 - ``--query <query>`` - Query DSL filter (e.g., ``'cat == "POSIX" and dur > 1000'``)
 - ``--group-by <dims...>`` - Group-by dimensions: name, cat, pid, tid, fhash, hhash, pid_tid (default: name for detailed)
+- ``--filter-names <names...>`` - Filter by event names
+- ``--filter-cats <cats...>`` - Filter by event categories
 - ``--json`` - Output in JSON format
 - ``--no-auto-index`` - Disable automatic bloom index building
 - ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
@@ -450,7 +389,7 @@ dftracer_view
 
 **Options:**
 
-- ``--files <files...>`` - Trace files to process (.pfw, .pfw.gz)
+- ``--files <files...>`` - Trace files to process (.pfw.gz)
 - ``-d, --directory <path>`` - Directory containing trace files
 - ``--preset <name>`` - Predefined view: io, compute, dlio
 - ``--recipe <path>`` - Custom view JSON file path
@@ -462,10 +401,42 @@ dftracer_view
 - ``-o, --output <path>`` - Output file path (default: stdout)
 - ``--stream`` - Stream matching events to stdout as NDJSON
 - ``--no-metadata`` - Exclude metadata events (ph=M) from output
-- ``--index-dir <path>`` - Directory where .idx index files are stored
-- ``--no-auto-index`` - Disable automatic bloom index building for files missing .idx
+- ``--index-dir <path>`` - Directory where ``.dftindex`` stores are created
+- ``--no-auto-index`` - Disable automatic index building for files missing ``.dftindex``
 - ``--checkpoint-size <bytes>`` - Checkpoint size for auto-indexing in bytes (default: 33554432 B / 32 MB)
 - ``--executor-threads <count>`` - Number of worker threads (default: number of CPU cores)
+
+**Aggregation:**
+
+- ``--group-by <cols>`` - Aggregate: group by columns, comma-separated
+  (``name``, ``cat``, ``pid``, ``tid``, ``fhash``, ``arg:KEY``)
+- ``--agg <reducers>`` - Aggregate: reducers, comma-separated (``count``,
+  ``sum:FIELD``, ``min:FIELD``, ``max:FIELD``, ``mean:FIELD``, ``var:FIELD``,
+  ``std:FIELD``, ``skew:FIELD``, ``kurt:FIELD``, ``pNN:FIELD`` e.g.
+  ``p99:dur``, ``pct:FIELD:Q``)
+- ``--time-bucket <us>`` - Aggregate into time buckets of N microseconds
+- ``--counters`` - Emit the aggregation as ``ph=C`` counter events
+- ``--format <fmt>`` - Aggregate output format: ``text`` (default) or
+  ``arrow`` (IPC file)
+- ``--phase <phase>`` - Select events by phase: ``events`` (ph=X),
+  ``counters`` (ph=C), ``any``
+- ``--select <cols>`` - Project the result to these columns, comma-separated
+- ``--limit <n>`` - Cap the output to N rows/events (0 = unlimited)
+- ``--offset <n>`` - Skip the first N rows/events before applying ``--limit``
+- ``--time-scale <ratio>`` - Scale timestamps/durations by this
+  ns-per-unit ratio (0 = leave as stored)
+- ``--memory-budget <bytes>`` - Spill aggregation to disk past N in-core
+  bytes (0 = auto: ~1/3 of available memory)
+- ``--no-spill`` - Keep aggregation fully in memory (disable the default spill)
+- ``--agg-numeric-args`` - Aggregate every numeric ``args.*`` field automatically
+- ``--collect-typed`` - Dump the aggregation index's regular/aggregated/counters families (one pass)
+- ``--materialize`` - Persist this aggregation as a rollup for instant reuse (needs ``--group-by``/``--agg``)
+
+**Merging:**
+
+- ``--merge`` - Merge all inputs into one trace written to ``--output``
+- ``--no-index`` - Do not build an index for the written trace (default: index)
+- ``--verify`` - Re-scan the exported output and confirm the event count round-trips
 
 **Example:**
 
@@ -493,7 +464,7 @@ dftracer_index
 
 **Options:**
 
-- ``-d, --directory <path>`` - Input directory containing .pfw or .pfw.gz files (default: .)
+- ``-d, --directory <path>`` - Input directory containing .pfw.gz files (default: .)
 - ``--dimensions <dims>`` - Comma-separated extra dimensions to index from args (e.g., args.level,args.mode)
 - ``-f, --force`` - Force index recreation even if already built
 - ``--checkpoint-size <bytes>`` - Checkpoint size for gzip indexing in bytes (default: 33554432 B / 32 MB)
@@ -502,13 +473,12 @@ dftracer_index
 - ``--expected-entries <count>`` - Expected entries per chunk for bloom filter sizing (default: 1024)
 - ``--false-positive-rate <rate>`` - Bloom filter false positive rate (default: 0.01)
 - ``--read-batch-size <MB>`` - Batch read size in MB for stream processing (default: 4)
-- ``--manifest`` - Also build manifest tables in .idx (per-checkpoint event line routing)
 - ``--rebuild-summaries`` - Rebuild ``ROOT_*`` aggregated summaries after ingest.
   Off by default; ``ROOT_*`` CFs are only consumed by summary tools such as
   ``dftracer_info``. Bloom-filter chunk-skipping queries do not require them.
 
 This binary also accepts the shared :ref:`cli-shared-flags` (Pipeline,
-Watchdog, Indexing).
+Indexing).
 
 **Example:**
 
@@ -520,96 +490,58 @@ Watchdog, Indexing).
     # Build with custom dimensions and force rebuild
     dftracer_index -d ./traces --dimensions "args.level,args.io.size" --force
 
-    # Build manifest indices for sparse query routing
-    dftracer_index -d ./traces --manifest
+    # Rebuild ROOT_* aggregated summaries after ingest
+    dftracer_index -d ./traces --rebuild-summaries
 
-dftracer_aggregator
--------------------
+dftracer_run
+------------
 
-**Description:** Aggregate DFTracer events into time-series counters using streaming coroutine pipeline
-
-The aggregator can emit three logical row types:
-
-- regular event rows from non-counter trace events
-- profile-counter rows from ``ph="C"`` events whose category is not ``sys``
-- system-counter rows from ``ph="C"`` events whose category is ``sys``
-
-With ``--format arrow``, these are distinguished by the ``batch_type`` column.
-The Arrow output always includes the base columns ``batch_type``, ``cat``,
-``name``, ``pid``, ``tid``, ``hhash``, ``fhash``, ``time_bucket``, ``count``,
-``dur_total``, ``dur_min``, ``dur_max``, ``dur_mean``, ``dur_std``,
-``size_total``, ``size_min``, ``size_max``, ``size_mean``, ``size_std``,
-``ts``, and ``te``. Each field listed in ``--metric-fields`` adds
-``<field>_total``, ``<field>_min``, ``<field>_max``, ``<field>_mean``, and
-``<field>_std``.
+**Description:** Load one or more compiled plugins (``.so``) and run them
+over a directory or file list of DFTracer traces. Files are normalized to
+multi-member gzip (so every checkpoint is a real gzip member) before the
+plugins run, unless ``--no-auto-index`` is given.
 
 **Usage:**
 
 .. code-block:: bash
 
-    dftracer_aggregator [OPTIONS]
+    dftracer_run [OPTIONS] --plugin <path.so> [--plugin <path.so> ...]
 
 **Options:**
 
-- ``-d, --directory <path>`` - Input directory containing .pfw or .pfw.gz files (default: .)
-- ``-o, --output <path>`` - Output file path for aggregated counters (default: aggregated_output.json)
-- ``-t, --time-interval <ms>`` - Time interval in milliseconds for bucketing (default: 5000)
-- ``-g, --group-keys <keys>`` - Comma-separated extra group keys from args (e.g., epoch,step,level)
-- ``-m, --metric-fields <fields>`` - Comma-separated custom metric fields from args (e.g., iter_count,num_events)
-- ``--query <query>`` - Query DSL filter (e.g., ``'cat == "POSIX" and dur > 1000'``)
-- ``-f, --force`` - Force index recreation
-- ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
-- ``--executor-threads <count>`` - Number of executor threads for parallel processing (default: number of CPU cores)
-- ``--index-dir <path>`` - Directory to store index files (default: system temp directory)
-- ``--compress`` - Compress output using gzip
-- ``--compression-level <0-9>`` - Gzip compression level (default: 6)
-- ``--boundary-events <config>`` - Boundary event configuration: event_name:value_field:output_name
-- ``--no-track-process-parents`` - Disable tracking of process parent relationships from fork/spawn
-- ``--chunk-size <MB>`` - Target chunk size in MB for parallel processing (default: 4)
-- ``--read-batch-size <MB>`` - Batch read size in MB for stream processing (default: 4)
-- ``--event-format <fmt>`` - Perfetto event format: counter, async, regular (default: counter)
-- ``--compute-percentiles`` - Enable percentile/quantile computation using DDSketch
-- ``--percentiles <vals>`` - Comma-separated percentiles to compute (e.g., 0.25,0.5,0.75,0.90)
-- ``--relative-accuracy <rate>`` - Relative accuracy for DDSketch percentile estimation (default: 0.01)
-- ``--format <fmt>`` - Output format: ``json`` (default, Perfetto trace) or ``arrow`` (``.arrows`` IPC file). Arrow format requires ``DFTRACER_UTILS_ENABLE_ARROW_IPC=ON`` at build time.
+- ``-d, --directory <path>`` - Directory containing trace files
+- ``--files <files...>`` - Trace files (.pfw.gz)
+- ``--index-dir <path>`` - Directory where ``.dftindex`` stores are created
+- ``--checkpoint-size <bytes>`` - Checkpoint size for gzip indexing in bytes (default: 33554432 B / 32 MB)
+- ``--no-auto-index`` - Disable automatic index building for files missing ``.dftindex``
+- ``--plugin <path>`` - Path to a plugin shared object. Repeatable; each
+  occurrence starts a new plugin block that the following ``--parg``/``--pconfig``
+  apply to
+- ``--parg <key=value>`` - Set a config key for the plugin block started by
+  the preceding ``--plugin``. Repeatable
+- ``--pconfig <path>`` - JSON config file merged into the plugin block
+  started by the preceding ``--plugin``
+- ``--shared-parg <key=value>`` - Set a config key applied to every plugin
+  block. Repeatable
+- ``--shared-pconfig <path>`` - JSON config file merged into every plugin
+  block
+
+These flags are extracted before argparse runs, so they can be interleaved
+freely with the tool's other options. This binary also accepts the shared
+:ref:`cli-shared-flags` (Pipeline and Watchdog schemas).
 
 **Example:**
 
 .. code-block:: bash
 
-    # Basic aggregation with 1-second (1000ms) buckets
-    dftracer_aggregator -d ./traces -o agg.json -t 1000
+    # Run a single plugin over a directory of traces
+    dftracer_run -d ./traces --plugin ./libmy_plugin.so
 
-    # Aggregation with percentiles and compression
-    dftracer_aggregator -d ./traces -o agg.json --compute-percentiles --compress
-
-    # Query-filtered aggregation with custom metrics from args
-    dftracer_aggregator -d ./traces --query 'cat == "POSIX"' \
-        -m "iter_count,epoch"
-
-    # Output as Arrow IPC file (readable by pyarrow, polars, DuckDB)
-    dftracer_aggregator -d ./traces -o agg.arrows --format arrow
-
-    # Stream profile/system counters as Perfetto counter events
-    dftracer_aggregator -d ./traces --event-format counter
-
-**Reading Arrow IPC output:**
-
-.. code-block:: python
-
-    # pyarrow
-    import pyarrow.ipc as ipc
-    reader = ipc.open_file("agg.arrows")
-    table = reader.read_all()
-    df = table.to_pandas()
-
-    # polars
-    import polars as pl
-    df = pl.read_ipc("agg.arrows")
-
-    # DuckDB
-    import duckdb
-    result = duckdb.sql("SELECT * FROM 'agg.arrows'")
+    # Pass per-plugin args and a shared config file to two plugins
+    dftracer_run -d ./traces \
+        --plugin ./libfoo.so --parg mode=fast \
+        --plugin ./libbar.so --pconfig bar.json \
+        --shared-pconfig shared.json
 
 dftracer_gen_dlio_config
 ------------------------
@@ -618,8 +550,9 @@ dftracer_gen_dlio_config
 of raw DFTracer traces. The tool indexes the inputs, aggregates them into the
 internal ``AGGREGATION`` column family (DDSketch forced on), fits per-component
 distributions, refines ``max_bound`` against an internal barrier simulator, and
-emits a DLIO ``train.computation_time`` + ``reader.preprocess_time`` block. The
-user does not need to run ``dftracer_aggregator`` separately.
+emits a DLIO ``train.computation_time`` + ``reader.preprocess_time`` block. No
+separate aggregation step is required; the tool populates the ``AGGREGATION``
+column family itself.
 
 Default input event names: ``cat=dataloader`` with ``name=fetch.block`` /
 ``fetch.iter``, and ``cat=data`` with ``name=preprocess`` / ``item``. Traces
@@ -635,7 +568,7 @@ are present.
 
 **Options:**
 
-- ``-d, --directory <path>`` - Input directory containing .pfw or .pfw.gz traces (default: .)
+- ``-d, --directory <path>`` - Input directory containing .pfw.gz traces (default: .)
 - ``-o, --output <path>`` - Output path for the DLIO YAML config [required]
 - ``--max-bound-percentile <pct>`` - Initial max_bound percentile, 0-100 (default: 95)
 - ``--simulation-iterations <n>`` - Max simulator iterations for percentile refinement (default: 5)
@@ -732,7 +665,7 @@ dftracer_replay
 
 **Options:**
 
-- ``inputs`` - Trace files (.pfw, .pfw.gz) or directories containing trace files [required]
+- ``inputs`` - Trace files (.pfw.gz) or directories containing trace files [required]
 - ``--no-timing`` - Ignore original timing and execute as fast as possible
 - ``--dry-run`` - Parse and analyze traces without executing operations
 - ``--dftracer-mode`` - Use DFTracer sleep-based replay (sleep for operation duration instead of doing actual I/O)
@@ -756,6 +689,8 @@ dftracer_replay
 - ``--sample-rate <rate>`` - Sample rate for replay (0.0-1.0, 1.0=all events, 0.1=10%)
 - ``--sample-seed <seed>`` - Random seed for sampling (for reproducibility)
 - ``--max-events <count>`` - Maximum number of events to replay (0=unlimited)
+- ``--channel-capacity <n>`` - Bounded ``Channel<Trace>`` capacity between the
+  read/parse producer and the dispatch consumer (default: 4096)
 
 **Example:**
 
@@ -771,40 +706,6 @@ dftracer_replay
     dftracer_replay -d ./traces -r --filter-category POSIX --filter-function read
 
 For detailed usage, see :doc:`utilities/replay`.
-
-dftracer_tar
-------------
-
-**Description:** Index and analyze TAR.GZ archives containing DFTracer trace data
-
-**Usage:**
-
-.. code-block:: bash
-
-    dftracer_tar [OPTIONS] <file>
-
-**Options:**
-
-- ``file`` - TAR.GZ file to process [required]
-- ``-i, --index <path>`` - Index file to use (auto-generated if not specified)
-- ``-c, --checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
-- ``-f, --force-rebuild`` - Force rebuild index
-- ``--list-files`` - List all files in the TAR archive
-- ``--info`` - Show archive information
-- ``--build-only`` - Only build the index, don't perform other operations
-
-**Example:**
-
-.. code-block:: bash
-
-    # Show archive information
-    dftracer_tar trace_archive.tar.gz --info
-
-    # List files in archive
-    dftracer_tar trace_archive.tar.gz --list-files
-
-    # Build index for fast access
-    dftracer_tar trace_archive.tar.gz --build-only
 
 dftracer_gen_fake_trace
 -----------------------
@@ -849,7 +750,9 @@ dftracer_gen_fake_trace
 dftracer_call_tree
 ------------------
 
-**Description:** Build and analyze call trees from DFTracer trace files for hierarchical structure analysis
+**Description:** Build a hierarchical call tree from DFTracer trace files and
+write it out as Chrome Tracing JSON. Pipeline DAG: ``scan -> build -> merge ->
+hierarchy -> write_json``.
 
 **Usage:**
 
@@ -859,29 +762,23 @@ dftracer_call_tree
 
 **Options:**
 
-- ``inputs`` - Trace files (.pfw, .pfw.gz) or directories containing trace files [required]
+- ``inputs`` - Trace files (.pfw.gz) or directories [required]
 - ``-r, --recursive`` - Recursively search directories for trace files
-- ``--pattern <pattern>`` - File pattern for trace files (default: ``*.pfw.gz``)
-- ``-o, --output <path>`` - Output file path for serialized call tree (auto-generated from input if not specified)
-- ``--json`` - Also save call tree in JSON (Chrome Tracing) format
-- ``--text <path>`` - Export call tree to text file
-- ``--max-depth <n>`` - Maximum depth for tree printing (0=unlimited, default: 0)
-- ``--analyze`` - Perform detailed analysis (call patterns, timing, critical path)
-- ``--stats-only`` - Only print statistics, skip tree traversal
-- ``--no-save`` - Don't save output files, only print analysis
+- ``-o, --output <path>`` - Output JSON path (Chrome Tracing)
+- ``--no-save`` - Skip writing output
+- ``--gzip`` - gzip the output (``.gz`` appended if needed)
+
+This binary also accepts the shared :ref:`cli-shared-flags` (Pipeline).
 
 **Example:**
 
 .. code-block:: bash
 
-    # Build call tree from directory
-    dftracer_call_tree ./traces --analyze
+    # Build call tree from a directory, recursively
+    dftracer_call_tree ./traces -r -o call_tree.json
 
-    # Export to JSON and text formats
-    dftracer_call_tree ./traces --json --text tree.txt
-
-    # Analyze with detailed statistics and debug logging
-    dftracer_call_tree ./traces --analyze --log-level debug --max-depth 5
+    # Build and gzip the output
+    dftracer_call_tree ./traces -o call_tree.json --gzip
 
 dftracer_comparator
 -------------------
@@ -910,7 +807,7 @@ dftracer_comparator
 - ``--executor-threads <count>`` - Number of parallel threads (default: auto)
 - ``--baseline-index-dir <path>`` - Index directory for baseline (default: co-located with data)
 - ``--variant-index-dir <path>`` - Index directory for variant (default: co-located with data)
-- ``--force`` - Force index rebuild
+- ``-f, --force`` - Force index rebuild
 - ``--checkpoint-size <bytes>`` - Checkpoint size for indexing in bytes (default: 33554432 B / 32 MB)
 
 **Example:**
@@ -1005,75 +902,6 @@ and ``--variant``.
             }
         ]
     }
-
-dftracer_aggregator_mpi
------------------------
-
-**Description:** MPI driver for the distributed-SST aggregator. Each rank
-produces per-rank aggregation SSTs; rank 0 bulk-ingests and the ranks jointly
-write the final gzip JSON output. Requires the build to be configured with
-``DFTRACER_UTILS_ENABLE_MPI=ON``.
-
-The pipeline is structured as a five-task DAG executed inside the standard
-``Pipeline`` runtime:
-
-``scan -> phase_a -> phase_b -> phase_c -> merge``
-
-- **scan** - Cooperative gzip-member pre-scan, ``Allgatherv`` of the member
-  map, and deterministic Longest-Processing-Time (LPT) assignment of work
-  units to ranks.
-- **phase_a** - Each rank runs the distributed-SST indexer + aggregation
-  visitor on its slice and writes SSTs (and ``tracker.bin``) to its rank
-  staging directory. SSTs are optionally moved to a shared-FS staging root
-  for the coordinator.
-- **phase_b** - Rank 0 ``Gatherv`` of artifact lists and a single
-  ``IndexDatabase::bulk_ingest`` + tracker merge.
-- **phase_c** - Each rank writes a shard-prefixed Perfetto gzip JSON slice
-  using ``PerfettoTraceWriterUtility``.
-- **merge** - Parallel ``pwrite`` on Lustre-striped output or serial
-  concatenation otherwise.
-
-**Usage:**
-
-.. code-block:: bash
-
-    mpirun -n <N> dftracer_aggregator_mpi [OPTIONS]
-
-**Options:**
-
-- ``-d, --directory <path>`` - Input directory containing .pfw or .pfw.gz
-  files (default: ``.``)
-- ``-o, --output <path>`` - Output gzip JSON path. ``.gz`` is appended if
-  missing (default: ``aggregated_output.json.gz``)
-- ``-t, --time-interval <ms>`` - Time interval in milliseconds for bucketing
-  (default: 5000)
-- ``--staging-dir <path>`` - Per-rank SST staging root. Defaults to
-  ``<index_dir>/_staging``; each rank writes to ``<staging_dir>/rank_<R>``.
-- ``--shared-staging <path>`` - Shared-FS staging root. When set and
-  different from ``--staging-dir``, each rank moves its SSTs and
-  ``tracker.bin`` from the (node-local) staging dir to
-  ``<shared-staging>/rank_<R>`` before the coordinator ingest. Required for
-  multi-node runs where ``--staging-dir`` points at node-local NVMe.
-- ``--keep-staging`` - Keep per-rank SST staging dirs after a successful
-  ingest
-
-This binary also accepts the shared :ref:`cli-shared-flags` (Pipeline and
-Indexing schemas). Per-rank ``--executor-threads`` / ``--io-threads`` are
-automatically scaled down by the detected processes-per-node count so
-co-located ranks do not oversubscribe cores.
-
-**Example:**
-
-.. code-block:: bash
-
-    # 16 ranks on one node, node-local staging
-    mpirun -n 16 dftracer_aggregator_mpi -d ./traces -o agg.json.gz
-
-    # Multi-node run with shared staging on Lustre
-    mpirun -n 64 dftracer_aggregator_mpi -d /lustre/traces \
-        --staging-dir /local/nvme/_staging \
-        --shared-staging /lustre/scratch/_staging \
-        -o /lustre/out/agg.json.gz
 
 dftracer_call_tree_mpi
 ----------------------

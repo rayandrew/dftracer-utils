@@ -8,10 +8,10 @@
 
 namespace dftracer::utils::utilities::common::arrow {
 
-// Init `view` from `schema` and bind it to `array`. On either failure the view
-// is reset and the nanoarrow error code is returned; on success returns
-// NANOARROW_OK with `view` ready for reads. Callers own the successful view and
-// must ArrowArrayViewReset it themselves.
+/// Init `view` from `schema` and bind it to `array`. On either failure the view
+/// is reset and the nanoarrow error code is returned; on success returns
+/// NANOARROW_OK with `view` ready for reads. Callers own the successful view
+/// and must ArrowArrayViewReset it themselves.
 inline int init_array_view(ArrowArrayView& view, ArrowSchema* schema,
                            ArrowArray* array) {
     ArrowError error;

@@ -31,7 +31,7 @@ struct EventLabels {
 // fetch.block / fetch.iter and preprocess duration events spread across
 // `num_ranks` pids. Each rank gets `events_per_rank` of each kind. Event
 // categories and names come from `labels`.
-std::string create_dlio_pfw_gz(dft_utils_test::TestEnvironment& env, int id,
+std::string create_dlio_pfw_gz(dftu_utils_test::TestEnvironment& env, int id,
                                int num_ranks, int events_per_rank,
                                const EventLabels& labels = {}) {
     const std::string plain_path =
@@ -165,7 +165,7 @@ TEST_SUITE("DFTracerGenDlioConfig") {
         const auto binary = find_binary();
         if (binary.empty()) return;
         // Pointing -d at a valid empty dir but no -o; argparse should fail.
-        dft_utils_test::TestEnvironment env(10);
+        dftu_utils_test::TestEnvironment env(10);
         REQUIRE(env.is_valid());
         CHECK(run_binary(binary, {"-d", env.get_dir()}) != 0);
     }
@@ -173,7 +173,7 @@ TEST_SUITE("DFTracerGenDlioConfig") {
     TEST_CASE("directory without DLIO events fails gracefully") {
         const auto binary = find_binary();
         if (binary.empty()) return;
-        dft_utils_test::TestEnvironment env(50);
+        dftu_utils_test::TestEnvironment env(50);
         REQUIRE(env.is_valid());
 
         // Generic POSIX trace (no fetch.block/preprocess events).
@@ -191,7 +191,7 @@ TEST_SUITE("DFTracerGenDlioConfig") {
         "happy path: DLIO traces produce a valid YAML with train + reader") {
         const auto binary = find_binary();
         if (binary.empty()) return;
-        dft_utils_test::TestEnvironment env(200);
+        dftu_utils_test::TestEnvironment env(200);
         REQUIRE(env.is_valid());
 
         for (int i = 0; i < 2; ++i) {
@@ -220,7 +220,7 @@ TEST_SUITE("DFTracerGenDlioConfig") {
     TEST_CASE("custom event cat/name overrides map onto DLIO components") {
         const auto binary = find_binary();
         if (binary.empty()) return;
-        dft_utils_test::TestEnvironment env(200);
+        dftu_utils_test::TestEnvironment env(200);
         REQUIRE(env.is_valid());
 
         EventLabels labels;
@@ -275,7 +275,7 @@ TEST_SUITE("DFTracerGenDlioConfig") {
     TEST_CASE("JSON event map is accepted") {
         const auto binary = find_binary();
         if (binary.empty()) return;
-        dft_utils_test::TestEnvironment env(200);
+        dftu_utils_test::TestEnvironment env(200);
         REQUIRE(env.is_valid());
 
         EventLabels labels;
@@ -312,7 +312,7 @@ TEST_SUITE("DFTracerGenDlioConfig") {
     TEST_CASE("malformed event map is rejected") {
         const auto binary = find_binary();
         if (binary.empty()) return;
-        dft_utils_test::TestEnvironment env(200);
+        dftu_utils_test::TestEnvironment env(200);
         REQUIRE(env.is_valid());
 
         auto f = create_dlio_pfw_gz(env, 0, /*num_ranks=*/1,
@@ -337,7 +337,7 @@ TEST_SUITE("DFTracerGenDlioConfig") {
     TEST_CASE("respects --num-workers and --prefetch-factor") {
         const auto binary = find_binary();
         if (binary.empty()) return;
-        dft_utils_test::TestEnvironment env(200);
+        dftu_utils_test::TestEnvironment env(200);
         REQUIRE(env.is_valid());
 
         auto f = create_dlio_pfw_gz(env, 0, /*num_ranks=*/1,

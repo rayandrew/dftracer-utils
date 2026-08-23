@@ -2,7 +2,7 @@
 #define DFTRACER_UTILS_UTILITIES_READER_INTERNAL_TRACE_READER_SHARED_H
 
 #include <dftracer/utils/core/coro/async_generator.h>
-#include <dftracer/utils/utilities/common/query/query.h>
+#include <dftracer/utils/query/query.h>
 #include <dftracer/utils/utilities/reader/internal/reader.h>
 #include <dftracer/utils/utilities/reader/trace_reader.h>
 #include <simdjson.h>
@@ -40,8 +40,7 @@ inline std::string_view strip_ndjson_bookends(std::string_view bytes) {
     return std::string_view(s, static_cast<std::size_t>(e - s));
 }
 
-inline common::query::LiteralValue ondemand_to_literal(
-    simdjson::ondemand::value val) {
+inline query::LiteralValue ondemand_to_literal(simdjson::ondemand::value val) {
     auto type = val.type().value_unsafe();
     switch (type) {
         case simdjson::ondemand::json_type::string: {
@@ -72,7 +71,7 @@ inline common::query::LiteralValue ondemand_to_literal(
 
 // True if the query references any dotted (nested) field, e.g. "args.ret".
 // Cheap; compute once per read to gate the dotted-key work below.
-inline bool query_references_dotted(const common::query::Query& query) {
+inline bool query_references_dotted(const query::Query& query) {
     for (const auto& f : query.fields()) {
         if (f.find('.') != std::string_view::npos) return true;
     }
@@ -83,8 +82,8 @@ inline bool query_references_dotted(const common::query::Query& query) {
 // references: the bare child key (`ret`, the canonical form) and/or the dotted
 // path (`args.ret`). `check_dotted` should be query_references_dotted(query),
 // hoisted out of the per-event loop. Consumes `val` exactly once.
-inline void store_referenced_nested(common::query::ValueMap& fields,
-                                    const common::query::Query& query,
+inline void store_referenced_nested(query::ValueMap& fields,
+                                    const query::Query& query,
                                     bool check_dotted, std::string_view parent,
                                     std::string_view child,
                                     simdjson::ondemand::value val) {
@@ -106,8 +105,7 @@ inline void store_referenced_nested(common::query::ValueMap& fields,
 // shared by read_json (core) and read_arrow (Arrow export).
 coro::AsyncGenerator<std::span<const char>> read_chunks_indexed(
     std::shared_ptr<Reader> reader, std::string index_path,
-    std::string file_path, ReadConfig config,
-    std::optional<common::query::Query> query,
+    std::string file_path, ReadConfig config, std::optional<query::Query> query,
     bool extend_to_line_boundary = false);
 
 }  // namespace dftracer::utils::utilities::reader::internal

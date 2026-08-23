@@ -2,8 +2,8 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
+#include <dftracer/utils/trace/indexing/chunk_dimension_stats.h>
+#include <dftracer/utils/trace/indexing/chunk_statistics.h>
 #include <dftracer/utils/utilities/hash/fnv1a_hasher_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/index_database_sst_writer_context.h>
@@ -17,9 +17,8 @@
 #include <unordered_set>
 #include <vector>
 
-using dftracer::utils::utilities::composites::dft::indexing::
-    ChunkDimensionStats;
-using dftracer::utils::utilities::composites::dft::indexing::ChunkStatistics;
+using dftracer::utils::trace::indexing::ChunkDimensionStats;
+using dftracer::utils::trace::indexing::ChunkStatistics;
 using dftracer::utils::utilities::indexer::IndexDatabase;
 using dftracer::utils::utilities::indexer::IndexDatabaseSstWriterContext;
 using dftracer::utils::utilities::indexer::SstArtifactRegistry;
@@ -322,10 +321,10 @@ void check_root_summaries(const IndexDatabase& db_a,
 
 TEST_SUITE("IndexDatabaseSstWriterContext") {
     TEST_CASE("round-trip: SST ingest matches direct RocksDB writes") {
-        auto root_a = dft_utils_test::make_unique_test_path("sst_spike_db_a");
-        auto root_b = dft_utils_test::make_unique_test_path("sst_spike_db_b");
+        auto root_a = dftu_utils_test::make_unique_test_path("sst_spike_db_a");
+        auto root_b = dftu_utils_test::make_unique_test_path("sst_spike_db_b");
         auto staging =
-            dft_utils_test::make_unique_test_path("sst_spike_staging");
+            dftu_utils_test::make_unique_test_path("sst_spike_staging");
         fs::create_directories(root_a);
         fs::create_directories(root_b);
         fs::create_directories(staging);
@@ -370,10 +369,10 @@ TEST_SUITE("IndexDatabaseSstWriterContext") {
     }
 
     TEST_CASE("bulk_ingest composes across multiple disjoint batches") {
-        auto root_a = dft_utils_test::make_unique_test_path("sst_multi_db_a");
-        auto root_b = dft_utils_test::make_unique_test_path("sst_multi_db_b");
+        auto root_a = dftu_utils_test::make_unique_test_path("sst_multi_db_a");
+        auto root_b = dftu_utils_test::make_unique_test_path("sst_multi_db_b");
         auto staging =
-            dft_utils_test::make_unique_test_path("sst_multi_staging");
+            dftu_utils_test::make_unique_test_path("sst_multi_staging");
         fs::create_directories(root_a);
         fs::create_directories(root_b);
         fs::create_directories(staging);

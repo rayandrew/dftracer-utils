@@ -27,7 +27,7 @@
 
 namespace dftracer::utils::coro {
 
-// Maps void result types to std::monostate for use in std::variant.
+/// Maps void result types to std::monostate for use in std::variant.
 template <typename T>
 using when_any_result_t =
     std::conditional_t<std::is_void_v<T>, std::monostate, T>;
@@ -59,12 +59,12 @@ struct WhenAnyResult {
         }
     }
 
-    // Cancellation tokens for remaining tasks
+    /// Cancellation tokens for remaining tasks
     std::vector<std::shared_ptr<std::atomic<bool>>>
         remaining_cancellation_tokens;
 };
 
-// Forward declaration for SharedState
+/// Forward declaration for SharedState
 template <typename Awaitable>
 struct WhenAnySharedState;
 
@@ -352,8 +352,8 @@ auto when_any(std::initializer_list<Awaitable> awaitables) {
 
 namespace detail {
 
-// Helper to convert variadic awaitables to vector
-// All awaitables must be the same type
+/// Helper to convert variadic awaitables to vector
+/// All awaitables must be the same type
 template <typename Awaitable, typename... Rest>
 std::vector<Awaitable> make_awaitable_vector(Awaitable&& first,
                                              Rest&&... rest) {
@@ -386,7 +386,7 @@ auto when_any(Awaitable&& first, Rest&&... rest) {
 }
 
 // ============================================================================
-// Heterogeneous when_any — different awaitable types, variant result
+// Heterogeneous when_any - different awaitable types, variant result
 // ============================================================================
 
 /**
@@ -426,7 +426,7 @@ struct WhenAnyTupleResult {
     }
 
    private:
-    // Internal state — accessed by WhenAnyTupleState and
+    // Internal state - accessed by WhenAnyTupleState and
     // WhenAnyTupleAwaitable via friendship.
     template <typename... As>
     friend struct WhenAnyTupleState;
@@ -492,7 +492,7 @@ class WhenAnyTupleAwaitable {
     using State = WhenAnyTupleState<Awaitables...>;
     std::shared_ptr<State> state_;
 
-    // Launch a fire-and-forget Coro wrapper for the I-th awaitable.
+    /// Launch a fire-and-forget Coro wrapper for the I-th awaitable.
     template <std::size_t I>
     void launch_one() {
         using A = std::tuple_element_t<I, std::tuple<Awaitables...>>;
@@ -575,8 +575,8 @@ class WhenAnyTupleAwaitable {
         (launch_one<Is>(), ...);
     }
 
-    // Check if the I-th awaitable is immediately ready; if so, populate
-    // state and return true.
+    /// Check if the I-th awaitable is immediately ready; if so, populate
+    /// state and return true.
     template <std::size_t I>
     bool check_ready_one() {
         using A = std::tuple_element_t<I, std::tuple<Awaitables...>>;

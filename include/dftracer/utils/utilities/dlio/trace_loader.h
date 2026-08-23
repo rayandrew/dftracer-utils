@@ -15,8 +15,8 @@ namespace dftracer::utils::utilities::dlio {
 
 using DDSketch = ::dftracer::utils::utilities::common::statistics::DDSketch;
 
-// Default DLIO category / event names; overridable per-component via
-// TraceLoaderOptions.
+/// Default DLIO category / event names; overridable per-component via
+/// TraceLoaderOptions.
 inline constexpr std::string_view CATEGORY_DATALOADER = "dataloader";
 inline constexpr std::string_view CATEGORY_DATA = "data";
 inline constexpr std::string_view EVENT_FETCH_BLOCK = "fetch.block";
@@ -24,74 +24,74 @@ inline constexpr std::string_view EVENT_FETCH_ITER = "fetch.iter";
 inline constexpr std::string_view EVENT_PREPROCESS = "preprocess";
 inline constexpr std::string_view EVENT_ITEM = "item";
 
-// A (category, name) pair selecting one DLIO component.
+/// A (category, name) pair selecting one DLIO component.
 struct EventSelector {
     std::string cat;
     std::string name;
 };
 
 struct AggregatedTraces {
-    // Per-rank concatenated sample sequences (seconds), in pid-ascending,
-    // then time-bucket-ascending order.
+    /// Per-rank concatenated sample sequences (seconds), in pid-ascending,
+    /// then time-bucket-ascending order.
     std::vector<std::vector<double>> fetch_block_trace;
     std::vector<std::vector<double>> fetch_iter_trace;
     std::vector<std::vector<double>> getitem_trace;
 
-    // Flat sample arrays for distribution fitting (seconds).
-    std::vector<double> computation_times;  // fetch.block
-    std::vector<double> preprocess_times;   // preprocess
+    /// Flat sample arrays for distribution fitting (seconds).
+    std::vector<double> computation_times;  ///< fetch.block
+    std::vector<double> preprocess_times;   ///< preprocess
 
-    // Sketches merged across all (rank, bucket) entries for each component.
-    // Nullable: only populated if the aggregator was run with
-    // --compute-percentiles.
+    /// Sketches merged across all (rank, bucket) entries for each component.
+    /// Nullable: only populated if the aggregator was run with
+    /// --compute-percentiles.
     std::shared_ptr<DDSketch> fetch_block_sketch;
     std::shared_ptr<DDSketch> fetch_iter_sketch;
     std::shared_ptr<DDSketch> preprocess_sketch;
     std::shared_ptr<DDSketch> getitem_sketch;
 
-    // Statistics with min/max/mean/count populated, sketch attached when
-    // present.
+    /// Statistics with min/max/mean/count populated, sketch attached when
+    /// present.
     Statistic fetch_block_stats;
     Statistic fetch_iter_stats;
     Statistic preprocess_stats;
     Statistic getitem_stats;
 
-    // Aggregate metrics (seconds).
+    /// Aggregate metrics (seconds).
     double trace_e2e_duration = 0.0;
     double trace_rank_variance = 0.0;
     std::vector<double> trace_per_rank_throughput;
 
-    // Per-component accumulated / union times. Both computed from actual
-    // (ts, te) boundaries in the CF rather than a fixed-ratio heuristic.
+    /// Per-component accumulated / union times. Both computed from actual
+    /// (ts, te) boundaries in the CF rather than a fixed-ratio heuristic.
     ComponentTimeMetrics trace_preprocess_metrics;
     ComponentTimeMetrics trace_fetch_iter_metrics;
     ComponentTimeMetrics trace_fetch_block_metrics;
 
-    // Discovered PIDs (sorted) - index in this list defines rank ID.
+    /// Discovered PIDs (sorted) - index in this list defines rank ID.
     std::vector<std::uint64_t> rank_pids;
 
     int num_ranks = 0;
-    int num_steps = 0;  // min length across ranks of fetch_block_trace
+    int num_steps = 0;  ///< min length across ranks of fetch_block_trace
 
-    // True if any AGGREGATION entry was found.
+    /// True if any AGGREGATION entry was found.
     bool any_data = false;
 
-    // True if at least one DDSketch was present in the CF. Drives whether
-    // sample synthesis uses inverse-CDF or mean replication.
+    /// True if at least one DDSketch was present in the CF. Drives whether
+    /// sample synthesis uses inverse-CDF or mean replication.
     bool sketches_available = false;
 
-    // Time bucket width in microseconds (from AggGlobalConfig).
+    /// Time bucket width in microseconds (from AggGlobalConfig).
     std::uint64_t time_interval_us = 0;
 };
 
 struct TraceLoaderOptions {
-    // Hard cap on samples synthesized per (cat, name, pid, bucket) entry, so a
-    // single high-count bucket cannot blow up memory. 0 disables the cap.
+    /// Hard cap on samples synthesized per (cat, name, pid, bucket) entry, so a
+    /// single high-count bucket cannot blow up memory. 0 disables the cap.
     std::uint64_t max_samples_per_entry = 100;
-    // Seed for inverse-CDF sketch sampling.
+    /// Seed for inverse-CDF sketch sampling.
     std::uint64_t seed = 0xD15710;
 
-    // Per-component (cat, name) selectors; defaults are the DLIO event names.
+    /// Per-component (cat, name) selectors; defaults are the DLIO event names.
     EventSelector fetch_block{std::string(CATEGORY_DATALOADER),
                               std::string(EVENT_FETCH_BLOCK)};
     EventSelector fetch_iter{std::string(CATEGORY_DATALOADER),
@@ -101,20 +101,20 @@ struct TraceLoaderOptions {
     EventSelector item{std::string(CATEGORY_DATA), std::string(EVENT_ITEM)};
 };
 
-// Loads aggregated DLIO trace data from a dftracer RocksDB. Opens the database
-// read-only, iterates the AGGREGATION column family, and materializes per-rank
-// trace arrays, distribution sample arrays, and trace-side
-// ComponentTimeMetrics.
+/// Loads aggregated DLIO trace data from a dftracer RocksDB. Opens the database
+/// read-only, iterates the AGGREGATION column family, and materializes per-rank
+/// trace arrays, distribution sample arrays, and trace-side
+/// ComponentTimeMetrics.
 AggregatedTraces load_aggregated_traces(const std::string& db_path,
                                         const TraceLoaderOptions& options = {});
 
-// Overlays (cat, name) overrides from a YAML or JSON file onto the component
-// selectors in `options`. Top-level keys fetch_block, fetch_iter, preprocess
-// and item each take an optional `cat` and `name`; omitted keys and fields are
-// left untouched. Throws DFTUtilsException on a missing file or parse error.
+/// Overlays (cat, name) overrides from a YAML or JSON file onto the component
+/// selectors in `options`. Top-level keys fetch_block, fetch_iter, preprocess
+/// and item each take an optional `cat` and `name`; omitted keys and fields are
+/// left untouched. Throws DFTUtilsException on a missing file or parse error.
 void load_event_map(const std::string& path, TraceLoaderOptions& options);
 
-// Convenience: build a BarrierSimulatorContext from loaded traces.
+/// Convenience: build a BarrierSimulatorContext from loaded traces.
 BarrierSimulatorContext make_simulator_context(const AggregatedTraces& traces,
                                                int num_workers = 8,
                                                int prefetch_factor = 2);

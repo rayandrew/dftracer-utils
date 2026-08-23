@@ -1,3 +1,4 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/coro/channel.h>
@@ -12,8 +13,6 @@
 #include <map>
 #include <mutex>
 #include <vector>
-
-#include "common_cli.h"
 
 using namespace dftracer::utils;
 

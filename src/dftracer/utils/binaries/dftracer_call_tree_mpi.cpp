@@ -1,6 +1,8 @@
 // MPI driver for parallel call-tree construction. Thin DAG over
 // MPICallTreeBuilder; all phase logic lives in the engine.
 
+#include <dftracer/utils/binaries/common_cli.h>
+#include <dftracer/utils/binaries/common_cli_mpi.h>
 #include <dftracer/utils/call_tree/mpi/builder.h>
 #include <dftracer/utils/call_tree/mpi/config.h>
 #include <dftracer/utils/core/common/config.h>
@@ -16,9 +18,6 @@
 #include <cstdio>
 #include <memory>
 #include <string>
-
-#include "common_cli.h"
-#include "common_cli_mpi.h"
 
 using namespace dftracer::utils;
 using namespace dftracer::utils::call_tree;

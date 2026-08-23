@@ -275,14 +275,14 @@ std::unique_ptr<CallTree> make_fixture() {
     auto add_proc = [&](std::uint32_t pid, std::uint32_t tid,
                         std::uint32_t pkid) {
         ProcessKey key(pid, tid, pkid);
-        dftracer::utils::utilities::composites::dft::ArgsMap a1;
+        dftracer::utils::trace::ArgsMap a1;
         a1.set_valid(true);
         a1.insert("level", static_cast<std::uint64_t>(0));
         a1.insert("tid", static_cast<std::uint64_t>(tid));
         a1.insert("fhash", std::string("abc123"));
         auto root = tree->get_factory().create_node(1, "main", "function", 0,
                                                     1000, 0, std::move(a1));
-        dftracer::utils::utilities::composites::dft::ArgsMap a2;
+        dftracer::utils::trace::ArgsMap a2;
         a2.set_valid(true);
         a2.insert("level", static_cast<std::uint64_t>(1));
         a2.insert("tid", static_cast<std::uint64_t>(tid));

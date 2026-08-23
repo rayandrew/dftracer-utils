@@ -1,9 +1,10 @@
 """Dask distributed integration for dftracer-utils."""
 
 import os
+import shutil
 from collections import defaultdict, namedtuple
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple
 
 # pyarrow's stubs are well-behaved, so type-checkers get the real module.
 if TYPE_CHECKING:
@@ -33,13 +34,14 @@ from dftracer.utils import (
     peek_default_runtime,
     set_default_runtime,
 )
-from dftracer.utils.dftracer_utils_ext import AggregatedTraceViewer, TraceViewer
+from dftracer.utils.dataframe import AggregatedTraceViewer, TraceViewer
 
 __all__ = [
     "DaskTraceViewer",
     "DaskAggregatedTraceViewer",
     "ProgressAggregator",
     "register_auto_thread_plugin",
+    "assign_files_by_pid",
 ]
 
 
@@ -162,6 +164,11 @@ def resolve_local_staging(client) -> str:
     else:
         worker_local_dir = "/tmp"
     return os.path.join(worker_local_dir, "dftracer-sst-staging")
+
+
+def _rmtree_quiet(path: str) -> None:
+    """Best-effort recursive remove; submitted to workers for staging cleanup."""
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _runtime_threads(worker, host_worker_counts, total_cpus):
@@ -289,7 +296,7 @@ class _Plan:
     views_root: Optional[str] = None
 
 
-def _apply_plan(tv: TraceViewer, plan: _Plan) -> TraceViewer:
+def _apply_plan(tv: Any, plan: _Plan) -> Any:
     """Apply a DaskTraceViewer plan to a per-shard TraceViewer. group_by/agg
     return the AggregatedTraceViewer subclass, still a TraceViewer."""
     for dsl in plan.filters:
@@ -327,7 +334,7 @@ def _apply_plan(tv: TraceViewer, plan: _Plan) -> TraceViewer:
     return tv
 
 
-def _make_viewer(files, index_dir, plan: _Plan) -> TraceViewer:
+def _make_viewer(files, index_dir, plan: _Plan) -> Any:
     return _apply_plan(TraceViewer(files, index_path=index_dir or None), plan)
 
 
@@ -375,8 +382,8 @@ def _dv_collect_typed_task(files, index_dir, plan, shard_begin, shard_end):
     every worker sees all files but a distinct shard range of the aggregation
     CF - returns {regular, aggregated, counters} pyarrow Tables.
 
-    The C++ terminal yields ext ArrowTable capsules, which are not picklable;
-    adopt each into a pyarrow Table here so a process cluster can ship them."""
+    The C++ terminal yields native VecBatches, which are not picklable; import
+    each into a pyarrow Table here so a process cluster can ship them."""
     import pyarrow as pa
 
     typed = _make_viewer(files, index_dir, plan).collect_typed(
@@ -468,7 +475,6 @@ class DaskTraceViewer:
             _plan=plan,
         )
 
-    # ---- builder ops (lazy) ----
     def filter(self, dsl: str) -> "DaskTraceViewer":
         return self._clone(replace(self._plan, filters=self._plan.filters + (dsl,)))
 
@@ -522,7 +528,6 @@ class DaskTraceViewer:
     def agg_numeric_args(self) -> "DaskAggregatedTraceViewer":
         return self._agg_clone(replace(self._plan, auto_numeric=True))
 
-    # ---- internals ----
     def _shards(self):
         step = max(1, self._files_per_task)
         return [self._files[i : i + step] for i in range(0, len(self._files), step)]
@@ -530,7 +535,6 @@ class DaskTraceViewer:
     def _resolve_client(self):
         return self._client or get_client()  # pyright: ignore[reportOptionalCall]  # ty: ignore[call-non-callable]
 
-    # ---- terminals ----
     def collect(self):
         """Distributed group_by+agg -> one pyarrow Table.
 
@@ -795,26 +799,18 @@ def assign_files_by_pid(
     if n_workers <= 0:
         n_workers = 1
 
-    # Count PIDs per file and assign to worker by hash(majority_pid) % n_workers
     worker_assignments: Dict[int, List[int]] = defaultdict(list)
 
     for file_id, pids in file_pids.items():
         if not pids:
-            # No PIDs known, round-robin assignment
             worker_id = file_id % n_workers
         else:
-            # Use hash of first PID for deterministic assignment
-            # Files with same PIDs go to same worker
-            majority_pid = min(pids)  # Use min for determinism
+            # Files with same PIDs go to same worker.
+            majority_pid = min(pids)  # min for determinism
             worker_id = hash(majority_pid) % n_workers
         worker_assignments[worker_id].append(file_id)
 
     return dict(worker_assignments)
-
-
-# ---------------------------------------------------------------------------
-# Distributed index build (SST sink path)
-# ---------------------------------------------------------------------------
 
 
 def _build_sst_task(
@@ -918,7 +914,7 @@ def distributed_index(
     bloom_dimensions: Optional[List[str]] = None,
     force_rebuild: bool = False,
     build_bloom: bool = True,
-    partition: str = "lpt",
+    partition: Literal["lpt", "round_robin"] = "lpt",
     rebuild_root_summaries: bool = True,
     parallelism_per_worker: int = 0,
     flush_every_files: int = 0,
@@ -1144,6 +1140,7 @@ def distributed_index(
 
     _t_build = _time.monotonic()
     worker_ids: List[int] = []
+    worker_addrs: List[str] = []
     # Each entry is (artifact_dicts, tracker_blob) returned by _build_sst_task.
     worker_results: List[Any] = []
     if client is None:
@@ -1279,6 +1276,31 @@ def distributed_index(
             len(all_file_ids),
             len(tracker_blobs),
         )
+
+    stale = []
+    for w in worker_ids:
+        stale.append((w, os.path.join(local_staging, f"worker_{w}")))
+        if shared_staging and shared_staging != local_staging:
+            stale.append((w, os.path.join(shared_staging, f"worker_{w}")))
+    if client is not None and worker_addrs:
+        try:
+            client.gather(
+                [
+                    client.submit(
+                        _rmtree_quiet,
+                        path,
+                        workers=[worker_addrs[w % len(worker_addrs)]],
+                        allow_other_workers=True,
+                        pure=False,
+                    )
+                    for w, path in stale
+                ]
+            )
+        except Exception:
+            _log.warning("distributed_index: staging cleanup failed", exc_info=True)
+    else:
+        for _w, path in stale:
+            _rmtree_quiet(path)
 
     per_worker_file_counts = [len(set(ids)) for ids in worker_file_ids]
     return {

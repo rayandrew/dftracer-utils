@@ -94,7 +94,7 @@ TEST_SUITE("DFTracerGenFakeTrace") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         std::string out_dir = env.get_dir() + "/output";
@@ -115,7 +115,7 @@ TEST_SUITE("DFTracerGenFakeTrace") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         std::string out_dir = env.get_dir() + "/output";
@@ -139,7 +139,7 @@ TEST_SUITE("DFTracerGenFakeTrace") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         std::string out_dir = env.get_dir() + "/output";
@@ -164,7 +164,7 @@ TEST_SUITE("DFTracerGenFakeTrace") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         std::string out1 = env.get_dir() + "/run1";
@@ -209,7 +209,7 @@ TEST_SUITE("DFTracerGenFakeTrace") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         std::string out_dir = env.get_dir() + "/output";

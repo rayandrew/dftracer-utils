@@ -11,13 +11,8 @@
 #include <chrono>
 #include <memory>
 
-static std::shared_ptr<dftracer::utils::Runtime> g_default_runtime;
-
-dftracer::utils::Runtime *get_default_runtime() {
-    if (!g_default_runtime) {
-        g_default_runtime = std::make_shared<dftracer::utils::Runtime>(0);
-    }
-    return g_default_runtime.get();
+dftracer::utils::Runtime *dftracer::utils::python::get_default_runtime() {
+    return &dftracer::utils::default_runtime();
 }
 
 static void Runtime_dealloc(RuntimeObject *self) {
@@ -61,7 +56,7 @@ static int Runtime_init(RuntimeObject *self, PyObject *args, PyObject *kwds) {
         self->runtime =
             std::make_shared<dftracer::utils::Runtime>(config, true);
     } catch (const std::exception &e) {
-        set_typed_py_error(e);
+        dftracer::utils::python::set_typed_py_error(e);
         return -1;
     }
 
@@ -156,7 +151,6 @@ static PyObject *Runtime_get_progress(RuntimeObject *self,
         return NULL;
     }
 
-    // Workers
     PyObject *workers =
         PyList_New(static_cast<Py_ssize_t>(prog.workers.size()));
     if (!workers) {
@@ -184,7 +178,6 @@ static PyObject *Runtime_get_progress(RuntimeObject *self,
     }
     Py_DECREF(workers);
 
-    // Tasks
     PyObject *tasks =
         PyList_New(static_cast<Py_ssize_t>(prog.root_tasks.size()));
     if (!tasks) {
@@ -207,7 +200,6 @@ static PyObject *Runtime_get_progress(RuntimeObject *self,
     }
     Py_DECREF(tasks);
 
-    // Errors
     PyObject *errors =
         PyList_New(static_cast<Py_ssize_t>(prog.recent_errors.size()));
     if (!errors) {
@@ -322,7 +314,8 @@ static PyObject *Runtime_get_threads(RuntimeObject *self, void *) {
 
 static PyObject *get_default_runtime_py(PyObject *Py_UNUSED(module),
                                         PyObject *Py_UNUSED(ignored)) {
-    dftracer::utils::Runtime *rt = get_default_runtime();
+    dftracer::utils::Runtime *rt =
+        dftracer::utils::python::get_default_runtime();
     if (!rt) {
         PyErr_SetString(PyExc_RuntimeError, "Failed to create default runtime");
         return NULL;
@@ -331,8 +324,8 @@ static PyObject *get_default_runtime_py(PyObject *Py_UNUSED(module),
     RuntimeObject *obj = (RuntimeObject *)RuntimeType.tp_alloc(&RuntimeType, 0);
     if (!obj) return NULL;
 
-    new (&obj->runtime)
-        std::shared_ptr<dftracer::utils::Runtime>(g_default_runtime);
+    new (&obj->runtime) std::shared_ptr<dftracer::utils::Runtime>(
+        dftracer::utils::default_runtime_shared());
     return (PyObject *)obj;
 }
 
@@ -343,13 +336,13 @@ static PyObject *get_default_runtime_py(PyObject *Py_UNUSED(module),
 // runtime.
 static PyObject *peek_default_runtime_py(PyObject *Py_UNUSED(module),
                                          PyObject *Py_UNUSED(ignored)) {
-    if (!g_default_runtime) Py_RETURN_NONE;
+    auto rt = dftracer::utils::peek_default_runtime();
+    if (!rt) Py_RETURN_NONE;
 
     RuntimeObject *obj = (RuntimeObject *)RuntimeType.tp_alloc(&RuntimeType, 0);
     if (!obj) return NULL;
 
-    new (&obj->runtime)
-        std::shared_ptr<dftracer::utils::Runtime>(g_default_runtime);
+    new (&obj->runtime) std::shared_ptr<dftracer::utils::Runtime>(rt);
     return (PyObject *)obj;
 }
 
@@ -359,7 +352,7 @@ static PyObject *set_default_runtime_py(PyObject *Py_UNUSED(module),
     if (!PyArg_ParseTuple(args, "O", &arg)) return NULL;
 
     if (arg == Py_None) {
-        g_default_runtime.reset();
+        dftracer::utils::set_default_runtime(nullptr);
         Py_RETURN_NONE;
     }
 
@@ -368,39 +361,39 @@ static PyObject *set_default_runtime_py(PyObject *Py_UNUSED(module),
         return NULL;
     }
 
-    g_default_runtime = ((RuntimeObject *)arg)->runtime;
+    dftracer::utils::set_default_runtime(((RuntimeObject *)arg)->runtime);
     Py_RETURN_NONE;
 }
 
 static PyMethodDef Runtime_methods[] = {
-    {"shutdown", DFT_PYCFUNCTION(Runtime_shutdown), METH_NOARGS,
+    {"shutdown", DFTU_PYCFUNCTION(Runtime_shutdown), METH_NOARGS,
      "shutdown()\n"
      "--\n"
      "\n"
      "Shut down the runtime.\n"},
-    {"get_progress", DFT_PYCFUNCTION(Runtime_get_progress), METH_NOARGS,
+    {"get_progress", DFTU_PYCFUNCTION(Runtime_get_progress), METH_NOARGS,
      "Return progress dict with keys: total, completed, running,\n"
      "queued, failed."},
-    {"is_responsive", DFT_PYCFUNCTION(Runtime_is_responsive), METH_NOARGS,
+    {"is_responsive", DFTU_PYCFUNCTION(Runtime_is_responsive), METH_NOARGS,
      "Return True if the runtime is making progress."},
-    {"set_timeout", DFT_PYCFUNCTION(Runtime_set_timeout),
+    {"set_timeout", DFTU_PYCFUNCTION(Runtime_set_timeout),
      METH_VARARGS | METH_KEYWORDS,
      "Set global timeout in milliseconds.\n"
      "\n"
      "Args:\n"
      "    global_ms (int): Timeout in milliseconds (0 = no timeout).\n"},
     {"set_default_task_timeout",
-     DFT_PYCFUNCTION(Runtime_set_default_task_timeout),
+     DFTU_PYCFUNCTION(Runtime_set_default_task_timeout),
      METH_VARARGS | METH_KEYWORDS,
      "Set default per-task timeout in milliseconds.\n"
      "\n"
      "Args:\n"
      "    ms (int): Timeout in milliseconds (0 = no timeout).\n"},
-    {"wait_all", DFT_PYCFUNCTION(Runtime_wait_all), METH_NOARGS,
+    {"wait_all", DFTU_PYCFUNCTION(Runtime_wait_all), METH_NOARGS,
      "Wait for all outstanding submitted tasks to complete."},
-    {"__enter__", DFT_PYCFUNCTION(Runtime_enter), METH_NOARGS,
+    {"__enter__", DFTU_PYCFUNCTION(Runtime_enter), METH_NOARGS,
      "Enter context manager."},
-    {"__exit__", DFT_PYCFUNCTION(Runtime_exit), METH_VARARGS,
+    {"__exit__", DFTU_PYCFUNCTION(Runtime_exit), METH_VARARGS,
      "Exit context manager (calls shutdown)."},
     {NULL}};
 
@@ -489,13 +482,13 @@ static PyMethodDef runtime_module_methods[] = {
 // scan can leave hundreds of SSTs open (more so on a networked filesystem),
 // and without this the process can appear to hang after the work is done.
 static void dftracer_utils_atexit_cleanup() {
-    if (g_default_runtime) {
-        g_default_runtime->shutdown();
+    if (auto rt = dftracer::utils::peek_default_runtime()) {
+        rt->shutdown();
     }
     dftracer::utils::rocksdb::mark_process_exiting_for_rocksdb();
 }
 
-int init_runtime(PyObject *m) {
+int dftracer::utils::python::init_runtime(PyObject *m) {
     if (register_type(m, &RuntimeType, "Runtime") < 0) return -1;
 
     Py_AtExit(dftracer_utils_atexit_cleanup);

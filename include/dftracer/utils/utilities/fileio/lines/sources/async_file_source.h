@@ -10,8 +10,8 @@
 
 namespace dftracer::utils::utilities::fileio::lines::sources {
 
-// Open a file read-only via async I/O, throwing DFTUtilsException(IO) on
-// failure. Returns an owning ScopedFd.
+/// Open a file read-only via async I/O, throwing DFTUtilsException(IO) on
+/// failure. Returns an owning ScopedFd.
 inline coro::CoroTask<ScopedFd> async_open_read(const std::string& file_path) {
     ssize_t fd =
         co_await ::dftracer::utils::io::open(file_path.c_str(), O_RDONLY);
@@ -22,8 +22,8 @@ inline coro::CoroTask<ScopedFd> async_open_read(const std::string& file_path) {
     co_return ScopedFd(static_cast<int>(fd));
 }
 
-// Build the IO read-error for a failed pread. neg_errno is the negated errno
-// returned by io::pread (bytes_read < 0).
+/// Build the IO read-error for a failed pread. neg_errno is the negated errno
+/// returned by io::pread (bytes_read < 0).
 inline DFTUtilsException make_read_error(const std::string& file_path,
                                          ssize_t neg_errno) {
     return DFTUtilsException(

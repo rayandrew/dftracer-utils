@@ -4,21 +4,23 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/python/batch_indexer.h>
+#include <dftracer/utils/python/columnar_eval.h>
+#include <dftracer/utils/python/dataframe.h>
 #include <dftracer/utils/python/index_database.h>
 #include <dftracer/utils/python/indexer.h>
 #include <dftracer/utils/python/json.h>
 #include <dftracer/utils/python/memoryview_batch.h>
+#include <dftracer/utils/python/op_runner.h>
+#include <dftracer/utils/python/plugin_host.h>
 #include <dftracer/utils/python/py_errors.h>
 #include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/runtime.h>
+#include <dftracer/utils/python/series.h>
 #include <dftracer/utils/python/sst_distribution.h>
 #include <dftracer/utils/python/task_handle.h>
 #include <dftracer/utils/python/trace_reader_iterator.h>
 #include <dftracer/utils/python/trace_viewer.h>
-#include <dftracer/utils/python/utilities/aggregator.h>
-#include <dftracer/utils/python/utilities/comparator.h>
-#include <dftracer/utils/python/utilities/metadata_collector.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
+#include <dftracer/utils/trace/aggregators/aggregation_serialization.h>
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #include <dftracer/utils/python/arrow_stream_capsule.h>
 #include <dftracer/utils/python/streaming_iterator.h>
@@ -89,7 +91,7 @@ PyObject* py_memory_budget_advice(PyObject*, PyObject* args, PyObject* kwds) {
 }
 
 PyMethodDef dftracer_utils_methods[] = {
-    {"memory_budget_advice", DFT_PYCFUNCTION(py_memory_budget_advice),
+    {"memory_budget_advice", DFTU_PYCFUNCTION(py_memory_budget_advice),
      METH_VARARGS | METH_KEYWORDS,
      "memory_budget_advice(required_bytes, available_bytes=0) -> dict\n\n"
      "Whether an aggregated workload of `required_bytes` fits in process, and\n"
@@ -131,34 +133,36 @@ PyMODINIT_FUNC PyInit_dftracer_utils_ext(void) {
     if (m == NULL) return NULL;
     // The aggregation CF shard count, so distributed callers split the shard
     // space without hardcoding it (single source of truth).
-    PyModule_AddIntConstant(m, "NUM_SHARDS",
-                            dftracer::utils::utilities::composites::dft::
-                                aggregators::AGG_KEY_NUM_SHARDS);
+    PyModule_AddIntConstant(
+        m, "NUM_SHARDS",
+        dftracer::utils::trace::aggregators::AGG_KEY_NUM_SHARDS);
     // Configure the C++ logger for the extension: picks up
     // DFTRACER_UTILS_LOG_LEVEL and auto color (on only when stderr is a TTY),
     // matching the CLI binaries. Without this the logger runs on bare defaults.
     dftracer::utils::logger::init();
-    if (init_py_errors(m) < 0) return NULL;
-    if (init_checkpoint_indexer(m) < 0) return NULL;
-    if (init_indexer(m) < 0) return NULL;
-    if (init_task_handle(m) < 0) return NULL;
-    if (init_runtime(m) < 0) return NULL;
+    if (dftracer::utils::python::init_py_errors(m) < 0) return NULL;
+    if (dftracer::utils::python::init_checkpoint_indexer(m) < 0) return NULL;
+    if (dftracer::utils::python::init_indexer(m) < 0) return NULL;
+    if (dftracer::utils::python::init_task_handle(m) < 0) return NULL;
+    if (dftracer::utils::python::init_runtime(m) < 0) return NULL;
     if (dftracer::utils::python::init_memoryview_batch(m) < 0) return NULL;
-    if (init_json_dict_value(m) < 0) return NULL;
-    if (init_trace_reader_iterator(m) < 0) return NULL;
+    if (dftracer::utils::python::init_json_dict_value(m) < 0) return NULL;
+    if (dftracer::utils::python::init_trace_reader_iterator(m) < 0) return NULL;
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
     if (dftracer::utils::python::init_arrow_streaming_iterator(m) < 0)
         return NULL;
-    if (init_arrow_batch_stream(m) < 0) return NULL;
+    if (dftracer::utils::python::init_arrow_batch_stream(m) < 0) return NULL;
 #endif
 #ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
     if (dftracer::utils::python::init_arrow_parallel_reader(m) < 0) return NULL;
 #endif
-    if (init_trace_viewer(m) < 0) return NULL;
-    if (init_metadata_collector(m) < 0) return NULL;
-    if (init_aggregator(m) < 0) return NULL;
-    if (init_comparator(m) < 0) return NULL;
-    if (init_index_database(m) < 0) return NULL;
-    if (init_sst_distribution(m) < 0) return NULL;
+    if (dftracer::utils::python::init_trace_viewer(m) < 0) return NULL;
+    if (dftracer::utils::python::init_plugin_host(m) < 0) return NULL;
+    if (dftracer::utils::python::init_op_runner(m) < 0) return NULL;
+    if (dftracer::utils::python::init_index_database(m) < 0) return NULL;
+    if (dftracer::utils::python::init_sst_distribution(m) < 0) return NULL;
+    if (dftracer::utils::python::init_series(m) < 0) return NULL;
+    if (dftracer::utils::python::init_dataframe(m) < 0) return NULL;
+    if (dftracer::utils::python::init_columnar_eval(m) < 0) return NULL;
     return m;
 }

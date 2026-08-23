@@ -21,6 +21,11 @@ typedef struct {
 extern PyTypeObject TraceViewerType;
 // group_by/agg/agg_numeric_args promote to this; it adds the cache terminals.
 extern PyTypeObject AggregatedTraceViewerType;
+
+namespace dftracer::utils::python {
+
 int init_trace_viewer(PyObject *m);
+
+}  // namespace dftracer::utils::python
 
 #endif  // DFTRACER_UTILS_PYTHON_TRACE_VIEWER_H

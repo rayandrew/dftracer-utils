@@ -13,11 +13,11 @@
 #include <any>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <thread>
@@ -30,23 +30,13 @@ namespace dftracer::utils {
 class Task;
 class Scheduler;
 
-/**
- * ThreadPoolExecutor - Executes tasks from queue using worker thread pool
- *
- * Features:
- * - Large thread pool for CPU/IO-bound work
- * - Pulls tasks from queue
- * - Executes task functions
- * - Notifies scheduler on completion via callback
- *
- * Thread pool size: N threads (default: hardware_concurrency)
- */
+/// Executes queued coroutine work on a pool of worker threads, notifying the
+/// scheduler on completion. Pool size defaults to hardware_concurrency.
 class ThreadPoolExecutor : public TaskExecutor {
    public:
     using TaskExecutor::CompletionCallback;
 
    private:
-    // Worker context for per-thread state.
     // Aligned to avoid false sharing between adjacent workers.
     struct alignas(DFTRACER_OPTIMAL_ALIGNMENT) WorkerContext {
         std::size_t worker_id;
@@ -61,18 +51,65 @@ class ThreadPoolExecutor : public TaskExecutor {
         std::string current_task_name;
         std::mutex task_name_mutex;
 
-        // Worker thread
+        // Set to ask this worker to exit its loop (dynamic retire); checked
+        // only at the loop top, so retire is always between tasks, never
+        // mid-resume.
+        std::atomic<bool> retire{false};
+
+        // Held stickily across resumes; released only when the worker parks
+        // idle. Touched only by this worker's own thread, so unsynced.
+        bool holds_permit{false};
+
+        // Lazy handoff state (BLK_*). Worker and sysmon race a CAS out of
+        // SYSCALL: exactly one of keep-on-exit and reclaim wins.
+        std::atomic<int> blk_state{0};
+        std::atomic<std::int64_t> blocking_since_ns{0};
+
         std::thread thread;
 
         explicit WorkerContext(std::size_t id) : worker_id(id) {}
     };
 
-    // Per-worker contexts
+    // Per-worker contexts. Mutated (add/retire) and iterated (progress,
+    // shutdown) under workers_mutex_; the hot enqueue/wake path is futex-based
+    // and never touches this vector.
     std::vector<std::unique_ptr<WorkerContext>> workers_;
-    std::atomic<std::size_t> next_worker_{0};  // For round-robin submission
+    mutable std::mutex workers_mutex_;
+    std::atomic<std::size_t> live_workers_{0};    // current live worker threads
+    std::atomic<std::size_t> idle_workers_{0};    // currently parked in wait()
+    std::atomic<std::size_t> next_worker_id_{0};  // monotonic ids, churn-safe
+    std::atomic<std::size_t> next_worker_{0};     // For round-robin submission
 
     std::atomic<bool> running_{false};
-    std::size_t num_threads_;
+    std::size_t num_threads_;                     // the running cap
+    std::size_t min_workers_;  // elastic floor; == num_threads_ means eager
+    // Live-thread ceiling for blocking-handoff replacements; the permit gate
+    // still bounds RUNNING threads. A backstop, not a working bound.
+    std::size_t max_live_;
+
+    static constexpr int BLK_NONE = 0;
+    static constexpr int BLK_SYSCALL = 1;
+    static constexpr int BLK_HANDED_OFF = 2;
+    // Blocks shorter than this pay no handoff; longer ones the sysmon reclaims.
+    static constexpr std::int64_t BLOCK_HANDOFF_NS = 100000;
+
+    // Available run permits.
+    alignas(DFTRACER_OPTIMAL_ALIGNMENT) std::atomic<std::ptrdiff_t> permits_{0};
+    // Workers currently parked inside run_blocking.
+    std::atomic<std::size_t> blocked_workers_{0};
+    // Workers parked in acquire_permit waiting for a slot.
+    std::atomic<std::size_t> permit_waiters_{0};
+    // Reclaims permits from long blocks; parks on sysmon_cv_ when none
+    // blocking.
+    std::thread sysmon_thread_;
+    std::mutex sysmon_mutex_;
+    std::condition_variable sysmon_cv_;
+    // Elastic grow/shrink coordinator (started only when min_workers_ <
+    // num_threads_).
+    std::thread monitor_thread_;
+    std::mutex coord_mutex_;
+    std::condition_variable coord_cv_;
+    bool grow_pending_{false};
 
     CompletionCallback completion_callback_;
 
@@ -90,13 +127,13 @@ class ThreadPoolExecutor : public TaskExecutor {
 
     std::atomic<std::int64_t> last_activity_ns_;
 
-    // Shutdown coordination
     std::atomic<bool> shutdown_requested_{false};
 
     // Responsiveness timeout thresholds
     std::chrono::seconds idle_timeout_;
     std::chrono::seconds deadlock_timeout_;
-    // Timer service for timeout operations
+    // Elastic idle-retire delay (monitor_loop). Longer = warmer pool.
+    std::chrono::milliseconds keepalive_;
     TimerService timer_service_;
 
     // Task registry for progress tracking
@@ -117,6 +154,19 @@ class ThreadPoolExecutor : public TaskExecutor {
     alignas(DFTRACER_OPTIMAL_ALIGNMENT) std::atomic<std::uint64_t> work_signal_{
         0};
 
+    // Idle park. run_queue_ is a moodycamel::ConcurrentQueue whose try_dequeue
+    // can report empty while another producer's item is still in flight, even
+    // after the worker observed that producer's work_signal_ bump, so a wakeup
+    // can be missed with the item already queued. The timeout is therefore
+    // load-bearing, not an optimization: it re-checks the queue so a missed
+    // wakeup self-heals. Do not replace wait_for with an untimed wait. Closing
+    // the race instead would need work_signal_ bumped under idle_mutex_ on the
+    // hot enqueue path, or a semaphore-backed queue.
+    std::mutex idle_mutex_;
+    std::condition_variable idle_cv_;
+    static constexpr std::chrono::milliseconds IDLE_PARK_MIN{1};
+    static constexpr std::chrono::milliseconds IDLE_PARK_MAX{256};
+
     // Deferred destruction queue for released Coro handles.
     // FinalAwaiter pushes here; worker loop drains periodically.
     moodycamel::ConcurrentQueue<std::coroutine_handle<>> destroy_queue_;
@@ -130,14 +180,10 @@ class ThreadPoolExecutor : public TaskExecutor {
     unsigned io_batch_threshold_ = 16;
 
    public:
-    /**
-     * Constructor
-     */
     explicit ThreadPoolExecutor(const ExecutorConfig& config = {});
 
     ~ThreadPoolExecutor() override;
 
-    // Prevent copying
     ThreadPoolExecutor(const ThreadPoolExecutor&) = delete;
     ThreadPoolExecutor& operator=(const ThreadPoolExecutor&) = delete;
 
@@ -145,60 +191,62 @@ class ThreadPoolExecutor : public TaskExecutor {
     ThreadPoolExecutor(ThreadPoolExecutor&&) = delete;
     ThreadPoolExecutor& operator=(ThreadPoolExecutor&&) = delete;
 
-    /**
-     * Start the executor (spawn worker threads)
-     */
     void start() override;
 
-    /**
-     * Shutdown the executor gracefully
-     */
     void shutdown() override;
 
-    /**
-     * Reset the executor (prepare for new execution)
-     */
     void reset();
 
-    /**
-     * Set completion callback (called when task finishes)
-     */
+    // Spawns one worker up to the num_threads_ cap.
+    void add_worker();
+    // Asks one worker to exit and joins it. Safe while
+    /// running; a retired worker strands no work (the run queue is shared) and
+    /// exits only between tasks
+    void retire_worker();
+
+    /// Blocking handoff. enter_blocking() marks the block and keeps the permit;
+    /// only if the block outlasts BLOCK_HANDOFF_NS does the sysmon reclaim it
+    /// and wake/spawn a replacement. exit_blocking() reclaims the permit with a
+    /// CAS on a short block, or re-acquires one (parking until free) if it was
+    /// handed off.
+    void enter_blocking() override;
+    void exit_blocking() override;
+
     void set_completion_callback(CompletionCallback callback) override;
 
-    /**
-     * Set scheduler reference (for CoroScope)
-     */
     void set_scheduler(Scheduler* scheduler) override {
         scheduler_ = scheduler;
     }
 
-    /**
-     * Get timer service for timeout operations
-     */
     TimerService& get_timer_service() override { return timer_service_; }
 
-    /**
-     * Check if executor is running
-     */
     bool is_running() const override { return running_.load(); }
 
-    /**
-     * Get number of worker threads
-     */
     std::size_t get_num_threads() const override { return num_threads_; }
+
+    /// Live worker threads right now (floats under num_threads_ once the
+    /// elastic policy is driving add_worker/retire_worker); num_threads_ is the
+    /// cap.
+    std::size_t live_workers() const {
+        return live_workers_.load(std::memory_order_acquire);
+    }
+
+    /// Available run permits and workers currently in a blocking handoff.
+    /// Observability for tests: at quiescence permits == cap and blocked == 0.
+    std::ptrdiff_t available_permits() const {
+        return permits_.load(std::memory_order_acquire);
+    }
+    std::size_t blocked_workers() const {
+        return blocked_workers_.load(std::memory_order_acquire);
+    }
 
     std::size_t get_io_pool_size() const override { return io_pool_size_; }
 
-    /**
-     * Check if an I/O backend is available
-     */
     bool has_io_backend() const noexcept override {
         return io_backend_ != nullptr;
     }
 
-    /**
-     * Get the I/O backend (must check has_io_backend() first)
-     */
+    /// Must check has_io_backend() first.
     io::IoBackend& io_backend() override { return *io_backend_; }
     const io::IoBackend& io_backend() const { return *io_backend_; }
 
@@ -208,63 +256,33 @@ class ThreadPoolExecutor : public TaskExecutor {
      */
     void request_shutdown() override;
 
-    /**
-     * Check if shutdown was requested
-     */
     bool is_shutdown_requested() const { return shutdown_requested_.load(); }
 
-    /**
-     * Check if executor is responsive (making progress)
-     *
-     * Used by watchdog to detect if executor is hung.
-     * Returns false if executor appears to be stuck or unresponsive.
-     */
+    /// Whether the executor is making progress; false if it appears hung.
+    /// Used by the watchdog.
     bool is_responsive() const override;
 
-    /**
-     * Get full progress report
-     */
     ExecutorProgress get_progress() const override;
 
-    /**
-     * Schedule a coroutine handle to be resumed on the executor's thread pool
-     * This is a lightweight operation that submits the resumption as work
-     * @param handle The coroutine handle to resume
-     *
-     * This is useful for when_all and other coroutine combinators that need
-     * to resume coroutines from completion callbacks without directly calling
-     * .resume()
-     */
+    /// Resume a coroutine handle on the pool. For combinators (when_all etc.)
+    /// that must resume from a completion callback without calling .resume().
     void schedule_coroutine_resumption(std::coroutine_handle<> handle) override;
 
-    /**
-     * Enqueue a coroutine handle for execution on the thread pool.
-     * This is the primary submission method for goroutines -- all
-     * lightweight work funnels through here.
-     * Cost: ~20ns (lock-free queue push + atomic signal).
-     * @param handle The coroutine handle to resume
-     * @param task_id Tracked-task id for registry progress, or -1 if untracked.
-     */
+    /// Primary submission path; all lightweight work funnels through here.
+    /// Cost: ~20ns (lock-free queue push + atomic signal). task_id is a
+    /// tracked-task id for registry progress, or -1 if untracked.
     void enqueue(std::coroutine_handle<> handle,
                  TaskIndex task_id = -1) override;
 
-    /**
-     * Enqueue a Coro with progress tracking in task_registry_.
-     */
+    /// Enqueue a Coro with progress tracking in task_registry_.
     TaskIndex enqueue_tracked(
         coro::Coro coro, std::string name,
         std::shared_ptr<std::atomic<TaskIndex>> tid_out = nullptr) override;
 
     void mark_coro_completed(TaskIndex id) override;
 
-    /**
-     * Submit a Task for execution via a Coro (Phase 3 path).
-     * Creates a run_task() Coro, registers in task_registry_,
-     * and enqueues the released handle to run_queue_.
-     * @param task The DAG task to execute
-     * @param input Task input
-     * @param parent_task_id Parent task ID for tracking (-1 for root)
-     */
+    /// Submit a DAG task for execution. parent_task_id tracks the parent, or
+    /// -1 for a root task.
     void submit_task(std::shared_ptr<Task> task,
                      std::shared_ptr<std::any> input,
                      TaskIndex parent_task_id = -1) override;
@@ -273,67 +291,57 @@ class ThreadPoolExecutor : public TaskExecutor {
 
     void drive_until(const std::function<bool()>& done) override;
 
-    /**
-     * Schedule a completed Coro handle for deferred destruction.
-     * Called from CoroPromise::FinalAwaiter for released handles.
-     * @param handle The coroutine handle at final_suspend
-     */
+    /// Schedule a completed Coro handle for deferred destruction. Called from
+    /// CoroPromise::FinalAwaiter for released handles.
     void schedule_destroy(std::coroutine_handle<> handle) override;
 
    private:
-    /**
-     * Worker thread main loop
-     */
     void worker_thread(WorkerContext* context);
 
     /**
-     * Update task location in registry
+     * Elastic policy loop (runs only when min_workers_ < num_threads_): grow
+     * one worker per tick while there is run-queue backlog under the cap;
+     * retire one per keep-alive of sustained idle down to min_workers_.
      */
+    void monitor_loop();
+
     void update_task_location(TaskIndex task_id, TaskInfo::Location location,
                               std::size_t worker_id);
 
-    /**
-     * Build task progress tree recursively
-     */
     TaskProgress build_task_progress_tree(
         TaskIndex task_id, std::unordered_set<TaskIndex>& processed) const;
 
-    /**
-     * Notify completion callback
-     */
     void notify_completion(std::shared_ptr<Task> task);
 
-    /**
-     * Mark activity (task start or completion) for responsiveness tracking
-     */
     void mark_activity();
 
-    /**
-     * Signal workers that new global work is available.
-     */
     void signal_global_work();
 
-    /**
-     * Wake one worker thread.
-     */
+    /// Acquire a run permit for `ctx`, parking on the permit futex until one is
+    /// free. Returns false without a permit if the worker should exit (shutdown
+    /// or retire observed while waiting).
+    bool acquire_permit(WorkerContext* ctx);
+    /// Release `ctx`'s permit if it holds one, notifying a permit-waiter.
+    void release_permit(WorkerContext* ctx);
+    /// A permit was just freed for a blocking handoff: wake a parked worker or
+    /// spawn a replacement (up to max_live_) so the freed slot gets used.
+    void ensure_running_worker();
+    /// Reclaims permits from workers blocking past BLOCK_HANDOFF_NS.
+    void sysmon_loop();
+    /// Spawn one worker if live < `cap`. Returns true if spawned. Takes
+    /// workers_mutex_; best_effort uses try_lock and gives up on contention.
+    bool spawn_worker(std::size_t cap, bool best_effort = false);
+
     void wake_one_worker();
 
-    /**
-     * Wake all worker threads.
-     */
     void wake_all_workers();
 
-    /**
-     * Create a Coro that executes a Task with full bookkeeping.
-     * The returned Coro is at initial_suspend -- caller must
-     * set executor on promise and enqueue via release().
-     */
+    /// Create a Coro that executes a Task with full bookkeeping. The returned
+    /// Coro is at initial_suspend: the caller must set the executor on the
+    /// promise and enqueue via release().
     coro::Coro run_task(std::shared_ptr<Task> task,
                         std::shared_ptr<std::any> input);
 
-    /**
-     * Drain the destroy queue (called from worker loop).
-     */
     void drain_destroy_queue();
 
     friend class Scheduler;

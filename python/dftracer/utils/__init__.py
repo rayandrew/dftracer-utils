@@ -2,6 +2,23 @@ import atexit
 from importlib.metadata import PackageNotFoundError, version
 from typing import Optional
 
+from .columnar import (  # noqa: F401
+    Agg,
+    ColumnExpr,
+    F,
+    GroupBy,
+    col,
+    columnar,
+    count,
+    eval_many,
+    lit,
+    where,
+)
+from .dataframe import (  # noqa: F401
+    AggregatedTraceViewer,
+    DataFrame,
+    TraceViewer,
+)
 from .dftracer_utils_ext import (  # noqa: F401
     CheckpointIndexer,  # noqa: F401
     DFTUtilsAggregationError,
@@ -16,7 +33,6 @@ from .dftracer_utils_ext import (  # noqa: F401
     DFTUtilsReaderError,
     DFTUtilsValueError,
     JsonDictValue,  # noqa: F401
-    TraceViewer,  # noqa: F401
     get_log_level,
     set_log_color,
     set_log_level,
@@ -38,6 +54,7 @@ from .indexer import (  # noqa: F401
 )
 from .query import Expr, Field, resolved  # noqa: F401
 from .runtime import Runtime, TaskHandle  # noqa: F401
+from .series import Series  # noqa: F401
 from .time_unit import TimeUnit  # noqa: F401
 
 _default_wrapper: Optional["Runtime"] = None
@@ -105,6 +122,15 @@ __all__ = [
     "CheckpointIndexer",
     "Expr",
     "Field",
+    "ColumnExpr",
+    "col",
+    "lit",
+    "columnar",
+    "F",
+    "where",
+    "Agg",
+    "GroupBy",
+    "count",
     "resolved",
     "Indexer",
     "IndexStatus",
@@ -114,6 +140,9 @@ __all__ = [
     "Phase",
     "TimeUnit",
     "TraceViewer",
+    "AggregatedTraceViewer",
+    "DataFrame",
+    "Series",
     "Runtime",
     "TaskHandle",
     "get_default_runtime",

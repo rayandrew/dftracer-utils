@@ -16,20 +16,20 @@
 
 namespace dftracer::utils::call_tree {
 
-// MPI-parallel call tree engine. Each method is a coroutine driven by the
-// caller's pipeline; this class owns no Pipeline of its own. Phases follow
-// the dftracer_aggregator_mpi pattern:
-//
-//   discover_pids_async : cooperative PID pre-scan + allgather + round-robin
-//                         assign so each pid is owned by exactly one rank.
-//   build_async         : per-file CoroScope fan-out, pid-filtered ingest,
-//                         merge of per-file fragments into a local tree.
-//   hierarchy_async     : per-process CoroScope fan-out (each PID lives on
-//                         one rank so no cross-rank dependency).
-//   write_async         : per-rank Chrome Tracing JSON shard via sharded
-//                         ParallelWriter (io_backend driven).
-//   merge_async         : rank 0 concatenates shards into the final output
-//                         via fileio::parallel::merge_shards.
+/// MPI-parallel call tree engine. Each method is a coroutine driven by the
+/// caller's pipeline; this class owns no Pipeline of its own. Phases follow
+/// the dftracer_aggregator_mpi pattern:
+///
+///   discover_pids_async : cooperative PID pre-scan + allgather + round-robin
+///                         assign so each pid is owned by exactly one rank.
+///   build_async         : per-file CoroScope fan-out, pid-filtered ingest,
+///                         merge of per-file fragments into a local tree.
+///   hierarchy_async     : per-process CoroScope fan-out (each PID lives on
+///                         one rank so no cross-rank dependency).
+///   write_async         : per-rank Chrome Tracing JSON shard via sharded
+///                         ParallelWriter (io_backend driven).
+///   merge_async         : rank 0 concatenates shards into the final output
+///                         via fileio::parallel::merge_shards.
 class MPICallTreeBuilder {
    public:
     explicit MPICallTreeBuilder(const MPICallTreeConfig& config);

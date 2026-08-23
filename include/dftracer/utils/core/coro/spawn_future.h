@@ -32,7 +32,7 @@ namespace dftracer::utils::coro {
 ///   schedule that handle for resumption via the executor.
 ///
 /// Await path (consumer):
-///   CAS(EMPTY → handle_addr). If CAS fails, state is DONE -- don't suspend.
+///   CAS(EMPTY -> handle_addr). If CAS fails, state is DONE -- don't suspend.
 ///
 /// One heap allocation per typed spawn (shared_ptr<SharedState<T>>).
 /// `result` is stored only for non-void T; the void case uses a zero-size

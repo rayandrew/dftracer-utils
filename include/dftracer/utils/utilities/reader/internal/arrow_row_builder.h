@@ -6,9 +6,9 @@
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 
 #include <dftracer/utils/core/common/string_arena.h>
+#include <dftracer/utils/json/parser.h>
+#include <dftracer/utils/trace/time_metric.h>
 #include <dftracer/utils/utilities/common/arrow/column_builder.h>
-#include <dftracer/utils/utilities/common/json/parser.h>
-#include <dftracer/utils/utilities/composites/dft/time_metric.h>
 #include <simdjson.h>
 
 #include <string>
@@ -17,7 +17,7 @@
 
 namespace dftracer::utils::utilities::reader::internal {
 
-using composites::dft::TimeScaleState;
+using trace::TimeScaleState;
 
 // Opt-in tuning for the native (non-normalized) row build. Defaults reproduce
 // the historical pass-through behaviour.
@@ -37,13 +37,13 @@ struct RowBuildOptions {
 // every field is passed through with its native type. Returns false when the
 // row should be skipped.
 bool build_arrow_row(common::arrow::RecordBatchBuilder &builder,
-                     common::json::JsonParser &parser, StringArena &arena,
+                     json::JsonParser &parser, StringArena &arena,
                      bool normalize, TimeScaleState &time_scale,
                      const RowBuildOptions &opts = {});
 
 // Flatten a simdjson object into "prefix.key" columns using native types.
 bool process_json_line(common::arrow::RecordBatchBuilder &builder,
-                       common::json::JsonParser &parser, StringArena &arena,
+                       json::JsonParser &parser, StringArena &arena,
                        std::string_view content, bool normalize,
                        TimeScaleState &time_scale,
                        const RowBuildOptions &opts = {});

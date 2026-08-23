@@ -1,3 +1,5 @@
+:description: How the pipeline builds parallel workflows with structured concurrency: the executor, CoroScope, coroutines, channels, and join handles.
+
 Pipeline Guide
 ==============
 
@@ -436,7 +438,7 @@ Lazy Sequences and Async Generators
 
    // Usage in a task
    auto task = make_task([](CoroScope& scope) -> CoroTask<void> {
-       auto gen = read_all({"file1.pfw", "file2.pfw"});
+       auto gen = read_all({"file1.pfw.gz", "file2.pfw.gz"});
        while (auto value = co_await gen.next()) {
            process(*value);
        }
@@ -662,7 +664,7 @@ Chain multiple ``Channel<T>`` instances to build staged processing pipelines. Ea
         co_return;
     });
 
-**Real-world example from dftracer_aggregator:** Multi-stage streaming pipeline with file producers, chunk processors, and incremental merger:
+**Real-world example from the aggregation pipeline:** Multi-stage streaming pipeline with file producers, chunk processors, and incremental merger:
 
 .. code-block:: cpp
 
@@ -726,7 +728,7 @@ Errors in pipeline tasks propagate to the caller of ``Pipeline::execute()``. Exc
 The library throws ``DFTUtilsException`` (and its subsystem subclasses), which
 derive ``std::runtime_error`` and carry an ``ErrorCode`` via ``code()``. Catch
 ``DFTUtilsException`` to inspect the category, or ``std::exception`` to handle
-any failure. See :doc:`cpp_api/error_handling`.
+any failure. See :doc:`cpp_api/runtime`.
 
 **Exception propagation from tasks:**
 
@@ -875,7 +877,7 @@ Control execution duration and cooperative cancellation using ``PipelineConfig``
         co_return;
     });
 
-See :doc:`cpp_api/pipeline` for ``PipelineConfig`` full timeout/watchdog API and :doc:`cpp_api/coro` for ``timeout`` and cancellation details.
+See :doc:`cpp_api/runtime` for ``PipelineConfig`` full timeout/watchdog API and :doc:`cpp_api/coro` for ``timeout`` and cancellation details.
 
 TaskGraph for DAGs
 ------------------
@@ -890,7 +892,7 @@ Build complex task graphs with fan-out, fan-in, map, and reduce. Example from ``
    using namespace dftracer::utils;
    using namespace dftracer::utils::task_graph;
 
-   auto graph = TaskGraph::builder("DFTracerSplit");
+   auto graph = TaskGraph::builder({.name = "DFTracerSplit"});
 
    // Phase 1: Parallel file processing
    auto file_metadata = graph.parallel<Metadata>(
@@ -899,7 +901,7 @@ Build complex task graphs with fan-out, fan-in, map, and reduce. Example from ``
            // Each task processes one file
            co_return collect_metadata(input_files[idx]);
        },
-       "ProcessFile");
+       {.name = "ProcessFile"});
 
    // Phase 2: Reduce all metadata into chunk manifests
    auto manifests = graph.reduce<std::vector<Manifest>>(
@@ -907,7 +909,7 @@ Build complex task graphs with fan-out, fan-in, map, and reduce. Example from ``
        [](CoroScope&, std::vector<Metadata> all) -> coro::CoroTask<std::vector<Manifest>> {
            co_return create_manifests(all);
        },
-       "CreateManifests");
+       {.name = "CreateManifests"});
 
    // Phase 3: Create extraction task with combiner
    auto extractor = make_task(...);
@@ -931,110 +933,21 @@ Common patterns:
    auto workers = graph.fan_out<Result>(source, num_outputs{4},
        [](CoroScope& scope, Data input, std::size_t idx) -> coro::CoroTask<Result> {
            co_return process_shard(input, idx);
-       }, "Worker");
+       }, {.name = "Worker"});
 
-   // Fan-in: M -> 1
-   auto combined = graph.fan_in<Result>(workers,
+   // Reduce: M -> 1 (tree reduce, also how a fan-in is expressed)
+   auto combined = graph.reduce<Result>(workers, split_every{workers.size()},
        [](CoroScope& scope, std::vector<Result> inputs) -> coro::CoroTask<Result> {
            co_return combine(inputs);
-       }, "Combine");
+       }, {.name = "Combine"});
 
    // Map: 1-to-1 transform
    auto transformed = graph.map<Output>(inputs,
        [](CoroScope& scope, Input in) -> coro::CoroTask<Output> {
            co_return transform(in);
-       }, "Transform");
+       }, {.name = "Transform"});
 
 See :doc:`cpp_api/task_graph` for full API.
-
-Migrating from Old Pipeline API (TaskContext/TaskScope)
--------------------------------------------------------
-
-The project has migrated from the old ``TaskContext``/``TaskScope`` API to the new ``CoroScope`` model. Here's how to update existing code:
-
-**Old API (deprecated):**
-
-.. code-block:: cpp
-
-   // Old: Tasks received TaskContext
-   auto task = make_task([](TaskContext& ctx) -> CoroTask<void> {
-       // Send data
-       co_await channel->send_blocking(data);
-       
-       // Spawn tasks (old way)
-       scope.spawn_task([](TaskContext& ctx) -> CoroTask<void> {
-           co_return;
-       });
-       
-       co_return;
-   });
-   
-   // Old: PipelineConfig had scheduler threads
-   auto config = PipelineConfig()
-       .with_scheduler_threads(8)  // Removed!
-       .with_name("MyPipeline");
-
-**New API:**
-
-.. code-block:: cpp
-
-   // New: Tasks receive CoroScope
-   auto task = make_task([](CoroScope& scope) -> CoroTask<void> {
-       // Send data (no _blocking)
-       co_await channel->send(std::move(data));
-       
-       // Spawn tasks (fire-and-forget, or co_await for completion)
-       scope.spawn([](CoroScope& child) -> CoroTask<void> {
-           co_return;
-       });
-       
-       // Or await a specific spawn
-       co_await scope.spawn([](CoroScope& child) -> CoroTask<void> {
-           co_return;
-       });
-       
-       // Or use scope() for structured concurrency
-       co_await scope.scope([](CoroScope& child) -> CoroTask<void> {
-           child.spawn([](CoroScope& s) -> CoroTask<void> {
-               co_return;
-           });
-           co_return;
-       });
-       
-       co_return;
-   });
-   
-   // New: PipelineConfig uses executor_threads
-   auto config = PipelineConfig()
-       .with_compute_threads(8)  // Changed from with_scheduler_threads
-       .with_name("MyPipeline");
-
-**Key changes:**
-
-+----------------------------------+----------------------------------------------+
-| Old                              | New                                          |
-+==================================+==============================================+
-| ``TaskContext& ctx``             | ``CoroScope& scope``                         |
-+----------------------------------+----------------------------------------------+
-| ``co_await channel->send_*()``   | ``co_await channel->send()``                 |
-+----------------------------------+----------------------------------------------+
-| ``co_await channel->receive()``  | ``co_await channel->receive()`` (same)       |
-+----------------------------------+----------------------------------------------+
-| ``scope.spawn_task(...)``        | ``scope.spawn(...)``                         |
-+----------------------------------+----------------------------------------------+
-| ``scope.join_all()``             | ``co_await scope.join_all()``                |
-+----------------------------------+----------------------------------------------+
-| ``with_scheduler_threads(N)``    | ``with_compute_threads(N)``                  |
-+----------------------------------+----------------------------------------------+
-| ``ctx.spawn_io(...)``            | Various ``io::*`` utilities                  |
-+----------------------------------+----------------------------------------------+
-
-**Executor Management:**
-
-- The executor now manages all worker threads internally
-- No more explicit ``Scheduler`` creation
-- ``PipelineConfig`` configures the executor (threads, timeouts, watchdog)
-- ``Pipeline::execute()`` blocks until all work completes
 
 Pipelined Replay
 ----------------
@@ -1057,13 +970,11 @@ together:
 The replay binary is otherwise unchanged from a CLI perspective; see the
 ``dftracer_replay`` section in :doc:`cli` for flag documentation.
 
-Memory Budget Control for Streaming Iterators
----------------------------------------------
+Memory Budget Control
+----------------------
 
-The ``MemoryBudget`` helpers in
-``dftracer/utils/core/common/memory_budget.h`` give utilities a single
-place to size streaming channels and per-file batch counts based on
-available system memory:
+The helpers in ``dftracer/utils/core/common/memory_budget.h`` give utilities a
+single place to size a workload against available system memory:
 
 .. code-block:: cpp
 
@@ -1079,30 +990,33 @@ available system memory:
        compute_memory_budget(/*user_override_bytes=*/4ULL << 30);
 
    // Per-file expansion factor + sample probing yields a per-file peak
-   const std::size_t per_file =
-       estimate_per_file_bytes(file_sizes_in_bytes);
+   // (on-disk sizes are compressed for .pfw.gz; this expands them to a
+   // decompressed + aggregated estimate).
+   const std::size_t required_bytes =
+       estimate_per_file_bytes(file_sizes_in_bytes) * file_sizes_in_bytes.size();
 
-   // Derive channel capacity and per-flush batch size
-   const std::size_t cap =
-       compute_channel_capacity(budget, estimated_batch_bytes, num_workers);
-   const std::size_t batch =
-       compute_file_batch_size(budget, per_file, /*min_files=*/4);
+   // Whether that fits under the budget, and how many nodes it would take if not.
+   MemoryBudgetAdvice advice = memory_budget_advice(required_bytes);
+   if (!advice.fits) {
+       DFTRACER_UTILS_LOG_WARN("%s", format_memory_budget_warning(advice).c_str());
+   }
 
-The Python ``TraceReader`` exposes the same control as a ``memory_budget``
-keyword on its streaming iterators (``iter_lines``, ``iter_lines_json``,
-``iter_raw``, ``iter_arrow``). Passing ``0`` keeps the auto-detect default;
-passing a positive integer caps the in-flight bytes across the underlying
-``Channel<T>`` instances.
+``dftracer_index`` and the CLI binaries use exactly this pattern
+(``estimate_per_file_bytes`` -> ``memory_budget_advice`` -> a warning if it does
+not fit) to size a run before it starts; see
+``src/dftracer/utils/binaries/dftracer_index.cpp``. On the Python side,
+``TraceViewer.memory_budget(nbytes)`` and ``View::memory_budget(bytes)`` in C++
+set the out-of-core aggregation budget directly on a query (0 = pure in-memory,
+spilling to sorted temp runs above the cap); ``TraceViewer.auto_spill()`` /
+``View::auto_spill()`` picks a budget from available memory for you.
 
 ``flush_every_files`` for Batched Index Writes
 ----------------------------------------------
 
-The batched indexer derives a ``flush_every_files`` value from a memory
-budget and feeds it to ``IndexBuildBatchConfig``. Each batch of
-``flush_every_files`` files is fully indexed and flushed before the next
-batch begins, capping peak memory regardless of trace count.
-
-When constructing an ``IndexBuildBatchConfig`` directly from C++:
+``IndexBuildBatchConfig::flush_every_files`` (used by the distributed/SST index
+build path) bounds peak memory by fully indexing and flushing a batch of that
+many files before starting the next, instead of holding every file's state live
+at once.
 
 .. code-block:: cpp
 
@@ -1111,18 +1025,17 @@ When constructing an ``IndexBuildBatchConfig`` directly from C++:
    batch_config->index_dir         = index_dir;
    batch_config->checkpoint_size   = checkpoint_size;
    batch_config->parallelism       = executor_threads;
-   batch_config->flush_every_files = compute_file_batch_size(
-       compute_memory_budget(),
-       estimate_per_file_bytes(file_sizes),
-       /*min_files=*/4);
+   batch_config->flush_every_files = 64;   // tune to your per-file memory profile
 
 A ``flush_every_files`` of ``0`` (the default) disables sub-batching and
 processes every file in one shot, which is fastest for small inputs but
-not memory-safe at scale.
+not memory-safe at scale. Size it with ``compute_memory_budget()`` and
+``estimate_per_file_bytes()`` above: pick a count such that
+``count * per_file_bytes`` stays under your budget.
 
 API Reference
 -------------
 
 - :doc:`cpp_api/coro` - CoroTask, Channel, Generator, when_all, when_any
 - :doc:`cpp_api/task_graph` - TaskGraph, TaskGroup, factory functions
-- :doc:`cpp_api/pipeline` - Pipeline, Executor, Task classes
+- :doc:`cpp_api/runtime` - Pipeline, Executor, Task classes

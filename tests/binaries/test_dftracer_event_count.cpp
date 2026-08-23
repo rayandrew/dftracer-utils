@@ -17,7 +17,7 @@
 
 namespace {
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -125,7 +125,7 @@ TEST_SUITE("DFTracerEventCount") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -144,7 +144,7 @@ TEST_SUITE("DFTracerEventCount") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         REQUIRE(!create_pfw_gz(env, 10, 0).empty());
@@ -164,7 +164,7 @@ TEST_SUITE("DFTracerEventCount") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         // No trace files -- binary either exits non-zero or prints 0.
@@ -182,7 +182,7 @@ TEST_SUITE("DFTracerEventCount") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 25, 0);
@@ -208,7 +208,7 @@ TEST_SUITE("DFTracerEventCount") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 15, 0);
@@ -227,7 +227,7 @@ TEST_SUITE("DFTracerEventCount") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 20, 0);

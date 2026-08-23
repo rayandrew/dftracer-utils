@@ -21,7 +21,7 @@ using namespace dftracer::utils::utilities::indexer::internal;
 using namespace dftracer::utils::utilities::reader::internal;
 using dftracer::utils::utilities::indexer::IndexerError;
 using dftracer::utils::utilities::reader::ReaderError;
-using namespace dft_utils_test;
+using namespace dftu_utils_test;
 
 TEST_CASE("C++ Indexer - Basic functionality") {
     TestEnvironment env(valgrind_scale(1000, 10));
@@ -844,7 +844,8 @@ TEST_CASE("C++ API - Regression and stress tests") {
         }
         f.close();
 
-        bool success = dft_utils_test::compress_file_to_gzip(txt_file, gz_file);
+        bool success =
+            dftu_utils_test::compress_file_to_gzip(txt_file, gz_file);
         REQUIRE(success);
         fs::remove(txt_file);
 

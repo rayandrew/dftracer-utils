@@ -1,9 +1,9 @@
 #include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_metrics.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/event_aggregator.h>
+#include <dftracer/utils/trace/aggregators/aggregation_metrics.h>
+#include <dftracer/utils/trace/aggregators/aggregation_serialization.h>
+#include <dftracer/utils/trace/aggregators/event_aggregator.h>
 #include <dftracer/utils/utilities/dlio/trace_loader.h>
 #include <yaml-cpp/yaml.h>
 
@@ -21,7 +21,7 @@ namespace dftracer::utils::utilities::dlio {
 
 namespace {
 
-namespace agg = ::dftracer::utils::utilities::composites::dft::aggregators;
+namespace agg = ::dftracer::utils::trace::aggregators;
 namespace rdb = ::dftracer::utils::rocksdb;
 
 constexpr double US_TO_S = 1e-6;

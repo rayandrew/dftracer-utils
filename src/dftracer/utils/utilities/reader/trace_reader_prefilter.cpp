@@ -1,4 +1,4 @@
-#include <dftracer/utils/utilities/common/query/query.h>
+#include <dftracer/utils/query/query.h>
 #include <dftracer/utils/utilities/reader/internal/trace_reader_prefilter.h>
 #include <simdjson.h>
 
@@ -10,17 +10,17 @@
 
 namespace dftracer::utils::utilities::reader::internal {
 
-using common::query::Query;
+using query::Query;
 
 namespace {
 
-bool collect_and_eq_literals(const common::query::QueryNode& node,
+bool collect_and_eq_literals(const query::QueryNode& node,
                              std::vector<std::string>& out) {
     return std::visit(
         [&out](const auto& n) -> bool {
             using T = std::decay_t<decltype(n)>;
-            if constexpr (std::is_same_v<T, common::query::CompareNode>) {
-                if (n.op != common::query::CompareOp::EQ) return false;
+            if constexpr (std::is_same_v<T, query::CompareNode>) {
+                if (n.op != query::CompareOp::EQ) return false;
                 std::string lit;
                 lit.reserve(n.field.path.size() + 16);
                 lit += '"';
@@ -42,7 +42,7 @@ bool collect_and_eq_literals(const common::query::QueryNode& node,
                 }
                 out.push_back(std::move(lit));
                 return true;
-            } else if constexpr (std::is_same_v<T, common::query::AndNode>) {
+            } else if constexpr (std::is_same_v<T, query::AndNode>) {
                 return collect_and_eq_literals(*n.left, out) &&
                        collect_and_eq_literals(*n.right, out);
             }
@@ -64,9 +64,8 @@ bool is_top_level_event_key(std::string_view k) {
 // Walk a CompareNode-with-EQ leaf into a probe. Returns false on
 // unsupported shapes (more than one '.' or a literal type the simdjson
 // get_X path can't compare directly).
-bool compile_eq_leaf(const common::query::CompareNode& n,
-                     CompiledEqProbe& out) {
-    if (n.op != common::query::CompareOp::EQ) return false;
+bool compile_eq_leaf(const query::CompareNode& n, CompiledEqProbe& out) {
+    if (n.op != query::CompareOp::EQ) return false;
     auto dot = n.field.path.find('.');
     if (dot == std::string::npos) {
         if (is_top_level_event_key(n.field.path)) {
@@ -170,8 +169,8 @@ bool probe_matches_value(const CompiledEqProbe& p,
 // Try to compile the query AST as an AND of EQ leaves. nullopt on
 // unsupported shapes; the ValueMap path handles those.
 std::optional<std::vector<CompiledEqProbe>> try_compile_eq_probes(
-    const common::query::QueryNode& node) {
-    using namespace common::query;
+    const query::QueryNode& node) {
+    using namespace query;
     return std::visit(
         [&](const auto& n) -> std::optional<std::vector<CompiledEqProbe>> {
             using T = std::decay_t<decltype(n)>;

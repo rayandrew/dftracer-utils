@@ -8,20 +8,20 @@
 
 using namespace dftracer::utils::utilities::reader::internal;
 
-static std::shared_ptr<Reader> *cast_reader(dft_reader_handle_t reader) {
+static std::shared_ptr<Reader> *cast_reader(dftu_reader_handle_t reader) {
     return static_cast<std::shared_ptr<Reader> *>(reader);
 }
 
 extern "C" {
 
 // Helper functions for C API
-static int validate_handle(dft_reader_handle_t reader) {
+static int validate_handle(dftu_reader_handle_t reader) {
     return reader ? 0 : -1;
 }
 
-dft_reader_handle_t dft_reader_create(const char *gz_path,
-                                      const char *index_path,
-                                      size_t index_ckpt_size) {
+dftu_reader_handle_t dftu_reader_create(const char *gz_path,
+                                        const char *index_path,
+                                        size_t index_ckpt_size) {
     if (!gz_path || !index_path) {
         DFTRACER_UTILS_LOG_ERROR("%s",
                                  "Both gz_path and index_path cannot be null");
@@ -33,7 +33,7 @@ dft_reader_handle_t dft_reader_create(const char *gz_path,
             ReaderFactory::create(gz_path, index_path, index_ckpt_size);
         // For C API, we need to transfer ownership - create a new shared_ptr on
         // heap
-        return static_cast<dft_reader_handle_t>(
+        return static_cast<dftu_reader_handle_t>(
             new std::shared_ptr<Reader>(reader));
     } catch (const std::exception &e) {
         DFTRACER_UTILS_LOG_ERROR("Failed to create DFT reader: %s", e.what());
@@ -41,8 +41,8 @@ dft_reader_handle_t dft_reader_create(const char *gz_path,
     }
 }
 
-dft_reader_handle_t dft_reader_create_with_indexer(
-    dft_indexer_handle_t indexer) {
+dftu_reader_handle_t dftu_reader_create_with_indexer(
+    dftu_indexer_handle_t indexer) {
     if (!indexer) {
         DFTRACER_UTILS_LOG_ERROR("%s", "Indexer cannot be null");
         return nullptr;
@@ -55,7 +55,7 @@ dft_reader_handle_t dft_reader_create_with_indexer(
         auto indexer_ptr = static_cast<std::shared_ptr<
             dftracer::utils::utilities::indexer::internal::Indexer> *>(indexer);
         auto reader = ReaderFactory::create(*indexer_ptr);
-        return static_cast<dft_reader_handle_t>(
+        return static_cast<dftu_reader_handle_t>(
             new std::shared_ptr<Reader>(reader));
     } catch (const std::exception &e) {
         DFTRACER_UTILS_LOG_ERROR("Failed to create DFT reader with indexer: %s",
@@ -64,13 +64,13 @@ dft_reader_handle_t dft_reader_create_with_indexer(
     }
 }
 
-void dft_reader_destroy(dft_reader_handle_t reader) {
+void dftu_reader_destroy(dftu_reader_handle_t reader) {
     if (reader) {
         delete cast_reader(reader);
     }
 }
 
-int dft_reader_get_max_bytes(dft_reader_handle_t reader, size_t *max_bytes) {
+int dftu_reader_get_max_bytes(dftu_reader_handle_t reader, size_t *max_bytes) {
     if (validate_handle(reader) || !max_bytes) {
         return -1;
     }
@@ -84,7 +84,7 @@ int dft_reader_get_max_bytes(dft_reader_handle_t reader, size_t *max_bytes) {
     }
 }
 
-int dft_reader_get_num_lines(dft_reader_handle_t reader, size_t *num_lines) {
+int dftu_reader_get_num_lines(dftu_reader_handle_t reader, size_t *num_lines) {
     if (validate_handle(reader) || !num_lines) {
         return -1;
     }
@@ -98,8 +98,8 @@ int dft_reader_get_num_lines(dft_reader_handle_t reader, size_t *num_lines) {
     }
 }
 
-int dft_reader_read(dft_reader_handle_t reader, size_t start_bytes,
-                    size_t end_bytes, char *buffer, size_t buffer_size) {
+int dftu_reader_read(dftu_reader_handle_t reader, size_t start_bytes,
+                     size_t end_bytes, char *buffer, size_t buffer_size) {
     if (validate_handle(reader) || !buffer || buffer_size == 0) {
         return -1;
     }
@@ -115,9 +115,9 @@ int dft_reader_read(dft_reader_handle_t reader, size_t start_bytes,
     }
 }
 
-int dft_reader_read_line_bytes(dft_reader_handle_t reader, size_t start_bytes,
-                               size_t end_bytes, char *buffer,
-                               size_t buffer_size) {
+int dftu_reader_read_line_bytes(dftu_reader_handle_t reader, size_t start_bytes,
+                                size_t end_bytes, char *buffer,
+                                size_t buffer_size) {
     if (validate_handle(reader) || !buffer || buffer_size == 0) {
         return -1;
     }
@@ -133,9 +133,9 @@ int dft_reader_read_line_bytes(dft_reader_handle_t reader, size_t start_bytes,
     }
 }
 
-int dft_reader_read_lines(dft_reader_handle_t reader, size_t start_line,
-                          size_t end_line, char *buffer, size_t buffer_size,
-                          size_t *bytes_written) {
+int dftu_reader_read_lines(dftu_reader_handle_t reader, size_t start_line,
+                           size_t end_line, char *buffer, size_t buffer_size,
+                           size_t *bytes_written) {
     if (validate_handle(reader) || !buffer || buffer_size == 0 ||
         !bytes_written) {
         return -1;
@@ -163,14 +163,14 @@ int dft_reader_read_lines(dft_reader_handle_t reader, size_t start_line,
     }
 }
 
-void dft_reader_reset(dft_reader_handle_t reader) {
+void dftu_reader_reset(dftu_reader_handle_t reader) {
     if (reader) {
         (*cast_reader(reader))->reset();
     }
 }
 
-dft_reader_stream_t dft_reader_stream(dft_reader_handle_t reader,
-                                      const dft_stream_config_t *config) {
+dftu_reader_stream_t dftu_reader_stream(dftu_reader_handle_t reader,
+                                        const dftu_stream_config_t *config) {
     if (validate_handle(reader)) {
         DFTRACER_UTILS_LOG_ERROR("%s", "Invalid reader handle");
         return nullptr;
@@ -189,7 +189,7 @@ dft_reader_stream_t dft_reader_stream(dft_reader_handle_t reader,
         auto stream = (*cast_reader(reader))->stream(cpp_config);
 
         // Transfer ownership to C API
-        return static_cast<dft_reader_stream_t>(stream.release());
+        return static_cast<dftu_reader_stream_t>(stream.release());
     } catch (const std::exception &e) {
         DFTRACER_UTILS_LOG_ERROR("Failed to create stream: %s", e.what());
         return nullptr;

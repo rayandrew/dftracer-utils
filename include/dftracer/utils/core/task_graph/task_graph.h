@@ -220,7 +220,7 @@ class TaskGraph {
             auto task = make_task(reducer, task_name);
             task->depends_on(group.task());
             // Wrap the single parent output into vector<any> so decode_input
-            // can unpack it into vector<T> — same format as the multi-parent
+            // can unpack it into vector<T> - same format as the multi-parent
             // path. Without this, the type checker rejects T -> vector<T>.
             task->with_combiner(
                 [](const std::vector<std::any>& inputs) -> std::any {

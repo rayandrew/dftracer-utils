@@ -45,7 +45,7 @@ class TimerService {
     moodycamel::ConcurrentQueue<TimerRequest> pending_timers_;
     std::unordered_map<TimerId, std::shared_ptr<std::atomic<bool>>>
         cancellation_tokens_;
-    mutable std::mutex tokens_mutex_;  // Protects cancellation_tokens_
+    mutable std::mutex tokens_mutex_;  ///< Protects cancellation_tokens_
     std::thread timer_thread_;
     std::mutex wake_mutex_;
     std::condition_variable wake_cv_;

@@ -13,8 +13,13 @@ typedef struct {
 } JsonDictValueObject;
 
 extern PyTypeObject JsonDictValueType;
+
+namespace dftracer::utils::python {
+
 int init_json_dict_value(PyObject *m);
 
 PyObject *args_value_to_pyobject(const ArgsValue &v);
+
+}  // namespace dftracer::utils::python
 
 #endif  // DFTRACER_UTILS_PYTHON_JSON_H

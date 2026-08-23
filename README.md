@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/source/_static/logo-dark.png">
-    <img alt="DFTracer Utils" src="docs/source/_static/logo-light.png" width="480">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/source/_static/logo-banner-dark.svg">
+    <img alt="DFTracer Utils" src="docs/source/_static/logo-banner-light.svg" width="520">
   </picture>
 </div>
 

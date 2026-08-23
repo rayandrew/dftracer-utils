@@ -1,19 +1,293 @@
-.api-source-link {
+/* dftracer-utils docs - design layer on top of the Shibuya theme.
+   Typography, a warmer accent, card and code polish, and a landing hero. */
+
+/* ---- Typography ---------------------------------------------------------- */
+/* Shibuya already serves Inter (via Google Fonts) for text and headings and
+   exposes the accent through its own tokens, so we only route the mono stack
+   through --sy-f-mono and add a few OpenType touches; the theme stays in
+   control of the sans face and the accent color. */
+:root {
+  --sy-f-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo,
+    Consolas, monospace;
+}
+
+body,
+.sy-body {
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  letter-spacing: -0.006em;
+}
+
+/* Tighter, more confident headings. */
+h1,
+h2,
+h3 {
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+
+/* ---- Cards (sphinx-design) ---------------------------------------------- */
+.sd-card {
+  border: 1px solid var(--sy-c-border, rgba(120, 120, 140, 0.18));
+  border-radius: 12px;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.sd-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--sy-c-link);
+  box-shadow: 0 10px 30px -12px rgba(14, 116, 144, 0.35);
+}
+.sd-card .sd-card-title {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* ---- Language tabs (sphinx-design) ------------------------------------- */
+.sd-tab-set > input:checked + label {
+  color: var(--sy-c-link);
+  border-color: var(--sy-c-link);
+}
+
+/* ---- Code blocks -------------------------------------------------------- */
+div.highlight,
+.highlight pre {
+  border-radius: 10px;
+}
+.highlight {
+  border: 1px solid var(--sy-c-border, rgba(120, 120, 140, 0.16));
+}
+
+/* ---- Landing hero ------------------------------------------------------- */
+.dft-hero {
+  padding: 2.5rem 0 1.5rem;
+}
+.dft-hero h1 {
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1.1;
+  margin-bottom: 0.5rem;
+}
+.dft-hero .dft-tagline {
+  font-size: 1.15rem;
+  opacity: 0.75;
+  max-width: 46rem;
+}
+.dft-kicker {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--sy-c-link);
+}
+
+/* ---- Mermaid diagrams --------------------------------------------------- */
+/* Colors come from mermaid's own frontmatter theme (conf.py). Shibuya applies
+   an invert() filter to SVGs in dark mode (to darken light diagrams); our
+   diagrams are already dark-themed, so that filter must be off or it turns the
+   neon palette into cream/salmon. */
+.mermaid {
+  text-align: center;
+}
+.mermaid svg,
+html.dark .mermaid svg {
+  filter: none !important;
+}
+
+/* ---- Sidebar spacing ---------------------------------------------------- */
+/* Shibuya puts 2.5rem above each section caption, which reads as a large gap
+   between our many top-level sections. Tighten it. */
+.caption {
+  margin-top: 1.35rem !important;
+}
+.caption + ul {
+  margin-bottom: 0.6rem !important;
+}
+
+/* ---- Collapsible "Source" dropdowns (sphinx-design) -------------------- */
+/* The generated C++ source blocks use :color: secondary, which renders as a
+   flat tan in dark mode. Brand the header: light cyan in light, neon blue in
+   dark, with a bright accent bar. */
+:root {
+  --dft-dd-bg: #e8f7fb;
+  --dft-dd-fg: #0e7490;
+  --dft-dd-accent: #0e7490;
+}
+html.dark {
+  --dft-dd-bg: #12233a;
+  --dft-dd-fg: #dcf7ff;
+  --dft-dd-accent: #35e6ff;
+}
+details.sd-dropdown > .sd-summary-title {
+  background-color: var(--dft-dd-bg) !important;
+  color: var(--dft-dd-fg) !important;
+  border-left: 3px solid var(--dft-dd-accent) !important;
+}
+details.sd-dropdown > .sd-summary-title *,
+details.sd-dropdown > .sd-summary-title .sd-summary-icon svg {
+  color: var(--dft-dd-fg) !important;
+  fill: var(--dft-dd-fg) !important;
+}
+
+/* "Goal" callout that opens each how-to guide */
+.admonition.goal {
+  border: 1px solid #bfe6ef;
+  border-left: 4px solid #0e7490;
+  background: #eef9fc;
+}
+.admonition.goal > .admonition-title {
+  color: #0e7490;
+  background: transparent;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+html.dark .admonition.goal {
+  border-color: #274b5f;
+  border-left-color: #35e6ff;
+  background: #12233a;
+}
+html.dark .admonition.goal > .admonition-title {
+  color: #35e6ff;
+}
+
+/* Landing hero banner (theme-switched). Selectors are scoped to .dft-hero and
+   the img element so they outrank the theme's article-image rules. */
+.dft-hero img.dft-hero-banner {
+  display: block;
+  width: min(460px, 84%);
+  height: auto;
+  margin: 0 auto 1.4rem;
+}
+.dft-hero img.dft-banner-dark {
+  display: none;
+}
+html.dark .dft-hero img.dft-banner-dark {
+  display: block;
+}
+html.dark .dft-hero img.dft-banner-light {
+  display: none;
+}
+
+/* "Use with an AI assistant" callout on the landing page. */
+.llm-assist {
+  margin: 1rem 0 1.5rem;
+}
+.llm-assist .llm-prompt {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--sy-c-border, #d0d7de);
+  border-radius: 8px;
+  background: var(--sy-c-bg-soft, rgba(127, 127, 127, 0.06));
+  font-size: 0.9em;
+  line-height: 1.5;
+  margin: 0 0 0.5rem;
+}
+.llm-assist .llm-copy {
+  padding: 0.35rem 0.9rem;
+  border: 1px solid var(--sy-c-border, #d0d7de);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+.llm-assist .llm-copy:hover {
+  background: var(--sy-c-bg-soft, rgba(127, 127, 127, 0.1));
+}
+.llm-assist .llm-links {
+  margin: 0.6rem 0 0;
+  font-size: 0.85em;
+  opacity: 0.85;
+}
+
+/* ---- "Copy page" control (embedded Markdown, no fetch) ------------------ */
+/* Injected at the top of each page body (conf.py _inject_copy_page); float it
+   to the top-right so the title flows beside it. A main "Copy page" button plus
+   a dropdown that hands the content to an agent. */
+.dftu-copy-page {
+  position: relative;
   float: right;
-  margin: 0 0 0.35rem 1rem;
-  font-size: 0.9rem;
-  line-height: 1.2;
+  margin: 0 0 0.5rem 1rem;
 }
-
-.api-source-link a::before {
-  content: "[";
+.dftu-copy-page-bar {
+  display: inline-flex;
+  align-items: stretch;
 }
-
-.api-source-link a::after {
-  content: "]";
+.dftu-copy-page-btn,
+.dftu-copy-page-toggle {
+  position: relative;
+  font-size: 0.82em;
+  color: var(--sy-c-link);
+  background: transparent;
+  border: 1px solid var(--sy-c-border, rgba(120, 120, 140, 0.3));
+  cursor: pointer;
 }
-
-.api-source-link + dl.cpp,
-.api-source-link + dl.c {
-  margin-top: 0;
+.dftu-copy-page-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px 0 0 6px;
+}
+.dftu-copy-page-toggle {
+  padding: 0 0.5rem;
+  /* Overlap the shared edge so the divider is one line, not two; on hover the
+     raised element paints its full (four-sided) border over the neighbor. */
+  margin-left: -1px;
+  border-radius: 0 6px 6px 0;
+}
+/* Caret, drawn in CSS to keep the markup pure ASCII. */
+.dftu-copy-page-toggle::after {
+  content: "";
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  vertical-align: middle;
+}
+.dftu-copy-page-btn:hover,
+.dftu-copy-page-toggle:hover {
+  border-color: var(--sy-c-link);
+  z-index: 1;
+}
+.dftu-copy-page-btn:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+.dftu-copy-page-menu {
+  position: absolute;
+  right: 0;
+  z-index: 20;
+  margin-top: 0.25rem;
+  min-width: 12rem;
+  display: flex;
+  flex-direction: column;
+  padding: 0.25rem;
+  background: var(--sy-c-background, #fff);
+  border: 1px solid var(--sy-c-border, rgba(120, 120, 140, 0.3));
+  border-radius: 8px;
+  box-shadow: 0 10px 30px -12px rgba(15, 23, 42, 0.35);
+}
+.dftu-copy-page-menu[hidden] {
+  display: none;
+}
+.dftu-copy-page-menu button,
+.dftu-copy-page-menu a {
+  display: block;
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85em;
+  color: inherit;
+  text-decoration: none;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.dftu-copy-page-menu button:hover,
+.dftu-copy-page-menu a:hover {
+  background: var(--sy-c-bg-soft, rgba(127, 127, 127, 0.1));
 }

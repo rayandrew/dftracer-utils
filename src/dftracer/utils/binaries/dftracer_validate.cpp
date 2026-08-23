@@ -1,3 +1,4 @@
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/logging.h>
@@ -18,8 +19,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include "common_cli.h"
 
 using namespace dftracer::utils;
 using dftracer::utils::json_trim_and_validate;

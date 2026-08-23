@@ -80,7 +80,7 @@ class TypedTask : public Task {
      * - void apply(CoroScope&)              - No input or output
      */
 
-    // Version with input and output
+    /// Version with input and output
     template <typename I_ = I, typename O_ = O>
     typename std::enable_if_t<!std::is_void_v<I_> && !std::is_void_v<O_>, O_>
     apply(CoroScope& ctx, const I_& input) {
@@ -91,7 +91,7 @@ class TypedTask : public Task {
                                 "TypedTask::apply() must be overridden");
     }
 
-    // Version with input, no output
+    /// Version with input, no output
     template <typename I_ = I, typename O_ = O>
     typename std::enable_if_t<!std::is_void_v<I_> && std::is_void_v<O_>, void>
     apply(CoroScope& ctx, const I_& input) {
@@ -102,7 +102,7 @@ class TypedTask : public Task {
                                 "TypedTask::apply() must be overridden");
     }
 
-    // Version with output, no input
+    /// Version with output, no input
     template <typename I_ = I, typename O_ = O>
     typename std::enable_if_t<std::is_void_v<I_> && !std::is_void_v<O_>, O_>
     apply(CoroScope& ctx) {
@@ -113,7 +113,7 @@ class TypedTask : public Task {
                                 "TypedTask::apply() must be overridden");
     }
 
-    // Version with no input or output
+    /// Version with no input or output
     template <typename I_ = I, typename O_ = O>
     typename std::enable_if_t<std::is_void_v<I_> && std::is_void_v<O_>, void>
     apply(CoroScope& ctx) {

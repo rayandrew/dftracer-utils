@@ -5,8 +5,8 @@
 
 namespace dftracer::utils {
 
-// TaskIndex must be able to hold pointer values (for pointer-based IDs)
-// Use intptr_t to ensure it's the same size as a pointer
+/// TaskIndex must be able to hold pointer values (for pointer-based IDs)
+/// Use intptr_t to ensure it's the same size as a pointer
 typedef std::intptr_t TaskIndex;
 
 }  // namespace dftracer::utils

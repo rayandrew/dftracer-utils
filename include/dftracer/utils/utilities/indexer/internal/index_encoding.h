@@ -2,8 +2,8 @@
 #define DFTRACER_UTILS_UTILITIES_INDEXER_INTERNAL_INDEX_ENCODING_H
 
 #include <dftracer/utils/core/rocksdb/key_codec.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
+#include <dftracer/utils/trace/indexing/chunk_dimension_stats.h>
+#include <dftracer/utils/trace/indexing/chunk_statistics.h>
 #include <dftracer/utils/utilities/indexer/internal/gzip_member_record.h>
 #include <dftracer/utils/utilities/indexer/internal/payload_codec.h>
 
@@ -85,10 +85,10 @@ std::string encode_bloom_value(std::span<const unsigned char> blob,
                                std::uint64_t num_entries);
 
 std::string encode_chunk_statistics_value(
-    const composites::dft::indexing::ChunkStatistics& stats);
+    const trace::indexing::ChunkStatistics& stats);
 
 std::string encode_chunk_dimension_stats_value(
-    const composites::dft::indexing::ChunkDimensionStats& stats,
+    const trace::indexing::ChunkDimensionStats& stats,
     std::size_t value_counts_cap);
 
 // Count map and name summary encoders are templated so they can accept any

@@ -13,8 +13,8 @@ namespace dftracer::utils::utilities::filesystem {
 struct FileEntry {
     fs::path path;
     std::size_t size = 0;
-    // Unix seconds; piggybacks on the size stat so staleness checks need no
-    // extra metadata op. 0 when not populated.
+    /// Unix seconds; piggybacks on the size stat so staleness checks need no
+    /// extra metadata op. 0 when not populated.
     std::uint64_t mtime = 0;
     bool is_directory = false;
     bool is_regular_file = false;

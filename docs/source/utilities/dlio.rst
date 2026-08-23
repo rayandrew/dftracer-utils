@@ -1,12 +1,15 @@
+:description: How the dlio utilities power dftracer_gen_dlio_config: aggregate an indexed trace directory and emit a DLIO YAML of per-component timing distributions.
+
 DLIO Config Generation
 ======================
 
 The ``dlio`` utilities power the ``dftracer_gen_dlio_config`` binary
-(see :ref:`dftracer_gen_dlio_config <cli-shared-flags>` in the CLI reference).
-They consume an already-populated ``AGGREGATION`` column family (produced by
-:doc:`/cli` ``dftracer_aggregator`` or by the shared
-``aggregation_runner`` library function) and emit a DLIO-compatible YAML
-config describing per-component timing distributions.
+(see :doc:`/cli` for the CLI reference).
+The binary indexes and aggregates its input directory automatically
+(calling the shared ``aggregation_runner`` library function to populate the
+``AGGREGATION`` column family) - there is no separate aggregation step -
+and emits a DLIO-compatible YAML config describing per-component timing
+distributions.
 
 .. code-block:: cpp
 
@@ -28,10 +31,12 @@ End-to-end the module composes four pieces:
    per-rank sample stream per component (``fetch.block``, ``fetch.iter``,
    ``preprocess``, ``item`` by default; the selecting ``(cat, name)`` per
    component is configurable via ``TraceLoaderOptions`` / ``load_event_map``).
-   Sketches are used for inverse-CDF sampling when the aggregator was run with
-   ``--compute-percentiles``; otherwise the per-call mean is replicated.
+   Sketches are used for inverse-CDF sampling when the aggregation run set
+   ``AggregationConfig::compute_percentiles`` (``dftracer_gen_dlio_config``
+   always sets it); otherwise the per-call mean is replicated.
 
-2. The :doc:`distribution fitter <common>` (under
+2. The distribution fitter (:doc:`API reference
+   </cpp_api/utilities>`, under
    ``common/statistics/distributions.h`` and ``mixture.h``) fits the lowest-BIC
    model from {Normal, Lognormal, Gamma, Exponential, Weibull, GMM-2, GMM-3}.
 
@@ -61,8 +66,8 @@ trace_loader
 
    if (!traces.any_data) { /* no DLIO events in this DB */ }
    if (!traces.sketches_available) {
-       // The aggregator was run without --compute-percentiles. We fell back to
-       // mean replication; rerun with the flag for higher-fidelity output.
+       // The aggregation run had compute_percentiles off. We fell back to
+       // mean replication; rerun with it enabled for higher-fidelity output.
    }
 
 Returns an ``AggregatedTraces`` with:
@@ -73,7 +78,8 @@ Returns an ``AggregatedTraces`` with:
 - ``computation_times`` / ``preprocess_times`` - flat sample arrays in seconds
   (the input to ``fit_all_single_distributions``).
 - ``fetch_block_stats`` / ``fetch_iter_stats`` / ``preprocess_stats`` /
-  ``getitem_stats`` - :doc:`Statistic <common>` objects, with merged DDSketches
+  ``getitem_stats`` - ``Statistic`` objects (see :doc:`API reference
+  </cpp_api/utilities>`), with merged DDSketches
   attached when available.
 - ``trace_e2e_duration`` and per-component ``ComponentTimeMetrics`` with both
   ``accumulated_time`` (sum of ``count x mean``) and ``union_time`` (true
@@ -108,7 +114,8 @@ Distribution fitting
 --------------------
 
 Lives under ``common/statistics`` and works on any sample array, not just DLIO
-traces - see :doc:`common` for ``FittedDistribution``, ``FittedMixture``,
+traces - see the :doc:`API reference
+</cpp_api/utilities>` for ``FittedDistribution``, ``FittedMixture``,
 ``BestModel`` (the ``std::variant``), ``select_best_model``, ``make_sampler``,
 and free ``pdf`` / ``cdf`` / ``quantile`` overloads.
 

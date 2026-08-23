@@ -14,14 +14,14 @@ namespace dftracer::utils::utilities::fileio {
  */
 struct StreamReadInput {
     fs::path path;
-    std::size_t chunk_size = 64 * 1024;  // 64KB default
+    std::size_t chunk_size = 64 * 1024;  ///< 64KB default
 
     StreamReadInput() = default;
 
     explicit StreamReadInput(fs::path p, std::size_t cs = 64 * 1024)
         : path(std::move(p)), chunk_size(cs) {}
 
-    // Equality for caching support
+    /// Equality for caching support
     bool operator==(const StreamReadInput& other) const {
         return path == other.path && chunk_size == other.chunk_size;
     }

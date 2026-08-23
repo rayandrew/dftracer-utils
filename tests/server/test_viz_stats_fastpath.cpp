@@ -87,7 +87,7 @@ TEST_SUITE("viz_stats_fastpath") {
     // full live decode (nofast=1) for every unfiltered group-by-name window.
     TEST_CASE("fast path equals live scan over a multi-member trace") {
         const int n = 3000;
-        auto dir = dft_utils_test::make_unique_test_path("viz_stats_fast");
+        auto dir = dftu_utils_test::make_unique_test_path("viz_stats_fast");
         fs::create_directories(dir);
         // Not *.pfw.gz: TraceIndex scans the dir and must see only the trace.
         const std::string src = (dir / "src.raw.gz").string();

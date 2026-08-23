@@ -12,6 +12,7 @@
 // write_json: per-worker serialization of process slices, ParallelWriter
 //             feeds io_backend for the actual writes
 
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/call_tree/internal/call_tree.h>
 #include <dftracer/utils/call_tree/internal/process_call_tree.h>
 #include <dftracer/utils/call_tree/internal/process_key.h>
@@ -37,8 +38,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-#include "common_cli.h"
 
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities;

@@ -16,22 +16,22 @@ extern "C" {
  *
  * Example (C):
  * @code
- * dft_stream_config_t config = {
- *     .stream_type = DFT_STREAM_TYPE_LINE,
- *     .range_type = DFT_RANGE_TYPE_LINES,
+ * dftu_stream_config_t config = {
+ *     .stream_type = DFTU_STREAM_TYPE_LINE,
+ *     .range_type = DFTU_RANGE_TYPE_LINES,
  *     .start = 1,
  *     .end = 1000,
  *     .buffer_size = 512 * 1024 * 1024  // 512MB for large files
  * };
- * dft_reader_stream_t stream = dft_reader_stream(reader, &config);
+ * dftu_reader_stream_t stream = dftu_reader_stream(reader, &config);
  * @endcode
  */
 typedef struct {
     /** Type of stream (BYTES, LINE, MULTI_LINES, etc.) */
-    dft_stream_type_t stream_type;
+    dftu_stream_type_t stream_type;
 
     /** How to interpret start/end (BYTES or LINES) */
-    dft_range_type_t range_type;
+    dftu_range_type_t range_type;
 
     /** Start of range (byte offset or line number based on range_type) */
     size_t start;
@@ -50,7 +50,7 @@ typedef struct {
      * Larger buffers improve I/O performance but use more memory.
      */
     size_t buffer_size;
-} dft_stream_config_t;
+} dftu_stream_config_t;
 
 #ifdef __cplusplus
 }  // extern "C"
@@ -194,7 +194,7 @@ class StreamConfig {
     /**
      * @brief Create from C API config.
      */
-    static StreamConfig from_c(const dft_stream_config_t& c_config) {
+    static StreamConfig from_c(const dftu_stream_config_t& c_config) {
         // Use default buffer size if 0 or uninitialized
         std::size_t buffer_size = c_config.buffer_size == 0
                                       ? DEFAULT_BUFFER_SIZE

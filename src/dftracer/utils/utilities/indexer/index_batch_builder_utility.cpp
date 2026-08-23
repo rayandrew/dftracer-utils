@@ -5,10 +5,10 @@
 #include <dftracer/utils/core/coro/channel.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/views/bloom_fold.h>
-#include <dftracer/utils/utilities/composites/dft/views/dict_fold.h>
-#include <dftracer/utils/utilities/composites/dft/views/index_fold_driver.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/views/bloom_fold.h>
+#include <dftracer/utils/trace/views/dict_fold.h>
+#include <dftracer/utils/trace/views/index_fold_driver.h>
 #include <dftracer/utils/utilities/indexer/error.h>
 #include <dftracer/utils/utilities/indexer/index_batch_sink.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
@@ -25,7 +25,7 @@
 
 namespace dftracer::utils::utilities::indexer {
 
-using composites::dft::internal::determine_index_path;
+using trace::internal::determine_index_path;
 
 namespace {
 
@@ -46,10 +46,10 @@ struct ParsedBloomJob {
     // The intern feeds the folds during the parse only; write_to_sink reads the
     // already-resolved chunk/dictionary state, so the folds outlive it.
     std::unique_ptr<dftracer::utils::StringIntern> intern;
-    std::unique_ptr<composites::dft::views::detail::BloomFold> bloom_fold;
-    std::unique_ptr<composites::dft::views::detail::DictFold> dict_fold;
-    std::unique_ptr<composites::dft::views::detail::AggregationFold> agg_fold;
-    std::optional<composites::dft::aggregators::AggFoldOutput> agg_output;
+    std::unique_ptr<trace::views::detail::BloomFold> bloom_fold;
+    std::unique_ptr<trace::views::detail::DictFold> dict_fold;
+    std::unique_ptr<trace::views::detail::AggregationFold> agg_fold;
+    std::optional<trace::aggregators::AggFoldOutput> agg_output;
 };
 
 std::vector<PreparedFile> prepare_file_identities(
@@ -91,7 +91,7 @@ struct BatchWriteState {
     std::shared_ptr<std::vector<std::string>> bloom_dims;
     std::string index_path;
     IndexBuildBatchMetrics metrics;
-    composites::dft::indexing::ChunkIndexerConfig bloom_config;
+    trace::indexing::ChunkIndexerConfig bloom_config;
     std::size_t num_files = 0;
     std::size_t parallelism = 0;
     std::size_t checkpoint_size = 0;
@@ -118,7 +118,7 @@ static coro::CoroTask<void> parse_and_emit_worker(
     std::vector<IndexBuildResult>* results_ptr,
     std::vector<std::optional<ParsedBloomJob>>* parsed_jobs_ptr,
     std::vector<PreparedFile>* prepared_ptr, std::size_t checkpoint_size,
-    composites::dft::indexing::ChunkIndexerConfig bloom_config,
+    trace::indexing::ChunkIndexerConfig bloom_config,
     std::atomic<std::uint64_t>* parse_ns_ptr,
     const IndexBuildBatchConfig::AggFoldFactory* agg_fold_factory_ptr,
     bool build_bloom, const IndexBuildBatchConfig::ProgressFn* progress_ptr,
@@ -141,7 +141,7 @@ static coro::CoroTask<void> parse_and_emit_worker(
         job.identity = pf;
         bool parse_ok = false;
         try {
-            namespace views = composites::dft::views::detail;
+            namespace views = trace::views::detail;
             internal::Indexer::VisitorList visitors;
 
             // Bloom + hash are harvested by folds via an IndexFoldDriver. The
@@ -195,7 +195,7 @@ static coro::CoroTask<void> parse_and_emit_worker(
                 // Lift the aggregation fold's out-of-band outputs before it
                 // goes to the write phase; its metrics stay for write_to_sink.
                 if (job.agg_fold) {
-                    composites::dft::aggregators::AggFoldOutput ao;
+                    trace::aggregators::AggFoldOutput ao;
                     ao.file_path = pf.file_path;
                     ao.observed_extra_keys =
                         job.agg_fold->observed_extra_keys();
@@ -334,7 +334,7 @@ static coro::CoroTask<void> run_streaming_pipeline(CoroScope* scope,
     auto files_done = std::make_shared<std::atomic<std::size_t>>(0);
     auto parse_ns = std::make_shared<std::atomic<std::uint64_t>>(0);
     auto bloom_config_holder =
-        std::make_shared<composites::dft::indexing::ChunkIndexerConfig>(
+        std::make_shared<trace::indexing::ChunkIndexerConfig>(
             state->bloom_config);
 
     auto* next_index_ptr = next_index.get();

@@ -1,5 +1,5 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
 #include <dftracer/utils/utilities/reader/internal/reader_factory.h>
 #include <doctest/doctest.h>
@@ -7,10 +7,10 @@
 #include "testing_utilities.h"
 
 using namespace dftracer::utils;
-using namespace dftracer::utils::utilities::composites::dft::internal;
+using namespace dftracer::utils::trace::internal;
 using namespace dftracer::utils::utilities::indexer::internal;
 using namespace dftracer::utils::utilities::reader::internal;
-using namespace dft_utils_test;
+using namespace dftu_utils_test;
 
 TEST_CASE("Factory Pattern - Basic GZIP functionality") {
     TestEnvironment env(100, Format::GZIP);

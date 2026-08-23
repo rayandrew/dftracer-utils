@@ -61,10 +61,11 @@ class AsyncOnce {
     }
 
    private:
-    // NOT_STARTED / IN_PROGRESS / READY are distinct from any Waiter* (which is
-    // pointer-aligned, so never 0/1/2).
+    /// NOT_STARTED / IN_PROGRESS / READY are distinct from any Waiter* (which
+    /// is pointer-aligned, so never 0/1/2).
     static constexpr std::uintptr_t NOT_STARTED = 0;
-    static constexpr std::uintptr_t IN_PROGRESS = 1;  // in progress, no waiters
+    static constexpr std::uintptr_t IN_PROGRESS =
+        1;  ///< in progress, no waiters
     static constexpr std::uintptr_t READY = 2;
 
     struct Waiter {

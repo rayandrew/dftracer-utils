@@ -1,7 +1,9 @@
+:description: The replay utility that re-executes recorded trace events in a configurable mode, with a coroutine-pipelined read/parse/filter/execute engine.
+
 Replay
 ==============
 
-The replay utility replays DFTracer trace files by reading recorded events and executing them in a configurable replay mode. It supports plain text and gzipped traces, dry-run analysis, timing-aware replay, and filtered execution for focused testing.
+The replay utility replays DFTracer trace files by reading recorded events and executing them in a configurable replay mode. It supports gzip-compressed traces, dry-run analysis, timing-aware replay, and filtered execution for focused testing.
 
 .. note::
 
@@ -9,7 +11,7 @@ The replay utility replays DFTracer trace files by reading recorded events and e
    reading, JSON parsing, filtering, and execution run as concurrent stages
    communicating through bounded channels, so a slow executor no longer
    blocks the reader. JSON parsing uses the shared
-   :cpp:class:`dftracer::utils::utilities::common::json::JsonParser`
+   :cpp:class:`dftracer::utils::json::JsonParser`
    (on-demand simdjson) which reuses one padded buffer per stage. String
    handling and file I/O have been re-tuned with a fixed read buffer and
    ``string_view`` line slicing; the public ``ReplayEngine`` /
@@ -25,7 +27,7 @@ Overview
 
 The Replay utility is designed to perform the following tasks:
 
-- Parse DFTracer trace files (``.pfw``, ``.pfw.gz``) from one or more files or directories
+- Parse DFTracer trace files (``.pfw.gz``) from one or more files or directories
 - Replay events in dry-run mode for validation without issuing I/O
 - Reproduce event timing or disable timing for faster execution
 - Filter replay by PID, TID, function, category, timestamp range, and operation size
@@ -46,31 +48,37 @@ Types
        OtherMetadata     // Other metadata types
    };
 
-   // Single trace event from DFTracer
+   // Single trace event from DFTracer (abbreviated - see
+   // dftracer/utils/utilities/replay/trace.h for the full field set,
+   // including io_cat, acc_pat, count, epoch, fhash, hhash, view_fields,
+   // bin_fields). cat/func_name/fhash/hhash are non-owning views into a
+   // process-wide StringIntern pool.
    struct Trace {
-       std::string cat;        // Category (e.g., "posix", "stdio")
-       std::string func_name;  // Function name (e.g., "read", "write")
-       double duration;        // Duration in microseconds
+       std::string_view cat;        // Category (e.g., "posix", "stdio")
+       std::string_view func_name;  // Function name (e.g., "read", "write")
+       double duration;             // Duration in microseconds
        std::uint64_t time_start;
        std::uint64_t time_end;
        std::uint64_t pid;
        std::uint64_t tid;
-       std::int64_t size;      // Operation size (-1 = unknown)
-       std::int64_t offset;    // File offset (-1 = unknown)
+       std::int64_t size = -1;      // Operation size (-1 = unknown)
+       std::int64_t offset = -1;    // File offset (-1 = unknown)
        TraceType type;
-       bool is_valid;
+       bool is_valid = false;
    };
 
-   // Replay results and statistics
+   // Replay results and statistics (abbreviated - also carries pid_counts,
+   // tid_counts, total_bytes_read/written, first/last_timestamp, and call
+   // tree stats; see replay.h)
    struct ReplayResult {
-       std::size_t total_events;
-       std::size_t executed_events;
-       std::size_t filtered_events;
-       std::size_t failed_events;
-       std::chrono::microseconds total_duration;
-       std::unordered_map<std::string, std::size_t> function_counts;
-       std::unordered_map<std::string, std::size_t> category_counts;
-       void print_summary(bool verbose = false) const;
+       std::size_t total_events = 0;
+       std::size_t executed_events = 0;
+       std::size_t filtered_events = 0;
+       std::size_t failed_events = 0;
+       std::chrono::microseconds total_duration{0};
+       std::unordered_map<std::string_view, std::size_t> function_counts;
+       std::unordered_map<std::string_view, std::size_t> category_counts;
+       void print_summary() const;
    };
 
 ReplayEngine
@@ -84,7 +92,6 @@ Main replay engine that coordinates trace reading and execution.
 
    ReplayConfig config;
    config.dry_run = true;
-   config.verbose = true;
 
    ReplayEngine engine(config);
    ReplayResult result = engine.replay("trace.pfw.gz");
@@ -114,7 +121,7 @@ Main replay engine that coordinates trace reading and execution.
        "rank_1.pfw.gz",
        "rank_2.pfw.gz"
    });
-   result.print_summary(true);  // Verbose summary
+   result.print_summary();
 
 Filtering
 ---------
@@ -176,7 +183,7 @@ Replay traces using hierarchical call tree structure for depth-first execution.
        "*.pfw.gz"          // File pattern
    );
 
-   result.print_summary(true);
+   result.print_summary();
    // result.total_nodes, result.tree_depth, result.unique_processes
 
 Custom Executors

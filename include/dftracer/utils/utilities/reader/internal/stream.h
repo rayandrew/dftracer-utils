@@ -100,7 +100,7 @@ extern "C" {
 /**
  * @brief Opaque stream handle (C API).
  */
-typedef void* dft_reader_stream_t;
+typedef void* dftu_reader_stream_t;
 
 /**
  * @brief Read next chunk from stream into buffer.
@@ -110,8 +110,8 @@ typedef void* dft_reader_stream_t;
  * @param buffer_size Maximum bytes to read
  * @return Number of bytes actually read (0 if finished)
  */
-size_t dft_reader_stream_read(dft_reader_stream_t stream, char* buffer,
-                              size_t buffer_size);
+size_t dftu_reader_stream_read(dftu_reader_stream_t stream, char* buffer,
+                               size_t buffer_size);
 
 /**
  * @brief Check if stream is done.
@@ -119,21 +119,21 @@ size_t dft_reader_stream_read(dft_reader_stream_t stream, char* buffer,
  * @param stream Stream handle
  * @return 1 if done (no more data), 0 otherwise
  */
-int dft_reader_stream_done(dft_reader_stream_t stream);
+int dftu_reader_stream_done(dftu_reader_stream_t stream);
 
 /**
  * @brief Reset stream to beginning.
  *
  * @param stream Stream handle
  */
-void dft_reader_stream_reset(dft_reader_stream_t stream);
+void dftu_reader_stream_reset(dftu_reader_stream_t stream);
 
 /**
  * @brief Destroy stream and free resources.
  *
  * @param stream Stream handle
  */
-void dft_reader_stream_destroy(dft_reader_stream_t stream);
+void dftu_reader_stream_destroy(dftu_reader_stream_t stream);
 
 #ifdef __cplusplus
 }

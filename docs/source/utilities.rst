@@ -1,3 +1,5 @@
+:description: Overview of the composable C++ utility building blocks - file I/O, filesystem, hashing, indexer, reader, DLIO, replay - used standalone or in pipelines.
+
 Utilities
 =========
 
@@ -9,65 +11,37 @@ dftracer-utils provides a collection of composable utilities for trace file proc
 
    utilities/filesystem
    utilities/fileio
-   utilities/compression
-   utilities/text
-   utilities/composites
    utilities/replay
    utilities/hash
    utilities/indexer
    utilities/reader
-   utilities/common
    utilities/dlio
    call-tree
 
 Overview
 --------
 
-Utilities follow a consistent pattern:
+The library groups its C++ building blocks by domain. Each group has generated
+API reference under :doc:`cpp_api/index`; the pages below add prose and
+examples for the areas most often used directly.
 
-- **Input types**: Configuration structs with fluent builder API
-- **Output types**: Result structs with success status and data
-- **process() method**: Main entry point that transforms input to output
-- **Tags**: Compile-time markers like ``NeedsContext`` that opt into
-  cross-cutting features (e.g. CoroScope access)
-
-.. mermaid::
-
-   graph TB
-       subgraph Base["Utility Pattern"]
-           Utility["Utility&lt;I, O, Tags...&gt;<br/>process(I) -> CoroTask&lt;O&gt;"]
-       end
-
-       subgraph Categories["Utility Categories"]
-           FileIO["File I/O<br/>FileReader, StreamingReader"]
-           Compression["Compression<br/>Compressor, Decompressor"]
-           Text["Text<br/>LineSplitter, LineFilter"]
-           Hash["Hash<br/>FNV1a, Std, MurmurHash3"]
-           Indexer["Indexer<br/>Checkpoint, BloomFilter"]
-           Reader["Reader<br/>Stream, LineProcessor"]
-           Common["Common<br/>JSON, DDSketch, Statistic, Distributions, Mixture"]
-           Composites["Composites<br/>DFTracer-specific pipelines"]
-           Dlio["DLIO<br/>BarrierSimulator, TraceLoader, Optimizer, YAML emit"]
-       end
-
-       Utility --> FileIO
-       Utility --> Compression
-       Utility --> Text
-       Utility --> Hash
-       Utility --> Indexer
-       Utility --> Reader
-       Utility --> Common
-       Utility --> Composites
-       Utility --> Dlio
+- **File I/O** - synchronous readers/writers plus async line and byte
+  generators for gzip-compressed trace files.
+- **Filesystem** - directory scanning and trace-file discovery.
+- **Hash** - incremental FNV-1a 64-bit hashing.
+- **Indexer** - checkpoint and bloom-filter indexing for fast queries.
+- **Reader** - trace-file reading and line processing.
+- **DLIO** - the trace-to-DLIO-config pipeline (barrier simulator, optimizer,
+  YAML emit).
 
 File I/O
 --------
 
 The ``fileio`` utilities support both synchronous and asynchronous file operations:
 
-- **Synchronous readers**: Full in-memory or streaming chunk-based reading
-- **Async generators**: Non-blocking line/byte generators using ``co_await`` and coroutines
-- **Plain and indexed files**: Support for both raw text files and compressed archives with sidecar indexes
+- **Synchronous readers**: Full in-memory or streaming chunk-based reading of plain files
+- **Async generators**: Non-blocking line/byte generators over gzip-compressed (``.pfw.gz``) archives, using ``co_await`` and coroutines
+- **Indexed and streaming access**: indexed random access via a ``.dftindex`` sidecar, or single-pass streaming decompression when no index is present
 - **Streaming decompression**: On-the-fly decompression of .gz files without building indexes
 
 See :doc:`/utilities/fileio` for detailed usage.
@@ -113,14 +87,15 @@ Advanced indexing utilities for fast trace queries:
 
 - **Bloom filter cache**: Thread-safe bounded cache for deserialized bloom filters with file-level and chunk-level keys
 - **Chunk statistics**: Per-chunk aggregates including event counts, timestamp ranges, and duration distributions
-- **Predicate filtering**: Efficient multi-dimensional filtering for view queries on dimensions like time range and duration bounds
+- **Chunk pruning**: ``ChunkPrunerUtility`` evaluates a compiled ``query::Query`` against a file's bloom filters and chunk statistics to return the candidate checkpoint list, without decompressing chunks that cannot match
 
-Views and Predicates
---------------------
+Views
+-----
 
-Query views on DFTracer traces with multi-dimensional filtering:
+Query views on DFTracer traces run the compiled query against the index
+before touching event data:
 
-- **PredicateFilter**: Efficiently filters events by dimension sets, time ranges, and duration bounds
-- **Supports multiple predicates**: Match events against OR'd lists of predicates
+- **ChunkPrunerUtility** (``trace/indexing/chunk_pruner_utility.h``) - takes an index path, file path, and ``Query``, and returns the subset of checkpoints that may match plus a ``file_may_match`` short-circuit
+- The reader's query DSL (see :doc:`/utilities/reader`) compiles AND-of-EQ predicates that ``ChunkPrunerUtility`` evaluates against bloom filters and chunk statistics
 
-See :doc:`cpp_api/utilities` for the full API reference.
+See :doc:`cpp_api/utilities` for the full generated C++ reference.

@@ -34,7 +34,7 @@ void append_member(std::vector<std::uint8_t>& out, const std::string& text) {
 }
 
 std::string write_gz(const std::vector<std::uint8_t>& bytes) {
-    fs::path p = dft_utils_test::make_unique_test_path("stream_gz.pfw.gz");
+    fs::path p = dftu_utils_test::make_unique_test_path("stream_gz.pfw.gz");
     std::ofstream ofs(p, std::ios::binary);
     ofs.write(reinterpret_cast<const char*>(bytes.data()),
               static_cast<std::streamsize>(bytes.size()));

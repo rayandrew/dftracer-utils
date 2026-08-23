@@ -1,7 +1,7 @@
 #ifndef DFTRACER_UTILS_CALL_TREE_INTERNAL_NODE_H
 #define DFTRACER_UTILS_CALL_TREE_INTERNAL_NODE_H
 
-#include <dftracer/utils/utilities/composites/dft/args_map.h>
+#include <dftracer/utils/trace/args_map.h>
 
 #include <cstdint>
 #include <string>
@@ -11,7 +11,7 @@
 namespace dftracer::utils::call_tree {
 namespace internal {
 
-using ArgsMap = dftracer::utils::utilities::composites::dft::ArgsMap;
+using ArgsMap = dftracer::utils::trace::ArgsMap;
 
 // name_ and category_ are non-owning views into a process-wide StringIntern
 // pool. ArgsMap interns its own keys.

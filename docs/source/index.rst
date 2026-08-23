@@ -1,119 +1,181 @@
-.. dftracer utilities documentation master file
+:layout: landing
+:description: A C++20 engine (plus C ABI and Python bindings) for reading, indexing, and analyzing DFTracer traces at scale.
 
-Welcome to dftracer utilities documentation!
-============================================
+.. raw:: html
 
-**dftracer utilities** is a collection of utilities for `DFTracer <https://dftracer.readthedocs.io/>`_,
-providing powerful tools for trace file reading, indexing, and processing. The library includes
-both C++ APIs and Python bindings for flexible integration.
+   <div class="dft-hero">
+     <img class="dft-hero-banner dft-banner-light" src="_static/logo-banner-light.svg" alt="DFTracer Utils" />
+     <img class="dft-hero-banner dft-banner-dark" src="_static/logo-banner-dark.svg" alt="DFTracer Utils" />
+     <h1>Analyze DFTracer traces at scale</h1>
+     <p class="dft-tagline">A coroutine-based C++20 engine with a stable C ABI and
+     Python bindings: read and index <code>.pfw.gz</code> traces,
+     run a SIMD columnar DataFrame, compose async pipelines, and author plugins -
+     the same capabilities from C, C++, and Python.</p>
+   </div>
 
-Features
---------
+.. grid:: 1 2 3 5
+   :gutter: 3
+   :class-container: sd-mb-4
 
-- **High-performance trace file reading**: Efficient reading of compressed trace files
-- **Arrow data interchange**: Columnar Arrow output via nanoarrow for zero-copy access from pyarrow, polars, and DuckDB
-- **Utility bindings**: Python bindings for statistics, views, aggregation, and bloom queries
-- **Indexing capabilities**: Fast indexing and searching of trace data with bloom filters
-- **Pipeline processing**: Parallel data processing with tasks, coroutines, and channels
-- **Arrow IPC file output**: Write results as Arrow IPC files for pyarrow, polars, and DuckDB
-- **Task graphs**: DAG-based workflow builder with fan-out, fan-in, map, reduce patterns
-- **Python bindings**: Easy-to-use Python interface
-- **Cross-platform**: Works on Linux, macOS, and other Unix-like systems
+   .. grid-item-card:: :octicon:`rocket` Get started
+      :link: getting-started/index
+      :link-type: doc
 
-.. toctree::
-    :maxdepth: 2
-    :caption: Contents:
+      Install it and run your first query, pipeline, and plugin. Start here if
+      you are new.
 
-    installation
-    quickstart
-    tutorials/index
-    pipeline
-    cli
-    server
-    trace-viewer
-    utilities
-    api/index
-    cpp_api/index
-    developers
+   .. grid-item-card:: :octicon:`mortar-board` Tutorials
+      :link: tutorials/index
+      :link-type: doc
 
-.. toctree::
-   :maxdepth: 1
-   :caption: Links:
+      Guided, end-to-end lessons: your first analysis, C++, serving, scaling
+      out, and writing a plugin.
 
-   DFTracer Documentation <https://dftracer.readthedocs.io/>
-   DFTracer GitHub <https://github.com/LLNL/dftracer>
+   .. grid-item-card:: :octicon:`book` Guides
+      :link: guides/index
+      :link-type: doc
 
-Getting Started
----------------
+      Task-oriented how-tos: columnar ops, the query DSL, fan-out/fan-in,
+      channels, plugin authoring.
 
-To get started with dftracer utilities, check out the :doc:`installation` guide
-and then follow the :doc:`quickstart` tutorial.
+   .. grid-item-card:: :octicon:`code` Reference
+      :link: reference/index
+      :link-type: doc
 
-Installation
-~~~~~~~~~~~~
+      The complete API: Python, C++, and the C ABI, generated from the source.
 
-.. code-block:: bash
+   .. grid-item-card:: :octicon:`light-bulb` Concepts
+      :link: concepts/index
+      :link-type: doc
 
-   pip install dftracer-utils
+      How it works: the fold-fusion engine, the coroutine runtime, and the
+      plugin and compose models.
 
-For more detailed installation instructions, see :doc:`installation`.
+What it does
+------------
 
-Quick Example
-~~~~~~~~~~~~~
+.. grid:: 1 1 3 3
+   :gutter: 2
 
-.. code-block:: python
+   .. grid-item-card:: Columnar, in three languages
 
-   from dftracer.utils import TraceReader
+      A SIMD ``DataFrame``/``Series`` engine (Highway kernels) with arithmetic,
+      reducers, strings, joins, and reshaping - reachable from C, C++, and
+      Python, zero-copy across Arrow and NumPy.
 
-   # Read a trace file (auto-detects index sidecar)
-   reader = TraceReader("path/to/trace.pfw.gz")
+   .. grid-item-card:: Async by construction
 
-   # Read all lines as JSON
-   for obj in reader.iter_lines_json():
-       print(obj["name"], obj["dur"])
+      A C++20 coroutine runtime (io_uring on Linux, kqueue on macOS) with
+      pipelines, task graphs, channels, and structured concurrency.
 
-   # Read as Arrow for columnar access
-   table = reader.read_arrow()
-   df = table.to_pandas()  # requires pyarrow
+   .. grid-item-card:: Extensible
 
-   # Aggregate traces in a directory
-   from dftracer.utils.utilities import AggregatorUtility
-   agg = AggregatorUtility()
-   table = agg.process("./traces", time_interval_ms=1000.0)
+      Author plugins against a stable C ABI, a C++ SDK, or a Python JIT DSL, and
+      build queries and compose ops that stay in the engine.
 
-   # Include extra per-event numeric fields as Arrow columns
-   table = agg.process("./traces", custom_metric_fields=["bytes"])
+Use with an AI assistant
+------------------------
+
+This site publishes ``llms.txt`` (a map of the docs) and ``llms-full.txt``
+(every page inlined), following the
+`llms.txt convention <https://llmstxt.org/>`_. Paste this into your AI assistant:
+
+.. raw:: html
+
+   <div class="llm-assist">
+     <pre id="llm-prompt" class="llm-prompt">Loading...</pre>
+     <button type="button" id="llm-copy" class="llm-copy">Copy</button>
+     <p class="llm-links">
+       Open directly: <a id="llm-link" href="llms.txt">llms.txt</a> |
+       <a id="llm-link-full" href="llms-full.txt">llms-full.txt</a>
+     </p>
+   </div>
+   <script>
+   (function () {
+     var base = window.location.href.replace(/[^/]*$/, "");
+     var url = new URL("llms.txt", base).href;
+     var fullUrl = new URL("llms-full.txt", base).href;
+     var prompt =
+       "Read " + url + " to learn dftracer-utils and its documentation, then " +
+       "help me install it and work through my task step by step. For the full " +
+       "docs in one file, use " + fullUrl + ".";
+     var pre = document.getElementById("llm-prompt");
+     if (pre) { pre.textContent = prompt; }
+     var link = document.getElementById("llm-link");
+     if (link) { link.href = url; }
+     var linkFull = document.getElementById("llm-link-full");
+     if (linkFull) { linkFull.href = fullUrl; }
+     var btn = document.getElementById("llm-copy");
+     if (btn && navigator.clipboard) {
+       btn.addEventListener("click", function () {
+         navigator.clipboard.writeText(prompt).then(function () {
+           btn.textContent = "Copied";
+           setTimeout(function () { btn.textContent = "Copy"; }, 1500);
+         });
+       });
+     } else if (btn) {
+       btn.style.display = "none";
+     }
+   })();
+   </script>
 
 Citation
 --------
 
-If you use this software, please cite:
+If you use dftracer-utils in your research, please cite the HORATIO paper:
 
    Ray A. O. Sinurat, William Nixon, Haryadi S. Gunawi, Nikoli Dryden, and
-   Hariharan Devarajan. 2026. HORATIO: Bridging Management and Analysis of
-   Traces at Scale. In The International Conference on Scalable Scientific Data
-   Management 2026 (SSDBM 2026), August 11-13, 2026, San Diego, CA, USA. ACM,
-   New York, NY, USA. doi: `10.1145/3828820.3828825
-   <https://doi.org/10.1145/3828820.3828825>`_
+   Hariharan Devarajan. 2026. HORATIO: Bridging Management and Analysis of Traces
+   at Scale. In The International Conference on Scalable Scientific Data
+   Management 2026 (SSDBM 2026). ACM.
+   doi:\ `10.1145/3828820.3828825 <https://doi.org/10.1145/3828820.3828825>`_
 
-.. code-block:: bibtex
+See :doc:`citation` for the BibTeX entry.
 
-   @inproceedings{sinurat2026horatio,
-     author    = {Sinurat, Ray A. O. and Nixon, William and Gunawi, Haryadi S. and Dryden, Nikoli and Devarajan, Hariharan},
-     title     = {HORATIO: Bridging Management and Analysis of Traces at Scale},
-     year      = {2026},
-     isbn      = {979-8-4007-2708-5},
-     publisher = {Association for Computing Machinery},
-     address   = {New York, NY, USA},
-     doi       = {10.1145/3828820.3828825},
-     booktitle = {The International Conference on Scalable Scientific Data Management 2026 (SSDBM 2026)},
-     location  = {San Diego, CA, USA},
-     series    = {SSDBM 2026},
-   }
+.. admonition:: Where the name comes from
+   :class: tip
 
-Indices and tables
-==================
+   HORATIO is named after Horatius Cocles, who held the Tiber bridge to defend
+   Rome. The name echoes the HORATIO's role to bridge trace management and
+   analysis while keeping the raw traces intact.
 
-* :ref:`genindex`
-* :ref:`modindex`
-* :ref:`search`
+.. toctree::
+   :hidden:
+   :caption: Get started
+
+   getting-started/index
+
+.. toctree::
+   :hidden:
+   :caption: Tutorials
+
+   tutorials/index
+
+.. toctree::
+   :hidden:
+   :caption: Guides
+
+   guides/index
+
+.. toctree::
+   :hidden:
+   :caption: Reference
+
+   reference/index
+
+.. toctree::
+   :hidden:
+   :caption: Concepts
+
+   concepts/index
+
+.. toctree::
+   :hidden:
+   :caption: More
+
+   cli
+   environment
+   developers
+   changelog
+   citation
+   open-source

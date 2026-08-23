@@ -256,7 +256,7 @@ static void ArrowBatchStream_dealloc(ArrowBatchStreamObject *self) {
 }
 
 static PyMethodDef ArrowBatchStream_methods[] = {
-    {"__arrow_c_stream__", DFT_PYCFUNCTION(ArrowBatchStream_arrow_c_stream),
+    {"__arrow_c_stream__", DFTU_PYCFUNCTION(ArrowBatchStream_arrow_c_stream),
      METH_VARARGS, "Export as Arrow C Data Interface stream PyCapsule"},
     {NULL}};
 
@@ -302,13 +302,14 @@ PyTypeObject ArrowBatchStreamType = {
     0,
 };
 
-int init_arrow_batch_stream(PyObject *m) {
+int dftracer::utils::python::init_arrow_batch_stream(PyObject *m) {
     if (register_type(m, &ArrowBatchStreamType, "_ArrowBatchStream") < 0)
         return -1;
     return 0;
 }
 
-PyObject *make_arrow_batch_stream(std::shared_ptr<ArrowIteratorState> state) {
+PyObject *dftracer::utils::python::make_arrow_batch_stream(
+    std::shared_ptr<ArrowIteratorState> state) {
     auto *obj = (ArrowBatchStreamObject *)ArrowBatchStreamType.tp_alloc(
         &ArrowBatchStreamType, 0);
     if (!obj) return NULL;

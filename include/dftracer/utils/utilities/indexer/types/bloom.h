@@ -1,12 +1,12 @@
 #ifndef DFTRACER_UTILS_UTILITIES_INDEXER_TYPES_BLOOM_H
 #define DFTRACER_UTILS_UTILITIES_INDEXER_TYPES_BLOOM_H
 
-#include <dftracer/utils/utilities/composites/dft/indexing/queries/queries.h>
+#include <dftracer/utils/trace/indexing/queries/queries.h>
 
 namespace dftracer::utils::utilities::indexer {
 
-using ChunkBloomResult = composites::dft::indexing::queries::ChunkBloomResult;
-using FileBloomResult = composites::dft::indexing::queries::FileBloomResult;
+using ChunkBloomResult = trace::indexing::queries::ChunkBloomResult;
+using FileBloomResult = trace::indexing::queries::FileBloomResult;
 
 }  // namespace dftracer::utils::utilities::indexer
 

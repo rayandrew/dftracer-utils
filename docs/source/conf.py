@@ -3,10 +3,9 @@
 # For the full list of built-in configuration values, see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
-import ast
+import datetime
 import os
-import inspect
-import importlib
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +16,17 @@ from _ext_stub import install_extension_stub  # noqa: E402
 
 # Auto-generate Mermaid class diagrams from Doxygen XML before building
 _docs_dir = Path(__file__).parent.parent  # docs/
+
+# Regenerate the Doxygen XML first so a plain sphinx-build (e.g. Read the Docs,
+# which does not run `make html`) never serves stale C/C++ API from an old dump.
+# No-op when doxygen is not installed.
+import shutil  # noqa: E402
+
+_doxyfile = _docs_dir / "Doxyfile"
+if shutil.which("doxygen") and _doxyfile.exists():
+    print("Running Doxygen to (re)generate XML...")
+    subprocess.run(["doxygen", str(_doxyfile)], cwd=str(_docs_dir), check=False)
+
 _script = _docs_dir / "scripts" / "generate_class_diagrams.py"
 _xml_dir = _docs_dir / "doxygen" / "xml"
 _gen_dir = _docs_dir / "source" / "_generated"
@@ -34,9 +44,27 @@ if _script.exists() and _xml_dir.exists():
         check=False,
     )
 
+# Generate Python collaboration diagrams from the package sources (ast-based,
+# no Doxygen needed).
+_py_script = _docs_dir / "scripts" / "generate_python_diagrams.py"
+_pkg_dir = _docs_dir.parent / "python" / "dftracer" / "utils"
+if _py_script.exists() and _pkg_dir.exists():
+    print("Generating Mermaid diagrams from Python sources...")
+    subprocess.run(
+        [
+            sys.executable,
+            str(_py_script),
+            "--pkg-dir",
+            str(_pkg_dir),
+            "--output-dir",
+            str(_gen_dir),
+        ],
+        check=False,
+    )
+
 # Auto-generate C++ API reference pages from Doxygen XML
 _api_script = _docs_dir / "scripts" / "generate_api_index.py"
-_api_out = _docs_dir / "source" / "cpp_api" / "api"
+_api_out = _docs_dir / "source" / "cpp_api" / "_generated"
 if _api_script.exists() and _xml_dir.exists():
     print("Generating C++ API reference pages from Doxygen XML...")
     subprocess.run(
@@ -54,174 +82,6 @@ if _api_script.exists() and _xml_dir.exists():
 ON_READTHEDOCS = os.environ.get("READTHEDOCS", "").lower() == "true"
 PYTHON_SOURCE_DIR = _docs_dir.parent / "python"
 autodoc_mock_imports = []
-
-
-
-
-def _repo_url() -> str:
-    """Return the GitHub repository URL used for source links."""
-    repo = os.environ.get("READTHEDOCS_GIT_REPOSITORY")
-    if repo:
-        repo = repo.removesuffix(".git")
-        if repo.startswith("git@github.com:"):
-            repo = repo.replace("git@github.com:", "https://github.com/", 1)
-        elif repo.startswith("https://github.com/"):
-            return repo
-        if repo.startswith("github.com/"):
-            return f"https://{repo}"
-
-    repo = os.environ.get("GITHUB_REPOSITORY")
-    if repo:
-        return f"https://github.com/{repo}"
-
-    try:
-        remote = (
-            subprocess.check_output(
-                ["git", "remote", "get-url", "origin"],
-                cwd=_docs_dir.parent,
-                text=True,
-            )
-            .strip()
-            .removesuffix(".git")
-        )
-        if remote.startswith("git@github.com:"):
-            return remote.replace("git@github.com:", "https://github.com/", 1)
-        if remote.startswith("https://github.com/"):
-            return remote
-    except Exception:
-        pass
-
-    return "https://github.com/LLNL/dftracer-utils"
-
-
-def _source_ref() -> str:
-    """Return the git ref used for source links."""
-    for env_name in ("READTHEDOCS_GIT_COMMIT_HASH", "GITHUB_SHA"):
-        value = os.environ.get(env_name)
-        if value:
-            return value
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=_docs_dir.parent,
-                text=True,
-            )
-            .strip()
-        )
-    except Exception:
-        return "develop"
-
-REPO_URL = _repo_url()
-SOURCE_REF = _source_ref()
-
-
-def _pyi_target_for_extension(fullname: str) -> tuple[Path, list[str]] | None:
-    """Map extension-exported objects to their public type-stub file."""
-    top = fullname.split(".", 1)[0]
-    utility_map = {
-        "AggregatorUtility": "python/dftracer/utils/utilities/_aggregator.pyi",
-        "ComparatorUtility": "python/dftracer/utils/utilities/_comparator.pyi",
-        "MetadataCollectorUtility": (
-            "python/dftracer/utils/utilities/_metadata_collector.pyi"
-        ),
-        "StatisticsQueryUtility": (
-            "python/dftracer/utils/utilities/_statistics_query.pyi"
-        ),
-        "StatisticsAggregatorUtility": (
-            "python/dftracer/utils/utilities/_statistics_aggregator.pyi"
-        ),
-        "ReorganizationPlannerUtility": (
-            "python/dftracer/utils/utilities/_reorganization_planner.pyi"
-        ),
-        "ReconstructionPlannerUtility": (
-            "python/dftracer/utils/utilities/_reconstruction_planner.pyi"
-        ),
-    }
-    rel_path = utility_map.get(top, "python/dftracer/utils/dftracer_utils_ext.pyi")
-    return (_docs_dir.parent / rel_path, fullname.split("."))
-
-
-def _find_symbol_lines(path: Path, parts: list[str]) -> tuple[int, int] | None:
-    """Find source lines for a class/function/method in a Python source or stub file."""
-    try:
-        tree = ast.parse(path.read_text())
-    except Exception:
-        return None
-
-    node = tree
-    current_body = tree.body
-    for part in parts:
-        match = None
-        for child in current_body:
-            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                if child.name == part:
-                    match = child
-                    break
-        if match is None:
-            return None
-        node = match
-        current_body = getattr(match, "body", [])
-
-    start = getattr(node, "lineno", None)
-    end = getattr(node, "end_lineno", start)
-    if start is None:
-        return None
-    return (start, end or start)
-
-
-def _github_url(path: Path, lines: tuple[int, int] | None) -> str | None:
-    """Build a GitHub blob URL for a repo-relative path and optional lines."""
-    try:
-        rel = path.resolve().relative_to(_docs_dir.parent.resolve()).as_posix()
-    except Exception:
-        return None
-    url = f"{REPO_URL}/blob/{SOURCE_REF}/{rel}"
-    if lines is not None:
-        start, end = lines
-        url += f"#L{start}"
-        if end != start:
-            url += f"-L{end}"
-    return url
-
-
-def linkcode_resolve(domain: str, info: dict[str, str]) -> str | None:
-    """Resolve Python objects to GitHub source links."""
-    if domain != "py":
-        return None
-
-    module_name = info.get("module")
-    fullname = info.get("fullname")
-    if not module_name or not fullname:
-        return None
-
-    try:
-        module = importlib.import_module(module_name)
-    except Exception:
-        return None
-
-    obj = module
-    for part in fullname.split("."):
-        obj = getattr(obj, part, None)
-        if obj is None:
-            return None
-
-    obj_module = getattr(obj, "__module__", module_name)
-    if obj_module == "dftracer.utils.dftracer_utils_ext":
-        target = _pyi_target_for_extension(fullname)
-        if target is None:
-            return None
-        path, parts = target
-        lines = _find_symbol_lines(path, parts)
-        return _github_url(path, lines)
-
-    try:
-        source_file = Path(inspect.getsourcefile(obj) or inspect.getfile(obj))
-        _, start = inspect.getsourcelines(obj)
-        end = start + max(len(inspect.getsource(obj).splitlines()) - 1, 0)
-        return _github_url(source_file, (start, end))
-    except Exception:
-        return None
 
 
 if ON_READTHEDOCS:
@@ -255,7 +115,7 @@ except (ImportError, ModuleNotFoundError) as e:
             "dask",
             "dask.distributed",
         ]
-        import dftracer.utils
+        import dftracer.utils  # noqa: F401  (imported for autodoc side effect)
     else:
         print(f"Warning: dftracer.utils package not found: {e}")
         print("API documentation will have limited information.")
@@ -266,8 +126,11 @@ except (ImportError, ModuleNotFoundError) as e:
 
 
 project = "dftracer-utils"
-copyright = "%Y, Ray Andrew Sinurat, Hariharan Devarajan"
+# Compute the year explicitly rather than relying on Sphinx's strftime %Y
+# handling (only added in Sphinx 8.1), so the footer is correct on any version.
+copyright = f"{datetime.date.today().year}, Ray Andrew Sinurat, Hariharan Devarajan"
 author = "Ray Andrew Sinurat, Hariharan Devarajan"
+
 
 # The version info for the project. Resolved automatically (git tags via
 # setuptools_scm, then the generated _version.py, then installed metadata) so
@@ -314,8 +177,6 @@ release = _resolve_release()
 
 # Collapse the setuptools_scm local segment to just "+g<7-char hash>",
 # dropping the dirty-tree date marker (".dYYYYMMDD") so the version stays short.
-import re
-
 release = re.sub(r"\+g([0-9a-fA-F]+).*$", lambda m: "+g" + m.group(1)[:7], release)
 version = ".".join(release.split(".")[:2])
 
@@ -335,15 +196,47 @@ extensions = [
     # and loses C extension __text_signature__. Sphinx's built-in autodoc
     # handles both Python type hints and C extension __text_signature__.
     "myst_parser",  # For Markdown support
+    "sphinx_design",  # Tabs, cards, grids (language tabs, landing page)
+    "sphinx_copybutton",  # Copy-to-clipboard on code blocks (Shibuya styles it)
     "breathe",  # Always enable breathe
     "sphinx.ext.ifconfig",  # For conditional inclusion
     "sphinxcontrib.mermaid",  # Mermaid diagrams
 ]
 
-# Mermaid configuration
+# copybutton: strip prompts and REPL markers so a copy yields runnable input.
+copybutton_prompt_text = r">>> |\.\.\. |\$ "
+copybutton_prompt_is_regexp = True
+copybutton_only_copy_prompt_lines = False
+
+# MyST: enable the extensions the Markdown guides use.
+myst_enable_extensions = ["colon_fence", "deflist", "attrs_inline"]
+myst_heading_anchors = 3
+
+# Mermaid: brand each diagram with a neon-blue palette injected as mermaid v11
+# frontmatter config (see setup() at end of file). Frontmatter is honored at
+# parse time - unlike initialize() themeVariables, which mermaid ignores here,
+# and unlike CSS/JS, which cannot re-raster the d3-zoom-composited SVG. One
+# dark-blue-card palette reads on both light and dark pages.
 mermaid_version = "11"
-mermaid_init_js = "mermaid.initialize({startOnLoad:true, theme:'neutral'});"
 mermaid_d3_zoom = True
+_MM_NEON = {
+    "primaryColor": "#12233a",
+    "mainBkg": "#12233a",
+    "secondaryColor": "#16304a",
+    "tertiaryColor": "#0e1a2a",
+    "primaryBorderColor": "#35e6ff",
+    "nodeBorder": "#35e6ff",
+    "clusterBorder": "#274b5f",
+    "clusterBkg": "#0e1a2a",
+    "primaryTextColor": "#dcf7ff",
+    "nodeTextColor": "#dcf7ff",
+    "textColor": "#dcf7ff",
+    "titleColor": "#dcf7ff",
+    "lineColor": "#22d3ee",
+    "edgeLabelBackground": "#0a1018",
+    "classText": "#dcf7ff",
+    "fontSize": "14px",
+}
 
 # Check if Doxygen XML output exists and set up Breathe config
 doxygen_xml_path = Path(__file__).parent.parent / "doxygen" / "xml"
@@ -395,18 +288,33 @@ master_doc = "index"
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
-html_theme = "furo"
+html_theme = "shibuya"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
+html_js_files = ["copy-page.js"]
+html_favicon = "_static/logo-dark.svg"
 
 # Search configuration
 html_search_language = "en"
 
-# Theme options
+# Theme options (Shibuya). Logos and accent are further shaped by custom.css.
 html_theme_options = {
-    "navigation_with_keys": True,
-    "light_logo": "logo-light.png",
-    "dark_logo": "logo-dark.png",
+    "accent_color": "cyan",
+    "light_logo": "_static/logo-light.svg",
+    "dark_logo": "_static/logo-dark.svg",
+    "github_url": "https://github.com/LLNL/dftracer-utils",
+    "globaltoc_expand_depth": 1,
+    # Shibuya's built-in "Copy page" fetches the source over the network, which
+    # fails for a private repo and behind firewalls; we inject our own that
+    # copies embedded Markdown (see _inject_copy_page), so disable the theme's.
+    "show_ai_links": False,
+    "nav_links": [
+        {"title": "Get started", "url": "getting-started/index"},
+        {"title": "Tutorials", "url": "tutorials/index"},
+        {"title": "Guides", "url": "guides/index"},
+        {"title": "Reference", "url": "reference/index"},
+        {"title": "Concepts", "url": "concepts/index"},
+    ],
 }
 
 # -- Options for autodoc -----------------------------------------------------
@@ -421,8 +329,87 @@ autodoc_default_options = {
 autodoc_typehints = "both"
 autodoc_typehints_description_target = "documented"
 
+# Do not print the module path before class/function names, so the internal
+# ``dftracer_utils_ext`` extension module name never leaks into the reference -
+# users import everything from ``dftracer.utils``.
+add_module_names = False
+
 # -- Options for todo extension ----------------------------------------------
 todo_include_todos = True
 
 # -- Options for autosummary -------------------------------------------------
 autosummary_generate = False
+
+
+# -- Mermaid neon theming (frontmatter injection) ----------------------------
+import json as _json  # noqa: E402
+
+_MM_FRONTMATTER = (
+    "---\nconfig:\n  theme: base\n  themeVariables: " + _json.dumps(_MM_NEON) + "\n---\n"
+)
+
+
+def _inject_mermaid_theme(app, doctree, docname):
+    try:
+        from sphinxcontrib.mermaid import mermaid as _mermaid_node
+    except Exception:
+        return
+    for node in doctree.findall(_mermaid_node):
+        code = node.get("code", "")
+        if code and "themeVariables" not in code:
+            node["code"] = _MM_FRONTMATTER + code
+
+
+def _inject_copy_page(app, pagename, templatename, context, doctree):
+    """Write the page's Markdown to a sibling <page>.md and inject a "Copy page"
+    / "Download page" control that reads it from the same origin. No fetch to an
+    external host, so it works with a private repo and behind a firewall, and the
+    Markdown lives in its own file rather than bloating the HTML. Same rendering
+    as llms-full.txt (see copy-page.js)."""
+    if doctree is None or not context.get("body"):
+        return
+    try:
+        import generate_llms
+
+        md = generate_llms.clean_html_to_md(context["body"])
+    except Exception:
+        return
+    if not md:
+        return
+    md_path = Path(app.outdir) / f"{pagename}.md"
+    try:
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(md, encoding="utf-8")
+    except OSError:
+        return
+    # Sibling file, so a link relative to this page is just its basename.
+    name = pagename.rsplit("/", 1)[-1] + ".md"
+    context["body"] = (
+        f'<div class="dftu-copy-page" data-dftu-copy-page data-md="{name}">'
+        '<div class="dftu-copy-page-bar">'
+        '<button type="button" class="dftu-copy-page-btn" data-action="copy">'
+        "Copy page</button>"
+        '<button type="button" class="dftu-copy-page-toggle" aria-haspopup="menu"'
+        ' aria-expanded="false" aria-label="More actions"></button>'
+        "</div>"
+        '<div class="dftu-copy-page-menu" role="menu" hidden>'
+        '<button type="button" role="menuitem" data-action="copy">Copy page</button>'
+        f'<a role="menuitem" href="{name}" download>Download page</a>'
+        "</div>"
+        "</div>"
+    ) + context["body"]
+
+
+def setup(app):
+    app.connect("doctree-resolved", _inject_mermaid_theme)
+
+    sys.path.insert(0, str(_docs_dir / "scripts"))
+    try:
+        import generate_llms
+
+        app.connect("build-finished", generate_llms.generate)
+        app.connect("html-page-context", _inject_copy_page)
+    except Exception as exc:  # a broken llms generator must not fail the build
+        print(f"llms.txt generation disabled: {exc}")
+
+    return {"parallel_read_safe": True, "parallel_write_safe": True}

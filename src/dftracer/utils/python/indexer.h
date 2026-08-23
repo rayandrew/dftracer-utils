@@ -7,7 +7,7 @@
 #include <cstdint>
 
 typedef struct {
-    PyObject_HEAD dft_indexer_handle_t handle;
+    PyObject_HEAD dftu_indexer_handle_t handle;
     PyObject *gz_path;
     PyObject *index_path;
     std::uint64_t checkpoint_size;
@@ -17,6 +17,10 @@ typedef struct {
 
 extern PyTypeObject CheckpointIndexerType;
 
+namespace dftracer::utils::python {
+
 int init_checkpoint_indexer(PyObject *m);
+
+}  // namespace dftracer::utils::python
 
 #endif

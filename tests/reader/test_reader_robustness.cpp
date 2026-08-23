@@ -23,7 +23,7 @@
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities::indexer::internal;
 using namespace dftracer::utils::utilities::reader::internal;
-using namespace dft_utils_test;
+using namespace dftu_utils_test;
 
 std::size_t count_json_lines(const std::string& content);
 bool validate_json_lines(const std::string& content);
@@ -46,8 +46,8 @@ class LargeTestEnvironment {
         static std::atomic<std::uint64_t> counter{0};
         temp_dir_ =
             fs::temp_directory_path() /
-            ("dft_robustness_test_" + std::to_string(std::time(nullptr)) + "_" +
-             std::to_string(counter.fetch_add(1)));
+            ("dftu_robustness_test_" + std::to_string(std::time(nullptr)) +
+             "_" + std::to_string(counter.fetch_add(1)));
         fs::create_directories(temp_dir_);
     }
 

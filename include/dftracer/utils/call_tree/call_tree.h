@@ -22,9 +22,9 @@ struct CallTreeNodeInfo {
     int level;
     std::uint64_t parent_id;
     size_t num_children;
-    std::vector<std::uint64_t> children_ids;  // IDs of child nodes
+    std::vector<std::uint64_t> children_ids;  ///< IDs of child nodes
     std::unordered_map<std::string, std::string>
-        args;  // Node arguments (pid, tid, fhash, etc.)
+        args;  ///< Node arguments (pid, tid, fhash, etc.)
 
     CallTreeNodeInfo()
         : id(0),
@@ -45,11 +45,12 @@ struct CallTreeStats {
     size_t num_levels;
     size_t num_leaf_nodes;
     size_t num_processes;
-    int max_depth;  // Maximum depth of the tree (alias for num_levels - 1)
-    size_t unique_processes;  // Unique process count (alias for num_processes)
+    int max_depth;  ///< Maximum depth of the tree (alias for num_levels - 1)
+    size_t
+        unique_processes;  ///< Unique process count (alias for num_processes)
     std::vector<double>
-        avg_time_per_level_us;  // Average time in microseconds per level
-    std::vector<size_t> nodes_per_level;  // Number of nodes per level
+        avg_time_per_level_us;  ///< Average time in microseconds per level
+    std::vector<size_t> nodes_per_level;  ///< Number of nodes per level
 
     CallTreeStats()
         : total_nodes(0),

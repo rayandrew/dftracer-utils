@@ -31,7 +31,7 @@ class GzTraceWriter {
     void close() {
         if (closed_) return;
         closed_ = true;
-        dft_utils_test::write_gz_trace(path_, buffer_.str());
+        dftu_utils_test::write_gz_trace(path_, buffer_.str());
     }
 
    private:

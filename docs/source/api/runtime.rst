@@ -1,3 +1,5 @@
+:description: Reference for the Python Runtime and TaskHandle: a thread pool that runs coroutines and Python callables over the C++ executor.
+
 Runtime Module
 ==============
 
@@ -8,15 +10,24 @@ Pipeline/DAG overhead.
 Runtime Class
 -------------
 
-.. autoclass:: dftracer.utils.Runtime(threads: int = 0, io_threads: int = 0)
+Type relationships
+------------------
+
+How the runtime types relate:
+
+.. mermaid:: /_generated/py_runtime.mmd
+
+.. autoclass:: dftracer.utils.Runtime(threads: int = 0, io_threads: int = 0, python_threads: int = 0)
    :members:
    :undoc-members:
    :show-inheritance:
    :special-members: __enter__, __exit__
 
-The ``threads`` argument sizes the compute pool; ``io_threads`` sizes a
-separate pool dedicated to blocking I/O tasks. Both default to ``0``,
-which lets the runtime auto-size based on the host.
+``threads`` sizes the C++ compute pool; ``io_threads`` sizes a separate pool
+dedicated to blocking I/O tasks; ``python_threads`` sizes the Python
+``ThreadPoolExecutor`` that runs Python callables submitted to ``submit()``
+(default ``min(32, threads)``). All three default to ``0``, which lets the
+runtime auto-size based on the host.
 
 TaskHandle Class
 ----------------
@@ -30,6 +41,8 @@ Module-level Functions
 ----------------------
 
 .. autofunction:: dftracer.utils.get_default_runtime
+
+.. autofunction:: dftracer.utils.peek_default_runtime
 
 .. autofunction:: dftracer.utils.set_default_runtime
 

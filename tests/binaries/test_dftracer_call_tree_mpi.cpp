@@ -16,10 +16,10 @@
 namespace {
 
 // MPI launcher/runner helpers are shared via testing_utilities.h.
-using dft_utils_test::run_mpi;
-using dft_utils_test::run_process;
+using dftu_utils_test::run_mpi;
+using dftu_utils_test::run_process;
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -69,7 +69,7 @@ std::vector<std::string> read_event_lines_sorted(const std::string& path) {
     return lines;
 }
 
-struct Env : dft_utils_test::MpiTestEnv {
+struct Env : dftu_utils_test::MpiTestEnv {
     Env()
         : MpiTestEnv("dftracer_call_tree", "DFTRACER_CALL_TREE_PATH",
                      "dftracer_call_tree_mpi", "DFTRACER_CALL_TREE_MPI_PATH") {}
@@ -77,7 +77,7 @@ struct Env : dft_utils_test::MpiTestEnv {
 
 std::pair<std::vector<std::string>, std::vector<std::string>> run_and_compare(
     const Env& e, int mpi_ranks, int num_events, int num_files) {
-    dft_utils_test::TestEnvironment src(100);
+    dftu_utils_test::TestEnvironment src(100);
     if (!src.is_valid()) return {};
     std::vector<std::string> srcs;
     for (int i = 0; i < num_files; ++i) {
@@ -148,7 +148,7 @@ TEST_SUITE("DFTracerCallTreeMpi") {
             MESSAGE("skipping: " << e.skip_reason);
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, 100, 0).empty());
         std::string out = env.get_dir() + "/mpi.pfw";

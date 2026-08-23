@@ -34,7 +34,7 @@ TEST_SUITE("RocksDBStorage") {
     }
 
     TEST_CASE("basic put/get works across column families") {
-        auto root = dft_utils_test::make_unique_test_path("rocksdb_put_get");
+        auto root = dftu_utils_test::make_unique_test_path("rocksdb_put_get");
         fs::create_directories(root);
 
         RocksDatabase db((root / ".dftindex").string());
@@ -52,7 +52,7 @@ TEST_SUITE("RocksDBStorage") {
     }
 
     TEST_CASE("manager reuses one live instance per db path") {
-        auto root = dft_utils_test::make_unique_test_path("rocksdb_manager");
+        auto root = dftu_utils_test::make_unique_test_path("rocksdb_manager");
         fs::create_directories(root);
 
         auto path = (root / ".dftindex").string();
@@ -74,7 +74,7 @@ TEST_SUITE("RocksDBStorage") {
 
     TEST_CASE("manager reset drops the cached instance for one path") {
         auto root =
-            dft_utils_test::make_unique_test_path("rocksdb_manager_reset");
+            dftu_utils_test::make_unique_test_path("rocksdb_manager_reset");
         fs::create_directories(root);
 
         auto path = (root / ".dftindex").string();
@@ -101,7 +101,7 @@ TEST_SUITE("RocksDBStorage") {
 
     TEST_CASE("manager shutdown clears cached instances") {
         auto root =
-            dft_utils_test::make_unique_test_path("rocksdb_manager_shutdown");
+            dftu_utils_test::make_unique_test_path("rocksdb_manager_shutdown");
         fs::create_directories(root);
 
         auto path = (root / ".dftindex").string();
@@ -125,7 +125,7 @@ TEST_SUITE("RocksDBStorage") {
 
     TEST_CASE("manager rejects read-only upgrade while handle is alive") {
         auto root =
-            dft_utils_test::make_unique_test_path("rocksdb_manager_upgrade");
+            dftu_utils_test::make_unique_test_path("rocksdb_manager_upgrade");
         fs::create_directories(root);
 
         auto path = (root / ".dftindex").string();
@@ -142,7 +142,7 @@ TEST_SUITE("RocksDBStorage") {
     }
 
     TEST_CASE("manager rejects read-only upgrade while handle is shared") {
-        auto root = dft_utils_test::make_unique_test_path(
+        auto root = dftu_utils_test::make_unique_test_path(
             "rocksdb_manager_upgrade_shared");
         fs::create_directories(root);
 
@@ -162,7 +162,8 @@ TEST_SUITE("RocksDBStorage") {
     }
 
     TEST_CASE("custom filesystem supports async read polling") {
-        auto root = dft_utils_test::make_unique_test_path("rocksdb_async_read");
+        auto root =
+            dftu_utils_test::make_unique_test_path("rocksdb_async_read");
         fs::create_directories(root);
 
         auto file_system =

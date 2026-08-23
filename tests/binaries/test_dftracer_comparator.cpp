@@ -33,7 +33,7 @@ std::string find_gen_binary() {
     return "";
 }
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env,
                           int /* num_events */, int id) {
     auto gen = find_gen_binary();
     if (gen.empty()) return "";
@@ -151,7 +151,7 @@ TEST_SUITE("DFTracerComparator") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 100, 0);
@@ -179,7 +179,7 @@ TEST_SUITE("DFTracerComparator") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto baseline = create_pfw_gz(env, 100, 0);
@@ -208,7 +208,7 @@ TEST_SUITE("DFTracerComparator") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         std::string base_dir = env.get_dir() + "/baseline";
@@ -217,13 +217,13 @@ TEST_SUITE("DFTracerComparator") {
         fs::create_directories(var_dir);
 
         {
-            dft_utils_test::TestEnvironment base_env(100);
+            dftu_utils_test::TestEnvironment base_env(100);
             auto f = base_env.create_dft_test_gzip_file(50);
             REQUIRE(!f.empty());
             fs::rename(f, base_dir + "/trace_0.pfw.gz");
         }
         {
-            dft_utils_test::TestEnvironment var_env(100);
+            dftu_utils_test::TestEnvironment var_env(100);
             auto f = var_env.create_dft_test_gzip_file(80);
             REQUIRE(!f.empty());
             fs::rename(f, var_dir + "/trace_0.pfw.gz");
@@ -249,7 +249,7 @@ TEST_SUITE("DFTracerComparator") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -344,7 +344,7 @@ TEST_SUITE("DFTracerComparator") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -384,7 +384,7 @@ TEST_SUITE("DFTracerComparator") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -405,7 +405,7 @@ TEST_SUITE("DFTracerComparator") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);

@@ -16,7 +16,7 @@
 
 namespace {
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -121,7 +121,7 @@ TEST_SUITE("DFTracerStats") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 100, 0);
@@ -142,7 +142,7 @@ TEST_SUITE("DFTracerStats") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -165,7 +165,7 @@ TEST_SUITE("DFTracerStats") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         for (int i = 0; i < 3; ++i) {
@@ -191,7 +191,7 @@ TEST_SUITE("DFTracerStats") {
             return p == std::string::npos ? -1 : std::atol(json.c_str() + p);
         };
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         auto f = create_pfw_gz(env, 100, 0);
         REQUIRE(!f.empty());

@@ -5,9 +5,9 @@
 // Internal to the server; not installed.
 
 #include <dftracer/utils/core/common/transparent_string_hash.h>
+#include <dftracer/utils/json/json_value.h>
 #include <dftracer/utils/server/trace_index.h>
-#include <dftracer/utils/utilities/common/json/json_value.h>
-#include <dftracer/utils/utilities/composites/dft/views/view.h>
+#include <dftracer/utils/trace/views/view.h>
 #include <simdjson.h>
 
 #include <algorithm>
@@ -43,18 +43,16 @@ inline bool parse_event_scalars(simdjson::dom::element root,
         std::string_view k = field.key;
         simdjson::dom::element v = field.value;
         if (k == "ts") {
-            out.ts = utilities::common::json::json_number(v);
+            out.ts = json::json_number(v);
             out.has_ts = true;
         } else if (k == "dur") {
-            out.dur = utilities::common::json::json_number(v);
+            out.dur = json::json_number(v);
             out.has_dur = true;
         } else if (k == "pid") {
-            out.pid = static_cast<std::int64_t>(
-                utilities::common::json::json_number(v));
+            out.pid = static_cast<std::int64_t>(json::json_number(v));
             out.has_pid = true;
         } else if (k == "tid") {
-            out.tid = static_cast<std::int64_t>(
-                utilities::common::json::json_number(v));
+            out.tid = static_cast<std::int64_t>(json::json_number(v));
         } else if (k == "name") {
             if (v.is_string()) out.name = v.get_string().value_unsafe();
         } else if (k == "cat") {
@@ -98,12 +96,12 @@ struct NameStat {
 using NameMap = dftracer::utils::StringViewMap<NameStat>;
 
 // Map selected index files to View sources (path + index + cached sizes).
-inline std::vector<utilities::composites::dft::views::ViewFile> to_view_files(
+inline std::vector<trace::views::ViewFile> to_view_files(
     const std::vector<const TraceIndex::FileInfo*>& fis) {
-    std::vector<utilities::composites::dft::views::ViewFile> v;
+    std::vector<trace::views::ViewFile> v;
     v.reserve(fis.size());
     for (auto* fi : fis) {
-        utilities::composites::dft::views::ViewFile vf;
+        trace::views::ViewFile vf;
         vf.file_path = fi->path;
         vf.index_path = fi->index_path;
         vf.uncompressed_size = fi->uncompressed_size;

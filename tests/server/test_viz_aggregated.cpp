@@ -13,6 +13,7 @@
 #include <testing_utilities.h>
 
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,10 +31,10 @@ constexpr long INTERVAL = 5000;  // native units == us (US trace)
 // A SELECTIVE-aggregation record (ph=3): individual events collapsed into
 // count/duration stats plus extra per-arg reductions (tag_min, comm_min) that
 // must survive to the client verbatim.
-std::string agg_event(long ts, int dft_cnt) {
+std::string agg_event(long ts, int dftu_cnt) {
     return "{\"name\":\"MPI_Irecv\",\"cat\":\"p2p\",\"type\":10,\"ts\":" +
            std::to_string(ts) + ",\"ph\":3,\"pid\":1,\"tid\":1,\"args\":{" +
-           "\"dft_cnt\":" + std::to_string(dft_cnt) +
+           "\"dftu_cnt\":" + std::to_string(dftu_cnt) +
            ",\"dur_sum\":38,\"dur_min\":0,\"dur_max\":3,\"tag_min\":-1,"
            "\"comm_min\":-2080374783}}\n";
 }
@@ -120,7 +121,7 @@ TEST_SUITE("viz_aggregated") {
         trace += end_event(100000 + 4 * INTERVAL);
         trace += "]\n";
 
-        auto dir = dft_utils_test::make_unique_test_path("viz_agg");
+        auto dir = dftu_utils_test::make_unique_test_path("viz_agg");
         auto index = build_index(trace, dir);
         REQUIRE(index->file_count() == 1);
 
@@ -134,7 +135,7 @@ TEST_SUITE("viz_aggregated") {
         simdjson::dom::parser parser;
         auto root = parser.parse(body);
         auto est = est_events(root.value());
-        // dft_cnt of 20, 21, 22, 23 -> one synthetic event each.
+        // dftu_cnt of 20, 21, 22, 23 -> one synthetic event each.
         REQUIRE(est.size() == 20 + 21 + 22 + 23);
 
         for (auto e : est) {
@@ -144,7 +145,7 @@ TEST_SUITE("viz_aggregated") {
             CHECK(e["dur"].get_double().value_unsafe() > 0);
             auto args = e["args"];
             REQUIRE(!args.error());
-            CHECK(!args["dft_cnt"].error());
+            CHECK(!args["dftu_cnt"].error());
             CHECK(!args["dur_sum"].error());
             CHECK(!args["tag_min"].error());
             CHECK(!args["comm_min"].error());
@@ -160,7 +161,7 @@ TEST_SUITE("viz_aggregated") {
         trace += end_event(105000);
         trace += "]\n";
 
-        auto dir = dft_utils_test::make_unique_test_path("viz_agg_cfg");
+        auto dir = dftu_utils_test::make_unique_test_path("viz_agg_cfg");
         auto index = build_index(trace, dir);
         Router router;
         register_viz_api(router, *index);

@@ -4,10 +4,10 @@
 
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/rocksdb/database.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_pruner_utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/sub_chunk_prune.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/indexing/chunk_pruner_utility.h>
+#include <dftracer/utils/trace/indexing/sub_chunk_prune.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
 
@@ -55,9 +55,8 @@ struct ChunkGeometry {
 // shape is anything else (NE, range ops, IN, NOT, OR), in which case the
 // uniform-match shortcut does not apply.
 std::optional<std::vector<std::pair<std::string, std::string>>>
-extract_eq_leaves(
-    const dftracer::utils::utilities::common::query::QueryNode &node) {
-    namespace q_ns = dftracer::utils::utilities::common::query;
+extract_eq_leaves(const dftracer::utils::query::QueryNode &node) {
+    namespace q_ns = dftracer::utils::query;
     using LeafVec = std::vector<std::pair<std::string, std::string>>;
 
     auto literal_to_string = [](const q_ns::LiteralNode &lit) -> std::string {
@@ -108,7 +107,7 @@ bool all_chunks_uniform_match(
     const std::vector<std::pair<std::string, std::string>> &leaves,
     const std::vector<std::uint64_t> &chunk_idxs) {
     if (leaves.empty() || chunk_idxs.empty()) return false;
-    namespace indexing = dftracer::utils::utilities::composites::dft::indexing;
+    namespace indexing = dftracer::utils::trace::indexing;
 
     for (const auto &[dim, val] : leaves) {
         auto rows = db.query_chunk_dimension_stats_for_dimension(fid, dim);
@@ -132,8 +131,7 @@ bool all_chunks_uniform_match(
 // is fully pruned or no chunk overlaps the line clip (caller skips the file).
 std::vector<std::uint64_t> select_kept_chunks(
     const ChunkGeometry &geo, bool has_query,
-    const dftracer::utils::utilities::composites::dft::indexing::
-        ChunkPrunerOutput &pr,
+    const dftracer::utils::trace::indexing::ChunkPrunerOutput &pr,
     const ClipRange &clip) {
     const std::size_t total_chunks = geo.total_chunks();
     std::vector<std::uint64_t> keep_chunks;
@@ -265,10 +263,9 @@ std::vector<ArrowWorkItem> enumerate_work_items(
     const std::string &query_str, std::size_t max_workers,
     std::size_t clip_start_byte, std::size_t clip_end_byte,
     std::size_t clip_start_line, std::size_t clip_end_line) {
-    namespace dft_internal =
-        dftracer::utils::utilities::composites::dft::internal;
+    namespace dftu_internal = dftracer::utils::trace::internal;
     namespace indexer_ns = dftracer::utils::utilities::indexer;
-    namespace indexing = dftracer::utils::utilities::composites::dft::indexing;
+    namespace indexing = dftracer::utils::trace::indexing;
 
     const ClipRange clip{clip_start_byte, clip_end_byte, clip_start_line,
                          clip_end_line};
@@ -286,10 +283,9 @@ std::vector<ArrowWorkItem> enumerate_work_items(
 
     // Parse the query once. Pruner input copies a Query, so we keep the
     // parsed form around to feed each ChunkPrunerInput without re-parsing.
-    std::optional<dftracer::utils::utilities::common::query::Query> parsed;
+    std::optional<dftracer::utils::query::Query> parsed;
     if (!query_str.empty()) {
-        auto r = dftracer::utils::utilities::common::query::Query::from_string(
-            query_str);
+        auto r = dftracer::utils::query::Query::from_string(query_str);
         if (r) parsed = std::move(*r);
     }
 
@@ -299,7 +295,7 @@ std::vector<ArrowWorkItem> enumerate_work_items(
     std::unordered_map<std::string, std::vector<std::size_t>> by_index;
     for (std::size_t i = 0; i < files.size(); ++i) {
         std::string index_path =
-            dft_internal::determine_index_path(files[i], index_dir);
+            dftu_internal::determine_index_path(files[i], index_dir);
         by_index[index_path].push_back(i);
     }
 
@@ -375,7 +371,7 @@ std::vector<ArrowWorkItem> enumerate_work_items(
         // Sub-chunk skip applies only to full-member reads (a clip that trims
         // the member start would offset the ordinal count) and only when the
         // query constrains ts/dur.
-        namespace idx = dftracer::utils::utilities::composites::dft::indexing;
+        namespace idx = dftracer::utils::trace::indexing;
         bool sub_chunk_eligible = false;
         if (parsed && !clip.has_line_clip() && !clip.has_byte_clip()) {
             auto ts = idx::extract_and_range(parsed->root(), "ts");
@@ -411,9 +407,8 @@ std::vector<ArrowWorkItem> enumerate_work_items(
             // Emit members with an active skip-mask as their own full-member
             // items carrying the mask; the rest coalesce normally.
             auto stats_rows = idx_db->query_chunk_statistics(fc.fid);
-            std::unordered_map<
-                std::uint64_t,
-                const composites::dft::indexing::ChunkStatistics *>
+            std::unordered_map<std::uint64_t,
+                               const trace::indexing::ChunkStatistics *>
                 by_member;
             by_member.reserve(stats_rows.size());
             for (const auto &r : stats_rows) {

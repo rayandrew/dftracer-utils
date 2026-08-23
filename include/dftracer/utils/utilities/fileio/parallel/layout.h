@@ -9,19 +9,19 @@
 namespace dftracer::utils::utilities::fileio::parallel {
 
 enum class FileLayout {
-    SHARDED,  // N files, glob by name; used on NFS
-    STRIPED,  // single file, atomic-offset pwrite; used on local and PFS
+    SHARDED,  ///< N files, glob by name; used on NFS
+    STRIPED,  ///< single file, atomic-offset pwrite; used on local and PFS
 };
 
-// Filesystem classification lives in core/common; re-exported here so existing
-// callers keep using parallel::FilesystemKind.
+/// Filesystem classification lives in core/common; re-exported here so existing
+/// callers keep using parallel::FilesystemKind.
 using dftracer::utils::FilesystemKind;
 
 struct LayoutInfo {
     FileLayout layout;
     FilesystemKind fs;
-    std::size_t stripe_size;   // 0 if unknown/not applicable
-    std::size_t stripe_count;  // 0 if unknown/not applicable
+    std::size_t stripe_size;   ///< 0 if unknown/not applicable
+    std::size_t stripe_count;  ///< 0 if unknown/not applicable
 };
 
 /// Detect layout for a path (the file need not exist yet; falls back to the

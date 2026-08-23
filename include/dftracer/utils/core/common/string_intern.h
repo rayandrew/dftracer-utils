@@ -20,8 +20,8 @@ class StringIntern {
     using IndexSlot = std::atomic<std::uint32_t>;
 
    public:
-    // id -> string lives in lazily allocated blocks behind a fixed directory,
-    // so an idle table costs the directory rather than the whole id space.
+    /// id -> string lives in lazily allocated blocks behind a fixed directory,
+    /// so an idle table costs the directory rather than the whole id space.
     static constexpr std::size_t BLOCK_BITS = 12;
     static constexpr std::size_t BLOCK_SIZE = 1u << BLOCK_BITS;
     static constexpr std::size_t DIRECTORY_SIZE = 1u << 16;
@@ -282,8 +282,8 @@ class StringIntern {
         log_entry(id);
     }
 
-    // Fixed, unlike std::hash, whose result varies by standard library:
-    // deterministic ids must agree across independently built processes.
+    /// Fixed, unlike std::hash, whose result varies by standard library:
+    /// deterministic ids must agree across independently built processes.
     static std::size_t hash(std::string_view sv) {
         return hash::fnv1a_mix(hash::fnv1a_hash(sv));
     }

@@ -11,9 +11,14 @@ typedef struct {
 } RuntimeObject;
 
 extern PyTypeObject RuntimeType;
+
+namespace dftracer::utils::python {
+
 int init_runtime(PyObject *m);
 
 // Default global runtime (lazy-initialized, never NULL after first call)
 dftracer::utils::Runtime *get_default_runtime();
+
+}  // namespace dftracer::utils::python
 
 #endif  // DFTRACER_UTILS_PYTHON_RUNTIME_H

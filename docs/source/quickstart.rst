@@ -1,3 +1,5 @@
+:description: Get started fast: query a trace directory with TraceViewer in Python and read an aggregated result back as a pandas DataFrame.
+
 Quick Start Guide
 =================
 
@@ -15,20 +17,18 @@ lazy and Arrow-first: builder methods compose a query and a terminal
 
 .. code-block:: python
 
-   import glob
    from dftracer.utils import TraceViewer
 
-   files = sorted(glob.glob("traces/**/*.pfw.gz", recursive=True))
-   view = TraceViewer(files)               # a file or a list of files
+   view = TraceViewer("traces/")           # a directory (scanned recursively), a file, or a list of files
 
    # Top I/O calls by total time.
-   table = (
+   df = (
        view.filter('cat == "POSIX"')
            .group_by("name")
            .agg("count", "sum:dur", "max:dur")
-           .collect()                       # -> pyarrow.Table
+           .collect()                       # -> DataFrame
    )
-   df = table.to_pandas()
+   pdf = df.to_pandas()
 
    # A bandwidth time series: bytes per 1 s window per call.
    ts = (
@@ -40,7 +40,7 @@ lazy and Arrow-first: builder methods compose a query and a terminal
    )
 
 See :doc:`api/trace_viewer` for the full builder, aggregation specs, and
-``collect_typed``; :doc:`api/query` for the filter DSL; and :doc:`tutorials/python`
+``collect_typed``; :doc:`api/query` for the filter DSL; and :doc:`guides/index`
 for task-oriented recipes. The rest of this page covers ``Runtime``,
 ``Indexer``, and Dask.
 
@@ -48,15 +48,16 @@ Reading events
 ~~~~~~~~~~~~~~
 
 A plain query (no ``group_by``) returns the matching events. ``collect()``
-materializes them as a pyarrow ``Table``; ``stream()`` yields Arrow record
+materializes them as a native :class:`~dftracer.utils.DataFrame` (``to_arrow()``
+/ ``to_pandas()`` convert only at the edge); ``stream()`` yields Arrow record
 batches for out-of-core reads (zero-copy; consume with pyarrow, polars, or
 DuckDB).
 
 .. code-block:: python
 
-   view = TraceViewer(files)
+   view = TraceViewer("traces/")
 
-   # All POSIX events as a DataFrame.
+   # All POSIX events as a pandas DataFrame.
    df = view.filter('cat == "POSIX"').select("name", "dur", "ts").collect().to_pandas()
 
    # Stream Arrow batches instead of materializing.
@@ -143,38 +144,6 @@ Error handling:
 Failures raised by library operations are typed (``DFTUtilsError`` and its
 subclasses); see `Error Handling`_ below.
 
-Utility Bindings
-~~~~~~~~~~~~~~~~
-
-The ``dftracer.utils.utilities`` module provides Python bindings for
-DFTracer's C++ utility classes. Tabular utilities return Arrow;
-scalar utilities return dicts.
-
-.. code-block:: python
-
-   from dftracer.utils.utilities import (
-       AggregatorUtility,
-       ComparatorUtility,
-       MetadataCollectorUtility,
-   )
-
-   # Aggregation pipeline (returns Arrow)
-   agg = AggregatorUtility()
-   table = agg.process("./traces", time_interval_ms=1000.0)
-   df = table.to_pandas()
-
-   # Optional: aggregate extra numeric args fields
-   table = agg.process(
-       "./traces",
-       custom_metric_fields=["bytes"],
-       compute_percentiles=True,
-   )
-
-   # File metadata (returns dict)
-   mc = MetadataCollectorUtility()
-   meta = mc.process("trace.pfw.gz")
-   print(f"Size: {meta['size_mb']:.2f} MB")
-
 Using with Dask
 ~~~~~~~~~~~~~~~
 
@@ -196,7 +165,7 @@ For distributed processing with ``dask.distributed``:
    results = client.gather(futures)
 
 For a distributed aggregation that fans one query across the cluster, use
-:class:`~dftracer.utils.dask.DaskTraceViewer` (see :doc:`tutorials/python`).
+:class:`~dftracer.utils.dask.DaskTraceViewer` (see :doc:`guides/index`).
 
 Working with Indexer
 ~~~~~~~~~~~~~~~~~~~~
@@ -222,8 +191,6 @@ Create and use indexes for faster access:
    ci = indexer.get_checkpoint_indexer("/path/to/traces/trace.pfw.gz")
    print(f"Max bytes: {ci.get_max_bytes()}")
    print(f"Num lines: {ci.get_num_lines()}")
-   for cp in ci.get_checkpoints():
-       print(f"Checkpoint {cp.checkpoint_idx}: {cp.num_lines} lines")
 
 Error Handling
 ~~~~~~~~~~~~~~
@@ -255,7 +222,7 @@ The full set is ``DFTUtilsError`` (base) plus ``DFTUtilsValueError``,
 ``DFTUtilsNotFoundError``, ``DFTUtilsIOError``, ``DFTUtilsParseError``,
 ``DFTUtilsCompressionError``, ``DFTUtilsQueryError``, ``DFTUtilsReaderError``,
 ``DFTUtilsIndexerError``, ``DFTUtilsPipelineError``, and
-``DFTUtilsAggregationError``. See :doc:`cpp_api/error_handling` for the
+``DFTUtilsAggregationError``. See :doc:`cpp_api/runtime` for the
 underlying C++ model.
 
 Controlling Log Output
@@ -263,7 +230,7 @@ Controlling Log Output
 
 The C++ logger is initialized when ``dftracer.utils`` is imported. Change the
 verbosity from Python at any time, or set the ``DFTRACER_UTILS_LOG_LEVEL``
-environment variable before running (see :doc:`installation`):
+environment variable before running (see :doc:`getting-started/installation`):
 
 .. code-block:: python
 
@@ -368,57 +335,6 @@ Spawn multiple tasks to run in parallel:
        co_return;
    });
 
-Creating a Reader (Legacy)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Use the factory pattern to create a reader. These factories now live under
-``internal/`` and are not part of the public API; prefer ``TraceReader``.
-
-.. code-block:: cpp
-
-   #include <dftracer/utils/utilities/reader/internal/reader_factory.h>
-   #include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
-   #include <iostream>
-   #include <memory>
-
-   int main() {
-       using dftracer::utils::utilities::indexer::internal::IndexerFactory;
-       using dftracer::utils::utilities::reader::internal::ReaderFactory;
-
-       // Create indexer first
-       auto indexer = IndexerFactory::create(
-           "trace.pfw.gz",
-           "trace.pfw.gz.idx"
-       );
-
-       // Create reader with indexer (transfers ownership)
-       auto reader = ReaderFactory::create(indexer.release());
-
-       // Simple: Read lines by line range (returns string with all lines)
-       std::string lines = reader->read_lines(1, 100);  // Lines 1-100
-       std::cout << lines;
-
-       // Advanced: Buffer-based reading for large files
-       const size_t read_buffer_size = 1024 * 1024;  // 1MB buffer
-       auto buffer = std::make_unique<char[]>(read_buffer_size);
-
-       size_t start_bytes = 0;
-       size_t end_bytes = reader->get_max_bytes();
-       size_t bytes_written;
-
-       // Read in chunks
-       while (start_bytes < end_bytes &&
-              (bytes_written = reader->read_line_bytes(
-                   start_bytes, end_bytes,
-                   buffer.get(), read_buffer_size)) > 0) {
-           // Process the chunk
-           std::cout.write(buffer.get(), bytes_written);
-           start_bytes += bytes_written;  // Advance for next read
-       }
-
-       return 0;
-   }
-
 Using Async Generators for Streaming Data
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -449,74 +365,6 @@ Process data lazily without materializing everything in memory:
        co_return;
    });
 
-Reading with Line Processor (Legacy)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Use a custom line processor for efficient line-by-line processing. These
-types now live under ``internal/`` and are not part of the public API.
-
-.. code-block:: cpp
-
-   #include <dftracer/utils/utilities/reader/internal/reader_factory.h>
-   #include <dftracer/utils/utilities/reader/internal/line_processor.h>
-   #include <iostream>
-
-   namespace reader = dftracer::utils::utilities::reader::internal;
-   namespace indexer = dftracer::utils::utilities::indexer::internal;
-
-   // Custom line processor
-   class MyLineProcessor : public reader::LineProcessor {
-   public:
-       void process_line(const char* line, size_t length) override {
-           // Process each line
-           std::cout.write(line, length);
-       }
-   };
-
-   int main() {
-       auto idx = indexer::IndexerFactory::create(
-           "trace.pfw.gz", "trace.pfw.gz.idx"
-       );
-       auto reader_ptr = reader::ReaderFactory::create(idx.release());
-
-       MyLineProcessor processor;
-
-       // Process lines 1-1000 with custom processor
-       reader_ptr->read_lines_with_processor(1, 1000, processor);
-
-       return 0;
-   }
-
-Working with Indexer (Legacy)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Use the factory pattern to create an indexer. This factory now lives under
-``internal/`` and is not part of the public API.
-
-.. code-block:: cpp
-
-   #include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
-
-   int main() {
-       using dftracer::utils::utilities::indexer::internal::IndexerFactory;
-
-       // Create an indexer using the factory
-       auto indexer = IndexerFactory::create(
-           "trace.pfw.gz",           // Archive path
-           "trace.pfw.gz.idx",       // Index path
-           true                       // Force rebuild
-       );
-
-       // Build the index
-       indexer->build();
-
-       // Get index information
-       std::cout << "Max bytes: " << indexer->get_max_bytes() << std::endl;
-       std::cout << "Num lines: " << indexer->get_num_lines() << std::endl;
-
-       return 0;
-   }
-
 C Quick Start
 -------------
 
@@ -534,7 +382,7 @@ Using the C API for reading trace files. This header now lives under
 
    int main() {
        // Create reader
-       dft_reader_handle_t reader = dft_reader_create(
+       dftu_reader_handle_t reader = dftu_reader_create(
            "trace.pfw.gz",
            "trace.pfw.gz.idx",
            1048576  // checkpoint_size
@@ -544,20 +392,22 @@ Using the C API for reading trace files. This header now lives under
        char *buffer = malloc(1024 * 1024);  // 1MB buffer
 
        // Read lines 1-100
-       int result = dft_reader_read_lines(
+       size_t bytes_written = 0;
+       int result = dftu_reader_read_lines(
            reader,
            1, 100,              // start_line, end_line
            buffer,
-           1024 * 1024          // buffer_size
+           1024 * 1024,         // buffer_size
+           &bytes_written
        );
 
        if (result == 0) {
-           printf("%s", buffer);
+           printf("%.*s", (int)bytes_written, buffer);
        }
 
        // Cleanup
        free(buffer);
-       dft_reader_destroy(reader);
+       dftu_reader_destroy(reader);
 
        return 0;
    }
@@ -575,7 +425,7 @@ and is not part of the public API.
 
    int main() {
        // Create indexer
-       dft_indexer_handle_t indexer = dft_indexer_create(
+       dftu_indexer_handle_t indexer = dftu_indexer_create(
            "trace.pfw.gz",
            "trace.pfw.gz.idx",
            1048576,  // checkpoint_size
@@ -583,20 +433,20 @@ and is not part of the public API.
        );
 
        // Build index if needed
-       if (dft_indexer_need_rebuild(indexer)) {
+       if (dftu_indexer_need_rebuild(indexer)) {
            printf("Building index...\n");
-           dft_indexer_build(indexer);
+           dftu_indexer_build(indexer);
        }
 
        // Get index information
-       uint64_t max_bytes = dft_indexer_get_max_bytes(indexer);
-       uint64_t num_lines = dft_indexer_get_num_lines(indexer);
+       uint64_t max_bytes = dftu_indexer_get_max_bytes(indexer);
+       uint64_t num_lines = dftu_indexer_get_num_lines(indexer);
 
        printf("Max bytes: %llu\n", (unsigned long long)max_bytes);
        printf("Num lines: %llu\n", (unsigned long long)num_lines);
 
        // Cleanup
-       dft_indexer_destroy(indexer);
+       dftu_indexer_destroy(indexer);
 
        return 0;
    }

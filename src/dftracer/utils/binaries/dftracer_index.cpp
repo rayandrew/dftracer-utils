@@ -1,12 +1,13 @@
 #include <concurrentqueue.h>
+#include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_indexer_utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
+#include <dftracer/utils/trace/indexing/chunk_indexer_utility.h>
+#include <dftracer/utils/trace/indexing/resolve_and_build.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -17,11 +18,9 @@
 #include <chrono>
 #include <memory>
 
-#include "common_cli.h"
-
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities;
-using namespace dftracer::utils::utilities::composites::dft::indexing;
+using namespace dftracer::utils::trace::indexing;
 using namespace dftracer::utils::utilities::indexer;
 
 class IndexArgParse : public cli::ArgParse {
@@ -156,7 +155,7 @@ static coro::CoroTask<int> run_index(const IndexArgParse* cli) {
     filesystem::PatternDirectoryScannerUtility scanner;
     filesystem::PatternDirectoryScannerUtilityInput scan_input{
         log_dir, {".pfw", ".pfw.gz"}, false};
-    auto matched_entries = co_await scanner.process(scan_input);
+    auto matched_entries = co_await scanner(scan_input);
 
     std::vector<std::string> input_files;
     input_files.reserve(matched_entries.size());

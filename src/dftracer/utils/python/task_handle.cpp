@@ -89,13 +89,13 @@ static PyObject *TaskHandle_get_task_id(TaskHandleObject *self, void *) {
 }
 
 static PyMethodDef TaskHandle_methods[] = {
-    {"get", DFT_PYCFUNCTION(TaskHandle_get), METH_NOARGS,
+    {"get", DFTU_PYCFUNCTION(TaskHandle_get), METH_NOARGS,
      "Block until task completes and return result.\n"
      "Raises RuntimeError if the task failed."},
-    {"wait", DFT_PYCFUNCTION(TaskHandle_wait), METH_NOARGS,
+    {"wait", DFTU_PYCFUNCTION(TaskHandle_wait), METH_NOARGS,
      "Block until task completes.\n"
      "Raises RuntimeError if the task failed."},
-    {"done", DFT_PYCFUNCTION(TaskHandle_done), METH_NOARGS,
+    {"done", DFTU_PYCFUNCTION(TaskHandle_done), METH_NOARGS,
      "Return True if task has completed."},
     {NULL}};
 
@@ -144,7 +144,7 @@ PyTypeObject TaskHandleType = {
     TaskHandle_new,                                 /* tp_new */
 };
 
-int init_task_handle(PyObject *m) {
+int dftracer::utils::python::init_task_handle(PyObject *m) {
     if (register_type(m, &TaskHandleType, "TaskHandle") < 0) return -1;
     return 0;
 }

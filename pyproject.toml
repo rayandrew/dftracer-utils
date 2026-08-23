@@ -25,12 +25,16 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+[project.scripts]
+dftracer_plugin = "dftracer.utils.plugin_cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=6.0",
   "ruff",
   "pyarrow>=14.0",
   "numpy",
+  "scipy",
   "pandas",
   "dask[bag,dataframe,distributed]>=2024.1.0; python_version >= '3.9'",
   "dask_jobqueue~=0.8.0; python_version >= '3.9'",
@@ -141,10 +145,13 @@ ignore = ["E501"]
 [[tool.ty.overrides]]
 include = [
   "python/dftracer/utils/arrow.py",
+  "python/dftracer/utils/columnar.py",
   "python/dftracer/utils/dask.py",
+  "python/dftracer/utils/dataframe.py",
   "python/dftracer/utils/dfanalyzer.py",
   "python/dftracer/utils/dftracer_utils_ext.pyi",
-  "python/dftracer/utils/trace_reader.py",
+  "python/dftracer/utils/plugins.py",
+  "python/dftracer/utils/series.py",
 ]
 
 [tool.ty.overrides.rules]

@@ -17,9 +17,13 @@ typedef struct {
 
 extern PyTypeObject ArrowBatchStreamType;
 
+namespace dftracer::utils::python {
+
 int init_arrow_batch_stream(PyObject *m);
 
 PyObject *make_arrow_batch_stream(std::shared_ptr<ArrowIteratorState> state);
+
+}  // namespace dftracer::utils::python
 
 #endif
 #endif

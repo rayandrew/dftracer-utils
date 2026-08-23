@@ -1,7 +1,9 @@
+:description: Run dftracer_server: a REST API over bloom-filter-indexed traces for filtering, aggregation, and visualization, plus the bundled web UI.
+
 HTTP Server
 ===========
 
-The ``dftracer_server`` provides a high-performance HTTP server for querying and streaming DFTracer trace data via REST API. It uses bloom filter indexing to accelerate event searches and supports filtering, aggregation, and visualization API endpoints.
+The ``dftracer_server`` provides a high-performance HTTP server for querying DFTracer trace data via a REST API. It uses bloom filter indexing to accelerate event searches and supports filtering, aggregation, and visualization API endpoints.
 
 Starting the Server
 -------------------
@@ -12,7 +14,7 @@ Basic startup:
 
     dftracer_server -d /path/to/traces
 
-The server scans the trace directory on startup, loads or builds bloom/checkpoint sidecar indexes (``.idx`` files), and begins listening for HTTP requests on ``127.0.0.1:8080``. It also serves the interactive :doc:`trace-viewer` web UI at ``/`` and ``/index.html``.
+The server scans the trace directory on startup, loads or builds a bloom/checkpoint sidecar index (a ``.dftindex`` directory), and begins listening for HTTP requests on ``127.0.0.1:8080``. It also serves the interactive :doc:`trace-viewer` web UI at ``/`` and ``/index.html``.
 
 Custom Configuration:
 
@@ -47,15 +49,15 @@ webview clients can query the API cross-origin.
 REST API
 --------
 
-All endpoints return JSON responses and support filtering via query parameters. The server uses `HTTP/1.1` with keep-alive connections for efficient streaming.
+All endpoints return a single JSON response and support filtering via query parameters. The server uses `HTTP/1.1` with keep-alive connections.
 
 Trace Data API
 ~~~~~~~~~~~~~~
 
-GET /api/v1/files
+GET /api/files
 +++++++++++++++++
 
-List all available trace files in the directory.
+List all indexed trace files.
 
 **Response:**
 
@@ -66,14 +68,13 @@ List all available trace files in the directory.
             {
                 "path": "trace1.pfw.gz",
                 "has_bloom_data": true,
-                "has_checkpoint_index": true,
-                "is_small": false
+                "has_checkpoint_index": true
             }
         ],
         "count": 1
     }
 
-GET /api/v1/files/info
+GET /api/files/info
 ++++++++++++++++++++++
 
 Get detailed metadata for a specific file.
@@ -90,7 +91,6 @@ Get detailed metadata for a specific file.
         "path": "trace1.pfw.gz",
         "has_bloom_data": true,
         "has_checkpoint_index": true,
-        "is_small": false,
         "size_mb": 45.2,
         "compressed_size": 47185920,
         "num_lines": 1234567,
@@ -98,116 +98,7 @@ Get detailed metadata for a specific file.
         "uncompressed_size": 943718400
     }
 
-.. note::
-
-   ``num_lines``, ``num_checkpoints``, and ``uncompressed_size`` are only included for non-small (indexed) files.
-
-GET /api/v1/events
-++++++++++++++++++
-
-Query events with optional filtering. Returns results as streaming NDJSON using HTTP/1.1 chunked transfer encoding.
-
-**Query Parameters:**
-
-- ``file`` (string) - Specific trace file to query (default: all files)
-- ``limit`` (integer) - Maximum number of events to return, 0-100000 (default: 1000)
-- ``cat`` (string) - Category filter (comma-separated for multiple values)
-- ``name`` (string) - Event name filter (comma-separated for multiple values)
-- ``pid`` (integer) - Process ID filter
-- ``ts_min`` (double) - Minimum timestamp in microseconds
-- ``ts_max`` (double) - Maximum timestamp in microseconds
-- ``dur_min`` (double) - Minimum duration in microseconds
-- ``dur_max`` (double) - Maximum duration in microseconds
-
-**Response:** Streaming NDJSON (one JSON object per line)
-
-- ``Content-Type: application/x-ndjson``
-- ``Transfer-Encoding: chunked``
-- ``X-Limit``: Echoes the limit applied
-
-.. code-block:: text
-
-    {"name":"MPI_Send","ph":"X","ts":1234567890,"dur":12345,"pid":1,"tid":1,"args":{}}
-    {"name":"MPI_Recv","ph":"X","ts":1234567950,"dur":200,"pid":1,"tid":1,"args":{}}
-
-**Example:**
-
-.. code-block:: bash
-
-    # Get first 100 MPI_Send events
-    curl "http://localhost:8080/api/v1/events?file=trace1.pfw.gz&name=MPI_Send&limit=100"
-
-    # Get events with specific duration threshold
-    curl "http://localhost:8080/api/v1/events?file=trace1.pfw.gz&dur_min=1000&limit=50"
-
-    # Filter by category and time range
-    curl "http://localhost:8080/api/v1/events?file=trace1.pfw.gz&cat=POSIX&ts_min=1000000&ts_max=2000000"
-
-GET /api/v1/events/stream
-+++++++++++++++++++++++++
-
-Stream events as NDJSON without a limit. Identical to ``/api/v1/events`` but ``limit`` defaults to 0 (unlimited). Useful for large result sets and real-time processing.
-
-**Query Parameters:** Same as ``/api/v1/events`` (but ``limit`` defaults to 0)
-
-**Response:** Streaming NDJSON with chunked transfer encoding (same format as ``/api/v1/events``)
-
-.. code-block:: text
-
-    {"name":"MPI_Send","ph":"X","ts":1234567890,"dur":12345,"pid":1,"tid":1,"args":{}}
-    {"name":"MPI_Recv","ph":"X","ts":1234567950,"dur":200,"pid":1,"tid":1,"args":{}}
-
-**Example:**
-
-.. code-block:: bash
-
-    # Stream all events with duration > 5000 microseconds
-    curl "http://localhost:8080/api/v1/events/stream?file=trace1.pfw.gz&dur_min=5000"
-
-GET /api/v1/stats
-+++++++++++++++++
-
-Retrieve aggregated statistics across all trace files. Results are cached in-memory by request path.
-
-**Query Parameters:** None
-
-**Response:**
-
-.. code-block:: json
-
-    {
-        "file_count": 3,
-        "total_events": 3704701,
-        "skipped_small_files": 0,
-        "files": [
-            {
-                "file_path": "trace1.pfw.gz",
-                "success": true,
-                "total_events": 1234567,
-                "num_categories": 5,
-                "num_unique_names": 42,
-                "num_pid_tids": 8,
-                "time_range": {
-                    "min_timestamp_us": 1000000,
-                    "max_timestamp_us": 5000000,
-                    "time_span_seconds": 4.0
-                },
-                "duration": {
-                    "count": 1234567,
-                    "sum_us": 98765432,
-                    "mean_us": 80.0,
-                    "stddev_us": 15.2,
-                    "min_us": 1,
-                    "max_us": 45000
-                },
-                "category_counts": {"POSIX": 500000, "APP": 734567},
-                "name_counts": {"read": 250000, "write": 250000},
-                "pid_tid_counts": {"1:1": 600000, "1:2": 634567}
-            }
-        ]
-    }
-
-GET /api/v1/info
+GET /api/info
 ++++++++++++++++
 
 Get global metadata about all trace files (time bounds, file listing).
@@ -227,7 +118,6 @@ Get global metadata about all trace files (time bounds, file listing).
                 "path": "trace1.pfw.gz",
                 "has_bloom_data": true,
                 "has_checkpoint_index": true,
-                "is_small": false,
                 "min_timestamp_us": 1000000,
                 "max_timestamp_us": 5000000
             },
@@ -235,20 +125,46 @@ Get global metadata about all trace files (time bounds, file listing).
                 "path": "trace2.pfw.gz",
                 "has_bloom_data": true,
                 "has_checkpoint_index": true,
-                "is_small": false,
                 "min_timestamp_us": 3000000,
                 "max_timestamp_us": 7000000
-            },
-            {
-                "path": "trace3.pfw.gz",
-                "has_bloom_data": true,
-                "has_checkpoint_index": true,
-                "is_small": false,
-                "min_timestamp_us": 5000000,
-                "max_timestamp_us": 10000000
             }
         ]
     }
+
+GET /api/resolve
+++++++++++++++++++
+
+Resolve content hashes (file/host/string/proc) to their names.
+
+**Query Parameters:**
+
+- ``hash`` (string) - One hash, or several separated by commas [required]
+- ``type`` (string) - ``file`` (default), ``host``, ``string``, or ``proc``
+
+**Response:**
+
+.. code-block:: json
+
+    {"names": {"314c1a1cdb22a136": "/data/train/img_0.npz"}}
+
+Unknown hashes are simply absent from the reply.
+
+POST /api/cancel
+++++++++++++++++++
+
+Cancel an in-flight request by its ``X-Request-Id`` header. Every request the
+router dispatches is registered under the ``X-Request-Id`` it was sent with (if
+any); posting its id here interrupts the in-flight scan cooperatively.
+
+**Query Parameters:**
+
+- ``id`` (string) - The request id to cancel [required]
+
+**Response:**
+
+.. code-block:: json
+
+    {"cancelled": true}
 
 Time units
 ++++++++++
@@ -262,7 +178,7 @@ so clients always work in microseconds regardless of the trace's native unit.
 Visualization API
 ~~~~~~~~~~~~~~~~~
 
-GET /api/v1/viz/events
+GET /api/viz/events
 ++++++++++++++++++++++
 
 Query events optimized for visualization with time-range windowing, lane grouping, and summary aggregation. Returns events binned and aggregated for efficient rendering in trace viewers.
@@ -280,6 +196,7 @@ Query events optimized for visualization with time-range windowing, lane groupin
 - ``cat`` (string) - Category filter
 - ``lanes`` (JSON) - Lane filtering as URL-encoded JSON (see below)
 - ``filters`` (JSON) - Complex filtering as URL-encoded JSON array (see below)
+- ``query`` (string) - A raw query DSL predicate, ANDed with the other filters
 
 **Response:**
 
@@ -323,7 +240,7 @@ Filter events by lane using URL-encoded JSON:
 .. code-block:: bash
 
     # Filter by process ID
-    curl "http://localhost:8080/api/v1/viz/events?begin=0&end=1000000&summary=1&lanes=%5B%7B%22field%22%3A%22pid%22%2C%22value%22%3A%221%22%7D%5D"
+    curl "http://localhost:8080/api/viz/events?begin=0&end=1000000&summary=1&lanes=%5B%7B%22field%22%3A%22pid%22%2C%22value%22%3A%221%22%7D%5D"
 
 The ``lanes`` parameter accepts a JSON array or object:
 
@@ -349,19 +266,37 @@ Supported operators: ``=``, ``>=``, ``<=``, ``>``, ``<``
 .. code-block:: bash
 
     # Get events for visualization in normalized time range [0, 1M]
-    curl "http://localhost:8080/api/v1/viz/events?begin=0&end=1000000&summary=1"
+    curl "http://localhost:8080/api/viz/events?begin=0&end=1000000&summary=1"
 
     # Same query with raw timestamps and PID filter
-    curl "http://localhost:8080/api/v1/viz/events?begin=1000000&end=2000000&summary=1&ts_normalize=0&pid=1"
+    curl "http://localhost:8080/api/viz/events?begin=1000000&end=2000000&summary=1&ts_normalize=0&pid=1"
 
-GET /api/v1/viz/density
+GET /api/viz/breaks
+++++++++++++++++++++++
+
+Globally idle time gaps, and multi-run detection (several distinct app runs
+back-to-back in one trace).
+
+**Query Parameters:**
+
+- ``ts_normalize`` (integer) - Normalize to the global minimum (default: 1)
+
+.. code-block:: bash
+
+    curl "http://localhost:8080/api/viz/breaks"
+
+.. code-block:: json
+
+    {"gaps": [{"begin": 50000, "end": 900000}], "multi_run": true}
+
+GET /api/viz/density
 +++++++++++++++++++++++
 
-Like ``/api/v1/viz/events``, but instead of dropping sub-pixel events it buckets
+Like ``/api/viz/events``, but instead of dropping sub-pixel events it buckets
 them per ``(pid, tid, pixel-column)`` into aggregated *density* blocks, so
 zoomed-out views still show where activity is. Returns full-size events (with
 ``args``, for the detail panel) plus a ``density`` array of blocks. Same
-``begin``/``end``/``summary`` parameters as ``/api/v1/viz/events``.
+``begin``/``end``/``summary`` parameters as ``/api/viz/events``.
 
 Optional ``group_by=<column>`` splits blocks by an event column (a top-level
 field, an ``args`` key, or a ``resolved.*`` alias such as ``resolved.fpath``).
@@ -372,8 +307,8 @@ the client - they are never dropped.
 
 .. code-block:: bash
 
-    curl "http://localhost:8080/api/v1/viz/density?begin=0&end=999999999&summary=2"
-    curl "http://localhost:8080/api/v1/viz/density?begin=0&end=999999999&summary=2&group_by=cat"
+    curl "http://localhost:8080/api/viz/density?begin=0&end=999999999&summary=2"
+    curl "http://localhost:8080/api/viz/density?begin=0&end=999999999&summary=2&group_by=cat"
 
 .. code-block:: json
 
@@ -385,7 +320,7 @@ the client - they are never dropped.
       ]
     }
 
-GET /api/v1/viz/columns
+GET /api/viz/columns
 +++++++++++++++++++++++
 
 The complete set of groupable columns in the trace (top-level scalar fields plus
@@ -395,13 +330,13 @@ durably in the index) with the summary scan as fallback for older indexes;
 
 .. code-block:: bash
 
-    curl "http://localhost:8080/api/v1/viz/columns"
+    curl "http://localhost:8080/api/viz/columns"
 
 .. code-block:: json
 
     {"columns": ["cat", "name", "mhost", "fhash"], "ready": true}
 
-GET /api/v1/viz/counters
+GET /api/viz/counters
 ++++++++++++++++++++++++
 
 Per-bucket read/write bytes and I/O operation counts over a time range, for the
@@ -410,14 +345,14 @@ bandwidth / IOPS tracks. Parameters ``begin``, ``end``, ``summary``; returns a
 
 .. code-block:: bash
 
-    curl "http://localhost:8080/api/v1/viz/counters?begin=0&end=999999999&summary=1"
+    curl "http://localhost:8080/api/viz/counters?begin=0&end=999999999&summary=1"
 
 .. code-block:: json
 
     {"buckets": [{"ts": 0, "read_bytes": 4096, "write_bytes": 0,
                   "read_ops": 1, "write_ops": 0}]}
 
-GET /api/v1/viz/stats
+GET /api/viz/stats
 +++++++++++++++++++++
 
 Server-side per-name aggregation over a time range (the Analyze panel). Returns
@@ -427,7 +362,7 @@ unfiltered queries are answered from a prebuilt summary.
 
 .. code-block:: bash
 
-    curl "http://localhost:8080/api/v1/viz/stats?begin=0&end=999999999&summary=1"
+    curl "http://localhost:8080/api/viz/stats?begin=0&end=999999999&summary=1"
 
 .. code-block:: json
 
@@ -437,7 +372,7 @@ unfiltered queries are answered from a prebuilt summary.
                  "avg": 50, "min": 10, "max": 90}]
     }
 
-GET /api/v1/viz/histogram
+GET /api/viz/histogram
 +++++++++++++++++++++++++
 
 Distribution of event durations matching the query in ``[begin, end]``: exact
@@ -446,13 +381,13 @@ the shape. Narrow to one operation by folding ``name == "..."`` into the query.
 
 .. code-block:: bash
 
-    curl "http://localhost:8080/api/v1/viz/histogram?begin=0&end=999999999&summary=1"
+    curl "http://localhost:8080/api/viz/histogram?begin=0&end=999999999&summary=1"
 
 .. code-block:: json
 
     {"min": 10, "max": 900, "p50": 150, "p99": 880, "buckets": []}
 
-GET /api/v1/viz/proctree
+GET /api/viz/proctree
 ++++++++++++++++++++++++
 
 Infers the process fork hierarchy and returns a ``nodes`` array (one per
@@ -463,14 +398,14 @@ per-node trees on multi-node traces.
 
 .. code-block:: bash
 
-    curl "http://localhost:8080/api/v1/viz/proctree"
+    curl "http://localhost:8080/api/viz/proctree"
 
 .. code-block:: json
 
     {"nodes": [{"pid": 100, "parent": -1, "host": "node01", "rank": "0",
                 "bytes": 16384, "io_ops": 4, "io_busy": 600.0}]}
 
-GET /api/v1/viz/calltree
+GET /api/viz/calltree
 ++++++++++++++++++++++++
 
 Merges events into a flamegraph tree from ``ts``/``dur`` containment; identical
@@ -480,7 +415,7 @@ name-paths fold together. Each node carries inclusive ``total``, exclusive
 
 .. code-block:: bash
 
-    curl "http://localhost:8080/api/v1/viz/calltree?begin=0&end=999999999&summary=1"
+    curl "http://localhost:8080/api/viz/calltree?begin=0&end=999999999&summary=1"
 
 .. code-block:: json
 
@@ -489,7 +424,7 @@ name-paths fold together. Each node carries inclusive ``total``, exclusive
       "children": [{"name": "read", "total": 2500, "self": 2500, "count": 50}]
     }
 
-GET /api/v1/viz/layers
+GET /api/viz/layers
 ++++++++++++++++++++++
 
 Whole-trace reference data: the operation-name to category ``layers`` map (a
@@ -498,7 +433,7 @@ property of the name, so fetched once), plus ``total_files`` (declared via
 
 .. code-block:: bash
 
-    curl "http://localhost:8080/api/v1/viz/layers"
+    curl "http://localhost:8080/api/viz/layers"
 
 .. code-block:: json
 
@@ -517,51 +452,44 @@ consume it too. None of these pages contain trace data; they query the API.
 Event Filtering
 ---------------
 
-The trace data endpoints (``/api/v1/events``, ``/api/v1/events/stream``) use structured query parameters for filtering:
+``GET /api/viz/events`` (and the other ``/api/viz/*`` endpoints that scan
+events) filter through a query built server-side from several sources, all
+ANDed together:
 
-**Query Parameter Filters:**
+- ``pid`` / ``tid`` / ``cat`` - equality filters on the top-level fields.
+- ``lanes`` - a URL-encoded JSON array/object selecting lanes, e.g.
+  ``[{"field": "pid", "value": "1"}]``.
+- ``filters`` - a URL-encoded JSON array of field/operator/value predicates:
 
-- ``cat`` - Filter by category (comma-separated for multiple: ``cat=POSIX,STDIO``)
-- ``name`` - Filter by event name (comma-separated for multiple: ``name=read,write``)
-- ``pid`` - Filter by process ID
-- ``ts_min`` / ``ts_max`` - Filter by timestamp range (microseconds)
-- ``dur_min`` / ``dur_max`` - Filter by duration range (microseconds)
+  .. code-block:: json
+
+      [
+          {"field": "pid", "op": "=", "value": 1},
+          {"field": "dur", "op": ">=", "value": 500}
+      ]
+
+  Supported operators: ``=``, ``>=``, ``<=``, ``>``, ``<``.
+- ``query`` - a raw query DSL predicate, e.g. ``dur >= 1000 and cat ==
+  "POSIX"``, spliced in verbatim. This is what the timeline's query box sends.
 
 .. code-block:: bash
 
-    # Get POSIX read/write events with duration > 1000 us
-    curl "http://localhost:8080/api/v1/events?file=trace.pfw.gz&cat=POSIX&name=read,write&dur_min=1000"
+    curl "http://localhost:8080/api/viz/events?begin=0&end=2000000&summary=1&cat=POSIX"
+    curl "http://localhost:8080/api/viz/events?begin=0&end=2000000&summary=1&query=dur%20%3E%3D%201000"
 
-    # Get events in a time window
-    curl "http://localhost:8080/api/v1/events?file=trace.pfw.gz&ts_min=1000000&ts_max=2000000"
-
-**Visualization Filters:**
-
-The ``/api/v1/viz/events`` endpoint supports JSON-based ``filters`` for complex predicates:
-
-.. code-block:: json
-
-    [
-        {"field": "pid", "op": "=", "value": 1},
-        {"field": "dur", "op": ">=", "value": 500}
-    ]
-
-Supported operators: ``=``, ``>=``, ``<=``, ``>``, ``<``
+Use ``GET /api/resolve`` to turn an interned hash (``fhash``, ``hhash``, a
+file/host/proc id from a response) back into its string.
 
 Indexing
 --------
 
 **Bloom Filters:**
 
-Trace files larger than 1 MB (compressed) are automatically indexed with bloom filters (``.idx`` files) during server startup. Bloom filters accelerate event filtering by skipping chunks that cannot contain matching events.
+Every trace file without an existing sidecar index is automatically indexed with bloom filters during server startup, regardless of file size. Bloom filters accelerate event filtering by skipping chunks that cannot contain matching events.
 
 **Checkpoint Indexes:**
 
-Checkpoint indexes (``.idx`` files) store byte offsets and decompression state, enabling efficient random access to events by line number or byte position.
-
-**Small Files:**
-
-Files smaller than 1 MB are streamed directly without sidecar indexes. The server detects this automatically based on compressed file size.
+Checkpoint indexes store byte offsets and decompression state, enabling efficient random access to events by line number or byte position.
 
 **Index Persistence:**
 
@@ -594,23 +522,25 @@ The server uses coroutine-based concurrency to handle multiple simultaneous requ
 
 **Memory:**
 
-Event filtering streams through bloom indexes and partial reads, minimizing memory usage. Both ``/api/v1/events`` and ``/api/v1/events/stream`` use chunked transfer encoding with iovec scatter-gather I/O, streaming NDJSON results without buffering the full response in memory.
+Event filtering streams through bloom indexes and partial reads, minimizing
+memory usage during the scan. The response itself is a single JSON body
+(built once the scan completes), not a chunked/streamed one.
 
 **Client Receive Timeouts:**
 
-The streaming endpoints (``/api/v1/events``, ``/api/v1/events/stream``,
-``/api/v1/viz/events``) use HTTP/1.1 chunked transfer encoding and can hold
-a connection open while the server is still scanning chunks before any
-bytes are emitted. Clients should set a receive timeout of at least
-**15 seconds** (the timeout used by the bundled integration tests, raised
-from 2 s in earlier builds) to accommodate the worst-case index-warmup
-path; the server itself does not impose a global request timeout
-(``with_global_timeout(0)``).
+A ``/api/viz/*`` request can hold its connection open while the server is
+still scanning chunks before any response bytes are written - there is no
+progress signal until the full JSON body is ready. Clients should set a
+receive timeout of at least **15 seconds** (the timeout used by the bundled
+integration tests, raised from 2 s in earlier builds) to accommodate the
+worst-case index-warmup path; the server itself does not impose a global
+request timeout (``with_global_timeout(0)``). Cancel a slow request early with
+``POST /api/cancel?id=<X-Request-Id>``.
 
 **Query Optimization:**
 
-- Use narrow time ranges in ``/api/v1/viz/events`` queries
-- Apply filters (``cat``, ``name``, ``pid``, time/duration ranges) to reduce the number of events scanned
-- Use ``limit`` for pagination on ``/api/v1/events``
-- Use higher ``summary`` levels in visualization queries to aggregate short-duration events
-- Consider ``lanes`` filtering for visualization queries to reduce network overhead
+- Use narrow time ranges in ``/api/viz/events`` queries.
+- Apply filters (``cat``, ``pid``, ``tid``, ``query``) to reduce the number of events scanned.
+- Use ``limit`` for pagination on ``/api/viz/events``.
+- Use higher ``summary`` levels in visualization queries to aggregate short-duration events.
+- Consider ``lanes`` filtering for visualization queries to reduce network overhead.

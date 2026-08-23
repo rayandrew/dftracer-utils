@@ -24,8 +24,8 @@
 
 namespace dftracer::utils::utilities::common::statistics {
 
-// One occupied histogram bucket: [lower, upper) DDSketch bounds and its count.
-// A {0, 0} bin carries the count of exact-zero values.
+/// One occupied histogram bucket: [lower, upper) DDSketch bounds and its count.
+/// A {0, 0} bin carries the count of exact-zero values.
 struct HistogramBin {
     double lower;
     double upper;
@@ -43,8 +43,8 @@ class DDSketch {
     double quantile(double q) const;
     void reset();
 
-    // Occupied buckets in ascending value order (empty buckets omitted), for a
-    // raw histogram. Bounds are the sketch's relative-error bucket bounds.
+    /// Occupied buckets in ascending value order (empty buckets omitted), for a
+    /// raw histogram. Bounds are the sketch's relative-error bucket bounds.
     std::vector<HistogramBin> bins() const;
 
     std::uint64_t count() const { return count_; }
@@ -65,10 +65,10 @@ class DDSketch {
     std::uint64_t count_;
     std::uint64_t zero_count_;
 
-    // Collapsing dense store: fixed-size array with offset.
-    // Logical bin index `k` maps to store_[k - offset_].
-    // When the key range exceeds MAX_BINS, lowest bins are
-    // collapsed into store_[0].
+    /// Collapsing dense store: fixed-size array with offset.
+    /// Logical bin index `k` maps to store_[k - offset_].
+    /// When the key range exceeds MAX_BINS, lowest bins are
+    /// collapsed into store_[0].
     std::array<std::uint16_t, MAX_BINS> store_{};
     int offset_ = 0;
     int min_key_ = 0;

@@ -8,8 +8,8 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/coro/task.h>
-#include <dftracer/utils/utilities/common/json/parser.h>
-#include <dftracer/utils/utilities/composites/dft/event.h>
+#include <dftracer/utils/json/parser.h>
+#include <dftracer/utils/trace/event.h>
 #include <dftracer/utils/utilities/reader/trace_reader.h>
 #include <simdjson.h>
 
@@ -210,8 +210,8 @@ std::shared_ptr<CallTreeNode> CallTreeFactory::create_node(
 
 namespace {
 
-using dftracer::utils::utilities::common::json::JsonParser;
-using dftracer::utils::utilities::composites::dft::DFTracerEvent;
+using dftracer::utils::json::JsonParser;
+using dftracer::utils::trace::DFTracerEvent;
 
 struct ParsedEvent {
     bool parsed = false;

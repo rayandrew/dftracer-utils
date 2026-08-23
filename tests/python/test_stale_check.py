@@ -4,24 +4,15 @@ Covers the IndexDatabase.find_stale_files binding and verifies that a full
 aggregation run rebuilds only the traces whose source files changed.
 """
 
-import pytest
-
-import dftracer.utils as dft_utils
-from dftracer.utils.dftracer_utils_ext import AggregatorUtility, IndexDatabase
+import dftracer.utils as dftu_utils
+from dftracer.utils.dftracer_utils_ext import IndexDatabase
 
 from .common import Environment, determine_index_path
 
 
 def _build_index(directory):
-    with dft_utils.Indexer(directory) as indexer:
+    with dftu_utils.Indexer(directory) as indexer:
         indexer.ensure_indexed()
-
-
-def _sum_event_count(table):
-    pa = pytest.importorskip("pyarrow")
-    batches = [pa.record_batch(batch) for batch in table.batches()]
-    rows = pa.Table.from_batches(batches).to_pylist()
-    return sum(row["count"] for row in rows)
 
 
 class TestFindStaleFiles:
@@ -85,24 +76,3 @@ class TestFindStaleFiles:
             # The registry now keys on the full canonical path.
             assert res["removed"] == [b]
             assert res["changed"] == []
-
-
-class TestStaleEndToEnd:
-    def test_aggregation_rebuilds_changed_trace(self):
-        # Open the index only through the aggregations so no external handle
-        # holds the RocksDB lock across runs.
-        with Environment(lines=20) as env:
-            env.create_dft_trace_file("a.pfw.gz", num_events=20)
-            env.create_dft_trace_file("b.pfw.gz", num_events=20)
-            directory = env.temp_dir
-
-            first = _sum_event_count(AggregatorUtility().process(directory))
-            assert first == 40
-
-            # Grow b; the stat-only check must flag it stale on the next run.
-            env.create_dft_trace_file("b.pfw.gz", num_events=80)
-            second = _sum_event_count(AggregatorUtility().process(directory))
-
-            # a stays cached (20), b is rebuilt with its new content (80). If
-            # staleness were missed, b would be served as the stale 20 -> 40.
-            assert second == 100

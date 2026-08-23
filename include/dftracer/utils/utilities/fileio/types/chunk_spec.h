@@ -16,10 +16,10 @@ namespace dftracer::utils::utilities::fileio {
  */
 struct ChunkSpec {
     std::string file_path;
-    std::string index_path;  // Empty for plain text files
+    std::string index_path;  ///< Empty for plain text files
     double size_mb;
-    std::size_t start_byte;  // Starting byte offset (0-based)
-    std::size_t end_byte;    // Ending byte offset (exclusive)
+    std::size_t start_byte;  ///< Starting byte offset (0-based)
+    std::size_t end_byte;    ///< Ending byte offset (exclusive)
 
     ChunkSpec() : size_mb(0.0), start_byte(0), end_byte(0) {}
 

@@ -41,7 +41,7 @@ static int IndexDatabase_init(IndexDatabaseObject *self, PyObject *args,
     try {
         self->db = std::make_shared<IndexDatabase>(index_path);
     } catch (const std::exception &e) {
-        set_typed_py_error(e);
+        dftracer::utils::python::set_typed_py_error(e);
         return -1;
     }
     return 0;
@@ -112,7 +112,8 @@ static PyObject *IndexDatabase_bulk_ingest(IndexDatabaseObject *self,
         return NULL;
     }
 
-    SstArtifactRegistry *registry = sst_artifact_registry_get(registry_obj);
+    SstArtifactRegistry *registry =
+        dftracer::utils::python::sst_artifact_registry_get(registry_obj);
     if (!registry) {
         PyErr_SetString(PyExc_TypeError,
                         "expected an SstArtifactRegistry instance");
@@ -274,24 +275,24 @@ static PyObject *IndexDatabase_find_stale_files(IndexDatabaseObject *self,
 }
 
 static PyMethodDef IndexDatabase_methods[] = {
-    {"init_schema", DFT_PYCFUNCTION(IndexDatabase_init_schema), METH_NOARGS,
+    {"init_schema", DFTU_PYCFUNCTION(IndexDatabase_init_schema), METH_NOARGS,
      "Idempotently initialise the schema version key."},
-    {"register_files", DFT_PYCFUNCTION(IndexDatabase_register_files),
+    {"register_files", DFTU_PYCFUNCTION(IndexDatabase_register_files),
      METH_VARARGS | METH_KEYWORDS,
      "register_files(paths) -> list[int]\n"
      "Register each path in the DEFAULT-CF file registry and return the "
      "assigned file_ids. Idempotent for files with matching hash."},
-    {"find_stale_files", DFT_PYCFUNCTION(IndexDatabase_find_stale_files),
+    {"find_stale_files", DFTU_PYCFUNCTION(IndexDatabase_find_stale_files),
      METH_VARARGS | METH_KEYWORDS,
      "find_stale_files(paths) -> dict\n"
      "Stat-only (mtime + size) staleness check of the given trace paths "
      "against the index. Returns {changed, added, removed, schema_outdated, "
      "stale}."},
     {"reserve_file_id_range",
-     DFT_PYCFUNCTION(IndexDatabase_reserve_file_id_range), METH_VARARGS,
+     DFTU_PYCFUNCTION(IndexDatabase_reserve_file_id_range), METH_VARARGS,
      "reserve_file_id_range(count) -> int\n"
      "Atomically reserve `count` contiguous file_ids, return the first."},
-    {"bulk_ingest", DFT_PYCFUNCTION(IndexDatabase_bulk_ingest),
+    {"bulk_ingest", DFTU_PYCFUNCTION(IndexDatabase_bulk_ingest),
      METH_VARARGS | METH_KEYWORDS,
      "bulk_ingest(registry, skip_cfs=None) -> None\n"
      "Ingest all SSTs collected in the SstArtifactRegistry.\n"
@@ -299,10 +300,10 @@ static PyMethodDef IndexDatabase_methods[] = {
      "outside the unified DB (used by distributed builds to keep "
      "AGGREGATION/SYSTEM_METRICS SSTs addressable by manifest)."},
     {"rebuild_root_summaries",
-     DFT_PYCFUNCTION(IndexDatabase_rebuild_root_summaries), METH_NOARGS,
+     DFTU_PYCFUNCTION(IndexDatabase_rebuild_root_summaries), METH_NOARGS,
      "Recompute ROOT_* summary column families from per-file CFs."},
     {"write_agg_global_config",
-     DFT_PYCFUNCTION(IndexDatabase_write_agg_global_config),
+     DFTU_PYCFUNCTION(IndexDatabase_write_agg_global_config),
      METH_VARARGS | METH_KEYWORDS,
      "write_agg_global_config(time_interval_us, config_hash=0, "
      "group_by_file=True) -> None\n"
@@ -311,14 +312,14 @@ static PyMethodDef IndexDatabase_methods[] = {
      "(which never materialise the key via worker SSTs) or "
      "post-consolidate indices."},
     {"write_agg_file_markers",
-     DFT_PYCFUNCTION(IndexDatabase_write_agg_file_markers), METH_VARARGS,
+     DFTU_PYCFUNCTION(IndexDatabase_write_agg_file_markers), METH_VARARGS,
      "write_agg_file_markers(file_ids) -> None\n"
      "Write per-file aggregation completion markers (\\xFF\\xFF + file_id) "
      "into the AGGREGATION CF. Required after distributed_index otherwise "
      "`ensure_indexed()` concludes aggregation is incomplete and re-runs "
      "the entire build."},
     {"write_aggregation_tracker",
-     DFT_PYCFUNCTION(IndexDatabase_write_aggregation_tracker), METH_VARARGS,
+     DFTU_PYCFUNCTION(IndexDatabase_write_aggregation_tracker), METH_VARARGS,
      "write_aggregation_tracker(blobs) -> None\n"
      "Merge a list of serialized AssociationTracker bytes and write the "
      "result to the AGGREGATION CF under the `__tracker__` key."},
@@ -364,7 +365,7 @@ PyTypeObject IndexDatabaseType = {
     IndexDatabase_new,
 };
 
-int init_index_database(PyObject *m) {
+int dftracer::utils::python::init_index_database(PyObject *m) {
     if (register_type(m, &IndexDatabaseType, "IndexDatabase") < 0) return -1;
     return 0;
 }

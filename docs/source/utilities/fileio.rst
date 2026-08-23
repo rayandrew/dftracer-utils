@@ -1,3 +1,5 @@
+:description: The file I/O utilities: synchronous readers and writers plus async line and byte generators for gzip-compressed trace files.
+
 File I/O
 ==================
 
@@ -8,7 +10,8 @@ Synchronous I/O:
 .. code-block:: cpp
 
    #include <dftracer/utils/utilities/fileio/file_reader_utility.h>
-   #include <dftracer/utils/utilities/fileio/streaming_file_reader_utility.h>
+   #include <dftracer/utils/utilities/fileio/binary_file_reader_utility.h>
+   #include <dftracer/utils/utilities/fileio/types/chunk_iterator.h>
    #include <dftracer/utils/utilities/fileio/streaming_file_writer_utility.h>
    #include <dftracer/utils/utilities/fileio/lines/streaming_line_reader.h>
 
@@ -16,8 +19,6 @@ Asynchronous Generators:
 
 .. code-block:: cpp
 
-   #include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_line_generator.h>
-   #include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_bytes_generator.h>
    #include <dftracer/utils/utilities/fileio/lines/sources/async_indexed_file_line_generator.h>
    #include <dftracer/utils/utilities/fileio/lines/sources/async_indexed_file_bytes_generator.h>
    #include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
@@ -29,8 +30,8 @@ Types
 
    // Zero-copy byte span (see core_infrastructure)
    class ByteView {
-       const void* data();
-       std::size_t size();
+       const std::byte* data() const;
+       std::size_t size() const;
        template <typename T> const T* as() const;
    };
 
@@ -50,17 +51,19 @@ Types
 FileReaderUtility
 -----------------
 
-Reads entire file into memory as text.
+Reads entire file into memory as text. A coroutine functor, not a
+``.process()``-style object; call it and await the result.
 
 .. code-block:: cpp
 
    FileReaderUtility reader;
-   Text content = reader.process(FileEntry{"/path/to/file.txt"});
+   Text content = co_await reader(FileEntry{"/path/to/file.txt"});
 
-BinaryFileReaderUtility
------------------------
+read_binary_file
+-----------------
 
-Streaming binary file reader yielding zero-copy ``ByteView`` chunks.
+Free function returning a streaming binary generator that yields zero-copy
+``ByteView`` chunks (``dftracer/utils/utilities/fileio/binary_file_reader_utility.h``).
 
 .. code-block:: cpp
 
@@ -69,45 +72,38 @@ Streaming binary file reader yielding zero-copy ``ByteView`` chunks.
        process(chunk->as<char>(), chunk->size());
    }
 
-StreamingFileReaderUtility
---------------------------
+ChunkRange
+----------
 
-Reads file in chunks with lazy evaluation.
-
-**Input:**
-
-.. code-block:: cpp
-
-   struct StreamReadInput {
-       fs::path path;
-       std::size_t chunk_size = 64 * 1024;  // 64KB default
-   };
-
-**Example:**
+Lazy, input-iterator-based chunk reading over a plain file
+(``dftracer/utils/utilities/fileio/types/chunk_iterator.h``). Only one
+chunk is buffered in memory at a time; each dereference exposes a
+zero-copy ``ByteView`` into that buffer.
 
 .. code-block:: cpp
 
-   StreamingFileReaderUtility reader;
-   auto input = StreamReadInput{"/path/to/large_file.dat", 1024 * 1024};
+   #include <dftracer/utils/utilities/fileio/types/chunk_iterator.h>
 
-   // Returns lazy iterator
-   ChunkRange chunks = reader.process(input);
+   using namespace dftracer::utils::utilities::fileio;
 
-   for (const auto& chunk : chunks) {
+   ChunkRange chunks("/path/to/large_file.dat", 1024 * 1024);
+
+   for (const ByteView& chunk : chunks) {
        process(chunk);
    }
 
 StreamingFileWriterUtility
 --------------------------
 
-Writes data in chunks.
+Writes ``ByteView`` chunks to a file. ``process()`` is a coroutine and must
+be awaited; ``close()`` is synchronous.
 
 .. code-block:: cpp
 
    StreamingFileWriterUtility writer("/output/file.dat");
 
    for (const auto& chunk : data_chunks) {
-       writer.process(chunk);
+       co_await writer.process(chunk);
    }
 
    writer.close();
@@ -116,97 +112,45 @@ Writes data in chunks.
 StreamingLineReader
 -------------------
 
-Lazy line-by-line reading for both plain and indexed files.
-
-**Plain text files:**
-
-.. code-block:: cpp
-
-   // Read all lines
-   LineRange lines = StreamingLineReader::read_plain("/path/to/file.txt");
-
-   for (const auto& line : lines) {
-       std::cout << line.line_number << ": " << line.content << "\n";
-   }
-
-   // Read specific line range
-   LineRange subset = StreamingLineReader::read_plain(
-       "/path/to/file.txt",
-       100,   // start_line
-       200    // end_line
-   );
-
-**Indexed (compressed) files:**
+Async line reading for gzip trace files, auto-selecting indexed random
+access (when a ``.dftindex`` sidecar is given and exists) or single-pass
+streaming decompression otherwise. There is no plain-text mode; only
+``.gz`` input is recognized.
 
 .. code-block:: cpp
 
-   IndexedFileLineIteratorConfig config;
-   config.archive_path = "/path/to/file.pfw.gz";
-   config.index_path = "/path/to/file.pfw.gz.idx";
-   config.start_line = 0;
-   config.end_line = 1000;
+   #include <dftracer/utils/utilities/fileio/lines/streaming_line_reader.h>
 
-   LineRange lines = StreamingLineReader::read_indexed(config);
+   using namespace dftracer::utils::utilities::fileio::lines;
 
-   // Collect all into vector
-   std::vector<Line> all_lines = lines.collect();
+   auto config = StreamingLineReaderConfig()
+       .with_file("trace.pfw.gz")
+       .with_index("trace-root/.dftindex")  // omit for streaming decompression
+       .with_line_range(1, 1000);           // omit for the whole file
 
-   // Or take first N
-   std::vector<Line> first_100 = lines.take(100);
-
-   // Or filter
-    auto filtered = lines.filter([](const Line& l) {
-        return l.content.find("error") != std::string_view::npos;
-    });
-
-Asynchronous File I/O
----------------------
-
-Async generators provide non-blocking line and byte reading using C++20 coroutines. They are ideal for high-concurrency scenarios and integrating with async task pipelines.
-
-**Plain Text Files**
-
-Read lines from uncompressed files with async I/O:
-
-.. code-block:: cpp
-
-   #include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_line_generator.h>
-
-   // Read all lines asynchronously
-   auto gen = async_plain_file_lines("data.txt");
+   auto gen = StreamingLineReader::read_async(config);
    while (auto line = co_await gen.next()) {
        std::cout << line->line_number << ": " << line->content << "\n";
    }
 
-   // Read specific line range
-   auto gen = async_plain_file_lines("data.txt", 100, 200);  // lines 100-200
-   while (auto line = co_await gen.next()) {
-       process(*line);
-   }
+Asynchronous File I/O
+---------------------
 
-**Plain Text Files by Byte Range**
-
-Read lines within a byte range from plain files, with automatic line-boundary alignment:
-
-.. code-block:: cpp
-
-   #include <dftracer/utils/utilities/fileio/lines/sources/async_plain_file_bytes_generator.h>
-
-   auto gen = async_plain_file_bytes("data.txt", 1000, 5000);  // bytes 1000-5000
-   while (auto line = co_await gen.next()) {
-       process(*line);  // Yields complete lines within the byte range
-   }
+Async generators provide non-blocking line and byte reading using C++20
+coroutines. They are ideal for high-concurrency scenarios and integrating
+with async task pipelines. Only gzip-compressed input (``.pfw.gz``) is
+supported; there is no plain-text generator.
 
 **Indexed (Compressed) Files**
 
-Read lines from ``.gz.idx`` indexed archive files asynchronously:
+Read lines from a ``.dftindex``-backed archive asynchronously:
 
 .. code-block:: cpp
 
    #include <dftracer/utils/utilities/fileio/lines/sources/async_indexed_file_line_generator.h>
 
    auto config = IndexedFileLineIteratorConfig()
-       .with_file("trace.pfw.gz", "trace.pfw.gz.idx")
+       .with_file("trace.pfw.gz", "trace-dir/.dftindex")
        .with_line_range(1, 1000);
 
    auto gen = async_indexed_file_lines(config);
@@ -222,7 +166,7 @@ Read lines within a byte range from indexed archives:
 
    #include <dftracer/utils/utilities/fileio/lines/sources/async_indexed_file_bytes_generator.h>
 
-   auto reader = ReaderFactory::create("trace.pfw.gz", "trace.pfw.gz.idx");
+   auto reader = ReaderFactory::create("trace.pfw.gz", "trace-dir/.dftindex");
    auto gen = async_indexed_file_bytes(reader, 1000, 5000);  // bytes 1000-5000
    while (auto line = co_await gen.next()) {
        process(*line);

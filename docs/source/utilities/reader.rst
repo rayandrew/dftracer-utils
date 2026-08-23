@@ -1,10 +1,12 @@
+:description: The streaming reader for indexed compressed traces: line- and byte-based access, zero-copy reads, and async I/O over .pfw.gz plus .dftindex.
+
 Reader
 ================
 
 .. seealso::
 
    For complete class and member documentation, see the
-   :doc:`API Reference </cpp_api/api/index>`.
+   :doc:`API Reference </cpp_api/reader>`.
 
 Streaming reader for compressed trace files with support for line-based and byte-based access, zero-copy reads, and async I/O.
 
@@ -22,17 +24,16 @@ different access patterns and both synchronous and asynchronous reads.
 The high-level :cpp:class:`dftracer::utils::utilities::reader::TraceReader`
 exposes:
 
-- **Directory input** (Python binding): when constructed with a directory,
-  all matching ``.pfw.gz`` files share one ``.dftindex`` root and are
-  processed in parallel (each file becomes one or more checkpoint-level
-  work items routed across the runtime thread pool).
+- **Directory input**: the higher-level :class:`~dftracer.utils.TraceViewer`
+  (see :ref:`Python API <reader-python-api>` below) accepts a directory of
+  ``.pfw.gz`` files that share one ``.dftindex`` root and are processed in
+  parallel (each file becomes one or more checkpoint-level work items
+  routed across the runtime thread pool).
 - **JSON streaming** (``read_json``): each line is parsed once with a
   reused ``simdjson`` ondemand ``JsonParser``; the yielded ``JsonLine``
   borrows the parser until the next ``next()`` call.
-- **Arrow streaming** (``read_arrow``, Python ``iter_arrow_stream``):
-  yields native ``ArrowExportResult`` record batches sized at
-  ``batch_size`` rows. The Python binding exposes this as an Arrow C
-  Data Interface stream (no Python-side row materialisation).
+- **Arrow streaming** (``read_arrow``): yields native
+  ``ArrowExportResult`` record batches sized at ``batch_size`` rows.
 - **Query filtering**: an optional ``query`` DSL string is compiled into
   AND-of-EQ probes when possible. The compiled probes evaluate directly
   against simdjson fields, with a uniform-match shortcut when every
@@ -60,7 +61,7 @@ Creates readers with automatic format detection.
 
    auto reader = ReaderFactory::create(
        "trace.pfw.gz",       // Compressed file
-       "trace.pfw.gz.idx"    // Index file
+       "trace-dir/.dftindex" // Index directory (empty string auto-generates one)
    );
 
    // Query file metadata
@@ -105,7 +106,7 @@ Reading Lines
 
 .. code-block:: cpp
 
-   auto reader = ReaderFactory::create("trace.pfw.gz", "trace.pfw.gz.idx");
+   auto reader = ReaderFactory::create("trace.pfw.gz", "trace-dir/.dftindex");
 
    StreamConfig config;
    config.stream_type(StreamType::LINE)
@@ -174,7 +175,7 @@ Process lines without materializing them into a container:
    };
 
    MyProcessor processor;
-   reader->process_lines(processor, 1, 1000);  // Lines 1-1000
+   co_await reader->read_lines_with_processor_async(1, 1000, processor);  // Lines 1-1000
 
 C API
 -----
@@ -185,51 +186,60 @@ Opaque handle-based interface for C interoperability:
 
    #include <dftracer/utils/utilities/reader/internal/reader.h>
 
-   /* Create reader */
-   dft_reader_handle_t reader = dft_reader_create(
-       "trace.pfw.gz", "trace.pfw.gz.idx");
+   /* Create reader (index_ckpt_size = 0 uses the default) */
+   dftu_reader_handle_t reader = dftu_reader_create(
+       "trace.pfw.gz", "trace-dir/.dftindex", 0);
 
-   /* Query metadata */
-   size_t num_lines = dft_reader_get_num_lines(reader);
+   /* Query metadata (returns non-zero on error) */
+   size_t num_lines = 0;
+   dftu_reader_get_num_lines(reader, &num_lines);
 
    /* Create stream */
-   dft_reader_stream_handle_t stream = dft_reader_create_stream(
-       reader, DFT_STREAM_LINE, DFT_RANGE_LINE, 1, 100);
+   dftu_stream_config_t config = {
+       .stream_type = DFTU_STREAM_TYPE_LINE,
+       .range_type = DFTU_RANGE_TYPE_LINES,
+       .start = 1,
+       .end = 100,
+       .buffer_size = 0,  /* 0 = use default */
+   };
+   dftu_reader_stream_t stream = dftu_reader_stream(reader, &config);
 
    /* Read lines */
    char buffer[1024 * 1024];
-   while (!dft_reader_stream_done(stream)) {
-       size_t bytes = dft_reader_stream_read(
+   while (!dftu_reader_stream_done(stream)) {
+       size_t bytes = dftu_reader_stream_read(
            stream, buffer, sizeof(buffer));
        if (bytes == 0) break;
        /* process buffer[0..bytes-1] */
    }
 
    /* Cleanup */
-   dft_reader_stream_destroy(stream);
-   dft_reader_destroy(reader);
+   dftu_reader_stream_destroy(stream);
+   dftu_reader_destroy(reader);
+
+.. _reader-python-api:
 
 Python API
 ----------
 
+There is no Python binding for ``TraceReader`` directly; the Python API
+reads traces through :class:`dftracer.utils.TraceViewer`, a lazy,
+composable view that wraps the same reader/indexer machinery and returns
+Arrow-backed :class:`~dftracer.utils.DataFrame` results.
+
 .. code-block:: python
 
-   from dftracer.utils import TraceReader
+   from dftracer.utils import TraceViewer
 
-   reader = TraceReader("trace.pfw.gz")
+   viewer = TraceViewer("trace.pfw.gz")
 
-   # Read all lines
-   lines = reader.read_lines()
-   for line in lines:
-       print(line)
-
-   # Get metadata (requires index sidecar)
-   print(f"Total lines: {reader.get_num_lines()}")
-   print(f"Total bytes: {reader.get_max_bytes()}")
+   # Filter with the query DSL and collect to a DataFrame
+   df = viewer.filter("cat == 'POSIX'").collect()
+   print(df)
 
 See Also
 --------
 
-- :doc:`indexer` - Indexer that builds the ``.idx`` files readers depend on
+- :doc:`indexer` - Indexer that builds the ``.dftindex`` store readers depend on
 - :doc:`fileio` - Higher-level file I/O with async generators
 - :doc:`/api/index` - Python API documentation

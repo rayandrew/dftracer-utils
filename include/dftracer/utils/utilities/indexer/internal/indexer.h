@@ -9,19 +9,19 @@
 extern "C" {
 #endif
 
-typedef void *dft_indexer_handle_t;
+typedef void *dftu_indexer_handle_t;
 
 // C API function declarations
-dft_indexer_handle_t dft_indexer_create(const char *gz_path,
-                                        const char *index_path,
-                                        uint64_t checkpoint_size,
-                                        int force_rebuild);
-int dft_indexer_build(dft_indexer_handle_t indexer);
-int dft_indexer_need_rebuild(dft_indexer_handle_t indexer);
-int dft_indexer_exists(dft_indexer_handle_t indexer);
-uint64_t dft_indexer_get_max_bytes(dft_indexer_handle_t indexer);
-uint64_t dft_indexer_get_num_lines(dft_indexer_handle_t indexer);
-void dft_indexer_destroy(dft_indexer_handle_t indexer);
+dftu_indexer_handle_t dftu_indexer_create(const char *gz_path,
+                                          const char *index_path,
+                                          uint64_t checkpoint_size,
+                                          int force_rebuild);
+int dftu_indexer_build(dftu_indexer_handle_t indexer);
+int dftu_indexer_need_rebuild(dftu_indexer_handle_t indexer);
+int dftu_indexer_exists(dftu_indexer_handle_t indexer);
+uint64_t dftu_indexer_get_max_bytes(dftu_indexer_handle_t indexer);
+uint64_t dftu_indexer_get_num_lines(dftu_indexer_handle_t indexer);
+void dftu_indexer_destroy(dftu_indexer_handle_t indexer);
 
 #ifdef __cplusplus
 }

@@ -117,7 +117,7 @@ docs:
   script:
     - JOBID=$(flux jobs -n --name="$ALLOC_NAME" -o "{id}" | head -1)
     - test -n "$JOBID"
-    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/run-in-podman.sh docker.io/library/python:3.11 .gitlab/ci/docs.sh
+    - flux proxy "$JOBID" flux run -N 1 bash .gitlab/ci/run-in-podman.sh docker.io/library/python:3.12 .gitlab/ci/docs.sh
   artifacts:
     paths: [public]
 

@@ -1,3 +1,5 @@
+:description: Reference for JsonDictValue, the zero-copy wrapper over a parsed DFTracer JSON event, and materializing it to a plain Python dict.
+
 JSON Module
 ===========
 

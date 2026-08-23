@@ -1,0 +1,121 @@
+:description: Keep a scan or aggregation inside a memory ceiling: cap and spill a view's group map, and check whether a footprint fits across nodes.
+
+Bound memory usage
+==================
+
+.. admonition:: Goal
+   :class: goal
+
+   Keep a scan or aggregation inside a memory ceiling instead of letting the
+   group map grow until the process is killed. Two tools do this: a builder setting
+   on the view that caps and spills intermediate memory, and a free advisory that
+   tells you whether a required footprint fits and how many nodes to spread it
+   across.
+
+Cap and spill a view
+--------------------
+
+``View::memory_budget(bytes)`` (in ``dftracer/utils/trace/views/view.h``,
+namespace ``dftracer::utils::trace::views``) caps each worker's in-memory group map at
+``bytes`` and spills the overflow to temporary runs. It bounds intermediate
+memory, not the returned result. ``0`` means pure in-memory (no spilling).
+``auto_spill()`` is the convenience form: it caps at roughly one third of
+available memory. Both are chainable and available on the Python viewer too.
+
+.. tab-set::
+
+   .. tab-item:: C++
+
+      .. code-block:: cpp
+
+         #include <dftracer/utils/trace/views/view.h>
+         using namespace dftracer::utils::trace::views;
+
+         auto df = view
+             .memory_budget(2ull * 1024 * 1024 * 1024)   // 2 GiB per worker
+             .group_by({GroupKey::cat()})
+             .agg({{AggOp::Sum, "dur", "sum_dur"}})
+             .collect()
+             .get();
+
+         auto spilled = view.auto_spill()
+                            .group_by({GroupKey::cat()})
+                            .agg({{AggOp::Count, "", "count"}})
+                            .collect()
+                            .get();
+
+   .. tab-item:: Python
+
+      .. code-block:: python
+
+         from dftracer.utils import TraceViewer
+
+         tv = TraceViewer("./traces")
+
+         result = (
+             tv.memory_budget(2 * 1024**3)   # 2 GiB per worker
+               .group_by("cat")
+               .agg("sum:dur")
+               .collect()
+         )
+
+         spilled = tv.auto_spill().group_by("cat").agg("count").collect()
+
+Check a footprint before you run
+--------------------------------
+
+``memory_budget_advice`` judges a required byte footprint against available
+memory (auto-detected and cgroup-aware when you pass ``0`` or omit it). It
+returns whether the footprint fits, the peak it expects, and how many nodes
+would spread that peak under the available limit.
+
+.. tab-set::
+
+   .. tab-item:: C++
+
+      .. code-block:: cpp
+
+         #include <dftracer/utils/core/common/memory_budget.h>
+         using namespace dftracer::utils;
+
+         MemoryBudgetAdvice advice =
+             memory_budget_advice(/*required_bytes=*/40ull * 1024 * 1024 * 1024);
+
+         if (!advice.fits) {
+             std::cerr << format_memory_budget_warning(advice) << '\n';
+             // advice.suggested_nodes: nodes to spread the peak under available
+         }
+
+   .. tab-item:: Python
+
+      .. code-block:: python
+
+         from dftracer.utils.dftracer_utils_ext import memory_budget_advice
+
+         advice = memory_budget_advice(required_bytes=40 * 1024**3)
+         # dict: fits, required_bytes, peak_bytes, available_bytes,
+         #       suggested_nodes, warning
+         if not advice["fits"]:
+             print(advice["warning"])
+             print("spread across", advice["suggested_nodes"], "nodes")
+
+The returned advice carries ``fits`` (peak within available), ``required_bytes``
+(what you passed), ``peak_bytes`` (required times a peak factor),
+``available_bytes`` (what it judged against), and ``suggested_nodes``. The C++
+struct is ``MemoryBudgetAdvice``; the Python function returns the same fields as
+a dict plus a ``warning`` string (empty when it fits).
+
+.. note::
+
+   ``compute_memory_budget`` and ``estimate_per_file_bytes`` (same C++ header)
+   compute a budget and a per-file estimate from a list of file sizes. They are
+   C++-only; the viewer calls ``compute_memory_budget`` internally to pick a
+   default. Only ``memory_budget_advice`` is exposed as a standalone Python
+   function.
+
+See also
+--------
+
+- :doc:`../../trace-viewer` - the viewer whose builder ``memory_budget`` tunes.
+- :doc:`../scale/mpi` - spread a job across ``suggested_nodes`` with the MPI
+  binaries.

@@ -9,7 +9,7 @@ namespace dftracer::utils {
  * @brief Get a demangled type name at compile time.
  *
  * Uses __PRETTY_FUNCTION__ to extract the type name from the compiler's
- * own representation. Zero runtime cost — the result is a string_view
+ * own representation. Zero runtime cost - the result is a string_view
  * into a string literal baked into .rodata by the compiler.
  *
  * @tparam T The type to get the name for

@@ -56,6 +56,16 @@ GUIDE_PAGES: dict[str, str] = {
 
 # Human-readable title overrides (key = namespace suffix after ROOT_NS)
 TITLE_OVERRIDES: dict[str, str] = {
+    "": "Runtime classes",
+    "dataframe": "DataFrame and Series",
+    "dataframe.field": "Field builder",
+    "query": "Query builder",
+    "plugins": "Plugin SDK",
+    "plugins.reflect": "Reflection",
+    "plugins.scalar": "Scalars",
+    "logger": "Logging",
+    "json": "JSON",
+    "hash": "Hashing",
     "coro": "Coroutine Primitives",
     "io": "Async I/O",
     "rocksdb": "RocksDB",
@@ -453,8 +463,21 @@ def _ns_to_filename(ns_suffix: str) -> str:
     return ns_suffix.replace(".", "/")
 
 
+CANONICAL_REPO_URL = "https://github.com/LLNL/dftracer-utils"
+
+
 def detect_repo_url(repo_root: Path) -> str:
-    """Detect the GitHub repository URL for source links."""
+    """Detect the GitHub repository URL for source links.
+
+    Resolves to the canonical LLNL repo by default. A contributor's local
+    fork remote must never leak into published source links, so `git remote`
+    is deliberately not consulted; set DFTRACER_DOCS_REPO_URL (or run under
+    ReadTheDocs / GitHub Actions) to point elsewhere.
+    """
+    override = os.environ.get("DFTRACER_DOCS_REPO_URL")
+    if override:
+        return override.removesuffix(".git")
+
     repo = os.environ.get("READTHEDOCS_GIT_REPOSITORY")
     if repo:
         repo = repo.removesuffix(".git")
@@ -469,61 +492,117 @@ def detect_repo_url(repo_root: Path) -> str:
     if repo:
         return f"https://github.com/{repo}"
 
-    try:
-        remote = (
-            subprocess.check_output(
-                ["git", "remote", "get-url", "origin"],
-                cwd=repo_root,
-                text=True,
-            )
-            .strip()
-            .removesuffix(".git")
-        )
-        if remote.startswith("git@github.com:"):
-            return remote.replace("git@github.com:", "https://github.com/", 1)
-        if remote.startswith("https://github.com/"):
-            return remote
-    except Exception:
-        pass
-
-    return "https://github.com/LLNL/dftracer-utils"
+    return CANONICAL_REPO_URL
 
 
 def detect_source_ref(repo_root: Path) -> str:
     """Detect the git ref used for source links."""
+    override = os.environ.get("DFTRACER_DOCS_SOURCE_REF")
+    if override:
+        return override
+
     for env_name in ("READTHEDOCS_GIT_COMMIT_HASH", "GITHUB_SHA"):
         value = os.environ.get(env_name)
         if value:
             return value
 
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=repo_root,
-                text=True,
-            )
-            .strip()
-        )
-    except Exception:
-        return "develop"
+    # Local builds point at the canonical repo (see detect_repo_url), where a
+    # fork's local HEAD commit does not exist, so pin to the default branch
+    # rather than an unresolvable SHA. CI provides the exact commit above.
+    return "develop"
+
+
+def _repo_rel(repo_root: Path, candidate: str) -> str | None:
+    """Resolve one Doxygen location path to a repo-relative path, or None."""
+    if not candidate:
+        return None
+    rel = Path(candidate)
+    for base in (repo_root / "include", repo_root / "src"):
+        full = base / rel
+        if full.exists():
+            return full.relative_to(repo_root).as_posix()
+    return None
 
 
 def resolve_repo_path(repo_root: Path, item: APIItem) -> str | None:
     """Resolve a Doxygen location path to a repo-relative source file."""
-    candidates = []
-    if item.bodyfile:
-        candidates.append(item.bodyfile)
-    if item.file:
-        candidates.append(item.file)
-
-    for candidate in candidates:
-        rel = Path(candidate)
-        for base in (repo_root / "include", repo_root / "src"):
-            full = base / rel
-            if full.exists():
-                return full.relative_to(repo_root).as_posix()
+    for candidate in (item.bodyfile, item.file):
+        rel = _repo_rel(repo_root, candidate)
+        if rel is not None:
+            return rel
     return None
+
+
+def _line_count(path: Path) -> int:
+    try:
+        with path.open("rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def _validated_range(repo_root: Path, rel: str, start: int, end: int) -> tuple[str, int, int] | None:
+    """Clamp/validate a line range against the file's real length.
+
+    Doxygen XML can go stale relative to the working tree (line numbers past
+    the current file length); an out-of-range ``literalinclude`` only warns, but
+    that is a new warning, so treat an untrustworthy range as unresolvable.
+    """
+    n = _line_count(repo_root / rel)
+    if n == 0 or start < 1 or start > n or end > n:
+        return None
+    return rel, start, end
+
+
+def resolve_source_lines(repo_root: Path, item: APIItem) -> tuple[str, int, int] | None:
+    """Resolve the item's implementation body to (repo_rel_path, start, end).
+
+    Prefers the definition (Doxygen ``bodyfile`` / ``bodystart`` / ``bodyend``)
+    so the embedded source shows the real implementation, and falls back to the
+    declaration location when no separate body is recorded. Returns None when no
+    on-disk file and valid line range can be resolved, so callers can skip the
+    embed gracefully rather than emit a literalinclude that warns or fails.
+    """
+    if item.bodyfile and item.bodystart:
+        rel = _repo_rel(repo_root, item.bodyfile)
+        if rel is not None:
+            end = item.bodyend if (item.bodyend and item.bodyend >= item.bodystart) else item.bodystart
+            valid = _validated_range(repo_root, rel, item.bodystart, end)
+            if valid is not None:
+                return valid
+    if item.file:
+        rel = _repo_rel(repo_root, item.file)
+        if rel is not None:
+            start = item.bodystart or item.line
+            if start is None:
+                return None
+            end = item.bodyend if (item.bodyend and item.bodyend >= start) else start
+            return _validated_range(repo_root, rel, start, end)
+    return None
+
+
+def emit_source_block(
+    lines: list[str],
+    rst_dir: Path,
+    repo_root: Path,
+    repo_url: str,
+    source_ref: str,
+    item: APIItem,
+) -> None:
+    """Append a GitHub source link for ``item`` to ``lines``.
+
+    Emits a lightweight link to the definition on GitHub. The raw source is not
+    embedded inline: for the C++ SDK types whose method signatures wrap the C
+    ABI, an embedded header would paste ``dftu_`` C symbols into the C++ pages,
+    which must stay pure C++ (the C ABI lives under ``c_api/``). Emits nothing
+    when the source cannot be resolved.
+    """
+    link = source_link(repo_root, repo_url, source_ref, item)
+    if link:
+        lines.append(".. rst-class:: api-source-link")
+        lines.append("")
+        lines.append(f"   `source <{link}>`_")
+        lines.append("")
 
 
 def source_link(repo_root: Path, repo_url: str, source_ref: str, item: APIItem) -> str | None:
@@ -547,19 +626,24 @@ def generate_module_rst(
     repo_root: Path,
     repo_url: str,
     source_ref: str,
+    rst_dir: Path,
 ) -> str:
-    """Generate RST for a single module page."""
+    """Generate an includable RST fragment for a single module (namespace).
+
+    Emitted as a ``.rst.inc`` fragment (see :func:`generate`) that a curated
+    thematic page pulls in with ``.. include::``. The fragment opens at section
+    level (``-``) so it nests under the including page's title, and carries no
+    toctree of its own. Every rendered symbol appears in exactly one fragment,
+    so no breathe declaration is documented twice.
+    """
     mod.items.sort(key=lambda x: (x.is_inner, x.name))
 
     lines: list[str] = []
     lines.append(mod.title)
-    lines.append("=" * len(mod.title))
+    lines.append("-" * len(mod.title))
     lines.append("")
     lines.append(f"Namespace: ``{mod.full_ns}``")
     lines.append("")
-    if mod.guide_page:
-        lines.append(f"For usage guide and examples, see :doc:`/cpp_api/{mod.guide_page}`.")
-        lines.append("")
 
     top_level = [
         i for i in mod.items if not i.is_inner and i.kind in ("class", "struct")
@@ -567,12 +651,7 @@ def generate_module_rst(
 
     for item in top_level:
         directive = "doxygenclass" if item.kind == "class" else "doxygenstruct"
-        link = source_link(repo_root, repo_url, source_ref, item)
-        if link:
-            lines.append(f".. rst-class:: api-source-link")
-            lines.append("")
-            lines.append(f"   `source <{link}>`_")
-            lines.append("")
+        emit_source_block(lines, rst_dir, repo_root, repo_url, source_ref, item)
         lines.append(f".. {directive}:: {item.name}")
         lines.append("   :project: dftracer-utils")
         lines.append("   :members:")
@@ -583,18 +662,13 @@ def generate_module_rst(
         (i for i in mod.items if i.kind == "function"), key=lambda x: x.name
     )
     if functions:
-        lines.append("Free Functions")
-        lines.append("-" * len("Free Functions"))
+        lines.append("Free functions")
+        lines.append("~" * len("Free functions"))
         lines.append("")
         for item in functions:
             # Overloaded names need a parameter-type signature to resolve.
             target = item.name + (item.arg_types if item.overloaded else "")
-            link = source_link(repo_root, repo_url, source_ref, item)
-            if link:
-                lines.append(f".. rst-class:: api-source-link")
-                lines.append("")
-                lines.append(f"   `source <{link}>`_")
-                lines.append("")
+            emit_source_block(lines, rst_dir, repo_root, repo_url, source_ref, item)
             lines.append(f".. doxygenfunction:: {target}")
             lines.append("   :project: dftracer-utils")
             lines.append("")
@@ -602,182 +676,21 @@ def generate_module_rst(
     return "\n".join(lines)
 
 
-def _build_toctree_hierarchy(
-    modules: list[Module],
-) -> dict[str, list]:
-    """Build a directory tree from module filenames.
-
-    Returns a dict mapping directory paths to lists of (entry, is_dir) tuples.
-    entry is a module filename (leaf) or subdir name (branch).
-    """
-    dirs: dict[str, set[str]] = defaultdict(set)  # dir -> child dirs
-    dir_leaves: dict[str, list[Module]] = defaultdict(list)  # dir -> leaf modules
-
-    for mod in modules:
-        parts = mod.filename.rsplit("/", 1)
-        if len(parts) == 1:
-            # Top-level module
-            dir_leaves[""].append(mod)
-        else:
-            parent_dir, _leaf = parts
-            dir_leaves[parent_dir].append(mod)
-            # Register all ancestor directories
-            segments = parent_dir.split("/")
-            for i in range(len(segments)):
-                ancestor = "/".join(segments[:i])
-                child = "/".join(segments[: i + 1])
-                dirs[ancestor].add(child)
-
-    return dirs, dir_leaves
-
-
-def generate_index_rst(modules: list[Module], output_dir: Path) -> None:
-    """Generate index pages at each directory level."""
-    dirs, dir_leaves = _build_toctree_hierarchy(modules)
-
-    # Collect all directories that need an index
-    all_dirs = set(dirs.keys()) | set(dir_leaves.keys())
-    # Add intermediate dirs that only have subdirs
-    for d in list(dirs.keys()):
-        for child in dirs[d]:
-            all_dirs.add(child)
-
-    for dir_path in sorted(all_dirs):
-        _generate_dir_index(dir_path, dirs, dir_leaves, modules, output_dir)
-
-
-def _generate_dir_index(
-    dir_path: str,
-    dirs: dict[str, set[str]],
-    dir_leaves: dict[str, list[Module]],
-    all_modules: list[Module],
-    output_dir: Path,
-) -> None:
-    """Generate an index.rst for a specific directory level."""
-    is_root = dir_path == ""
-
-    if is_root:
-        title = "API Reference"
-    else:
-        last_segment = dir_path.rsplit("/", 1)[-1]
-        title = TITLE_OVERRIDES.get(
-            dir_path.replace("/", "."),
-            last_segment.replace("_", " ").title() + " API",
-        )
-
-    lines: list[str] = []
-    lines.append(title)
-    lines.append("=" * len(title))
-    lines.append("")
-
-    if is_root:
-        lines.append(
-            "Complete reference for all public C++ classes and structs, "
-            "auto-generated from Doxygen XML."
-        )
-        lines.append("")
-        lines.append(".. tip::")
-        lines.append("")
-        lines.append(
-            "   Each module page lists all classes and structs with full "
-            "   member documentation. Mirrors the ``include/dftracer/utils/`` "
-            "   directory structure."
-        )
-        lines.append("")
-
-    # Toctree entries: subdirectory indexes + leaf modules
-    entries: list[str] = []
-
-    # Subdirectories (link to their index)
-    child_dirs = sorted(dirs.get(dir_path, set()))
-    for child in child_dirs:
-        rel = child[len(dir_path) :].lstrip("/") if dir_path else child
-        entries.append(f"{rel}/index")
-
-    # Leaf modules in this directory; ones that collide with a subdir of the
-    # same name are emitted as "<name>/_namespace" so the namespace page lives
-    # inside the subdir's toctree (see resolved_filename in generate()).
-    child_names = {c.rsplit("/", 1)[-1] for c in child_dirs}
-    leaves = sorted(dir_leaves.get(dir_path, []), key=lambda m: m.filename)
-    for mod in leaves:
-        rel = mod.filename[len(dir_path) :].lstrip("/") if dir_path else mod.filename
-        if rel in child_names:
-            continue
-        entries.append(rel)
-
-    # Also include the namespace overview page when this dir's name was a
-    # colliding leaf in the parent (file written as "<this>/_namespace.rst").
-    if dir_path:
-        leaf_name = dir_path.rsplit("/", 1)[-1] if "/" in dir_path else dir_path
-        parent_dir = dir_path.rsplit("/", 1)[0] if "/" in dir_path else ""
-        parent_leaves = dir_leaves.get(parent_dir, [])
-        for mod in parent_leaves:
-            parent_rel = (
-                mod.filename[len(parent_dir) :].lstrip("/") if parent_dir else mod.filename
-            )
-            if parent_rel == leaf_name:
-                entries.insert(0, "_namespace")
-                break
-
-    if entries:
-        lines.append(".. toctree::")
-        lines.append("   :maxdepth: 1")
-        lines.append("")
-        for entry in entries:
-            lines.append(f"   {entry}")
-        lines.append("")
-
-    # Summary table (only at root)
-    if is_root:
-        lines.append("Summary")
-        lines.append("-------")
-        lines.append("")
-        lines.append(".. list-table::")
-        lines.append("   :header-rows: 1")
-        lines.append("   :widths: 50 15 35")
-        lines.append("")
-        lines.append("   * - Module")
-        lines.append("     - Items")
-        lines.append("     - Namespace")
-
-        collisions = {
-            m.filename
-            for m in all_modules
-            if any(
-                other.filename.startswith(m.filename + "/")
-                for other in all_modules
-                if other is not m
-            )
-        }
-        total = 0
-        for mod in all_modules:
-            count = len(mod.items)
-            total += count
-            doc_path = (
-                f"{mod.filename}/_namespace"
-                if mod.filename in collisions
-                else mod.filename
-            )
-            lines.append(f"   * - :doc:`{doc_path}`")
-            lines.append(f"     - {count}")
-            lines.append(f"     - ``{mod.full_ns}``")
-
-        lines.append("   * - **Total**")
-        lines.append(f"     - **{total}**")
-        lines.append("     -")
-        lines.append("")
-
-    # Write
-    if dir_path:
-        out_path = output_dir / dir_path / "index.rst"
-    else:
-        out_path = output_dir / "index.rst"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text("\n".join(lines))
+def _fragment_key(mod: "Module") -> str:
+    """Fragment basename for a module. Root namespace maps to ``core``."""
+    return mod.ns_suffix or "core"
 
 
 def generate(xml_dir: Path, output_dir: Path) -> None:
-    """Main generation entry point. Called by conf.py or CLI."""
+    """Emit one includable ``.rst.inc`` fragment per namespace module.
+
+    ``output_dir`` is ``docs/source/cpp_api/_generated``. Fragments carry no
+    toctree and are pulled into the curated thematic pages under ``cpp_api/``
+    with ``.. include::``, so the generated members appear inside the curated
+    pages and there is no separate visible ``api/`` section. ``.rst.inc`` is not
+    a Sphinx source suffix, so the fragments are never treated as standalone
+    documents (no orphan warnings).
+    """
     repo_root = output_dir.parents[3]
     repo_url = detect_repo_url(repo_root)
     source_ref = detect_source_ref(repo_root)
@@ -791,42 +704,28 @@ def generate(xml_dir: Path, output_dir: Path) -> None:
 
     modules = discover_modules(items)
 
-    # Detect leaf modules whose filename collides with a sibling subdir:
-    # e.g. "utilities/composites.rst" + directory "utilities/composites/".
-    # Re-route those leaves into "<filename>/_namespace.rst" so the namespace
-    # page lives under the subdir's toctree and Sphinx does not orphan it.
-    dir_paths = {mod.filename.rsplit("/", 1)[0] for mod in modules if "/" in mod.filename}
-    dir_paths |= {
-        "/".join(mod.filename.split("/")[: i + 1])
-        for mod in modules
-        for i in range(len(mod.filename.split("/")) - 1)
-    }
-    collisions = {mod.filename for mod in modules if mod.filename in dir_paths}
-
-    def resolved_filename(mod: "Module") -> str:
-        return f"{mod.filename}/_namespace" if mod.filename in collisions else mod.filename
-
-    # Generate per-module pages
     output_dir.mkdir(parents=True, exist_ok=True)
-    expected_paths = {output_dir / f"{resolved_filename(mod)}.rst" for mod in modules}
-    for mod in modules:
-        rst = generate_module_rst(mod, repo_root, repo_url, source_ref)
-        out_path = output_dir / f"{resolved_filename(mod)}.rst"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(rst)
+    rst_dir = output_dir.parent
 
-    for stale in output_dir.rglob("*.rst"):
-        if stale.name == "index.rst":
-            continue
-        if stale not in expected_paths:
+    keys: list[str] = []
+    for mod in modules:
+        key = _fragment_key(mod)
+        keys.append(key)
+        rst = generate_module_rst(mod, repo_root, repo_url, source_ref, rst_dir)
+        (output_dir / f"{key}.rst.inc").write_text(rst)
+
+    expected = {f"{k}.rst.inc" for k in keys}
+    for stale in output_dir.glob("*.rst.inc"):
+        if stale.name not in expected:
             stale.unlink()
 
-    # Generate index pages at each directory level
-    generate_index_rst(modules, output_dir)
+    # Manifest lets a curated page / reviewer confirm every namespace fragment
+    # is included by some thematic page (no silently dropped namespace).
+    (output_dir / "_manifest.txt").write_text("\n".join(sorted(keys)) + "\n")
 
-    print(f"  Generated {len(modules)} module pages + index in {output_dir}/")
+    print(f"  Generated {len(modules)} fragments in {output_dir}/")
     for mod in modules:
-        print(f"    {len(mod.items):3d}  {mod.title} -> {mod.filename}.rst")
+        print(f"    {len(mod.items):3d}  {mod.title} -> {_fragment_key(mod)}.rst.inc")
 
 
 def main():
@@ -842,8 +741,8 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("docs/source/cpp_api/api"),
-        help="Output directory for generated RST files",
+        default=Path("docs/source/cpp_api/_generated"),
+        help="Output directory for generated RST include fragments",
     )
     args = parser.parse_args()
     generate(args.xml_dir, args.output_dir)

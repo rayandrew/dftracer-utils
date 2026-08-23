@@ -12,6 +12,7 @@
 #include <coroutine>
 #include <exception>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace dftracer::utils {
@@ -60,6 +61,7 @@ ThreadPoolExecutor::ThreadPoolExecutor(const ExecutorConfig& config)
           std::chrono::steady_clock::now().time_since_epoch().count()),
       idle_timeout_(config.idle_timeout),
       deadlock_timeout_(config.deadlock_timeout),
+      keepalive_(config.elastic_keepalive),
       io_pool_size_(config.io_pool_size == 0 ? hardware_concurrency()
                                              : config.io_pool_size),
       io_backend_type_(config.io_backend_type),
@@ -76,6 +78,11 @@ ThreadPoolExecutor::ThreadPoolExecutor(const ExecutorConfig& config)
     if (num_threads_ > 2) num_threads_ = 2;
     if (io_pool_size_ > 2) io_pool_size_ = 2;
 #endif
+    min_workers_ =
+        (config.min_workers == 0 || config.min_workers > num_threads_)
+            ? num_threads_
+            : config.min_workers;
+    max_live_ = num_threads_ + hardware_concurrency();
     DFTRACER_UTILS_LOG_DEBUG(
         "Executor created with %zu threads, idle_timeout=%lld s, "
         "deadlock_timeout=%lld s",
@@ -97,6 +104,8 @@ void ThreadPoolExecutor::start() {
     running_ = true;
     workers_.clear();
     workers_.reserve(num_threads_);
+    permits_.store(static_cast<std::ptrdiff_t>(num_threads_),
+                   std::memory_order_release);
 
     static std::once_flag warmup_once;
     std::call_once(warmup_once, warmup_vendored_libs);
@@ -109,13 +118,16 @@ void ThreadPoolExecutor::start() {
                                         io_batch_threshold_);
     io_backend_->start();
 
-    // Create all worker contexts first so workers_ is stable before any
-    // worker thread can try to iterate/steal from it.
-    for (std::size_t i = 0; i < num_threads_; ++i) {
-        auto worker = std::make_unique<WorkerContext>(i);
+    // Spawn the floor (== the cap in eager mode). The elastic monitor grows the
+    // rest on demand. Contexts first so workers_ is stable before any worker
+    // thread can iterate it.
+    for (std::size_t i = 0; i < min_workers_; ++i) {
+        auto worker = std::make_unique<WorkerContext>(
+            next_worker_id_.fetch_add(1, std::memory_order_relaxed));
         worker->last_activity = std::chrono::steady_clock::now();
         workers_.push_back(std::move(worker));
     }
+    live_workers_.store(workers_.size(), std::memory_order_release);
 
     // Start worker threads after all contexts are in place.
     for (auto& worker : workers_) {
@@ -123,8 +135,18 @@ void ThreadPoolExecutor::start() {
             std::thread(&ThreadPoolExecutor::worker_thread, this, worker.get());
     }
 
-    DFTRACER_UTILS_LOG_DEBUG("Executor started with %zu worker threads",
-                             num_threads_);
+    // Elastic mode only: a monitor drives grow/shrink between the floor and
+    // cap.
+    if (min_workers_ < num_threads_) {
+        monitor_thread_ = std::thread(&ThreadPoolExecutor::monitor_loop, this);
+    }
+
+    // Reclaims permits from long blocks; blocking can occur in any mode.
+    sysmon_thread_ = std::thread(&ThreadPoolExecutor::sysmon_loop, this);
+
+    DFTRACER_UTILS_LOG_DEBUG(
+        "Executor started with %zu worker threads (cap %zu)", min_workers_,
+        num_threads_);
 }
 
 void ThreadPoolExecutor::shutdown() {
@@ -136,27 +158,28 @@ void ThreadPoolExecutor::shutdown() {
     running_ = false;
     wake_all_workers();
 
-    // Join all worker threads (must happen before io_backend_ is
-    // destroyed, since workers call io_backend_->poll() when idle).
+    coord_cv_.notify_all();
+    if (monitor_thread_.joinable()) monitor_thread_.join();
+
+    {
+        std::lock_guard<std::mutex> lock(sysmon_mutex_);
+        sysmon_cv_.notify_all();
+    }
+    if (sysmon_thread_.joinable()) sysmon_thread_.join();
+
+    std::lock_guard<std::mutex> workers_lock(workers_mutex_);
+
     for (auto& worker : workers_) {
         if (worker->thread.joinable()) {
             worker->thread.join();
         }
     }
 
-    // Stop I/O backend AFTER joining workers (workers may poll the
-    // backend) but BEFORE clearing workers_.  The I/O backend's
-    // completion thread may still call enqueue() -> wake_all_workers()
-    // which accesses WorkerContext cv/mutex, so workers_ must remain
-    // alive until the completion thread has exited.
     if (io_backend_) {
         io_backend_->stop();
         io_backend_.reset();
     }
 
-    // Destroy deferred frames and orphaned run-queue entries BEFORE
-    // clearing workers_. Frames may hold shared_ptr<Channel> whose
-    // ConcurrentQueue has TLS producer tokens tied to worker threads.
     drain_destroy_queue();
     {
         RunQueueEntry orphan;
@@ -168,6 +191,7 @@ void ThreadPoolExecutor::shutdown() {
     }
 
     workers_.clear();
+    live_workers_.store(0, std::memory_order_release);
     timer_service_.stop();
 
     // Drain the main thread's thread-local destroy list (for
@@ -182,6 +206,209 @@ void ThreadPoolExecutor::reset() {
     DFTRACER_UTILS_LOG_DEBUG("%s", "Executor reset");
 }
 
+bool ThreadPoolExecutor::spawn_worker(std::size_t cap, bool best_effort) {
+    std::unique_lock<std::mutex> lock(workers_mutex_, std::defer_lock);
+    if (best_effort) {
+        if (!lock.try_lock()) return false;
+    } else {
+        lock.lock();
+    }
+    if (!running_.load(std::memory_order_acquire)) return false;
+    if (live_workers_.load(std::memory_order_relaxed) >= cap) return false;
+    auto worker = std::make_unique<WorkerContext>(
+        next_worker_id_.fetch_add(1, std::memory_order_relaxed));
+    worker->last_activity = std::chrono::steady_clock::now();
+    WorkerContext* ptr = worker.get();
+    workers_.push_back(std::move(worker));
+    live_workers_.fetch_add(1, std::memory_order_acq_rel);
+    ptr->thread = std::thread(&ThreadPoolExecutor::worker_thread, this, ptr);
+    return true;
+}
+
+void ThreadPoolExecutor::add_worker() {
+    spawn_worker(num_threads_, /*best_effort=*/false);
+}
+
+void ThreadPoolExecutor::retire_worker() {
+    std::unique_ptr<WorkerContext> victim;
+    {
+        std::lock_guard<std::mutex> lock(workers_mutex_);
+        if (workers_.empty()) return;
+        // Pull the target out of the vector under the lock, so wake/progress no
+        // longer see it, then drive its exit outside the lock.
+        victim = std::move(workers_.back());
+        workers_.pop_back();
+        live_workers_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    victim->retire.store(true, std::memory_order_release);
+    wake_all_workers();  // wake it if parked so it observes retire
+    if (victim->thread.joinable()) victim->thread.join();
+    // victim (and its WorkerContext) is destroyed here, after the join.
+}
+
+bool ThreadPoolExecutor::acquire_permit(WorkerContext* ctx) {
+    std::ptrdiff_t c = permits_.load(std::memory_order_acquire);
+    for (;;) {
+        while (c > 0) {
+            if (permits_.compare_exchange_weak(c, c - 1,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_acquire)) {
+                return true;
+            }
+        }
+        if (!running_.load(std::memory_order_acquire) ||
+            ctx->retire.load(std::memory_order_acquire)) {
+            return false;
+        }
+        permit_waiters_.fetch_add(1, std::memory_order_acq_rel);
+        permits_.wait(0, std::memory_order_acquire);
+        permit_waiters_.fetch_sub(1, std::memory_order_acq_rel);
+        c = permits_.load(std::memory_order_acquire);
+    }
+}
+
+void ThreadPoolExecutor::release_permit(WorkerContext* ctx) {
+    if (!ctx->holds_permit) return;
+    ctx->holds_permit = false;
+    permits_.fetch_add(1, std::memory_order_acq_rel);
+    permits_.notify_one();
+}
+
+void ThreadPoolExecutor::ensure_running_worker() {
+    // A permit-waiter will take the freed slot; no need to spawn.
+    if (permit_waiters_.load(std::memory_order_acquire) > 0) return;
+    if (idle_workers_.load(std::memory_order_acquire) > 0) {
+        wake_one_worker();
+        return;
+    }
+    const std::size_t justified =
+        num_threads_ + blocked_workers_.load(std::memory_order_acquire);
+    if (live_workers_.load(std::memory_order_acquire) < justified) {
+        spawn_worker(max_live_, /*best_effort=*/true);
+    }
+}
+
+void ThreadPoolExecutor::enter_blocking() {
+    auto* ctx = static_cast<WorkerContext*>(get_current_worker_context());
+    if (!ctx || !ctx->holds_permit) return;
+    ctx->blocking_since_ns.store(
+        std::chrono::steady_clock::now().time_since_epoch().count(),
+        std::memory_order_relaxed);
+    ctx->blk_state.store(BLK_SYSCALL, std::memory_order_release);
+    // Only the 0->1 transition can find the sysmon parked; skip the wake else.
+    // Notify under sysmon_mutex_ so the wake cannot slip between the sysmon's
+    // predicate check and its wait().
+    if (blocked_workers_.fetch_add(1, std::memory_order_acq_rel) == 0) {
+        std::lock_guard<std::mutex> lock(sysmon_mutex_);
+        sysmon_cv_.notify_one();
+    }
+}
+
+void ThreadPoolExecutor::exit_blocking() {
+    auto* ctx = static_cast<WorkerContext*>(get_current_worker_context());
+    if (!ctx) return;
+    blocked_workers_.fetch_sub(1, std::memory_order_acq_rel);
+    int expected = BLK_SYSCALL;
+    if (ctx->blk_state.compare_exchange_strong(expected, BLK_NONE,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_acquire)) {
+        return;  // kept our permit
+    }
+    // Handed off: reacquire a permit before resuming.
+    ctx->holds_permit = false;
+    ctx->blk_state.store(BLK_NONE, std::memory_order_release);
+    if (acquire_permit(ctx)) ctx->holds_permit = true;
+}
+
+void ThreadPoolExecutor::sysmon_loop() {
+    while (running_.load(std::memory_order_acquire)) {
+        {
+            std::unique_lock<std::mutex> lock(sysmon_mutex_);
+            if (blocked_workers_.load(std::memory_order_acquire) == 0) {
+                // Park until a worker enters a blocking region or we shut down;
+                // both notify under sysmon_mutex_, so there is no wakeup to
+                // miss and no need to poll.
+                sysmon_cv_.wait(lock, [this] {
+                    return blocked_workers_.load(std::memory_order_acquire) >
+                               0 ||
+                           !running_.load(std::memory_order_acquire);
+                });
+            }
+        }
+        if (!running_.load(std::memory_order_acquire)) break;
+        if (blocked_workers_.load(std::memory_order_acquire) == 0) continue;
+
+        const std::int64_t now =
+            std::chrono::steady_clock::now().time_since_epoch().count();
+        int handed = 0;
+        {
+            std::unique_lock<std::mutex> wl(workers_mutex_, std::try_to_lock);
+            if (wl.owns_lock()) {
+                for (auto& w : workers_) {
+                    if (w->blk_state.load(std::memory_order_acquire) !=
+                        BLK_SYSCALL)
+                        continue;
+                    if (now - w->blocking_since_ns.load(
+                                  std::memory_order_acquire) <
+                        BLOCK_HANDOFF_NS)
+                        continue;
+                    int expected = BLK_SYSCALL;
+                    if (w->blk_state.compare_exchange_strong(
+                            expected, BLK_HANDED_OFF, std::memory_order_acq_rel,
+                            std::memory_order_acquire)) {
+                        permits_.fetch_add(1, std::memory_order_acq_rel);
+                        permits_.notify_one();
+                        ++handed;
+                    }
+                }
+            }
+        }
+        for (int i = 0; i < handed; ++i) ensure_running_worker();
+        std::this_thread::sleep_for(std::chrono::nanoseconds(BLOCK_HANDOFF_NS));
+    }
+}
+
+void ThreadPoolExecutor::monitor_loop() {
+    using clock = std::chrono::steady_clock;
+    const auto keepalive = keepalive_;
+    auto last_busy = clock::now();
+
+    std::unique_lock<std::mutex> lock(coord_mutex_);
+    while (running_.load(std::memory_order_acquire)) {
+        // Park until enqueue signals unmet demand (grow) or a keep-alive
+        // elapses (shrink check). No busy-poll.
+        coord_cv_.wait_for(lock, keepalive, [this] {
+            return grow_pending_ || !running_.load(std::memory_order_acquire);
+        });
+        grow_pending_ = false;
+        lock.unlock();  // add/retire take workers_mutex_, not coord_mutex_
+        if (!running_.load(std::memory_order_acquire)) {
+            lock.lock();
+            break;
+        }
+
+        if (run_queue_.size_approx() > 0 ||
+            idle_workers_.load(std::memory_order_acquire) <
+                live_workers_.load(std::memory_order_acquire)) {
+            last_busy = clock::now();
+        }
+        // Grow: spawn until the backlog is covered or we hit the cap - all at
+        // once, so a burst reaches full parallelism in one wake.
+        while (run_queue_.size_approx() > 0 &&
+               live_workers_.load(std::memory_order_acquire) < num_threads_) {
+            add_worker();
+        }
+        // Shrink: one worker per keep-alive of sustained idle, down to the
+        // floor (gentle, so a brief lull does not thrash the pool).
+        if (live_workers_.load(std::memory_order_acquire) > min_workers_ &&
+            clock::now() - last_busy >= keepalive) {
+            retire_worker();
+            last_busy = clock::now();
+        }
+        lock.lock();
+    }
+}
+
 void ThreadPoolExecutor::set_completion_callback(CompletionCallback callback) {
     completion_callback_ = std::move(callback);
 }
@@ -193,29 +420,31 @@ void ThreadPoolExecutor::worker_thread(WorkerContext* context) {
     Executor::set_current(this);
     coro::reset_timeslice();
 
+    // Grows while idle so the pool is not polling, resets on work found.
+    std::chrono::milliseconds idle_park = IDLE_PARK_MIN;
+
     // Fixed for the process lifetime; read once to keep the resume loop cheap.
     const bool monitor = utilities::monitoring_enabled();
     if (monitor) {
         utilities::monitor_set_worker(static_cast<int>(context->worker_id));
     }
 
-    while (running_) {
+    while (running_ && !context->retire.load(std::memory_order_acquire)) {
+        // Hold a permit to run; a surplus thread (live > cap) parks for a slot.
+        if (!context->holds_permit) {
+            if (!acquire_permit(context)) break;
+            context->holds_permit = true;
+        }
+
         RunQueueEntry pending_entry;
 
-        // Snapshot the work signal BEFORE checking any queues.
-        // This ensures that any signal increment (from enqueue +
-        // signal_global_work) that happens AFTER this load will be detected by
-        // the wait predicate below, even if the actual queue check sees the
-        // queue as empty. Loading it inside the else branch (after queue
-        // checks) creates a race: work can arrive between the queue check and
-        // the signal load, causing the worker to sleep with the updated signal
-        // value while work sits in the queue.
         const std::uint64_t observed_signal =
             work_signal_.load(std::memory_order_acquire);
 
         // Run queue: coroutine handles from enqueue() and
         // schedule_coroutine_resumption().
         if (run_queue_.try_dequeue(pending_entry)) {
+            idle_park = IDLE_PARK_MIN;
             coro::reset_timeslice();
             context->is_idle.store(false, std::memory_order_relaxed);
             std::coroutine_handle<> pending_resume = pending_entry.handle;
@@ -256,14 +485,10 @@ void ThreadPoolExecutor::worker_thread(WorkerContext* context) {
         else {
             context->is_idle.store(true, std::memory_order_relaxed);
             // Flush any batched I/O operations before sleeping.
-            // This ensures pending SQEs are submitted even when no
-            // new work is arriving (drain trigger).
             if (io_backend_) {
                 io_backend_->flush();
             }
-            // Opportunistic I/O polling before sleeping.
-            // If the backend has completions, they'll enqueue new
-            // work, so skip the sleep and retry the run queue.
+            // Opportunistic I/O polling before sleeping
             if (io_backend_) {
                 auto reaped = io_backend_->poll(0);
                 if (reaped > 0) {
@@ -272,14 +497,29 @@ void ThreadPoolExecutor::worker_thread(WorkerContext* context) {
                 }
             }
             drain_destroy_queue();
-            // Re-check after snapshotting the signal: shutdown()'s bump may
-            // have landed post-snapshot, so wait() would park forever.
-            if (!running_.load(std::memory_order_acquire)) {
+            if (!running_.load(std::memory_order_acquire) ||
+                context->retire.load(std::memory_order_acquire)) {
                 break;
             }
-            work_signal_.wait(observed_signal, std::memory_order_acquire);
+            // Give up the permit for a waiting/surplus thread, then park.
+            release_permit(context);
+            idle_workers_.fetch_add(1, std::memory_order_acq_rel);
+            {
+                std::unique_lock<std::mutex> lock(idle_mutex_);
+                if (work_signal_.load(std::memory_order_acquire) !=
+                        observed_signal ||
+                    idle_cv_.wait_for(lock, idle_park) !=
+                        std::cv_status::timeout)
+                    idle_park = IDLE_PARK_MIN;
+                else if (idle_park < IDLE_PARK_MAX)
+                    idle_park *= 2;
+            }
+            idle_workers_.fetch_sub(1, std::memory_order_acq_rel);
         }
     }
+
+    // Release the permit if we broke out of the loop still holding it.
+    release_permit(context);
 
     // Final drain: destroy any frames deferred during the last resume().
     drain_thread_local_destroys();
@@ -291,15 +531,9 @@ void ThreadPoolExecutor::worker_thread(WorkerContext* context) {
 }
 
 void ThreadPoolExecutor::drive_until(const std::function<bool()>& done) {
-    // Keeps serving the shared queue instead of parking, so a worker that
-    // waits here still counts towards the pool's capacity and work it is
-    // waiting on can run on this very thread.
     constexpr int IDLE_POLL_MS = 1;
 
     while (!done()) {
-        // Snapshot before checking the queue, as the worker loop does: an
-        // enqueue landing after this load still makes the wait below return
-        // immediately, so no wakeup can be missed.
         const std::uint64_t observed_signal =
             work_signal_.load(std::memory_order_acquire);
 
@@ -319,30 +553,22 @@ void ThreadPoolExecutor::drive_until(const std::function<bool()>& done) {
         if (done()) break;
         if (!running_.load(std::memory_order_acquire)) break;
 
-        // Idle: wait in the kernel rather than spinning. Polling the I/O
-        // backend does both jobs at once - it blocks for completions and
-        // services them - which matters because a thread parked here is not
-        // in the worker loop doing that polling for anyone else.
         if (io_backend_) {
             io_backend_->flush();
             io_backend_->poll(IDLE_POLL_MS);
             continue;
         }
-        // Without a backend the only wakeup is an enqueue, which bumps the
-        // signal; the snapshot above makes a concurrent one non-blocking.
-        work_signal_.wait(observed_signal, std::memory_order_acquire);
+        // Bounded for the same reason as worker_thread's park: a run_queue_
+        // enqueue can be missed with the item already queued, so re-check.
+        std::unique_lock<std::mutex> lock(idle_mutex_);
+        if (work_signal_.load(std::memory_order_acquire) == observed_signal)
+            idle_cv_.wait_for(lock, IDLE_PARK_MIN);
     }
     drain_thread_local_destroys();
 }
 
 void ThreadPoolExecutor::notify_completion(std::shared_ptr<Task> task) {
-    // No mutex needed -- the callback is set exactly once during Scheduler
-    // construction (before any task is submitted) and never modified after.
-    // on_task_completed uses only atomics, lock-free queues, and properly-
-    // locked shard mutexes, so concurrent calls from multiple workers are safe.
-    if (completion_callback_) {
-        completion_callback_(task);
-    }
+    if (completion_callback_) completion_callback_(task);
 }
 
 void ThreadPoolExecutor::request_shutdown() {
@@ -362,17 +588,29 @@ void ThreadPoolExecutor::schedule_coroutine_resumption(
 
 void ThreadPoolExecutor::signal_global_work() {
     work_signal_.fetch_add(1, std::memory_order_acq_rel);
-    // Wake one worker, not all. Each enqueue adds one unit of work,
-    // so one worker is sufficient. Avoids thundering herd where all
-    // N threads wake, N-1 find no work, and go back to sleep.
     wake_one_worker();
+    if (min_workers_ < num_threads_ &&
+        idle_workers_.load(std::memory_order_acquire) == 0 &&
+        live_workers_.load(std::memory_order_relaxed) < num_threads_) {
+        {
+            std::lock_guard<std::mutex> lock(coord_mutex_);
+            grow_pending_ = true;
+        }
+        coord_cv_.notify_one();
+    }
 }
 
-void ThreadPoolExecutor::wake_one_worker() { work_signal_.notify_one(); }
+void ThreadPoolExecutor::wake_one_worker() {
+    work_signal_.notify_one();
+    idle_cv_.notify_one();
+}
 
 void ThreadPoolExecutor::wake_all_workers() {
     work_signal_.fetch_add(1, std::memory_order_release);
     work_signal_.notify_all();
+    idle_cv_.notify_all();
+    // Wake workers parked in acquire_permit so they re-check running_/retire.
+    permits_.notify_all();
 }
 
 // Helper function for when_all.h (avoids circular dependency)
@@ -508,22 +746,25 @@ ExecutorProgress ThreadPoolExecutor::get_progress() const {
         }
     }
 
-    // Worker states
-    for (const auto& worker : workers_) {
-        ExecutorProgress::WorkerStatus status;
-        status.worker_id = worker->worker_id;
-        status.is_idle = worker->is_idle.load();
+    // Worker states (dynamic set; lock against add/retire mutation)
+    {
+        std::lock_guard<std::mutex> workers_lock(workers_mutex_);
+        for (const auto& worker : workers_) {
+            ExecutorProgress::WorkerStatus status;
+            status.worker_id = worker->worker_id;
+            status.is_idle = worker->is_idle.load();
 
-        TaskIndex current_id = worker->current_task_id.load();
-        if (current_id != -1) {
-            status.current_task_id = current_id;
-            std::lock_guard<std::mutex> name_lock(worker->task_name_mutex);
-            status.current_task_name = worker->current_task_name;
+            TaskIndex current_id = worker->current_task_id.load();
+            if (current_id != -1) {
+                status.current_task_id = current_id;
+                std::lock_guard<std::mutex> name_lock(worker->task_name_mutex);
+                status.current_task_name = worker->current_task_name;
+            }
+
+            status.local_queue_depth = 0;
+
+            progress.workers.push_back(status);
         }
-
-        status.local_queue_depth = 0;
-
-        progress.workers.push_back(status);
     }
 
     return progress;

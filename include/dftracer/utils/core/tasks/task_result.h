@@ -18,11 +18,11 @@ namespace dftracer::utils {
 class TaskResult {
    public:
     enum class State : std::uint8_t {
-        pending,    // Not started
-        running,    // Execution in progress
-        value,      // Completed with value
-        exception,  // Completed with exception
-        cancelled,  // Cancelled before completion
+        pending,    ///< Not started
+        running,    ///< Execution in progress
+        value,      ///< Completed with value
+        exception,  ///< Completed with exception
+        cancelled,  ///< Cancelled before completion
     };
 
     TaskResult() = default;
@@ -101,18 +101,18 @@ class TaskResult {
     std::exception_ptr exception_;
     std::atomic<std::uint8_t> state_{static_cast<std::uint8_t>(State::pending)};
 
-    // Reader tracking for smart value release.
-    // Starts at 0. Incremented by add_reader() (called from depends_on).
-    // Decremented by release_reader() (called by Scheduler after consuming).
-    // Value cleared when count goes from 1 -> 0.
-    // Terminal tasks (count stays 0) are never auto-released.
+    /// Reader tracking for smart value release.
+    /// Starts at 0. Incremented by add_reader() (called from depends_on).
+    /// Decremented by release_reader() (called by Scheduler after consuming).
+    /// Value cleared when count goes from 1 -> 0.
+    /// Terminal tasks (count stays 0) are never auto-released.
     std::atomic<int> pending_readers_{0};
 
     mutable std::mutex mutex_;
     mutable std::condition_variable cv_;
 
-    // Coroutine continuations waiting for completion.
-    // Protected by mutex_. Drained on publish().
+    /// Coroutine continuations waiting for completion.
+    /// Protected by mutex_. Drained on publish().
     std::vector<std::coroutine_handle<>> continuations_;
 };
 

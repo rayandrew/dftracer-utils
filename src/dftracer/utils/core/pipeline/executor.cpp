@@ -38,14 +38,8 @@ void schedule_thread_local_destroy(std::coroutine_handle<> h) {
 }
 
 void drain_thread_local_destroys() {
-    Executor* exec = Executor::current();
-    for (auto h : tls_pending_destroys) {
-        if (!h) continue;
-        if (exec) {
-            exec->schedule_destroy(h);
-        } else {
-            h.destroy();
-        }
+    for (std::size_t i = 0; i < tls_pending_destroys.size(); ++i) {
+        if (auto h = tls_pending_destroys[i]) h.destroy();
     }
     tls_pending_destroys.clear();
 }

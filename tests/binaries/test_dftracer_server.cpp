@@ -35,7 +35,7 @@ int valgrind_timeout_scale() {
 
 /// Create a DFTracer gzip file with .pfw.gz extension
 /// (the server scans for .pfw and .pfw.gz patterns).
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -378,7 +378,7 @@ TEST_CASE("DFTracer Server - start and respond to endpoints") {
         return;
     }
 
-    dft_utils_test::TestEnvironment env(100);
+    dftu_utils_test::TestEnvironment env(100);
     REQUIRE(env.is_valid());
 
     // Create test files with .pfw.gz extension
@@ -800,7 +800,7 @@ TEST_CASE("DFTracer Server - graceful shutdown via SIGTERM") {
         return;
     }
 
-    dft_utils_test::TestEnvironment env(100);
+    dftu_utils_test::TestEnvironment env(100);
     REQUIRE(env.is_valid());
 
     auto file = create_pfw_gz(env, 50, 1);
@@ -847,7 +847,7 @@ TEST_CASE("DFTracer Server - multi-run break detection") {
         return;
     }
 
-    dft_utils_test::TestEnvironment env(1);
+    dftu_utils_test::TestEnvironment env(1);
     REQUIRE(env.is_valid());
     // 3 runs of 1s, 10ms idle between: gap is ~0.33% of the span (under old
     // 2%).
@@ -887,7 +887,7 @@ TEST_CASE("DFTracer Server - rebuilds stale index on changed source") {
         return;
     }
 
-    dft_utils_test::TestEnvironment env(1);
+    dftu_utils_test::TestEnvironment env(1);
     REQUIRE(env.is_valid());
     std::string pfw = env.get_dir() + "/mr.pfw.gz";
 
@@ -943,7 +943,7 @@ TEST_CASE("DFTracer Server - density surfaces ph=C counters as blocks") {
         return;
     }
 
-    dft_utils_test::TestEnvironment env(1);
+    dftu_utils_test::TestEnvironment env(1);
     REQUIRE(env.is_valid());
     std::string path = env.get_dir() + "/ctr.pfw.gz";
     gzFile f = gzopen(path.c_str(), "wb");
@@ -1003,7 +1003,7 @@ TEST_CASE("DFTracer Server - viz summary cache persists and invalidates") {
         return;
     }
 
-    dft_utils_test::TestEnvironment env(1);
+    dftu_utils_test::TestEnvironment env(1);
     REQUIRE(env.is_valid());
     std::string pfw = env.get_dir() + "/mr.pfw.gz";
     std::string cache = env.get_dir() + "/.dftviz_summary";
@@ -1070,7 +1070,7 @@ TEST_CASE("DFTracer Server - calltree endpoint") {
         return;
     }
 
-    dft_utils_test::TestEnvironment env(1);
+    dftu_utils_test::TestEnvironment env(1);
     REQUIRE(env.is_valid());
     REQUIRE(!create_pfw_gz(env, 40, 1).empty());
     REQUIRE(!create_pfw_gz(env, 30, 2).empty());
@@ -1210,7 +1210,7 @@ TEST_CASE("DFTracer Server - CM time_metric scales viz to microseconds") {
         return;
     }
 
-    dft_utils_test::TestEnvironment env(1);
+    dftu_utils_test::TestEnvironment env(1);
     REQUIRE(env.is_valid());
     auto ns_file = create_ns_pfw_gz(env.get_dir());
     REQUIRE(!ns_file.empty());

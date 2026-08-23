@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace dftracer::utils {
-// Forward declaration
+/// Forward declaration
 class Task;
 }  // namespace dftracer::utils
 
@@ -106,7 +106,7 @@ class TaskGroup {
      */
     void reserve(std::size_t capacity) { tasks_.reserve(capacity); }
 
-    // Iterator support
+    /// Iterator support
     auto begin() { return tasks_.begin(); }
     auto end() { return tasks_.end(); }
     auto begin() const { return tasks_.begin(); }

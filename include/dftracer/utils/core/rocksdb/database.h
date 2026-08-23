@@ -20,12 +20,12 @@ namespace dftracer::utils::rocksdb {
 
 void mark_process_exiting_for_rocksdb();
 
-// Register a callback to run at the start of
-// mark_process_exiting_for_rocksdb(), before RocksDB handles are abandoned. Use
-// it to drop process-lifetime caches that keep DBs open (e.g. the view tier
-// cache), so those DBs reach a zero refcount and close cleanly while RocksDB is
-// still usable, rather than being leaked by the exit-time abandon path in
-// RocksDatabase::close().
+/// Register a callback to run at the start of
+/// mark_process_exiting_for_rocksdb(), before RocksDB handles are abandoned.
+/// Use it to drop process-lifetime caches that keep DBs open (e.g. the view
+/// tier cache), so those DBs reach a zero refcount and close cleanly while
+/// RocksDB is still usable, rather than being leaked by the exit-time abandon
+/// path in RocksDatabase::close().
 void register_pre_exit_cleanup(std::function<void()> fn);
 
 class RocksDatabase {

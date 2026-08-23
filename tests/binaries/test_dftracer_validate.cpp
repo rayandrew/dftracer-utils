@@ -17,7 +17,7 @@
 namespace {
 
 // Move a freshly generated valid pfw.gz into `dir`.
-std::string make_valid_pfw(dft_utils_test::TestEnvironment& env,
+std::string make_valid_pfw(dftu_utils_test::TestEnvironment& env,
                            const fs::path& dir, int num_events, int id) {
     auto gz = env.create_dft_test_gzip_file(num_events);
     if (gz.empty()) return "";
@@ -123,7 +123,7 @@ TEST_SUITE("dftracer_validate") {
             MESSAGE("dftracer_validate binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         fs::path work = fs::path(env.get_dir()) / "valid";
         REQUIRE(!make_valid_pfw(env, work, 30, 0).empty());
@@ -142,7 +142,7 @@ TEST_SUITE("dftracer_validate") {
             MESSAGE("dftracer_validate binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         fs::path root = fs::path(env.get_dir()) / "nested";
         REQUIRE(!make_valid_pfw(env, root / "a", 10, 0).empty());
@@ -160,7 +160,7 @@ TEST_SUITE("dftracer_validate") {
             MESSAGE("dftracer_validate binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(1);
+        dftu_utils_test::TestEnvironment env(1);
         REQUIRE(env.is_valid());
         auto bad = make_bad_pfw(fs::path(env.get_dir()) / "bad", 0);
         REQUIRE(!bad.empty());
@@ -177,7 +177,7 @@ TEST_SUITE("dftracer_validate") {
             MESSAGE("dftracer_validate binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(1);
+        dftu_utils_test::TestEnvironment env(1);
         REQUIRE(env.is_valid());
         fs::path empty = fs::path(env.get_dir()) / "empty";
         std::error_code ec;
@@ -194,7 +194,7 @@ TEST_SUITE("dftracer_validate") {
             MESSAGE("dftracer_validate binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         auto f = make_valid_pfw(env, fs::path(env.get_dir()) / "single", 25, 0);
         REQUIRE(!f.empty());
@@ -211,7 +211,7 @@ TEST_SUITE("dftracer_validate") {
             MESSAGE("dftracer_validate binary not found, skipping.");
             return;
         }
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         auto f = make_valid_pfw(env, fs::path(env.get_dir()) / "loglvl", 10, 0);
         REQUIRE(!f.empty());

@@ -2,6 +2,11 @@
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/dataframe/arrow_bridge.h>
+#include <dftracer/utils/dataframe/batch_ops.h>
+#include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/internal/column_read.h>
+#include <dftracer/utils/python/dataframe.h>
 #include <dftracer/utils/python/py_dict_helpers.h>
 #include <dftracer/utils/python/py_errors.h>
 #include <dftracer/utils/python/py_list_helpers.h>
@@ -10,23 +15,28 @@
 #include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
+#include <dftracer/utils/python/series.h>
 #include <dftracer/utils/python/trace_viewer.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/time_metric.h>
-#include <dftracer/utils/utilities/composites/dft/trace_config.h>
-#include <dftracer/utils/utilities/composites/dft/views/view.h>
+#include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/comparator/compare_view.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/time_metric.h>
+#include <dftracer/utils/trace/trace_config.h>
+#include <dftracer/utils/trace/views/result_batch.h>
+#include <dftracer/utils/trace/views/result_join.h>
+#include <dftracer/utils/trace/views/view.h>
+#include <dftracer/utils/utilities/common/arrow/arrow_export.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/string_arena.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/json/parser.h>
 #include <dftracer/utils/python/arrow_helpers.h>
 #include <dftracer/utils/python/batch_byte_size.h>
 #include <dftracer/utils/python/streaming_iterator.h>
 #include <dftracer/utils/utilities/common/arrow/column_builder.h>
-#include <dftracer/utils/utilities/common/json/parser.h>
 #include <dftracer/utils/utilities/reader/internal/arrow_row_builder.h>
 #endif
 
@@ -41,31 +51,33 @@
 #include <utility>
 #include <vector>
 
+namespace dataframe = dftracer::utils::dataframe;
+
 namespace {
 
 using dftracer::utils::Runtime;
-using dftracer::utils::utilities::common::query::Query;
-using dftracer::utils::utilities::composites::dft::views::AggOp;
-using dftracer::utils::utilities::composites::dft::views::AggregatedView;
-using dftracer::utils::utilities::composites::dft::views::AggSpec;
-using dftracer::utils::utilities::composites::dft::views::ExportStats;
-using dftracer::utils::utilities::composites::dft::views::GroupKey;
-using dftracer::utils::utilities::composites::dft::views::Phase;
-using dftracer::utils::utilities::composites::dft::views::ResultTable;
-using dftracer::utils::utilities::composites::dft::views::TypedResult;
-using dftracer::utils::utilities::composites::dft::views::View;
-using dftracer::utils::utilities::composites::dft::views::ViewFile;
+using dftracer::utils::dataframe::DataFrame;
+using dftracer::utils::query::Query;
+using dftracer::utils::trace::views::AggOp;
+using dftracer::utils::trace::views::AggregatedView;
+using dftracer::utils::trace::views::AggSpec;
+using dftracer::utils::trace::views::ExportStats;
+using dftracer::utils::trace::views::GroupKey;
+using dftracer::utils::trace::views::Phase;
+using dftracer::utils::trace::views::TypedResult;
+using dftracer::utils::trace::views::View;
+using dftracer::utils::trace::views::ViewFile;
 using dftracer::utils::utilities::filesystem::FileEntry;
 using dftracer::utils::utilities::filesystem::PatternDirectoryScannerUtility;
 using dftracer::utils::utilities::filesystem::
     PatternDirectoryScannerUtilityInput;
-namespace dftint = dftracer::utils::utilities::composites::dft::internal;
+namespace dftint = dftracer::utils::trace::internal;
 
 // Parallel scan of a directory for trace files (recursive, .pfw.gz only).
 // Returns false with a Python error set on failure. Sorted for determinism.
 bool scan_dir_trace_files(const std::string& dir,
                           std::vector<std::string>& out) {
-    auto* rt = get_default_runtime();
+    auto* rt = dftracer::utils::python::get_default_runtime();
     PatternDirectoryScannerUtilityInput input(dir, {".pfw.gz"},
                                               /*recursive=*/true,
                                               /*populate_size=*/false);
@@ -78,7 +90,7 @@ bool scan_dir_trace_files(const std::string& dir,
                               std::vector<FileEntry>* o)
                                -> dftracer::utils::coro::CoroTask<void> {
                                PatternDirectoryScannerUtility scanner;
-                               *o = co_await scope.spawn(scanner, in);
+                               *o = co_await scanner(scope, in);
                            },
                            std::move(input), &entries),
                        "tv-scan-dir")
@@ -110,13 +122,19 @@ struct ViewerPlan {
     std::uint64_t offset = 0;
     std::string rollup_root;  // "" = derive the aggregation-cache dir
     std::string views_root;   // "" = derive <parent-of-index>/.dftindex-views
+    // Post-aggregation ordering applied to the collect() result DataFrame (same
+    // dataframe kernels as DataFrame.sort_by/topk), so the View and dataframe
+    // surfaces match.
+    std::string sort_col;
+    bool sort_desc = false;
+    std::string topk_col;
+    std::int64_t topk_k = -1;  // -1 = no topk
+    bool topk_largest = true;
 };
 
 ViewerPlan* plan_of(TraceViewerObject* self) {
     return static_cast<ViewerPlan*>(self->plan_ptr);
 }
-
-// ---- builder-arg parsing --------------------------------------------------
 
 // name | cat | pid | tid | fhash | hhash | io_cat | acc_pat | arg:<key>
 // "fn(key)" or "fn(key, 'a', 'b')" -> transform + inner key text; returns
@@ -255,11 +273,10 @@ bool parse_agg_spec(const char* s, AggSpec& out) {
     return true;
 }
 
-// ---- lowering -------------------------------------------------------------
-
 // Throws DFTUtilsException on a bad filter DSL.
 View build_view_from_data(const std::vector<std::string>& file_paths,
-                          const std::string& index_dir, const ViewerPlan& p) {
+                          const std::string& index_dir, const ViewerPlan& p,
+                          bool aggregate = true) {
     std::vector<ViewFile> files;
     files.reserve(file_paths.size());
     for (const auto& fp : file_paths) {
@@ -279,20 +296,27 @@ View build_view_from_data(const std::vector<std::string>& file_paths,
         v = v.filter(parsed.value());
     }
     if (p.phase >= 0) v = v.phase(static_cast<Phase>(p.phase));
-    if (!p.group_by.empty()) v = v.group_by(p.group_by);
-    if (!p.agg.empty()) v = v.agg(p.agg);
-    if (p.auto_numeric) v = v.agg_numeric_args();
     if (p.time_scale != 1.0) v = v.time_scale(p.time_scale);
     if (p.time_bucket_us) v = v.time_bucket(p.time_bucket_us);
     if (p.time_range)
         v = v.time_range(p.time_range->first, p.time_range->second);
-    if (!p.select.empty()) v = v.select(p.select);
+    // The aggregation and everything that operates on the aggregated result;
+    // CompareView owns this step, so it asks for a base view (aggregate=false).
+    if (aggregate) {
+        if (!p.group_by.empty()) v = v.group_by(p.group_by);
+        if (!p.agg.empty()) v = v.agg(p.agg);
+        if (p.auto_numeric) v = v.agg_numeric_args();
+        if (!p.select.empty()) v = v.select(p.select);
+        if (!p.sort_col.empty()) v = v.sort_by(p.sort_col, p.sort_desc);
+        if (!p.topk_col.empty())
+            v = v.topk(p.topk_col, p.topk_k, p.topk_largest);
+        if (p.limit) v = v.limit(p.limit);
+        if (p.offset) v = v.offset(p.offset);
+    }
     if (p.memory_budget)
         v = v.memory_budget(p.memory_budget);
     else if (p.auto_spill)
         v = v.auto_spill();
-    if (p.limit) v = v.limit(p.limit);
-    if (p.offset) v = v.offset(p.offset);
     if (!p.rollup_root.empty()) v = v.rollup_root(p.rollup_root);
     if (!p.views_root.empty()) v = v.views_root(p.views_root);
     return v;
@@ -318,8 +342,6 @@ AggregatedView build_agg_view(const std::vector<std::string>& files,
                               const ViewerPlan& p) {
     return build_view_from_data(files, index_dir, p).group_by(p.group_by);
 }
-
-// ---- type new/init/dealloc ------------------------------------------------
 
 PyObject* tv_new(PyTypeObject* type, PyObject*, PyObject*) {
     TraceViewerObject* self = (TraceViewerObject*)type->tp_alloc(type, 0);
@@ -428,8 +450,6 @@ TraceViewerObject* clone_agg(TraceViewerObject* self) {
     return clone_as(self, &AggregatedTraceViewerType);
 }
 
-// ---- builder ops ----------------------------------------------------------
-
 PyObject* tv_filter(TraceViewerObject* self, PyObject* arg) {
     // Accept a DSL string or a query.Expr (or any object whose str() is a DSL
     // predicate); str(str) is the string itself, so this stays zero-cost for
@@ -521,29 +541,32 @@ PyObject* tv_time_bucket(TraceViewerObject* self, PyObject* arg) {
 }
 
 PyObject* tv_time_unit(TraceViewerObject* self, PyObject* arg) {
-    namespace dft = dftracer::utils::utilities::composites::dft;
     const char* s = as_utf8(arg);
     if (!s) return nullptr;
     std::string t(s);
-    dft::TimeMetric target;
+    dftracer::utils::trace::TimeMetric target;
     if (t == "ns")
-        target = dft::TimeMetric::NS;
+        target = dftracer::utils::trace::TimeMetric::NS;
     else if (t == "us")
-        target = dft::TimeMetric::US;
+        target = dftracer::utils::trace::TimeMetric::US;
     else if (t == "ms")
-        target = dft::TimeMetric::MS;
+        target = dftracer::utils::trace::TimeMetric::MS;
     else if (t == "sec")
-        target = dft::TimeMetric::SEC;
+        target = dftracer::utils::trace::TimeMetric::SEC;
     else {
         PyErr_SetString(PyExc_ValueError, "time_unit must be ns/us/ms/sec");
         return nullptr;
     }
     // Source unit read once from the first file (assumes the run is uniform).
     auto files = extract_files(self);
-    dft::TimeMetric source =
-        files.empty() ? dft::TimeMetric::US : dft::read_time_metric(files[0]);
-    double scale = static_cast<double>(dft::time_metric_ns_per_unit(source)) /
-                   static_cast<double>(dft::time_metric_ns_per_unit(target));
+    dftracer::utils::trace::TimeMetric source =
+        files.empty() ? dftracer::utils::trace::TimeMetric::US
+                      : dftracer::utils::trace::read_time_metric(files[0]);
+    double scale =
+        static_cast<double>(
+            dftracer::utils::trace::time_metric_ns_per_unit(source)) /
+        static_cast<double>(
+            dftracer::utils::trace::time_metric_ns_per_unit(target));
     TraceViewerObject* c = clone(self);
     if (!c) return nullptr;
     plan_of(c)->time_scale = scale;
@@ -635,6 +658,39 @@ PyObject* tv_limit(TraceViewerObject* self, PyObject* arg) {
     return (PyObject*)c;
 }
 
+// sort_by(name, descending=False): order the collect() result by a column.
+PyObject* tv_sort_by(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
+    const char* name = nullptr;
+    int descending = 0;
+    static const char* kwlist[] = {"name", "descending", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "s|p", const_cast<char**>(kwlist), &name, &descending))
+        return nullptr;
+    TraceViewerObject* c = clone(self);
+    if (!c) return nullptr;
+    plan_of(c)->sort_col = name;
+    plan_of(c)->sort_desc = descending != 0;
+    return (PyObject*)c;
+}
+
+// topk(name, k, largest=True): keep the k best rows of the collect() result.
+PyObject* tv_topk(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
+    const char* name = nullptr;
+    Py_ssize_t k = 0;
+    int largest = 1;
+    static const char* kwlist[] = {"name", "k", "largest", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "sn|p",
+                                     const_cast<char**>(kwlist), &name, &k,
+                                     &largest))
+        return nullptr;
+    TraceViewerObject* c = clone(self);
+    if (!c) return nullptr;
+    plan_of(c)->topk_col = name;
+    plan_of(c)->topk_k = static_cast<std::int64_t>(k);
+    plan_of(c)->topk_largest = largest != 0;
+    return (PyObject*)c;
+}
+
 PyObject* tv_offset(TraceViewerObject* self, PyObject* arg) {
     long long v = PyLong_AsLongLong(arg);
     if (v < 0 && PyErr_Occurred()) return nullptr;
@@ -644,40 +700,29 @@ PyObject* tv_offset(TraceViewerObject* self, PyObject* arg) {
     return (PyObject*)c;
 }
 
-// ---- terminals ------------------------------------------------------------
-
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
-// ResultTable -> a 1-batch pyarrow Table: group/text columns are strings,
-// value columns are doubles.
-PyObject* result_table_to_pyarrow(const ResultTable& t) {
+// dataframe::DataFrame -> a 1-batch pyarrow Table. The DataFrame is a struct
+// (columns as fields), so it exports zero-copy through the Arrow C Data
+// Interface: no per-cell rebuild, and every column type (incl. list<struct>
+// histograms) carries its native Arrow type.
+PyObject* batch_to_pyarrow(dftracer::utils::dataframe::DataFrame batch) {
     namespace arrow = dftracer::utils::utilities::common::arrow;
-    arrow::RecordBatchBuilder b;
-    std::vector<arrow::ColumnSpec> specs;
-    for (const auto& c : t.group_columns)
-        specs.push_back({c, arrow::ColumnType::STRING});
-    for (const auto& c : t.value_columns)
-        specs.push_back({c, arrow::ColumnType::DOUBLE});
-    for (const auto& c : t.text_columns)
-        specs.push_back({c, arrow::ColumnType::STRING});
-    for (const auto& c : t.hist_columns)
-        specs.push_back({c, arrow::ColumnType::HIST});
-    b.declare_schema(specs);
-    b.reserve(t.rows.size());
-    for (const auto& row : t.rows) {
-        std::size_t col = 0;
-        for (const auto& k : row.keys) b.append_string(col++, k);
-        for (double v : row.values) b.append_double(col++, v);
-        for (const auto& tx : row.texts) b.append_string(col++, tx);
-        for (const auto& h : row.hists) b.append_hist(col++, h);
-        b.end_row();
-    }
-    return dftracer::utils::python::arrow_result_to_table(b.finish());
+    dataframe::Series s =
+        dataframe::Series::structs(batch.names, std::move(batch.columns));
+    nanoarrow::UniqueSchema schema;
+    nanoarrow::UniqueArray array;
+    dataframe::to_arrow(s, schema.get(), array.get());
+    arrow::ArrowExportResult result(std::move(schema), std::move(array));
+    return dftracer::utils::python::arrow_result_to_table(std::move(result));
 }
+
 #endif
 
-// collect(cache=False). cache=True uses the materialized-view cache
-// (reconstruct on hit, else scan + persist + return); it requires an
-// aggregation (group_by/agg), enforced by the runtime guard.
+// collect(cache=False) -> a native DataFrame (our columnar format); Arrow is
+// produced only on an explicit batch.to_arrow()/to_pandas()/to_polars(). cache
+// uses the materialized-view cache (reconstruct on hit, else scan + persist +
+// return); it requires an aggregation (group_by/agg), enforced by the runtime
+// guard.
 PyObject* tv_collect(TraceViewerObject* self, PyObject*) {
 #ifndef DFTRACER_UTILS_ENABLE_ARROW
     PyErr_SetString(PyExc_RuntimeError,
@@ -688,18 +733,130 @@ PyObject* tv_collect(TraceViewerObject* self, PyObject*) {
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
     ViewerPlan plan = *plan_of(self);
-    ResultTable table;
+    DataFrame table;
     if (!run_blocking([&] {
             View v = build_view_from_data(files, index_dir, plan);
             table = rt->submit(v.collect()).get();
         }))
         return nullptr;
-    return result_table_to_pyarrow(table);
+    return dftracer::utils::python::wrap_dataframe(std::move(table));
 #endif
 }
 
+// Aggregate this viewer and `other`, then equi-join their result tables on the
+// shared group key. Raises ValueError on a bad `how` or when the two group-key
+// schemas differ; TypeError when `other` is not a TraceViewer.
+PyObject* tv_join(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
+#ifndef DFTRACER_UTILS_ENABLE_ARROW
+    PyErr_SetString(PyExc_RuntimeError,
+                    "join() requires the arrow-enabled build");
+    return nullptr;
+#else
+    namespace views = dftracer::utils::trace::views;
+    PyObject* other = nullptr;
+    const char* how = "inner";
+    static const char* kwlist[] = {"other", "how", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|s",
+                                     const_cast<char**>(kwlist), &other, &how))
+        return nullptr;
+    if (!PyObject_TypeCheck(other, &TraceViewerType)) {
+        PyErr_SetString(PyExc_TypeError, "join() other must be a TraceViewer");
+        return nullptr;
+    }
+    views::JoinType type = views::JoinType::INNER;
+    const std::string h(how);
+    if (h == "inner")
+        type = views::JoinType::INNER;
+    else if (h == "left")
+        type = views::JoinType::LEFT;
+    else if (h == "right")
+        type = views::JoinType::RIGHT;
+    else if (h == "full")
+        type = views::JoinType::FULL;
+    else if (h == "semi")
+        type = views::JoinType::LEFT_SEMI;
+    else if (h == "anti")
+        type = views::JoinType::LEFT_ANTI;
+    else {
+        PyErr_Format(PyExc_ValueError,
+                     "join() how must be inner|left|right|full|semi|anti, "
+                     "got '%s'",
+                     how);
+        return nullptr;
+    }
+
+    TraceViewerObject* o = (TraceViewerObject*)other;
+    Runtime* rt = resolve_runtime(self);
+    auto lf = extract_files(self);
+    auto li = extract_index_dir(self);
+    ViewerPlan lp = *plan_of(self);
+    auto rf = extract_files(o);
+    auto ri = extract_index_dir(o);
+    ViewerPlan rp = *plan_of(o);
+    DataFrame joined;
+    if (!run_blocking([&] {
+            AggregatedView lv = build_agg_view(lf, li, lp);
+            AggregatedView rv = build_agg_view(rf, ri, rp);
+            joined = rt->submit(lv.join(rv, type)).get();
+        }))
+        return nullptr;
+    if (joined.num_columns() == 0) {  // mismatched group-key schemas
+        PyErr_SetString(
+            PyExc_ValueError,
+            "join() requires both views to share a group-key schema");
+        return nullptr;
+    }
+    return dftracer::utils::python::wrap_dataframe(std::move(joined));
+#endif
+}
+
+// compare(other): aggregate this viewer and `other` with THIS viewer's
+// group_by + agg plan, in parallel, and return the comparison DataFrame (group
+// key, l_/r_ per metric, plus delta_/pct_). Wraps
+// trace::comparator::CompareView.
+PyObject* tv_compare(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
+    namespace comparator = dftracer::utils::trace::comparator;
+    PyObject* other = nullptr;
+    static const char* kwlist[] = {"other", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O",
+                                     const_cast<char**>(kwlist), &other))
+        return nullptr;
+    if (!PyObject_TypeCheck(other, &TraceViewerType)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "compare() other must be a TraceViewer");
+        return nullptr;
+    }
+    TraceViewerObject* o = (TraceViewerObject*)other;
+    ViewerPlan lp = *plan_of(self);
+    if (lp.agg.empty()) {
+        PyErr_SetString(PyExc_ValueError,
+                        "compare() needs a group_by + agg plan on the baseline "
+                        "viewer (both sides aggregate the same way)");
+        return nullptr;
+    }
+    Runtime* rt = resolve_runtime(self);
+    auto lf = extract_files(self);
+    auto li = extract_index_dir(self);
+    auto rf = extract_files(o);
+    auto ri = extract_index_dir(o);
+    DataFrame result;
+    if (!run_blocking([&] {
+            View base = build_view_from_data(lf, li, lp, /*aggregate=*/false);
+            View variant =
+                build_view_from_data(rf, ri, lp, /*aggregate=*/false);
+            result = rt->submit(comparator::CompareView::of(std::move(base),
+                                                            std::move(variant))
+                                    .group_by(lp.group_by)
+                                    .agg(lp.agg)
+                                    .collect())
+                         .get();
+        }))
+        return nullptr;
+    return dftracer::utils::python::wrap_dataframe(std::move(result));
+}
+
 // One-pass read of the aggregation index's three record families, returned as a
-// dict of pyarrow Tables: {"regular", "aggregated", "counters"}.
+// dict of native DataFrames: {"regular", "aggregated", "counters"}.
 PyObject* tv_collect_typed(TraceViewerObject* self, PyObject* args,
                            PyObject* kwds) {
 #ifndef DFTRACER_UTILS_ENABLE_ARROW
@@ -719,7 +876,7 @@ PyObject* tv_collect_typed(TraceViewerObject* self, PyObject* args,
     // Bridge a Python (done, total) callback to the C++ scan; it fires from a
     // runtime worker thread while run_blocking holds the GIL released, so each
     // call re-acquires the GIL.
-    namespace views = dftracer::utils::utilities::composites::dft::views;
+    namespace views = dftracer::utils::trace::views;
     views::ProgressFn progress_fn;
     const views::ProgressFn* progress_ptr = nullptr;
     if (progress_obj && progress_obj != Py_None) {
@@ -755,14 +912,15 @@ PyObject* tv_collect_typed(TraceViewerObject* self, PyObject* args,
                         .get();
         }))
         return nullptr;
-    PyObject* regular = result_table_to_pyarrow(typed.regular);
+    namespace py = dftracer::utils::python;
+    PyObject* regular = py::wrap_dataframe(std::move(typed.regular));
     if (!regular) return nullptr;
-    PyObject* aggregated = result_table_to_pyarrow(typed.aggregated);
+    PyObject* aggregated = py::wrap_dataframe(std::move(typed.aggregated));
     if (!aggregated) {
         Py_DECREF(regular);
         return nullptr;
     }
-    PyObject* counters = result_table_to_pyarrow(typed.counters);
+    PyObject* counters = py::wrap_dataframe(std::move(typed.counters));
     if (!counters) {
         Py_DECREF(regular);
         Py_DECREF(aggregated);
@@ -832,14 +990,14 @@ PyObject* tv_merge_partials(TraceViewerObject* self, PyObject* arg) {
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
     ViewerPlan plan = *plan_of(self);
-    ResultTable table;
+    DataFrame table;
     if (!run_blocking([&] {
             std::vector<std::string_view> parts(owned.begin(), owned.end());
             View v = build_view_from_data(files, index_dir, plan);
             table = v.merge_partials_to_table(parts);
         }))
         return nullptr;
-    return result_table_to_pyarrow(table);
+    return batch_to_pyarrow(std::move(table));
 #endif
 }
 
@@ -891,7 +1049,7 @@ PyObject* tv_materialize(TraceViewerObject* self, PyObject* args,
             &part_size, &progress_obj))
         return nullptr;
 
-    namespace views = dftracer::utils::utilities::composites::dft::views;
+    namespace views = dftracer::utils::trace::views;
     views::ProgressFn progress_fn;
     const views::ProgressFn* progress_ptr = nullptr;
     if (progress_obj && progress_obj != Py_None) {
@@ -998,14 +1156,14 @@ PyObject* tv_reconstruct_if_cached(TraceViewerObject* self, PyObject*) {
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
     ViewerPlan plan = *plan_of(self);
-    std::optional<ResultTable> table;
+    std::optional<DataFrame> table;
     if (!run_blocking([&] {
             AggregatedView v = build_agg_view(files, index_dir, plan);
             table = v.reconstruct_if_cached();
         }))
         return nullptr;
     if (!table) Py_RETURN_NONE;
-    return result_table_to_pyarrow(*table);
+    return batch_to_pyarrow(std::move(*table));
 #endif
 }
 
@@ -1015,7 +1173,7 @@ PyObject* tv_statistics(TraceViewerObject* self, PyObject*) {
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
     ViewerPlan plan = *plan_of(self);
-    ResultTable table;
+    DataFrame table;
     if (!run_blocking([&] {
             View v = build_view_from_data(files, index_dir, plan)
                          .group_by({})
@@ -1031,13 +1189,12 @@ PyObject* tv_statistics(TraceViewerObject* self, PyObject*) {
     PyObject* d = PyDict_New();
     if (!d) return nullptr;
     double count = 0, mean = 0, stddev = 0, mn = 0, mx = 0;
-    if (!table.rows.empty() && table.rows[0].values.size() >= 5) {
-        const auto& vals = table.rows[0].values;
-        count = vals[0];
-        mean = vals[1];
-        stddev = vals[2];
-        mn = vals[3];
-        mx = vals[4];
+    if (table.num_rows() >= 1 && table.columns.size() >= 5) {
+        count = dftracer::utils::dataframe::read_f64(table.columns[0], 0);
+        mean = dftracer::utils::dataframe::read_f64(table.columns[1], 0);
+        stddev = dftracer::utils::dataframe::read_f64(table.columns[2], 0);
+        mn = dftracer::utils::dataframe::read_f64(table.columns[3], 0);
+        mx = dftracer::utils::dataframe::read_f64(table.columns[4], 0);
     }
     dict_set_i64(d, "duration_count", (long long)count);
     dict_set_f64(d, "duration_mean_us", mean);
@@ -1047,8 +1204,7 @@ PyObject* tv_statistics(TraceViewerObject* self, PyObject*) {
     return d;
 }
 
-class FileSink
-    : public dftracer::utils::utilities::composites::dft::views::ExportSink {
+class FileSink : public dftracer::utils::trace::views::ExportSink {
    public:
     explicit FileSink(FILE* f) : f_(f) {}
     void write(std::string_view data) override {
@@ -1062,8 +1218,7 @@ class FileSink
 // Streaming gzip sink: buffers writes and flushes whole-line gzip members once
 // past MEMBER_TARGET, so the aggregation output is a multi-member re-indexable
 // trace. finish() flushes the remainder.
-class GzipSink
-    : public dftracer::utils::utilities::composites::dft::views::ExportSink {
+class GzipSink : public dftracer::utils::trace::views::ExportSink {
    public:
     GzipSink(FILE* f, int level) : f_(f), comp_(level) {}
     void write(std::string_view data) override {
@@ -1141,8 +1296,7 @@ PyObject* tv_export(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
     }
 
     if (!run_blocking([&] {
-            using dftracer::utils::utilities::composites::dft::views::
-                TraceWriteOptions;
+            using dftracer::utils::trace::views::TraceWriteOptions;
             View v = build_view_from_data(files, index_dir, plan);
             TraceWriteOptions opts;
             opts.output_path = path_s;
@@ -1172,8 +1326,8 @@ dftracer::utils::coro::CoroTask<void> run_viewer_stream(
     namespace arrow = dftracer::utils::utilities::common::arrow;
     namespace rd = dftracer::utils::utilities::reader::internal;
     using dftracer::utils::StringArena;
-    using dftracer::utils::utilities::common::json::JsonParser;
-    using dftracer::utils::utilities::composites::dft::TimeScaleState;
+    using dftracer::utils::json::JsonParser;
+    using dftracer::utils::trace::TimeScaleState;
     (void)scope;
     try {
         View v = build_view_from_data(files, index_dir, plan);
@@ -1284,74 +1438,90 @@ PyObject* tv_stream(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
 }  // namespace
 
 static PyMethodDef tv_methods[] = {
-    {"filter", DFT_PYCFUNCTION(tv_filter), METH_O,
+    {"filter", DFTU_PYCFUNCTION(tv_filter), METH_O,
      "Keep events matching a query-DSL predicate (AND-combined)."},
-    {"query", DFT_PYCFUNCTION(tv_filter), METH_O, "Alias of filter()."},
-    {"phase", DFT_PYCFUNCTION(tv_phase), METH_O,
+    {"query", DFTU_PYCFUNCTION(tv_filter), METH_O, "Alias of filter()."},
+    {"phase", DFTU_PYCFUNCTION(tv_phase), METH_O,
      "Select 'events' (ph=X), 'counters' (ph=C), or 'any'."},
-    {"group_by", DFT_PYCFUNCTION(tv_group_by), METH_VARARGS,
+    {"group_by", DFTU_PYCFUNCTION(tv_group_by), METH_VARARGS,
      "Group by keys: name/cat/pid/tid/fhash/arg:<key>."},
-    {"agg", DFT_PYCFUNCTION(tv_agg), METH_VARARGS,
+    {"agg", DFTU_PYCFUNCTION(tv_agg), METH_VARARGS,
      "Aggregations: count, sum:/min:/max:/mean:/var:/std:<field>, "
      "argmax:<field>:<by>, set_union:<field> (distinct values, one string "
      "column joined by \\x1e)."},
-    {"time_bucket", DFT_PYCFUNCTION(tv_time_bucket), METH_O,
+    {"time_bucket", DFTU_PYCFUNCTION(tv_time_bucket), METH_O,
      "Bucket events into fixed intervals (microseconds)."},
-    {"time_unit", DFT_PYCFUNCTION(tv_time_unit), METH_O,
+    {"time_unit", DFTU_PYCFUNCTION(tv_time_unit), METH_O,
      "Normalize ts/dur to a target unit (ns/us/ms/sec); source read from the "
      "trace's CM time_metric. Higher-level helper over time_scale()."},
-    {"time_scale", DFT_PYCFUNCTION(tv_time_scale), METH_O,
+    {"time_scale", DFTU_PYCFUNCTION(tv_time_scale), METH_O,
      "Multiply ts/dur/te by this ratio (source_ns/target_ns; 1.0 = none). The "
      "raw primitive behind time_unit()."},
-    {"time_range", DFT_PYCFUNCTION(tv_time_range), METH_VARARGS,
+    {"time_range", DFTU_PYCFUNCTION(tv_time_range), METH_VARARGS,
      "Restrict to a [begin, end) timestamp window."},
-    {"select", DFT_PYCFUNCTION(tv_select), METH_VARARGS, "Project columns."},
-    {"memory_budget", DFT_PYCFUNCTION(tv_memory_budget), METH_O,
+    {"select", DFTU_PYCFUNCTION(tv_select), METH_VARARGS, "Project columns."},
+    {"memory_budget", DFTU_PYCFUNCTION(tv_memory_budget), METH_O,
      "Spill aggregation above this many bytes (0 = in-memory)."},
-    {"auto_spill", DFT_PYCFUNCTION(tv_auto_spill), METH_NOARGS,
+    {"auto_spill", DFTU_PYCFUNCTION(tv_auto_spill), METH_NOARGS,
      "Spill at ~1/3 of available memory."},
-    {"agg_numeric_args", DFT_PYCFUNCTION(tv_auto_numeric_args), METH_NOARGS,
+    {"agg_numeric_args", DFTU_PYCFUNCTION(tv_auto_numeric_args), METH_NOARGS,
      "Also aggregate every auto-discovered numeric arg (size, ret, ...)."},
-    {"limit", DFT_PYCFUNCTION(tv_limit), METH_O, "Cap produced rows/events."},
-    {"offset", DFT_PYCFUNCTION(tv_offset), METH_O,
+    {"limit", DFTU_PYCFUNCTION(tv_limit), METH_O, "Cap produced rows/events."},
+    {"offset", DFTU_PYCFUNCTION(tv_offset), METH_O,
      "Skip the first N rows/events."},
-    {"collect", DFT_PYCFUNCTION(tv_collect), METH_NOARGS,
-     "Run group_by+agg; return a pyarrow.Table."},
-    {"collect_typed", DFT_PYCFUNCTION(tv_collect_typed),
+    {"sort_by", DFTU_PYCFUNCTION(tv_sort_by), METH_VARARGS | METH_KEYWORDS,
+     "sort_by(name, descending=False): order the collect() result by a "
+     "column (same dataframe kernel as DataFrame.sort_by)."},
+    {"topk", DFTU_PYCFUNCTION(tv_topk), METH_VARARGS | METH_KEYWORDS,
+     "topk(name, k, largest=True): keep the k best rows of the collect() "
+     "result (same dataframe kernel as DataFrame.topk)."},
+    {"collect", DFTU_PYCFUNCTION(tv_collect), METH_NOARGS,
+     "Run group_by+agg; return a native DataFrame (call .to_arrow() for "
+     "Arrow)."},
+    {"join", DFTU_PYCFUNCTION(tv_join), METH_VARARGS | METH_KEYWORDS,
+     "Aggregate and equi-join another viewer on the shared group key; "
+     "how=inner|left|right|full|semi|anti. Returns a DataFrame with l_/r_ "
+     "prefixed value columns."},
+    {"compare", DFTU_PYCFUNCTION(tv_compare), METH_VARARGS | METH_KEYWORDS,
+     "Compare this viewer (baseline) against another (variant) using this "
+     "viewer's group_by + agg plan. Both sides aggregate in parallel; returns "
+     "a DataFrame with the group key, l_/r_ per metric, and delta_/pct_."},
+    {"collect_typed", DFTU_PYCFUNCTION(tv_collect_typed),
      METH_VARARGS | METH_KEYWORDS,
      "One-pass read of the aggregation index's three record families over "
      "shard range [shard_begin, shard_end) (shard_end<=0 = all); returns a "
      "dict {'regular','aggregated','counters'} of pyarrow.Table."},
-    {"stream", DFT_PYCFUNCTION(tv_stream), METH_VARARGS | METH_KEYWORDS,
+    {"stream", DFTU_PYCFUNCTION(tv_stream), METH_VARARGS | METH_KEYWORDS,
      "Iterate matching events as pyarrow record batches (parallel, bounded "
      "memory). kwargs: batch_size, workers, normalize."},
-    {"statistics", DFT_PYCFUNCTION(tv_statistics), METH_NOARGS,
+    {"statistics", DFTU_PYCFUNCTION(tv_statistics), METH_NOARGS,
      "One-row summary: count, mean/stddev dur, min/max ts (dict)."},
-    {"aggregate_partial", DFT_PYCFUNCTION(tv_aggregate_partial), METH_NOARGS,
+    {"aggregate_partial", DFTU_PYCFUNCTION(tv_aggregate_partial), METH_NOARGS,
      "Combinable aggregation partial (bytes) for distributed merge."},
-    {"merge_partials_to_table", DFT_PYCFUNCTION(tv_merge_partials), METH_O,
+    {"merge_partials_to_table", DFTU_PYCFUNCTION(tv_merge_partials), METH_O,
      "Merge aggregate_partial() bytes into the final pyarrow.Table."},
-    {"rollup_root", DFT_PYCFUNCTION(tv_rollup_root), METH_O,
+    {"rollup_root", DFTU_PYCFUNCTION(tv_rollup_root), METH_O,
      "Override the aggregation-cache root dir (default: derive from index)."},
-    {"views_root", DFT_PYCFUNCTION(tv_views_root), METH_O,
+    {"views_root", DFTU_PYCFUNCTION(tv_views_root), METH_O,
      "Override the materialized-view root dir (default: derive "
      "<parent-of-index>/.dftindex-views)."},
-    {"materialize", DFT_PYCFUNCTION(tv_materialize),
+    {"materialize", DFTU_PYCFUNCTION(tv_materialize),
      METH_VARARGS | METH_KEYWORDS,
      "Build-only: persist this query as a materialized view so a later "
      "matching read reuses it (row query -> filtered trace, aggregation -> "
      "rollup). kwargs: checkpoint_size, part_size, progress (called with "
      "(done, total) scan units). Returns None."},
-    {"mv_source", DFT_PYCFUNCTION(tv_mv_source), METH_NOARGS,
+    {"mv_source", DFTU_PYCFUNCTION(tv_mv_source), METH_NOARGS,
      "The materialized-view trace file(s) that would serve this query, or an "
      "empty list if a read would scan the base."},
-    {"materialize_dir", DFT_PYCFUNCTION(tv_materialize_dir), METH_NOARGS,
+    {"materialize_dir", DFTU_PYCFUNCTION(tv_materialize_dir), METH_NOARGS,
      "Distributed row-MV coordinator: create and return the shared MV dir for "
      "this full-file-set view. Ranks export into subdirs of it."},
-    {"register_materialized", DFT_PYCFUNCTION(tv_register_materialized), METH_O,
+    {"register_materialized", DFTU_PYCFUNCTION(tv_register_materialized),
+     METH_O,
      "Write the MV manifest at the given dir over this view's base set, after "
      "ranks have materialized their shard subdirs."},
-    {"export_trace", DFT_PYCFUNCTION(tv_export), METH_VARARGS | METH_KEYWORDS,
+    {"export_trace", DFTU_PYCFUNCTION(tv_export), METH_VARARGS | METH_KEYWORDS,
      "Write a dftracer trace: the aggregation when group_by/agg is set, else "
      "the matching events. gzip+re-indexable by default. kwargs: compress, "
      "index, member_size, level, part_size."},
@@ -1362,9 +1532,9 @@ static PyMethodDef tv_methods[] = {
 // A plain collect() already reads a subsuming rollup, so there is no cache
 // flag.
 static PyMethodDef atv_methods[] = {
-    {"materialize_partials", DFT_PYCFUNCTION(tv_materialize_partials), METH_O,
+    {"materialize_partials", DFTU_PYCFUNCTION(tv_materialize_partials), METH_O,
      "Materialize the rollup from aggregate_partial() bytes; no rescan."},
-    {"reconstruct_if_cached", DFT_PYCFUNCTION(tv_reconstruct_if_cached),
+    {"reconstruct_if_cached", DFTU_PYCFUNCTION(tv_reconstruct_if_cached),
      METH_NOARGS,
      "Materialized aggregation as a pyarrow.Table, or None on a miss."},
     {nullptr, nullptr, 0, nullptr}};
@@ -1452,9 +1622,9 @@ PyTypeObject AggregatedTraceViewerType = {
     0,  // tp_new inherited
 };
 
-int init_trace_viewer(PyObject* m) {
-    if (register_type(m, &TraceViewerType, "TraceViewer") < 0) return -1;
-    if (register_type(m, &AggregatedTraceViewerType, "AggregatedTraceViewer") <
+int dftracer::utils::python::init_trace_viewer(PyObject* m) {
+    if (register_type(m, &TraceViewerType, "_TraceViewer") < 0) return -1;
+    if (register_type(m, &AggregatedTraceViewerType, "_AggregatedTraceViewer") <
         0)
         return -1;
     return 0;

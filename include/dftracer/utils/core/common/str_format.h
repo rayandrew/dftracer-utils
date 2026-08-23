@@ -25,9 +25,9 @@ inline void str_append(std::string& out, bool b) {
     out.append(b ? "true" : "false");
 }
 
-// Integral types (excluding bool/char, handled above) via std::to_chars - the
-// integer overload is available on every supported platform (only the
-// floating-point one is availability-gated, see to_chars.h).
+/// Integral types (excluding bool/char, handled above) via std::to_chars - the
+/// integer overload is available on every supported platform (only the
+/// floating-point one is availability-gated, see to_chars.h).
 template <typename T,
           std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool> &&
                                !std::is_same_v<T, char>,
@@ -49,11 +49,11 @@ inline void str_append(std::string& out, float v) {
 
 }  // namespace detail
 
-// Type-safe concatenation: appends each argument to one string, routing numbers
-// through to_chars (faster than std::to_string, portable unlike std::format).
-// Strings/string_views/char append directly; integers/floats convert via
-// to_chars; bool -> "true"/"false". No format string to parse.
-//   str_cat("Cannot open ", path, ": errno=", errno)
+/// Type-safe concatenation: appends each argument to one string, routing
+/// numbers through to_chars (faster than std::to_string, portable unlike
+/// std::format). Strings/string_views/char append directly; integers/floats
+/// convert via to_chars; bool -> "true"/"false". No format string to parse.
+///   str_cat("Cannot open ", path, ": errno=", errno)
 template <typename... Args>
 std::string str_cat(const Args&... args) {
     std::string out;
@@ -61,11 +61,11 @@ std::string str_cat(const Args&... args) {
     return out;
 }
 
-// printf-style formatting into a std::string. Portable (plain vsnprintf, no
-// std::format / availability gates); use for cold, mixed-content messages. For
-// literal '%' in the text, escape as "%%" (or use str_cat, which has no format
-// string). vstring_format is the va_list core; string_format is the variadic
-// front-end.
+/// printf-style formatting into a std::string. Portable (plain vsnprintf, no
+/// std::format / availability gates); use for cold, mixed-content messages. For
+/// literal '%' in the text, escape as "%%" (or use str_cat, which has no format
+/// string). vstring_format is the va_list core; string_format is the variadic
+/// front-end.
 __attribute__((__format__(__printf__, 1, 0))) inline std::string vstring_format(
     const char* fmt, va_list ap) {
     va_list ap2;
@@ -88,8 +88,8 @@ __attribute__((__format__(__printf__, 1, 2))) inline std::string string_format(
     return s;
 }
 
-// Human-readable byte count, e.g. "1.5 MB" or "3.0 MB/s". `per_suffix` appends
-// a rate unit (e.g. "/s"); `precision` sets the fractional digits.
+/// Human-readable byte count, e.g. "1.5 MB" or "3.0 MB/s". `per_suffix` appends
+/// a rate unit (e.g. "/s"); `precision` sets the fractional digits.
 inline std::string human_bytes(double value, const char* per_suffix = "",
                                int precision = 1) {
     static const char* const UNITS[] = {"B", "KB", "MB", "GB", "TB", "PB"};

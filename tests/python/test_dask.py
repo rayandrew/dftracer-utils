@@ -16,7 +16,7 @@ try:
 except ImportError:
     DASK_AVAILABLE = False
 
-import dftracer.utils as dft_utils
+import dftracer.utils as dftu_utils
 from dftracer.utils.dftracer_utils_ext import CheckpointIndexer as NativeIndexer
 
 from .common import Environment
@@ -88,7 +88,7 @@ class TestDirectoryIndexerWithDask:
                 gz_files.append(gz_file)
 
             # Use directory-level Indexer
-            indexer = dft_utils.Indexer(env.temp_dir)
+            indexer = dftu_utils.Indexer(env.temp_dir)
 
             # Check status before build
             before = indexer.resolve()
@@ -110,7 +110,7 @@ class TestDirectoryIndexerWithDask:
         with Environment(lines=50) as env:
             env.create_test_gzip_file()
 
-            indexer = dft_utils.Indexer(env.temp_dir)
+            indexer = dftu_utils.Indexer(env.temp_dir)
 
             # First call builds the index
             status1 = indexer.ensure_indexed()
@@ -133,7 +133,7 @@ class TestDistributedWriteTrace:
 
         with Environment(lines=200) as env:
             files = [env.create_test_gzip_file(f"f{k}/t{k}.pfw.gz") for k in range(3)]
-            with dft_utils.Indexer(files=files, index_dir=env.temp_dir) as ix:
+            with dftu_utils.Indexer(files=files, index_dir=env.temp_dir) as ix:
                 ix.ensure_indexed()
 
             cluster = LocalCluster(processes=False, n_workers=2, threads_per_worker=2)
@@ -146,10 +146,10 @@ class TestDistributedWriteTrace:
                 assert len(res["files"]) == 3
                 # Each shard is a re-indexable .pfw.gz trace.
                 reidx = os.path.join(env.temp_dir, "reidx")
-                with dft_utils.Indexer(files=res["files"], index_dir=reidx) as ix2:
+                with dftu_utils.Indexer(files=res["files"], index_dir=reidx) as ix2:
                     ix2.ensure_indexed()
                 total = sum(
-                    dft_utils.TraceViewer(f, index_path=reidx).statistics()["duration_count"]
+                    dftu_utils.TraceViewer(f, index_path=reidx).statistics()["duration_count"]
                     for f in res["files"]
                 )
                 assert total > 0
@@ -164,7 +164,7 @@ class TestDaskTraceViewer:
 
     def _cluster_files(self, env):
         files = [env.create_test_gzip_file(f"f{k}/t{k}.pfw.gz") for k in range(4)]
-        with dft_utils.Indexer(files=files, index_dir=env.temp_dir) as ix:
+        with dftu_utils.Indexer(files=files, index_dir=env.temp_dir) as ix:
             ix.ensure_indexed()
         return files
 
@@ -257,7 +257,7 @@ class TestDaskTraceViewer:
                         '"ts":%d,"dur":%d,"args":{}}\n' % (1000 + k * 1000 + i, 10 + i)
                     )
             files.append(p)
-        with dft_utils.Indexer(files=files, index_dir=str(tmp_path)) as ix:
+        with dftu_utils.Indexer(files=files, index_dir=str(tmp_path)) as ix:
             ix.ensure_indexed()
 
         cluster = LocalCluster(processes=False, n_workers=2, threads_per_worker=2)

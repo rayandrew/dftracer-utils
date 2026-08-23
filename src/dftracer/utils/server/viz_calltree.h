@@ -14,7 +14,7 @@
 
 namespace dftracer::utils::server {
 
-using utilities::common::json::json_number;
+using json::json_number;
 
 // One scanned event, reduced to what the call-tree needs.
 struct FlameEv {

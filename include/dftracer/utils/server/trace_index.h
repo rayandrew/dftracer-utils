@@ -6,8 +6,8 @@
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/server/viz_result_cache.h>
 #include <dftracer/utils/server/viz_summary.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/bloom_filter_cache.h>
-#include <dftracer/utils/utilities/composites/dft/time_metric.h>
+#include <dftracer/utils/trace/indexing/bloom_filter_cache.h>
+#include <dftracer/utils/trace/time_metric.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 
 #include <atomic>
@@ -22,7 +22,7 @@
 
 namespace dftracer::utils::server {
 
-// Byte budget for the per-index viz result cache.
+/// Byte budget for the per-index viz result cache.
 inline constexpr std::size_t VIZ_RESULT_CACHE_BYTES = 256UL * 1024 * 1024;
 
 /// Scans a directory for trace files and caches paths to their
@@ -78,56 +78,55 @@ class TraceIndex {
     const std::string& index_dir() const { return index_dir_; }
     std::size_t max_concurrent() const { return max_concurrent_; }
 
-    using BloomCache =
-        dftracer::utils::utilities::composites::dft::indexing::BloomFilterCache;
+    using BloomCache = dftracer::utils::trace::indexing::BloomFilterCache;
     BloomCache& bloom_cache() { return bloom_cache_; }
 
-    // Result cache for heavy viz endpoints. Immutable trace => never stale.
+    /// Result cache for heavy viz endpoints. Immutable trace => never stale.
     VizResultCache& viz_cache() { return viz_cache_; }
 
-    // Trace-wide native time unit (one unit per trace), from the leading CM
-    // time_metric of the first file (absent = US). Index/event ts and dur are
-    // stored in this unit; the viz layer converts at its us boundary.
-    using TimeMetric = dftracer::utils::utilities::composites::dft::TimeMetric;
+    /// Trace-wide native time unit (one unit per trace), from the leading CM
+    /// time_metric of the first file (absent = US). Index/event ts and dur are
+    /// stored in this unit; the viz layer converts at its us boundary.
+    using TimeMetric = dftracer::utils::trace::TimeMetric;
     TimeMetric time_metric() const { return time_metric_; }
     std::uint64_t native_to_us(std::uint64_t v) const {
-        return dftracer::utils::utilities::composites::dft::scale_between(
-            time_metric_, TimeMetric::US, v);
+        return dftracer::utils::trace::scale_between(time_metric_,
+                                                     TimeMetric::US, v);
     }
     std::uint64_t us_to_native(std::uint64_t v) const {
-        return dftracer::utils::utilities::composites::dft::scale_between(
-            TimeMetric::US, time_metric_, v);
+        return dftracer::utils::trace::scale_between(TimeMetric::US,
+                                                     time_metric_, v);
     }
 
-    // Native (index-unit) global bounds. The `_us` names are historical: for a
-    // US trace they are microseconds; for NS/MS/SEC traces use native_to_us().
+    /// Native (index-unit) global bounds. The `_us` names are historical: for a
+    /// US trace they are microseconds; for NS/MS/SEC traces use native_to_us().
     std::uint64_t global_min_timestamp_us() const { return global_min_ts_; }
     std::uint64_t global_max_timestamp_us() const { return global_max_ts_; }
 
-    // Lazily-built activity summary. Null until the build finishes.
+    /// Lazily-built activity summary. Null until the build finishes.
     const VizSummary* viz_summary() const {
         return viz_summary_state_.load(std::memory_order_acquire) == 2
                    ? viz_summary_.get()
                    : nullptr;
     }
-    // Serializes the build so concurrent requests wait for it instead of each
-    // launching a whole-trace live scan of its own.
+    /// Serializes the build so concurrent requests wait for it instead of each
+    /// launching a whole-trace live scan of its own.
     coro::AsyncMutex& viz_summary_mutex() { return viz_summary_mutex_; }
     void set_viz_summary(std::unique_ptr<VizSummary> summary) {
         viz_summary_ = std::move(summary);
         viz_summary_state_.store(2, std::memory_order_release);
     }
 
-    // Resolve a content hash (file/host/string) to its name via a point lookup
-    // in the per-root index databases, which are opened once and kept. Empty
-    // when no root knows the hash.
+    /// Resolve a content hash (file/host/string) to its name via a point lookup
+    /// in the per-root index databases, which are opened once and kept. Empty
+    /// when no root knows the hash.
     using HashType =
         dftracer::utils::utilities::indexer::IndexDatabase::HashType;
     std::string resolve_hash(HashType type, const std::string& hash);
 
-    // On-disk summary cache (index_dir/.dftviz_summary), keyed by a fingerprint
-    // of the current file set so a re-indexed trace invalidates it. Loading it
-    // skips the full rescan on restart.
+    /// On-disk summary cache (index_dir/.dftviz_summary), keyed by a
+    /// fingerprint of the current file set so a re-indexed trace invalidates
+    /// it. Loading it skips the full rescan on restart.
     bool load_persisted_viz_summary();
     void persist_viz_summary() const;
 
@@ -160,7 +159,8 @@ class TraceIndex {
 
     coro::AsyncMutex viz_summary_mutex_;
     std::unique_ptr<VizSummary> viz_summary_;
-    std::atomic<int> viz_summary_state_{0};  // 0 not built, 1 building, 2 ready
+    std::atomic<int> viz_summary_state_{
+        0};  ///< 0 not built, 1 building, 2 ready
 };
 
 class QueryParams;

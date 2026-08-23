@@ -1,13 +1,12 @@
 #ifndef DFTRACER_UTILS_BINARIES_COMMON_CLI_MPI_H
 #define DFTRACER_UTILS_BINARIES_COMMON_CLI_MPI_H
 
+#include <dftracer/utils/binaries/common_cli.h>
 #include <mpi.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
-
-#include "common_cli.h"
 
 namespace dftracer::utils::cli {
 

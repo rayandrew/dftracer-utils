@@ -91,7 +91,7 @@ static PyObject* ArrowStreamingIterator_cancel(
 }
 
 static PyMethodDef ArrowStreamingIterator_methods[] = {
-    {"cancel", DFT_PYCFUNCTION(ArrowStreamingIterator_cancel), METH_NOARGS,
+    {"cancel", DFTU_PYCFUNCTION(ArrowStreamingIterator_cancel), METH_NOARGS,
      "Cancel the streaming iterator."},
     {NULL}};
 

@@ -81,7 +81,7 @@ bool needs_rechunk(const std::string& path, std::size_t cap) {
 
 TEST_SUITE("gzip_rechunker") {
     TEST_CASE("needs_rechunk flags a member over the cap only") {
-        auto dir = dft_utils_test::make_unique_test_path("rechunk_probe");
+        auto dir = dftu_utils_test::make_unique_test_path("rechunk_probe");
         fs::create_directories(dir);
         const std::string gz = (dir / "one.pfw.gz").string();
         const auto payload = make_lines(2000);  // ~90 KB uncompressed
@@ -94,7 +94,7 @@ TEST_SUITE("gzip_rechunker") {
     }
 
     TEST_CASE("rechunk preserves bytes and produces multiple members") {
-        auto dir = dft_utils_test::make_unique_test_path("rechunk_split");
+        auto dir = dftu_utils_test::make_unique_test_path("rechunk_split");
         fs::create_directories(dir);
         const std::string in = (dir / "big.pfw.gz").string();
         const std::string out = (dir / "out.pfw.gz").string();
@@ -121,7 +121,7 @@ TEST_SUITE("gzip_rechunker") {
 
     TEST_CASE(
         "rechunk_to_dir_if_needed splits into a dir, else passes through") {
-        auto dir = dft_utils_test::make_unique_test_path("rechunk_ingest");
+        auto dir = dftu_utils_test::make_unique_test_path("rechunk_ingest");
         fs::create_directories(dir);
         const std::string in = (dir / "trace.pfw.gz").string();
         const auto payload = make_lines(5000);
@@ -153,7 +153,7 @@ TEST_SUITE("gzip_rechunker") {
     }
 
     TEST_CASE("rechunk handles a payload with no trailing newline") {
-        auto dir = dft_utils_test::make_unique_test_path("rechunk_nonl");
+        auto dir = dftu_utils_test::make_unique_test_path("rechunk_nonl");
         fs::create_directories(dir);
         const std::string in = (dir / "in.pfw.gz").string();
         const std::string out = (dir / "out.pfw.gz").string();

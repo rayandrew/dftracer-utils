@@ -8,8 +8,8 @@
 #include <dftracer/utils/core/common/to_chars.h>
 #include <dftracer/utils/server/http_request.h>
 #include <dftracer/utils/server/trace_index.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/views/view_definition.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/views/view_definition.h>
 #include <simdjson.h>
 
 #include <algorithm>
@@ -19,7 +19,7 @@
 
 namespace dftracer::utils::server {
 
-using utilities::composites::dft::views::ViewDefinition;
+using trace::views::ViewDefinition;
 
 // `value`. No-op when the key is absent. Returns whether it rewrote.
 static bool rewrite_uint_field(std::string& json, std::string_view key,
@@ -65,7 +65,7 @@ static std::string normalize_event_ts(const std::string& event_json,
         return event_json;
     }
 
-    using dftracer::utils::utilities::composites::dft::scale_between;
+    using dftracer::utils::trace::scale_between;
     using TM = TraceIndex::TimeMetric;
     std::uint64_t new_ts =
         scale_between(metric, TM::US, old_ts >= offset ? old_ts - offset : 0);

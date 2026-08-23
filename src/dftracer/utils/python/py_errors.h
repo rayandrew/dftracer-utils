@@ -7,6 +7,8 @@
 
 #include <exception>
 
+namespace dftracer::utils::python {
+
 // Typed Python exception objects
 extern PyObject *g_dft_error;              // DFTUtilsError (base)
 extern PyObject *g_dft_value_error;        // DFTUtilsValueError
@@ -27,11 +29,16 @@ int init_py_errors(PyObject *m);
 // Map a coarse ErrorCode to its Python exception type (borrowed reference).
 // Falls back to the DFTUtilsError base for UNKNOWN/INTERNAL.
 PyObject *py_error_type_for(dftracer::utils::ErrorCode code);
+/// Domain-aware: maps a domain error (e.g. the query domain) to its Python
+/// type, falling back to the portable-condition map.
+PyObject *py_error_type_for(const dftracer::utils::DFTUtilsException &e);
 
 // Set the current Python error from a caught C++ exception, choosing the typed
 // DFTUtils* exception (DFTUtilsException -> its code; std::invalid_argument ->
 // DFTUtilsValueError; else the DFTUtilsError base). Mirrors run_blocking's
 // dispatch for the bindings that catch and translate inline.
 void set_typed_py_error(const std::exception &e);
+
+}  // namespace dftracer::utils::python
 
 #endif  // DFTRACER_UTILS_PYTHON_PY_ERRORS_H

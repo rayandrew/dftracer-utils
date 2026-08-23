@@ -24,7 +24,7 @@ void set_test_library_path(const std::string& binary) {
     ::setenv("LD_LIBRARY_PATH", lib_path.c_str(), 1);
 }
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -131,7 +131,7 @@ TEST_SUITE("DFTracerInfo") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -151,7 +151,7 @@ TEST_SUITE("DFTracerInfo") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         for (int i = 0; i < 2; ++i) {
@@ -170,7 +170,7 @@ TEST_SUITE("DFTracerInfo") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 50, 0);
@@ -196,7 +196,7 @@ TEST_SUITE("DFTracerInfo") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 30, 0);
@@ -220,7 +220,7 @@ TEST_SUITE("DFTracerInfo") {
             return p == std::string::npos ? -1 : std::atol(out.c_str() + p);
         };
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
         auto f = create_pfw_gz(env, 100, 0);
         REQUIRE(!f.empty());

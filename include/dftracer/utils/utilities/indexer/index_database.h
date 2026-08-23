@@ -77,7 +77,10 @@ class IndexDatabase {
     /// bare filename, so an older index's file lookups miss under new code.
     /// v9 -> v10 added per-counter pid/tid to the ph="C" summary series, so an
     /// older summary would deserialize the new fields as counter bucket data.
-    static constexpr std::uint32_t SCHEMA_VERSION = 10;
+    /// v10 -> v11 added the FieldStat numeric domain tag and exact integer
+    /// sum/min/max to the serialized aggregation accumulator (persisted rollup
+    /// records), so an older rollup lacks those bytes and would misparse.
+    static constexpr std::uint32_t SCHEMA_VERSION = 11;
 
     /// True if the stored schema predates the current build's layout.
     bool schema_outdated() const;
@@ -205,10 +208,10 @@ class IndexDatabase {
     // -----------------------------------------------------------------------
 
     enum class HashType : std::uint8_t {
-        FILE = 0,    // FH: file hash -> file name
-        HOST = 1,    // HH: host hash -> host name
-        STRING = 2,  // SH: string hash -> string value
-        PROC = 3     // PR: proc hash -> proc metadata
+        FILE = 0,    ///< FH: file hash -> file name
+        HOST = 1,    ///< HH: host hash -> host name
+        STRING = 2,  ///< SH: string hash -> string value
+        PROC = 3     ///< PR: proc hash -> proc metadata
     };
 
     /// Query all entries of a given hash type.
@@ -296,7 +299,7 @@ class IndexDatabase {
     /// never need to touch the DEFAULT column family themselves.
     std::vector<int> register_files(const std::vector<std::string>& file_paths);
 
-    // Schema initialisation, idempotent
+    /// Schema initialisation, idempotent
     void init_schema();
 
    private:

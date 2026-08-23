@@ -90,8 +90,9 @@ namespace fs = ghc::filesystem;
 
 namespace dftracer::utils {
 
-// Convert a filesystem time point to Unix seconds. Shared by the directory
-// scanner and the indexer so scanned and stored mtimes are directly comparable.
+/// Convert a filesystem time point to Unix seconds. Shared by the directory
+/// scanner and the indexer so scanned and stored mtimes are directly
+/// comparable.
 inline std::time_t file_mtime_seconds(fs::file_time_type ftime) {
     auto sctp =
         std::chrono::time_point_cast<std::chrono::system_clock::duration>(
@@ -100,7 +101,7 @@ inline std::time_t file_mtime_seconds(fs::file_time_type ftime) {
     return std::chrono::system_clock::to_time_t(sctp);
 }
 
-// Best-effort cleanup: remove `path` if it exists, ignoring any error.
+/// Best-effort cleanup: remove `path` if it exists, ignoring any error.
 inline void remove_file_quietly(const fs::path& path) {
     if (fs::exists(path)) {
         try {

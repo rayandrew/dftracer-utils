@@ -50,7 +50,7 @@ class IndexedFileLineIteratorConfig {
         dftracer::utils::utilities::reader::internal::RangeType::LINE_RANGE;
     std::size_t start_ = 1;
     std::size_t end_ = 0;
-    std::size_t buffer_size_ = 1024 * 1024;  // 1MB default buffer
+    std::size_t buffer_size_ = 1024 * 1024;  ///< 1MB default buffer
 
    public:
     IndexedFileLineIteratorConfig() = default;
@@ -139,12 +139,13 @@ class IndexedFileLineIterator {
     std::unique_ptr<dftracer::utils::utilities::reader::internal::ReaderStream>
         stream_;
     std::size_t current_position_;
-    mutable std::string line_buffer_;    // Buffer to hold current line data
-    mutable std::string stream_buffer_;  // Buffer for reading from stream
+    mutable std::string line_buffer_;    ///< Buffer to hold current line data
+    mutable std::string stream_buffer_;  ///< Buffer for reading from stream
     mutable bool stream_done_;
     mutable bool
-        has_buffered_line_;        // True if line_buffer_ contains a valid line
-    mutable bool attempted_read_;  // True if we've tried to read the first line
+        has_buffered_line_;  ///< True if line_buffer_ contains a valid line
+    mutable bool
+        attempted_read_;     ///< True if we've tried to read the first line
 
    public:
     using Iterator = LineIterator<IndexedFileLineIterator>;

@@ -2,7 +2,7 @@
 #define DFTRACER_UTILS_UTILITIES_FILEIO_FILE_READER_UTILITY_H
 
 #include <dftracer/utils/core/common/error.h>
-#include <dftracer/utils/core/utilities/utility.h>
+#include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/utilities/filesystem/directory_scanner_utility.h>
 #include <dftracer/utils/utilities/text/shared.h>
 
@@ -19,9 +19,9 @@ namespace dftracer::utils::utilities::fileio {
  * and reads the file content as Text. It composes with existing types.
  *
  * Composition examples:
- * - DirectoryScanner → FileReader → Text
- * - FileEntry → FileReader → Text → LineSplitter → Lines
- * - FileEntry → FileReader → Text → TextHasher → Hash
+ * - DirectoryScanner -> FileReader -> Text
+ * - FileEntry -> FileReader -> Text -> LineSplitter -> Lines
+ * - FileEntry -> FileReader -> Text -> TextHasher -> Hash
  *
  * Features:
  * - Reads entire file into memory as text
@@ -52,12 +52,8 @@ namespace dftracer::utils::utilities::fileio {
  * }
  * @endcode
  */
-class FileReaderUtility
-    : public utilities::Utility<filesystem::FileEntry, text::Text> {
+class FileReaderUtility {
    public:
-    FileReaderUtility() = default;
-    ~FileReaderUtility() = default;
-
     /**
      * @brief Read file content as text.
      *
@@ -65,8 +61,8 @@ class FileReaderUtility
      * @return Text containing file content
      * @throws std::runtime_error if file cannot be read
      */
-    coro::CoroTask<text::Text> process(
-        const filesystem::FileEntry& input) override {
+    coro::CoroTask<text::Text> operator()(
+        const filesystem::FileEntry& input) const {
         if (!fs::exists(input.path)) {
             throw DFTUtilsException(
                 ErrorCode::NOT_FOUND,

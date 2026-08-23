@@ -4,8 +4,8 @@
 
 #include <ankerl/unordered_dense.h>
 #include <dftracer/utils/core/utils/string.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/schema.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/schema.h>
 
 #include <cctype>
 #include <cstdint>
@@ -19,8 +19,8 @@ namespace dftracer::utils::utilities::reader::internal {
 
 using common::arrow::ColumnType;
 using common::arrow::RecordBatchBuilder;
-using common::json::JsonParser;
-using common::json::JsonValueHelper;
+using json::JsonParser;
+using json::JsonValueHelper;
 
 namespace {
 
@@ -48,7 +48,7 @@ enum IOCat : std::int8_t {
 };
 
 std::int8_t get_io_cat(std::string_view func) {
-    using namespace dftracer::utils::utilities::composites::dft::internal;
+    using namespace dftracer::utils::trace::internal;
     // Op sets are disjoint, so a single flat lookup preserves the original
     // first-match semantics. Keys view the constexpr op arrays (static
     // storage).
@@ -141,7 +141,7 @@ void append_profile_columns(
     RecordBatchBuilder &builder,
     const std::unordered_map<std::string, std::int64_t> &int_map) {
     static const char *profile_keys[] = {
-        "count",      "count_max",  "count_min",  "count_sum",  "dft_cnt",
+        "count",      "count_max",  "count_min",  "count_sum",  "dftu_cnt",
         "dur",        "dur_max",    "dur_min",    "dur_sum",    "epoch",
         "flags",      "offset",     "offset_max", "offset_min", "offset_sum",
         "ret",        "ret_max",    "ret_min",    "ret_sum",    "whence",
@@ -179,15 +179,15 @@ bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
     using SVH = JsonValueHelper;
     // --- Single-pass extraction: capture top-level fields and args in one
     // member walk (dispatch on key, any field order). ---
-    namespace dft = dftracer::utils::utilities::composites::dft;
-    dft::RecordPhase phase = dft::RecordPhase::UNKNOWN;
+    dftracer::utils::trace::RecordPhase phase =
+        dftracer::utils::trace::RecordPhase::UNKNOWN;
     std::string_view name_sv, cat_sv;
     std::optional<std::int64_t> pid_opt, tid_opt, ts_opt, dur_opt;
     ParsedArgs args;
     parser.for_each_field(
         [&](std::string_view key, simdjson::ondemand::value val) {
             if (key == "ph") {
-                phase = dft::read_phase(val);
+                phase = dftracer::utils::trace::read_phase(val);
             } else if (key == "name") {
                 if (auto s = SVH::get_string(val)) name_sv = *s;
             } else if (key == "cat") {
@@ -206,13 +206,13 @@ bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
         });
 
     // --- Type classification ---
-    bool is_M = (phase == dft::RecordPhase::METADATA);
-    bool is_C = (phase == dft::RecordPhase::COUNTER);
+    bool is_M = (phase == dftracer::utils::trace::RecordPhase::METADATA);
+    bool is_C = (phase == dftracer::utils::trace::RecordPhase::COUNTER);
     bool is_event = !is_M && !is_C;
 
     if (is_M && name_sv == "CM" && args.name && *args.name == "time_metric" &&
         args.value) {
-        time_scale.metric = composites::dft::parse_time_metric(*args.value);
+        time_scale.metric = trace::parse_time_metric(*args.value);
     }
 
     std::int8_t row_type = ROW_EVENT;
@@ -310,9 +310,9 @@ bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
     const bool scale_time =
         time_scale.target && *time_scale.target != time_scale.metric;
     auto scaled = [&](std::int64_t v) {
-        return static_cast<std::int64_t>(composites::dft::scale_between(
-            time_scale.metric, *time_scale.target,
-            static_cast<std::uint64_t>(v)));
+        return static_cast<std::int64_t>(
+            trace::scale_between(time_scale.metric, *time_scale.target,
+                                 static_cast<std::uint64_t>(v)));
     };
     if (has_ts) {
         ts_val = *ts_opt;
@@ -336,7 +336,7 @@ bool normalize_row(RecordBatchBuilder &builder, StringArena &arena,
         // Size uses the shared io-cat rule (size_sum > posix/stdio read|write
         // ret > image_size) so the reader and the View aggregator's "size"
         // cannot drift.
-        if (auto sz = dft::internal::derive_io_size(
+        if (auto sz = dftracer::utils::trace::internal::derive_io_size(
                 cat_sv, out_name, args.size_sum, args.ret, args.image_size))
             builder.append_int64(ci_size, *sz);
         // Offset / image-id side outputs stay on their original branches (not

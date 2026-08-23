@@ -18,6 +18,10 @@ typedef struct {
 
 extern PyTypeObject IndexDatabaseType;
 
+namespace dftracer::utils::python {
+
 int init_index_database(PyObject *m);
+
+}  // namespace dftracer::utils::python
 
 #endif  // DFTRACER_UTILS_PYTHON_INDEX_DATABASE_H

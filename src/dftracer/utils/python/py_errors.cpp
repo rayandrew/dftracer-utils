@@ -1,7 +1,10 @@
 #include <dftracer/utils/python/py_errors.h>
+#include <dftracer/utils/query/errc.h>
 
 #include <stdexcept>
 #include <string>
+
+namespace dftracer::utils::python {
 
 PyObject *g_dft_error = nullptr;
 PyObject *g_dft_value_error = nullptr;
@@ -99,13 +102,22 @@ PyObject *py_error_type_for(ErrorCode code) {
     return g_dft_error;
 }
 
+PyObject *py_error_type_for(const dftracer::utils::DFTUtilsException &e) {
+    // Domain-specific types take precedence over the portable-condition map.
+    if (e.domain() == dftracer::utils::query::ERROR_DOMAIN.id)
+        return g_dft_query_error;
+    return py_error_type_for(e.code());
+}
+
 void set_typed_py_error(const std::exception &e) {
     if (const auto *de =
             dynamic_cast<const dftracer::utils::DFTUtilsException *>(&e)) {
-        PyErr_SetString(py_error_type_for(de->code()), e.what());
+        PyErr_SetString(py_error_type_for(*de), e.what());
     } else if (dynamic_cast<const std::invalid_argument *>(&e)) {
         PyErr_SetString(g_dft_value_error, e.what());
     } else {
         PyErr_SetString(g_dft_error, e.what());
     }
 }
+
+}  // namespace dftracer::utils::python

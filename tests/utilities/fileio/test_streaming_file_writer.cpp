@@ -15,7 +15,7 @@
 #include <vector>
 
 using namespace dftracer::utils::utilities::fileio;
-using namespace dft_utils_test;
+using namespace dftu_utils_test;
 using dftracer::utils::ByteView;
 
 TEST_CASE("StreamingFileWriterUtility - Basic Operations") {

@@ -1,3 +1,5 @@
+:description: Reference for TraceViewer, the lazy Arrow-first API to filter, group, aggregate, and collect DFTracer traces in a single indexed pass.
+
 TraceViewer (Querying Traces)
 =============================
 
@@ -11,21 +13,19 @@ summaries) instead of a full decompress.
 
 .. code-block:: python
 
-   import glob
    from dftracer.utils import TraceViewer
 
-   # A file or a list of files. To query a directory, glob it first.
-   files = sorted(glob.glob("traces/**/*.pfw.gz", recursive=True))
-   view = TraceViewer(files)               # index_path optional; sidecar used when present
+   # A directory is scanned recursively for .pfw.gz traces, in parallel.
+   view = TraceViewer("traces/")           # index_path optional; sidecar used when present
 
-   # Top I/O calls by total time, as a pyarrow Table.
-   table = (
+   # Top I/O calls by total time.
+   df = (
        view.filter('cat == "POSIX"')
            .group_by("name")
            .agg("count", "sum:dur", "max:dur")
-           .collect()
+           .collect()                       # -> DataFrame
    )
-   df = table.to_pandas()
+   pdf = df.to_pandas()
 
 Constructing a view
 -------------------
@@ -34,10 +34,10 @@ Constructing a view
 
    TraceViewer(files, index_path=None, runtime=None)
 
-``files`` is a single file path or a list of file paths (a bare string is
-treated as one file, so glob a directory yourself). Pass ``index_path`` to point
-at an index directory explicitly; omit it to use the sidecar convention. An
-optional :class:`~dftracer.utils.Runtime` controls the thread pool.
+``files`` is a directory (scanned recursively for ``.pfw.gz`` traces), a single
+file path, or a list of file paths. Pass ``index_path`` to point at an index
+directory explicitly; omit it to use the sidecar convention. An optional
+:class:`~dftracer.utils.Runtime` controls the thread pool.
 
 The fluent builder
 ------------------
@@ -108,12 +108,15 @@ Aggregation specs are ``op:field`` (or bare ``count``):
 Reading the result
 -------------------
 
-``collect`` returns a single pyarrow ``Table``:
+``collect`` returns a single native :class:`~dftracer.utils.DataFrame` (a set of
+typed :class:`~dftracer.utils.Series`); convert with ``to_arrow()`` /
+``to_pandas()`` / ``to_polars()`` only at the edge, or keep computing on it in
+the columnar engine (see :doc:`../columnar-engine`):
 
 .. code-block:: python
 
    # Per-(name, time bucket) I/O volume as a time series.
-   table = (
+   df = (
        TraceViewer(files)
        .filter('cat == "POSIX"')
        .time_bucket(1_000_000)          # 1 s windows (microseconds)
@@ -163,10 +166,17 @@ that composes the HLM as one View aggregation. See :doc:`dfanalyzer`.
 Reference
 ---------
 
-.. autoclass:: dftracer.utils.dftracer_utils_ext.TraceViewer
+Type relationships
+------------------
+
+How the viewer types relate and what they return:
+
+.. mermaid:: /_generated/py_trace_viewer.mmd
+
+.. autoclass:: dftracer.utils.TraceViewer
    :members:
    :undoc-members:
 
-.. autoclass:: dftracer.utils.dftracer_utils_ext.AggregatedTraceViewer
+.. autoclass:: dftracer.utils.AggregatedTraceViewer
    :members:
    :undoc-members:

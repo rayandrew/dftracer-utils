@@ -38,7 +38,7 @@ class Environment:
 
     def _setup(self):
         """Set up temporary directory"""
-        self.temp_dir = tempfile.mkdtemp(prefix="dft_test_")
+        self.temp_dir = tempfile.mkdtemp(prefix="dftu_test_")
 
     def __enter__(self):
         return self
@@ -110,7 +110,7 @@ class Environment:
         self.test_files.append(file_path)
         return file_path
 
-    def create_dft_trace_file(self, filename="dft_trace.pfw.gz", num_events=None):
+    def create_dft_trace_file(self, filename="dftu_trace.pfw.gz", num_events=None):
         """Create a gzip file with valid DFTracer trace events."""
         file_path = os.path.join(self.temp_dir, filename)
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
@@ -351,19 +351,19 @@ class Environment:
             pytest.skip(f"Failed to create indexer: {e}")
 
     def _find_dft_reader_executable(self):
-        """Find the dft_reader executable"""
+        """Find the dftu_reader executable"""
         # Check common build locations
         possible_paths = [
-            "dft_reader",  # In PATH
-            "./dft_reader",  # Current directory
-            "../dft_reader",  # Parent directory
-            "../../dft_reader",  # Grandparent directory
-            "./build_test/dft_reader",  # CMake build directory
-            "./build/dft_reader",  # Alternative build directory
-            "./build/dft_utils/dft_reader",  # Build subdirectory
-            "./cmake-build-debug/dft_reader",  # IDE build directory
-            "./cmake-build-release/dft_reader",  # IDE build directory
-            "./.venv/lib/python3.9/site-packages/dft_utils/bin/dft_reader",  # Python package
+            "dftu_reader",  # In PATH
+            "./dftu_reader",  # Current directory
+            "../dftu_reader",  # Parent directory
+            "../../dftu_reader",  # Grandparent directory
+            "./build_test/dftu_reader",  # CMake build directory
+            "./build/dftu_reader",  # Alternative build directory
+            "./build/dftu_utils/dftu_reader",  # Build subdirectory
+            "./cmake-build-debug/dftu_reader",  # IDE build directory
+            "./cmake-build-release/dftu_reader",  # IDE build directory
+            "./.venv/lib/python3.9/site-packages/dftu_utils/bin/dftu_reader",  # Python package
         ]
 
         for path in possible_paths:

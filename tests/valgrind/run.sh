@@ -14,6 +14,8 @@
 #
 # Useful environment overrides:
 #   VALGRIND_BUILD_DIR     C++ build directory (default build/build-valgrind)
+#   VALGRIND_CC            C compiler (default: image default, gcc-13 on 24.04)
+#   VALGRIND_CXX           C++ compiler (default: image default)
 #   VALGRIND_CTEST_FILTER  Regex; only C++ tests whose name matches run
 #   VALGRIND_PYTEST_FILES  Space-separated pytest targets (overrides default set)
 #   VALGRIND_EXTRA_OPTS    Extra options appended to every valgrind invocation
@@ -33,6 +35,12 @@ SUPP_DIR="$REPO_ROOT/tests/valgrind"
 BUILD_DIR="${VALGRIND_BUILD_DIR:-$REPO_ROOT/build/build-valgrind}"
 LOG_DIR="$REPO_ROOT/build/valgrind-logs"
 VENV_DIR="$REPO_ROOT/.venv_valgrind"
+
+# Optional compiler override (e.g. gcc-12 to reproduce a version-specific issue).
+# Empty by default so cmake picks the image toolchain.
+COMPILER_ARGS=()
+[[ -n "${VALGRIND_CC:-}" ]] && COMPILER_ARGS+=("-DCMAKE_C_COMPILER=${VALGRIND_CC}")
+[[ -n "${VALGRIND_CXX:-}" ]] && COMPILER_ARGS+=("-DCMAKE_CXX_COMPILER=${VALGRIND_CXX}")
 
 # Common valgrind options
 COMMON_OPTS=(
@@ -83,6 +91,7 @@ build_jobs() {
 configure_and_build_cpp() {
   log "Configuring C++ tests in $BUILD_DIR (RelWithDebInfo, debug symbols)"
   cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -G Ninja \
+    "${COMPILER_ARGS[@]}" \
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DDFTRACER_UTILS_TESTS=ON \
     -DDFTRACER_UTILS_DEBUG=OFF \
@@ -105,7 +114,12 @@ run_cpp() {
 
   mkdir -p "$LOG_DIR/cpp"
 
-  local exclude_pat="${VALGRIND_CTEST_EXCLUDE:-test_reader_robustness}"
+  # Tests Valgrind's serial scheduler cannot run: the pipeline stress tests churn
+  # workers / spawn handoff threads in tight loops and livelock under it (they
+  # exist for the tsan/asan presets, which cover their threading). Their memory
+  # paths are still exercised by the other pipeline tests that do run here.
+  local default_exclude="test_reader_robustness|test_blocking_handoff|test_dynamic_workers"
+  local exclude_pat="${VALGRIND_CTEST_EXCLUDE:-$default_exclude}"
 
   local selector
   selector="$(
@@ -467,6 +481,10 @@ run_py_one() {
   printf '%s\t%s\n' "$rc" "$fname" >"$rdir/${fname}.rc"
   if ((rc == 0)); then
     log "Python ✓ $fname"
+  elif ((rc == 5)); then
+    # pytest exit 5 = nothing collected: the whole module skipped, e.g. an
+    # importorskip for an optional dep (scipy) not in the Valgrind venv.
+    log "Python - $fname (no tests collected; optional deps skipped)"
   elif ((rc == 124 || rc == 137)); then
     err "Python ✗ TIMEOUT/KILLED ${py_timeout}s: $fname"
   else

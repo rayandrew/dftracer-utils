@@ -1,11 +1,27 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <doctest/doctest.h>
 
 #include <fstream>
 #include <memory>
+#include <vector>
 
 using namespace dftracer::utils::utilities::filesystem;
+
+// Run a scanner in a Runtime, injecting its scope. Re-raises any exception.
+template <typename Scanner, typename Input>
+static std::vector<FileEntry> run_scan(Scanner& scanner, const Input& input) {
+    dftracer::utils::Runtime rt;
+    std::vector<FileEntry> result;
+    rt.run_blocking("scan",
+                    [&](dftracer::utils::CoroScope& s)
+                        -> dftracer::utils::coro::CoroTask<void> {
+                        result = co_await scanner(s, input);
+                    });
+    return result;
+}
 
 // Helper to create a test directory structure
 class TestDirectoryFixture {
@@ -67,7 +83,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Basic Operations") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
     }
@@ -75,7 +91,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Basic Operations") {
     SUBCASE("Scan empty directory") {
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.empty());
     }
@@ -88,7 +104,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Basic Operations") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 2);
         for (const auto& entry : result) {
@@ -104,7 +120,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Basic Operations") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt", ".dat"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
         for (const auto& entry : result) {
@@ -125,7 +141,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Pattern Matching") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".pdf"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 1);
         CHECK(result[0].path.filename() == "document.pdf");
@@ -139,7 +155,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Pattern Matching") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".tar.gz", ".pfw.gz"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 2);
         for (const auto& entry : result) {
@@ -155,7 +171,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Pattern Matching") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {"*.txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 2);
         for (const auto& entry : result) {
@@ -170,7 +186,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Pattern Matching") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {"README.md"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 1);
         CHECK(result[0].path.filename() == "README.md");
@@ -182,7 +198,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Pattern Matching") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".log"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.empty());
     }
@@ -198,7 +214,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Pattern Matching") {
             fixture.get_path(),
             {".pfw", ".pfw.gz", "README.md", "*.txt"},
             false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 4);
     }
@@ -216,7 +232,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Recursive Scanning") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, true};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
         for (const auto& entry : result) {
@@ -232,12 +248,12 @@ TEST_CASE("PatternDirectoryScannerUtility - Recursive Scanning") {
         // Non-recursive
         PatternDirectoryScannerUtilityInput non_recursive{
             fixture.get_path(), {".txt"}, false};
-        auto non_recursive_result = scanner->process(non_recursive).get();
+        auto non_recursive_result = run_scan(*scanner, non_recursive);
 
         // Recursive
         PatternDirectoryScannerUtilityInput recursive{
             fixture.get_path(), {".txt"}, true};
-        auto recursive_result = scanner->process(recursive).get();
+        auto recursive_result = run_scan(*scanner, recursive);
 
         CHECK(non_recursive_result.size() == 1);
         CHECK(recursive_result.size() == 3);
@@ -251,7 +267,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Recursive Scanning") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".pfw"}, true};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
         for (const auto& entry : result) {
@@ -270,7 +286,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Directory Filtering") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         // Should only find the real file, not the directory
         CHECK(result.size() == 1);
@@ -286,7 +302,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Directory Filtering") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         // Should only match regular files
         CHECK(result.size() == 2);
@@ -358,7 +374,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Edge Cases") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {""}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         // Empty pattern should match all files
         CHECK(result.size() == 2);
@@ -371,7 +387,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Edge Cases") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {"README", "LICENSE"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 2);
     }
@@ -382,7 +398,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Edge Cases") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         // Should match .txt files (behavior may be platform-dependent for case)
         // On case-insensitive filesystems (macOS default), may match both
@@ -406,7 +422,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Edge Cases") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 1);
         CHECK(result[0].path.filename() == "file.v1.0.txt");
@@ -419,7 +435,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Edge Cases") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 1);
         CHECK(result[0].path.extension() == ".txt");
@@ -437,7 +453,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Edge Cases") {
 
         PatternDirectoryScannerUtilityInput input{fixture.get_path(),
                                                   many_patterns, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
     }
@@ -449,7 +465,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Edge Cases") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
     }
@@ -472,7 +488,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Performance") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".txt"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == num_txt_files);
     }
@@ -490,7 +506,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Performance") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".pfw"}, true};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 5);
     }
@@ -509,7 +525,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Real World Scenarios") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".pfw", ".pfw.gz"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
     }
@@ -523,7 +539,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Real World Scenarios") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".cpp", ".h"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
     }
@@ -536,7 +552,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Real World Scenarios") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {"*.log"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 4);
     }
@@ -549,7 +565,7 @@ TEST_CASE("PatternDirectoryScannerUtility - Real World Scenarios") {
 
         PatternDirectoryScannerUtilityInput input{
             fixture.get_path(), {".tar", ".tar.gz", ".zip"}, false};
-        auto result = scanner->process(input).get();
+        auto result = run_scan(*scanner, input);
 
         CHECK(result.size() == 3);
     }

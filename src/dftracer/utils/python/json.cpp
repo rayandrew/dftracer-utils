@@ -5,9 +5,9 @@
 #include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 
-using dftracer::utils::utilities::composites::dft::ArgsValueProxy;
+using dftracer::utils::trace::ArgsValueProxy;
 
-PyObject *args_value_to_pyobject(const ArgsValue &v) {
+PyObject *dftracer::utils::python::args_value_to_pyobject(const ArgsValue &v) {
     return std::visit(
         [](const auto &val) -> PyObject * {
             using T = std::decay_t<decltype(val)>;
@@ -86,7 +86,7 @@ static PyObject *JsonDictValue_subscript(JsonDictValueObject *self,
         PyErr_SetObject(PyExc_KeyError, key);
         return NULL;
     }
-    return args_value_to_pyobject(it->second);
+    return dftracer::utils::python::args_value_to_pyobject(it->second);
 }
 
 static PyObject *JsonDictValue_keys(JsonDictValueObject *self,
@@ -124,7 +124,7 @@ static PyObject *JsonDictValue_values(JsonDictValueObject *self,
 
     const auto &map = get_map(self);
     for (const auto &[k, v] : map.raw()) {
-        PyObject *val = args_value_to_pyobject(v);
+        PyObject *val = dftracer::utils::python::args_value_to_pyobject(v);
         if (val) {
             PyList_Append(list, val);
             Py_DECREF(val);
@@ -159,7 +159,7 @@ static PyObject *JsonDictValue_items(JsonDictValueObject *self,
     const auto &map = get_map(self);
     for (const auto &[k, v] : map.raw()) {
         PyObject *key = PyUnicode_FromStringAndSize(k.data(), k.size());
-        PyObject *val = args_value_to_pyobject(v);
+        PyObject *val = dftracer::utils::python::args_value_to_pyobject(v);
         if (key && val) {
             PyObject *tuple = PyTuple_Pack(2, key, val);
             if (tuple) {
@@ -230,7 +230,7 @@ static PyObject *JsonDictValue_get(JsonDictValueObject *self, PyObject *args) {
         Py_INCREF(default_val);
         return default_val;
     }
-    return args_value_to_pyobject(it->second);
+    return dftracer::utils::python::args_value_to_pyobject(it->second);
 }
 
 static int JsonDictValue_contains(JsonDictValueObject *self, PyObject *key) {
@@ -256,7 +256,7 @@ static PyObject *JsonDictValue_to_dict(JsonDictValueObject *self,
     const auto &map = get_map(self);
     for (const auto &[k, v] : map.raw()) {
         PyObject *key = PyUnicode_FromStringAndSize(k.data(), k.size());
-        PyObject *val = args_value_to_pyobject(v);
+        PyObject *val = dftracer::utils::python::args_value_to_pyobject(v);
         if (!key || !val) {
             Py_XDECREF(key);
             Py_XDECREF(val);
@@ -278,7 +278,8 @@ static PyObject *JsonDictValue_to_dict(JsonDictValueObject *self,
             }
             for (const auto &[k, v] : ev.args.raw()) {
                 PyObject *key = PyUnicode_FromStringAndSize(k.data(), k.size());
-                PyObject *val = args_value_to_pyobject(v);
+                PyObject *val =
+                    dftracer::utils::python::args_value_to_pyobject(v);
                 if (!key || !val) {
                     Py_XDECREF(key);
                     Py_XDECREF(val);
@@ -311,15 +312,15 @@ static PySequenceMethods JsonDictValue_as_sequence = {
 };
 
 static PyMethodDef JsonDictValue_methods[] = {
-    {"keys", DFT_PYCFUNCTION(JsonDictValue_keys), METH_NOARGS,
+    {"keys", DFTU_PYCFUNCTION(JsonDictValue_keys), METH_NOARGS,
      "Return list of keys."},
-    {"values", DFT_PYCFUNCTION(JsonDictValue_values), METH_NOARGS,
+    {"values", DFTU_PYCFUNCTION(JsonDictValue_values), METH_NOARGS,
      "Return list of values."},
-    {"items", DFT_PYCFUNCTION(JsonDictValue_items), METH_NOARGS,
+    {"items", DFTU_PYCFUNCTION(JsonDictValue_items), METH_NOARGS,
      "Return list of (key, value) pairs."},
-    {"get", DFT_PYCFUNCTION(JsonDictValue_get), METH_VARARGS,
+    {"get", DFTU_PYCFUNCTION(JsonDictValue_get), METH_VARARGS,
      "Get value by key with optional default."},
-    {"to_dict", DFT_PYCFUNCTION(JsonDictValue_to_dict), METH_NOARGS,
+    {"to_dict", DFTU_PYCFUNCTION(JsonDictValue_to_dict), METH_NOARGS,
      "Convert to a regular Python dict."},
     {NULL}};
 
@@ -355,7 +356,7 @@ PyTypeObject JsonDictValueType = {
     JsonDictValue_methods, /* tp_methods */
 };
 
-int init_json_dict_value(PyObject *m) {
+int dftracer::utils::python::init_json_dict_value(PyObject *m) {
     if (register_type(m, &JsonDictValueType, "JsonDictValue") < 0) return -1;
     return 0;
 }

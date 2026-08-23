@@ -81,7 +81,7 @@ docs/build/
 docs/doxygen/
 docs/source/**/_autosummary/
 docs/source/_generated/
-docs/source/cpp_api/api/
+docs/source/cpp_api/_generated/
 
 # LSP
 compile_commands.json
@@ -103,3 +103,4 @@ wheelhouse/
 
 # Local GCC14 repro scratch script
 .gcc14_repro.sh
+.venv_docs/

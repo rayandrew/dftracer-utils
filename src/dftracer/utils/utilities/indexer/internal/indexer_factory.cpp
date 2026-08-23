@@ -1,6 +1,6 @@
 #include <dftracer/utils/core/common/format_detector.h>
 #include <dftracer/utils/core/common/logging.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/internal/gzip/gzip_indexer.h>
 #include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
 
@@ -41,16 +41,14 @@ std::string IndexerFactory::generate_index_path(const std::string &archive_path,
 
     switch (format) {
         case ArchiveFormat::GZIP:
-            return composites::dft::internal::determine_index_path(archive_path,
-                                                                   "");
+            return trace::internal::determine_index_path(archive_path, "");
 
         case ArchiveFormat::UNKNOWN:
         default:
             DFTRACER_UTILS_LOG_WARN(
                 "Unknown format for %s, using root-local .dftindex",
                 archive_path.c_str());
-            return composites::dft::internal::determine_index_path(archive_path,
-                                                                   "");
+            return trace::internal::determine_index_path(archive_path, "");
     }
 }
 

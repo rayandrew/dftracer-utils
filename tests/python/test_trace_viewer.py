@@ -6,15 +6,15 @@ import json
 
 import pyarrow as pa
 
-import dftracer.utils as dft_utils
-from dftracer.utils.dftracer_utils_ext import TraceViewer
+import dftracer.utils as dftu_utils
+from dftracer.utils import TraceViewer
 
 from .common import Environment
 
 
 def _indexed(env):
     gz = env.create_test_gzip_file()
-    with dft_utils.Indexer(files=[gz]) as indexer:
+    with dftu_utils.Indexer(files=[gz]) as indexer:
         indexer.ensure_indexed()
     return gz
 
@@ -115,7 +115,7 @@ class TestTraceViewer:
             out = str(tmp_path / "events.pfw.gz")
             TraceViewer(gz).filter('cat == "STDIO"').export_trace(out)
             # The exported trace is a valid, re-indexable dftracer trace.
-            with dft_utils.Indexer(files=[out], index_dir=str(tmp_path)) as ix:
+            with dftu_utils.Indexer(files=[out], index_dir=str(tmp_path)) as ix:
                 ix.ensure_indexed()
             reread = TraceViewer(out, index_path=str(tmp_path)).statistics()
             assert 0 < reread["duration_count"] < 300
@@ -164,12 +164,12 @@ class TestTraceViewer:
         """Distributed partial+merge equals a single collect (incl. mean/std)."""
         with Environment(lines=300) as env:
             files = [env.create_test_gzip_file(f"f{k}/t{k}.pfw.gz") for k in range(3)]
-            with dft_utils.Indexer(files=files, index_dir=env.temp_dir) as ix:
+            with dftu_utils.Indexer(files=files, index_dir=env.temp_dir) as ix:
                 ix.ensure_indexed()
 
             def view(fs):
                 return (
-                    dft_utils.TraceViewer(fs, index_path=env.temp_dir)
+                    dftu_utils.TraceViewer(fs, index_path=env.temp_dir)
                     .group_by("cat")
                     .agg("count", "mean:dur", "std:dur")
                 )
@@ -225,7 +225,7 @@ class TestTraceViewer:
         carries the cache terminals; a raw TraceViewer cannot reach them."""
         import pytest
 
-        from dftracer.utils.dftracer_utils_ext import AggregatedTraceViewer
+        from dftracer.utils import AggregatedTraceViewer
 
         with Environment(lines=100) as env:
             gz = _indexed(env)
@@ -253,11 +253,11 @@ class TestTraceViewer:
                         '{"ph":"X","name":"%s","cat":"POSIX","pid":1,"tid":1,'
                         '"ts":%d,"dur":%d,"args":{}}\n' % (name, 1000 + i, dur)
                     )
-        with dft_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
             ix.ensure_indexed()
         df = (
             pa.table(
-                dft_utils.TraceViewer(gz, index_path=str(tmp_path))
+                dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
                 .group_by("io_cat")
                 .agg("count", "sumsq:dur")
                 .collect()
@@ -279,10 +279,10 @@ class TestTraceViewer:
                     '{"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,'
                     '"ts":%d,"dur":%d,"args":{"ret":%d}}\n' % (1000 + i, 10 + i, 10 * (i + 1))
                 )
-        with dft_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
             ix.ensure_indexed()
         tbl = pa.table(
-            dft_utils.TraceViewer(gz, index_path=str(tmp_path))
+            dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
             .group_by("cat")
             .agg("sum:size")
             .collect()
@@ -297,10 +297,10 @@ class TestTraceViewer:
                     '{"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,'
                     '"ts":%d,"dur":%d,"args":{"size":%d}}\n' % (1000 + i, 10 + i, 100 * (i + 1))
                 )
-        with dft_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
             ix.ensure_indexed()
         tbl = pa.table(
-            dft_utils.TraceViewer(gz, index_path=str(tmp_path))
+            dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
             .group_by("cat")
             .agg("count")
             .agg_numeric_args()
@@ -320,7 +320,7 @@ class TestTraceViewer:
         with Environment(lines=100) as env:
             gz = _indexed(env)
             tbl = pa.table(
-                dft_utils.TraceViewer(gz)
+                dftu_utils.TraceViewer(gz)
                 .phase(Phase.EVENTS)
                 .group_by(GroupKey.CAT)
                 .agg(AggOp.COUNT.of(""), AggOp.MEAN.of("dur"))
@@ -343,10 +343,10 @@ class TestTraceViewer:
                     '{"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,'
                     '"ts":%d,"dur":2,"args":{}}\n' % (100 + i)
                 )
-        with dft_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
             ix.ensure_indexed()
 
-        tv = dft_utils.TraceViewer(gz, index_path=str(tmp_path))
+        tv = dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
         native = pa.table(tv.group_by("cat").agg("mean:dur").collect())
         assert native.column("mean_dur").to_pylist()[0] == 2.0  # seconds
 

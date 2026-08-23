@@ -1,6 +1,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/filesystem.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <doctest/doctest.h>
 #include <sys/wait.h>
 #include <testing_utilities.h>
@@ -25,7 +25,7 @@ void set_test_library_path(const std::string& binary) {
     ::setenv("LD_LIBRARY_PATH", lib_path.c_str(), 1);
 }
 
-std::string create_pfw_gz(dft_utils_test::TestEnvironment& env, int num_events,
+std::string create_pfw_gz(dftu_utils_test::TestEnvironment& env, int num_events,
                           int id) {
     auto trace_gz = env.create_dft_test_gzip_file(num_events);
     if (trace_gz.empty()) return "";
@@ -94,7 +94,7 @@ TEST_SUITE("DFTracerIndex") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 100, 0);
@@ -103,8 +103,8 @@ TEST_SUITE("DFTracerIndex") {
         int rc = run_index(binary, {"-d", env.get_dir(), "--force"});
         CHECK(rc == 0);
 
-        CHECK(fs::exists(dftracer::utils::utilities::composites::dft::internal::
-                             determine_index_path(f, "")));
+        CHECK(fs::exists(
+            dftracer::utils::trace::internal::determine_index_path(f, "")));
     }
 
     TEST_CASE("build index with custom index-dir") {
@@ -114,7 +114,7 @@ TEST_SUITE("DFTracerIndex") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 100, 0);
@@ -128,8 +128,8 @@ TEST_SUITE("DFTracerIndex") {
             binary, {"-d", env.get_dir(), "--force", "--index-dir", idx_dir});
         CHECK(rc == 0);
 
-        CHECK(fs::exists(dftracer::utils::utilities::composites::dft::internal::
-                             determine_index_path(f, idx_dir)));
+        CHECK(fs::exists(dftracer::utils::trace::internal::determine_index_path(
+            f, idx_dir)));
     }
 
     TEST_CASE("force rebuild runs twice without error") {
@@ -139,7 +139,7 @@ TEST_SUITE("DFTracerIndex") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto f = create_pfw_gz(env, 100, 0);
@@ -147,13 +147,13 @@ TEST_SUITE("DFTracerIndex") {
 
         int rc1 = run_index(binary, {"-d", env.get_dir(), "--force"});
         CHECK(rc1 == 0);
-        REQUIRE(fs::exists(dftracer::utils::utilities::composites::dft::
-                               internal::determine_index_path(f, "")));
+        REQUIRE(fs::exists(
+            dftracer::utils::trace::internal::determine_index_path(f, "")));
 
         // Second run with --force must overwrite successfully.
         int rc2 = run_index(binary, {"-d", env.get_dir(), "--force"});
         CHECK(rc2 == 0);
-        CHECK(fs::exists(dftracer::utils::utilities::composites::dft::internal::
-                             determine_index_path(f, "")));
+        CHECK(fs::exists(
+            dftracer::utils::trace::internal::determine_index_path(f, "")));
     }
 }

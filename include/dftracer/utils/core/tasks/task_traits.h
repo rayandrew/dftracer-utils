@@ -20,7 +20,7 @@ namespace detail {
 // Step 1: Decompose callable signature (call_traits)
 //
 // Extracts return_type, args_tuple, and arity from any callable.
-// 6 member-function-pointer specializations (const/non-const × noexcept)
+// 6 member-function-pointer specializations (const/non-const x noexcept)
 // + 2 function-pointer specializations + callable-object delegation.
 // ============================================================================
 
@@ -38,35 +38,35 @@ struct call_traits_base {
     static constexpr std::size_t arity = sizeof...(Args);
 };
 
-// const member function (covers most lambdas)
+/// const member function (covers most lambdas)
 template <typename C, typename R, typename... Args>
 struct call_traits<R (C::*)(Args...) const> : call_traits_base<C, R, Args...> {
 };
 
-// non-const member function (mutable lambdas)
+/// non-const member function (mutable lambdas)
 template <typename C, typename R, typename... Args>
 struct call_traits<R (C::*)(Args...)> : call_traits_base<C, R, Args...> {};
 
-// const noexcept member function (GCC 14 treats noexcept as part of type)
+/// const noexcept member function (GCC 14 treats noexcept as part of type)
 template <typename C, typename R, typename... Args>
 struct call_traits<R (C::*)(Args...) const noexcept>
     : call_traits_base<C, R, Args...> {};
 
-// non-const noexcept member function
+/// non-const noexcept member function
 template <typename C, typename R, typename... Args>
 struct call_traits<R (C::*)(Args...) noexcept>
     : call_traits_base<C, R, Args...> {};
 
-// Function pointer
+/// Function pointer
 template <typename R, typename... Args>
 struct call_traits<R (*)(Args...)> : call_traits_base<void, R, Args...> {};
 
-// Function pointer (noexcept)
+/// Function pointer (noexcept)
 template <typename R, typename... Args>
 struct call_traits<R (*)(Args...) noexcept>
     : call_traits_base<void, R, Args...> {};
 
-// Callable objects: delegate to operator()
+/// Callable objects: delegate to operator()
 template <typename F>
 struct call_traits<F, std::void_t<decltype(&std::decay_t<F>::operator())>>
     : call_traits<decltype(&std::decay_t<F>::operator())> {};
@@ -82,45 +82,45 @@ struct call_traits<F, std::void_t<decltype(&std::decay_t<F>::operator())>>
 template <typename ArgsTuple>
 struct analyze_args;
 
-// () -> void input, no context
+/// () -> void input, no context
 template <>
 struct analyze_args<std::tuple<>> {
     using input_type = void;
     static constexpr bool has_context = false;
 };
 
-// (CoroScope) -> void input, has context
-// Note: std::decay_t<CoroScope&> is CoroScope
+/// (CoroScope) -> void input, has context
+/// Note: std::decay_t<CoroScope&> is CoroScope
 template <>
 struct analyze_args<std::tuple<CoroScope>> {
     using input_type = void;
     static constexpr bool has_context = true;
 };
 
-// (T) -> T input, no context
-// This is less specialized than (CoroScope) above, so no ambiguity.
+/// (T) -> T input, no context
+/// This is less specialized than (CoroScope) above, so no ambiguity.
 template <typename T>
 struct analyze_args<std::tuple<T>> {
     using input_type = T;
     static constexpr bool has_context = false;
 };
 
-// (CoroScope, T) -> T input, has context
+/// (CoroScope, T) -> T input, has context
 template <typename T>
 struct analyze_args<std::tuple<CoroScope, T>> {
     using input_type = T;
     static constexpr bool has_context = true;
 };
 
-// (CoroScope, T1, T2, ...) -> tuple<T1,T2,...> input, has context
-// More specialized than (T1, T2, Rest...) below due to CoroScope match.
+/// (CoroScope, T1, T2, ...) -> tuple<T1,T2,...> input, has context
+/// More specialized than (T1, T2, Rest...) below due to CoroScope match.
 template <typename T1, typename T2, typename... Rest>
 struct analyze_args<std::tuple<CoroScope, T1, T2, Rest...>> {
     using input_type = std::tuple<T1, T2, Rest...>;
     static constexpr bool has_context = true;
 };
 
-// (T1, T2, ...) -> tuple<T1,T2,...> input, no context
+/// (T1, T2, ...) -> tuple<T1,T2,...> input, no context
 template <typename T1, typename T2, typename... Rest>
 struct analyze_args<std::tuple<T1, T2, Rest...>> {
     using input_type = std::tuple<T1, T2, Rest...>;
@@ -169,8 +169,8 @@ struct function_traits {
     static constexpr std::size_t arity = CT::arity;
     static constexpr bool is_generic = false;
 
-    // For with_combiner: builds std::function from raw args (preserving
-    // original qualifiers like const& -- NOT decayed)
+    /// For with_combiner: builds std::function from raw args (preserving
+    /// original qualifiers like const& -- NOT decayed)
     template <typename RetType>
     using as_std_function = typename make_std_function_from_tuple<
         RetType, typename CT::raw_args_tuple>::type;

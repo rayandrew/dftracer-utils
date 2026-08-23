@@ -33,7 +33,7 @@
 #include <dftracer/utils/core/common/byte_view.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/string_intern.h>
-#include <dftracer/utils/utilities/composites/dft/args_map.h>
+#include <dftracer/utils/trace/args_map.h>
 #include <dftracer/utils/utilities/fileio/parallel/parallel_writer.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -50,8 +50,8 @@ namespace dftracer::utils::call_tree {
 
 namespace {
 
-using utilities::composites::dft::ArgsMap;
-using utilities::composites::dft::ArgsValueProxy;
+using trace::ArgsMap;
+using trace::ArgsValueProxy;
 
 enum ArgTypeTag : std::uint8_t {
     ARG_STRING = 0,

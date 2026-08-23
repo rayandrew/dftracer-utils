@@ -20,7 +20,7 @@ template <typename T>
 dftracer::utils::Runtime *resolve_runtime(T *self) {
     if (self->runtime_obj)
         return ((RuntimeObject *)self->runtime_obj)->runtime.get();
-    return get_default_runtime();
+    return dftracer::utils::python::get_default_runtime();
 }
 
 template <typename T>
@@ -76,11 +76,11 @@ bool run_blocking(F &&body) {
     } catch (const dftracer::utils::DFTUtilsException &e) {
         failed = true;
         error_msg = e.what();
-        exc_type = py_error_type_for(e.code());
+        exc_type = dftracer::utils::python::py_error_type_for(e);
     } catch (const std::invalid_argument &e) {
         failed = true;
         error_msg = e.what();
-        exc_type = g_dft_value_error;
+        exc_type = dftracer::utils::python::g_dft_value_error;
     } catch (const std::exception &e) {
         failed = true;
         error_msg = e.what();
@@ -89,7 +89,8 @@ bool run_blocking(F &&body) {
         error_msg = "unknown C++ exception";
     }
     Py_END_ALLOW_THREADS if (failed) {
-        if (exc_type == nullptr) exc_type = g_dft_error;
+        if (exc_type == nullptr)
+            exc_type = dftracer::utils::python::g_dft_error;
         PyErr_SetString(exc_type ? exc_type : PyExc_RuntimeError,
                         error_msg.c_str());
         return false;
@@ -111,9 +112,11 @@ bool run_blocking_r(F &&body, T &out) {
         try {
             std::rethrow_exception(eptr);
         } catch (const std::exception &e) {
-            set_typed_py_error(e);
+            dftracer::utils::python::set_typed_py_error(e);
         } catch (...) {
-            PyErr_SetString(g_dft_error ? g_dft_error : PyExc_RuntimeError,
+            PyErr_SetString(dftracer::utils::python::g_dft_error
+                                ? dftracer::utils::python::g_dft_error
+                                : PyExc_RuntimeError,
                             "unknown C++ exception");
         }
         return false;

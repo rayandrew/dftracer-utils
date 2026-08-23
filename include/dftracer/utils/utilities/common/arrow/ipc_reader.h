@@ -13,7 +13,7 @@
 #include <vector>
 
 namespace dftracer::utils::utilities::common::arrow::detail {
-// Store block info separately from decoder state
+/// Store block info separately from decoder state
 struct IpcBlock {
     std::int64_t offset;
     std::int32_t metadata_length;
@@ -48,43 +48,43 @@ class IpcReader {
     IpcReader(IpcReader&& other) noexcept;
     IpcReader& operator=(IpcReader&& other) noexcept;
 
-    // Open file for reading. Returns 0 on success.
+    /// Open file for reading. Returns 0 on success.
     int open(const std::string& path);
 
-    // Close the file.
+    /// Close the file.
     void close();
 
     bool is_open() const noexcept { return mapped_data_ != nullptr; }
 
-    // Number of record batches in the file.
+    /// Number of record batches in the file.
     std::size_t num_batches() const noexcept { return num_batches_; }
 
-    // Total rows across all batches.
+    /// Total rows across all batches.
     std::int64_t total_rows() const noexcept { return total_rows_; }
 
-    // Read a single batch by index. Returns empty result on error.
+    /// Read a single batch by index. Returns empty result on error.
     ArrowExportResult read_batch(std::size_t index);
 
-    // Read all batches and return as a vector.
+    /// Read all batches and return as a vector.
     std::vector<ArrowExportResult> read_all();
 
-    // Iterate over all batches, calling callback for each.
-    // Returns 0 on success, non-zero if callback returns non-zero or on error.
+    /// Iterate over all batches, calling callback for each.
+    /// Returns 0 on success, non-zero if callback returns non-zero or on error.
     int for_each_batch(std::function<int(ArrowExportResult&)> callback);
 
    private:
-    // Memory-mapped file data
+    /// Memory-mapped file data
     void* mapped_data_ = nullptr;
     std::size_t mapped_size_ = 0;
     int fd_ = -1;
 
-    // Decoder state
-    void* decoder_ = nullptr;  // ArrowIpcDecoder*
+    /// Decoder state
+    void* decoder_ = nullptr;  ///< ArrowIpcDecoder*
 
-    // Shared schema (not deep-copied per batch)
-    std::shared_ptr<void> shared_schema_;  // ArrowSchema*, ref-counted
+    /// Shared schema (not deep-copied per batch)
+    std::shared_ptr<void> shared_schema_;  ///< ArrowSchema*, ref-counted
 
-    // Block metadata
+    /// Block metadata
     std::vector<detail::IpcBlock> blocks_;
     std::size_t num_batches_ = 0;
     std::int64_t total_rows_ = 0;

@@ -9,8 +9,8 @@ namespace dftracer::utils {
 
 enum class FilesystemKind {
     UNKNOWN,
-    LOCAL,  // disk-backed local FS: ext4, xfs, btrfs, apfs, ...
-    TMPFS,  // RAM-backed: tmpfs / ramfs (e.g. /dev/shm)
+    LOCAL,  ///< disk-backed local FS: ext4, xfs, btrfs, apfs, ...
+    TMPFS,  ///< RAM-backed: tmpfs / ramfs (e.g. /dev/shm)
     NFS,
     LUSTRE,
     GPFS,
@@ -57,8 +57,8 @@ struct MountInfo {
 std::vector<MountInfo> list_mounts() noexcept;
 
 struct StripeInfo {
-    std::size_t size = 0;   // bytes per stripe, 0 if unknown/not striped
-    std::size_t count = 0;  // number of stripes, 0 if unknown/not striped
+    std::size_t size = 0;   ///< bytes per stripe, 0 if unknown/not striped
+    std::size_t count = 0;  ///< number of stripes, 0 if unknown/not striped
 };
 
 /// Lustre stripe geometry for `path` (or its parent when absent). Returns an

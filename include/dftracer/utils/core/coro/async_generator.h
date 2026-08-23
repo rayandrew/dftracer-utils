@@ -31,7 +31,7 @@ struct is_async_generator<AsyncGenerator<T>> : std::true_type {};
 template <typename T>
 inline constexpr bool is_async_generator_v = is_async_generator<T>::value;
 
-// F() -> AsyncGenerator<T> (zero-arg factory)
+/// F() -> AsyncGenerator<T> (zero-arg factory)
 template <typename F, typename T, typename = void>
 struct is_generator_factory : std::false_type {};
 
@@ -46,7 +46,7 @@ template <typename F, typename T>
 inline constexpr bool is_generator_factory_v =
     is_generator_factory<F, T>::value;
 
-// F(T) -> AsyncGenerator<U> (one-arg, returns generator)
+/// F(T) -> `AsyncGenerator<U>` (one-arg, returns generator)
 template <typename F, typename T, typename = void>
 struct is_flat_map_fn : std::false_type {};
 
@@ -58,7 +58,7 @@ struct is_flat_map_fn<
 template <typename F, typename T>
 inline constexpr bool is_flat_map_fn_v = is_flat_map_fn<F, T>::value;
 
-// F(T) -> U where U is NOT an AsyncGenerator (one-arg, returns plain value)
+/// F(T) -> U where U is NOT an AsyncGenerator (one-arg, returns plain value)
 template <typename F, typename T, typename = void>
 struct is_map_fn : std::false_type {};
 

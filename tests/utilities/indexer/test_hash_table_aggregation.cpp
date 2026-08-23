@@ -4,8 +4,8 @@
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_config.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
+#include <dftracer/utils/trace/aggregators/aggregation_config.h>
+#include <dftracer/utils/trace/indexing/resolve_and_build.h>
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <doctest/doctest.h>
@@ -15,12 +15,9 @@
 #include <string>
 
 using namespace dftracer::utils;
-using dftracer::utils::utilities::composites::dft::aggregators::
-    AggregationConfig;
-using dftracer::utils::utilities::composites::dft::indexing::
-    resolve_and_build_index;
-using dftracer::utils::utilities::composites::dft::indexing::
-    ResolveAndBuildInput;
+using dftracer::utils::trace::aggregators::AggregationConfig;
+using dftracer::utils::trace::indexing::resolve_and_build_index;
+using dftracer::utils::trace::indexing::ResolveAndBuildInput;
 using dftracer::utils::utilities::indexer::IndexDatabase;
 
 namespace {
@@ -71,7 +68,7 @@ TEST_SUITE("hash_table_aggregation") {
     // must still populate the file hash table, or fhash -> file_name never
     // resolves.
     TEST_CASE("aggregation build populates the file hash table") {
-        auto dir = dft_utils_test::make_unique_test_path("hashagg");
+        auto dir = dftu_utils_test::make_unique_test_path("hashagg");
         fs::create_directories(dir);
         const std::string gz = (dir / "trace.pfw.gz").string();
         const std::string index_dir = (dir / "idx").string();

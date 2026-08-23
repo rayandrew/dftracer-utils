@@ -1,8 +1,10 @@
+:description: Reference for the Python Indexer and CheckpointIndexer: resolve and build the .dftindex store and query checkpoints, bloom filters, and aggregation.
+
 Indexer Module
 ==============
 
 The indexer module provides functionality for indexing DFTracer trace files
-(``.pfw`` / ``.pfw.gz``) backed by a ``.dftindex`` RocksDB store. The
+(``.pfw.gz``) backed by a ``.dftindex`` RocksDB store. The
 top-level :class:`~dftracer.utils.Indexer` follows a ``resolve`` / ``build``
 pattern over a directory or file list and exposes the higher index tiers
 (checkpoints, bloom filters, aggregation).
@@ -12,16 +14,23 @@ interface used for checkpoint-level operations.
 Indexer Class
 -------------
 
-.. autoclass:: dftracer.utils.Indexer(directory: str = '', files: list[str] | None = None, index_dir: str = '', require_checkpoint: bool = True, require_bloom: bool = True, require_aggregation: bool | AggregationConfig | None = None, checkpoint_size: int = 33554432, parallelism: int = 0, force_rebuild: bool = False, runtime: Runtime | None = None)
-   :members: resolve, build, ensure_indexed, get_checkpoint_indexer, get_hash_table, query_file_pids, query_all_file_pids, query_file_info, iter_aggregation, iter_arrow_dfanalyzer, iter_arrow_dfanalyzer_all
+Type relationships
+------------------
+
+How the indexer types relate:
+
+.. mermaid:: /_generated/py_indexer.mmd
+
+.. autoclass:: dftracer.utils.Indexer(directory: str = '', files: list[str] | None = None, index_dir: str = '', require_checkpoint: bool = True, require_bloom: bool = True, build_bloom: bool = True, require_aggregation: bool | AggregationConfig | None = None, checkpoint_size: int = 33554432, parallelism: int = 0, force_rebuild: bool = False, runtime: Runtime | None = None)
+   :members: resolve, build, ensure_indexed, get_checkpoint_indexer, get_hash_table, query_file_pids, query_all_file_pids, query_file_info
    :undoc-members:
    :show-inheritance:
 
 Aggregation is enabled by passing ``require_aggregation=True`` (defaults) or
 ``require_aggregation=AggregationConfig(...)``. The aggregation knobs
 (``time_interval_ms``, ``group_keys``, ``custom_metric_fields``,
-``compute_percentiles``) are fields of :class:`~dftracer.utils.AggregationConfig`,
-not direct ``Indexer`` arguments.
+``compute_percentiles``, ``group_by_file``) are fields of
+:class:`~dftracer.utils.AggregationConfig`, not direct ``Indexer`` arguments.
 
 AggregationConfig
 -----------------
@@ -59,46 +68,13 @@ CheckpointIndexer Class
 Distributed Index (SST-based)
 -----------------------------
 
-The distributed-index path lets the coordinator pre-register files, hand out
-``file_id`` ranges to workers, and bulk-ingest worker-produced SST artifacts
-back into the unified ``.dftindex`` store.
-
-IndexDatabase
-~~~~~~~~~~~~~
-
-.. autoclass:: dftracer.utils.dftracer_utils_ext.IndexDatabase(index_path: str)
-   :members: init_schema, register_files, reserve_file_id_range, bulk_ingest, rebuild_root_summaries, write_agg_global_config, write_agg_file_markers, write_aggregation_tracker
-   :undoc-members:
-
-SstArtifactRegistry
-~~~~~~~~~~~~~~~~~~~
-
-.. autoclass:: dftracer.utils.dftracer_utils_ext.SstArtifactRegistry
-   :members: append
-   :undoc-members:
-
-Module-level Functions
-----------------------
-
-.. autofunction:: dftracer.utils.dftracer_utils_ext.scan_files
-
-.. autofunction:: dftracer.utils.dftracer_utils_ext.build_sst_batch
-
-.. autofunction:: dftracer.utils.dftracer_utils_ext.plan_lpt_partition
-
-.. autofunction:: dftracer.utils.dftracer_utils_ext.enumerate_gzip_members
-
-.. autofunction:: dftracer.utils.dftracer_utils_ext.plan_work_units
-
-.. autofunction:: dftracer.utils.dftracer_utils_ext.move_artifacts
-
-.. autofunction:: dftracer.utils.dftracer_utils_ext.enable_aggregation_deterministic_ids
-
-Dask Helpers
-------------
-
-The ``dftracer.utils.dask`` module provides Dask-distributed drivers built on
-the SST-based primitives above:
+The distributed-index path lets a coordinator pre-register files, hand out
+``file_id`` ranges to Dask workers, and bulk-ingest worker-produced SST
+artifacts back into the unified ``.dftindex`` store. The public entry point is
+:func:`~dftracer.utils.dask.distributed_index`; it pre-registers files, fans
+one indexing task per worker, and ingests the resulting SSTs. The scan,
+LPT-partition, and SST-registry primitives it drives are internal to the
+native extension and have no public Python path.
 
 .. autofunction:: dftracer.utils.dask.distributed_index
 

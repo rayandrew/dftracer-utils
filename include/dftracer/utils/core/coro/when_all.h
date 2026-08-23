@@ -26,8 +26,8 @@ namespace dftracer::utils::coro {
 /// Coroutine that destroys its own frame on completion.
 struct FireAndForget {
     struct promise_type {
-        // Route wrapper coroutine frames through ObjectPool like every other
-        // promise (PromiseBase in task.h, CoroPromise in coro.h).
+        /// Route wrapper coroutine frames through ObjectPool like every other
+        /// promise (PromiseBase in task.h, CoroPromise in coro.h).
         static void* operator new(std::size_t size) {
             return ObjectPool::instance().allocate(size);
         }
@@ -90,9 +90,9 @@ class WhenAllVectorAwaitable {
         : state_(std::make_shared<WhenAllVectorState<Awaitable>>(
               std::move(awaitables))) {}
 
-    // Always return false: wrapper coroutines are launched in
-    // await_suspend, so we must always enter it.  If all sub-awaitables
-    // complete synchronously, await_suspend returns false (no suspend).
+    /// Always return false: wrapper coroutines are launched in
+    /// await_suspend, so we must always enter it.  If all sub-awaitables
+    /// complete synchronously, await_suspend returns false (no suspend).
     bool await_ready() { return false; }
 
     template <typename Promise>
@@ -221,9 +221,9 @@ class WhenAllVectorAwaitable<Awaitable> {
         : state_(std::make_shared<WhenAllVectorState<Awaitable>>(
               std::move(awaitables))) {}
 
-    // Always return false: wrapper coroutines are launched in
-    // await_suspend, so we must always enter it.  If all sub-awaitables
-    // complete synchronously, await_suspend returns false (no suspend).
+    /// Always return false: wrapper coroutines are launched in
+    /// await_suspend, so we must always enter it.  If all sub-awaitables
+    /// complete synchronously, await_suspend returns false (no suspend).
     bool await_ready() { return false; }
 
     template <typename Promise>
@@ -334,9 +334,9 @@ class WhenAllTupleAwaitable {
         : state_(std::make_shared<WhenAllTupleState<Awaitables...>>(
               std::forward<Awaitables>(awaitables)...)) {}
 
-    // Always return false: wrapper coroutines are launched in
-    // await_suspend, so we must always enter it.  If all sub-awaitables
-    // complete synchronously, await_suspend returns false (no suspend).
+    /// Always return false: wrapper coroutines are launched in
+    /// await_suspend, so we must always enter it.  If all sub-awaitables
+    /// complete synchronously, await_suspend returns false (no suspend).
     bool await_ready() { return false; }
 
     template <typename Promise>
@@ -412,7 +412,7 @@ class WhenAllTupleAwaitable {
         }(state_);
     }
 
-    // Expand index sequence to launch all wrapper coroutines.
+    /// Expand index sequence to launch all wrapper coroutines.
     template <std::size_t... Is>
     void launch_all(std::index_sequence<Is...>) {
         (launch_one<Is>(), ...);

@@ -5,7 +5,7 @@
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/task_handle.h>
 #include <dftracer/utils/python/memoryview_batch.h>
-#include <dftracer/utils/utilities/composites/dft/args_map.h>
+#include <dftracer/utils/trace/args_map.h>
 #include <dftracer/utils/utilities/reader/internal/json_dict_builder.h>
 
 #include <memory>
@@ -47,8 +47,8 @@ struct ArrowIteratorState {
 };
 #endif
 
-using ArgsValue = dftracer::utils::utilities::composites::dft::ArgsValue;
-using ArgsMap = dftracer::utils::utilities::composites::dft::ArgsMap;
+using ArgsValue = dftracer::utils::trace::ArgsValue;
+using ArgsMap = dftracer::utils::trace::ArgsMap;
 
 using dftracer::utils::utilities::reader::internal::JsonDictBatch;
 using dftracer::utils::utilities::reader::internal::JsonDictEvent;
@@ -86,6 +86,11 @@ typedef struct {
 } TraceReaderIteratorObject;
 
 extern PyTypeObject TraceReaderIteratorType;
+
+namespace dftracer::utils::python {
+
 int init_trace_reader_iterator(PyObject *m);
+
+}  // namespace dftracer::utils::python
 
 #endif  // DFTRACER_UTILS_PYTHON_TRACE_READER_ITERATOR_H

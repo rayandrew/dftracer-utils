@@ -2,6 +2,12 @@
 
 These were previously vendored inside dfanalyzer; they belong here since they
 only depend on the Indexer and Arrow plumbing.
+
+Supported surface: the names in ``__all__`` are dfanalyzer's integration
+contract and co-version with it - changing one means updating the matching
+dfanalyzer release in the same bump. tests/python/test_dfanalyzer_contract.py
+freezes the set so a rename or removal is caught here. Everything else
+(``_``-prefixed) is internal and may change without notice.
 """
 
 from __future__ import annotations

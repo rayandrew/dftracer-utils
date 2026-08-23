@@ -7,7 +7,7 @@
 
 #include <ankerl/unordered_dense.h>
 #include <dftracer/utils/server/viz_internal.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/reserved_args.h>
+#include <dftracer/utils/trace/aggregators/reserved_args.h>
 #include <simdjson.h>
 
 #include <cmath>
@@ -19,7 +19,7 @@
 
 namespace dftracer::utils::server {
 
-using utilities::common::json::json_number;
+using json::json_number;
 
 // Sub-pixel events are bucketed by (pid, tid, pixel-column) instead of dropped,
 // so zoomed-out views still show where activity is. The live path also assigns
@@ -547,7 +547,7 @@ static void fold_counter_density(simdjson::dom::element root, double begin,
 
     auto args = root["args"];
     if (args.error() || !args.is_object()) return;
-    namespace agg = utilities::composites::dft::aggregators;
+    namespace agg = trace::aggregators;
     for (auto field : args.get_object()) {
         double val = 0;
         auto v = field.value;
@@ -560,9 +560,9 @@ static void fold_counter_density(simdjson::dom::element root, double begin,
         else
             continue;  // non-numeric arg: not a counter sample
         // Mirror the aggregator's track_default_args arg selection so we match
-        // it exactly: skip metadata (hhash/fhash/dur/ret/offset/dft_cnt) and
+        // it exactly: skip metadata (hhash/fhash/dur/ret/offset/dftu_cnt) and
         // the pre-aggregated *_sum/_min/_max fields an already-aggregated trace
-        // carries. Keeps junk lanes (dft_cnt, ts, ...) out.
+        // carries. Keeps junk lanes (dftu_cnt, ts, ...) out.
         if (agg::is_reserved_arg(field.key) || agg::is_preagg_suffix(field.key))
             continue;
         std::string series(name);
@@ -582,7 +582,7 @@ struct AggRec {
     std::int64_t tid;
     std::string name;
     std::string cat;
-    std::uint32_t count;  // dft_cnt
+    std::uint32_t count;  // dftu_cnt
     double total;         // dur_sum, native units
 };
 
@@ -608,7 +608,7 @@ static bool collect_aggregated(simdjson::dom::element root,
     double total = 0;
     auto args = root["args"];
     if (!args.error() && args.is_object()) {
-        auto cnt = args["dft_cnt"];
+        auto cnt = args["dftu_cnt"];
         if (!cnt.error()) {
             double c = json_number(cnt.value_unsafe());
             count = c > 0 ? static_cast<std::uint32_t>(c) : 1;
@@ -658,8 +658,8 @@ static void extrapolate_aggregate(const AggRec& r, double interval,
 
     // Each synthetic event is the aggregate's own record with ts moved to the
     // estimated position and a mean dur added, so selection keeps every arg
-    // (dft_cnt, dur_sum, tag_min, ...). The record's ts is its window start; we
-    // rewrite that one occurrence.
+    // (dftu_cnt, dur_sum, tag_min, ...). The record's ts is its window start;
+    // we rewrite that one occurrence.
     const std::string ts_key =
         "\"ts\":" + std::to_string(static_cast<long long>(r.ts));
     const std::string tail =

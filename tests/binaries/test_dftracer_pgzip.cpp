@@ -18,7 +18,7 @@
 namespace {
 
 // Create a plain (uncompressed) .pfw file with DFTracer events.
-std::string create_plain_pfw(dft_utils_test::TestEnvironment& env,
+std::string create_plain_pfw(dftu_utils_test::TestEnvironment& env,
                              int num_events, int id) {
     auto trace = env.create_dft_test_file(num_events);
     if (trace.empty()) return "";
@@ -106,7 +106,7 @@ TEST_SUITE("DFTracerPgzip") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto pfw = create_plain_pfw(env, 50, 0);
@@ -128,7 +128,7 @@ TEST_SUITE("DFTracerPgzip") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto pfw = create_plain_pfw(env, 10, 0);
@@ -152,7 +152,7 @@ TEST_SUITE("DFTracerPgzip") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto pfw = create_plain_pfw(env, 20, 0);
@@ -171,7 +171,7 @@ TEST_SUITE("DFTracerPgzip") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto pfw = create_plain_pfw(env, 20, 0);
@@ -190,7 +190,7 @@ TEST_SUITE("DFTracerPgzip") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         auto pfw0 = create_plain_pfw(env, 15, 0);
@@ -213,7 +213,7 @@ TEST_SUITE("DFTracerPgzip") {
             return;
         }
 
-        dft_utils_test::TestEnvironment env(100);
+        dftu_utils_test::TestEnvironment env(100);
         REQUIRE(env.is_valid());
 
         // No .pfw files -- binary treats this as success (nothing to do).

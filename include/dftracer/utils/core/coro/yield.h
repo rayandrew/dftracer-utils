@@ -72,7 +72,7 @@ void drive_to_completion(std::coroutine_handle<> h);
 /// Tag type so await_transform can recognize and skip wrapping.
 struct YieldAwaitable {
     bool force_ =
-        false;  // true = always suspend, false = only if timeslice exceeded
+        false;  ///< true = always suspend, false = only if timeslice exceeded
 
     bool await_ready() noexcept;
 

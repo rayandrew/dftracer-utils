@@ -16,16 +16,16 @@
 #include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
-#include <dftracer/utils/utilities/common/query/query.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_config.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregation_serialization.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/aggregator_types.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/event_aggregator.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/system_metrics.h>
-#include <dftracer/utils/utilities/composites/dft/aggregators/system_metrics_serialization.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/index_resolver_utility.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/resolve_and_build.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
+#include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/aggregators/aggregation_config.h>
+#include <dftracer/utils/trace/aggregators/aggregation_serialization.h>
+#include <dftracer/utils/trace/aggregators/aggregator_types.h>
+#include <dftracer/utils/trace/aggregators/event_aggregator.h>
+#include <dftracer/utils/trace/aggregators/system_metrics.h>
+#include <dftracer/utils/trace/aggregators/system_metrics_serialization.h>
+#include <dftracer/utils/trace/indexing/index_resolver_utility.h>
+#include <dftracer/utils/trace/indexing/resolve_and_build.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 
 #include <algorithm>
@@ -40,8 +40,8 @@
 using dftracer::utils::CoroScope;
 using dftracer::utils::Runtime;
 using dftracer::utils::coro::CoroTask;
-using namespace dftracer::utils::utilities::composites::dft::indexing;
-using namespace dftracer::utils::utilities::composites::dft::aggregators;
+using namespace dftracer::utils::trace::indexing;
+using namespace dftracer::utils::trace::aggregators;
 
 // ---------------------------------------------------------------------------
 // BatchIndexer - directory-level indexer with resolve/build pattern
@@ -202,7 +202,7 @@ static Runtime* get_batch_indexer_runtime(IndexerObject* self) {
     if (self->runtime_obj) {
         return ((RuntimeObject*)self->runtime_obj)->runtime.get();
     }
-    return get_default_runtime();
+    return dftracer::utils::python::get_default_runtime();
 }
 
 static std::optional<AggregationConfig> build_aggregation_config(
@@ -272,10 +272,7 @@ static PyObject* Indexer_resolve(IndexerObject* self,
                            [](CoroScope& scope, ResolverInput in,
                               ResolverResult* out) -> CoroTask<void> {
                                IndexResolverUtility resolver;
-                               // scope.spawn(utility, input) auto-binds context
-                               // for utilities with the NeedsContext tag
-                               *out = co_await scope.spawn(resolver,
-                                                           std::move(in));
+                               *out = co_await resolver(scope, std::move(in));
                            },
                            std::move(input), &result),
                        "batch-indexer-resolve")
@@ -435,8 +432,9 @@ static PyObject* Indexer_get_checkpoint_indexer(IndexerObject* self,
 
     // Determine index path using BatchIndexer's index_dir setting
     const char* index_dir = as_utf8(self->index_dir);
-    std::string index_path = dftracer::utils::utilities::composites::dft::
-        internal::determine_index_path(file_path, index_dir ? index_dir : "");
+    std::string index_path =
+        dftracer::utils::trace::internal::determine_index_path(
+            file_path, index_dir ? index_dir : "");
 
     // Create IndexerObject
     CheckpointIndexerObject* indexer =
@@ -461,8 +459,8 @@ static PyObject* Indexer_get_checkpoint_indexer(IndexerObject* self,
     }
 
     // Create the native handle
-    indexer->handle = dft_indexer_create(file_path, index_path.c_str(),
-                                         self->checkpoint_size, 0);
+    indexer->handle = dftu_indexer_create(file_path, index_path.c_str(),
+                                          self->checkpoint_size, 0);
     if (!indexer->handle) {
         Py_DECREF((PyObject*)indexer);
         PyErr_SetString(PyExc_RuntimeError,
@@ -715,7 +713,8 @@ static PyObject* count_hash_entries_fn(PyObject* /*self*/, PyObject* args) {
 }
 
 static PyMethodDef BatchIndexerModuleMethods[] = {
-    {"count_hash_entries", DFT_PYCFUNCTION(count_hash_entries_fn), METH_VARARGS,
+    {"count_hash_entries", DFTU_PYCFUNCTION(count_hash_entries_fn),
+     METH_VARARGS,
      "count_hash_entries(index_path, type)\n"
      "--\n\n"
      "Number of hashes of `type` ('file', 'host', 'string', 'proc') in the\n"
@@ -725,7 +724,7 @@ static PyMethodDef BatchIndexerModuleMethods[] = {
 #endif
 
 static PyMethodDef Indexer_methods[] = {
-    {"get_checkpoint_indexer", DFT_PYCFUNCTION(Indexer_get_checkpoint_indexer),
+    {"get_checkpoint_indexer", DFTU_PYCFUNCTION(Indexer_get_checkpoint_indexer),
      METH_VARARGS,
      "get_checkpoint_indexer(file_path)\n"
      "--\n\n"
@@ -734,23 +733,23 @@ static PyMethodDef Indexer_methods[] = {
      "    file_path: Path to the trace file (.pfw/.pfw.gz)\n\n"
      "Returns:\n"
      "    Indexer instance for checkpoint-level operations.\n"},
-    {"resolve", DFT_PYCFUNCTION(Indexer_resolve), METH_NOARGS,
+    {"resolve", DFTU_PYCFUNCTION(Indexer_resolve), METH_NOARGS,
      "resolve()\n"
      "--\n\n"
      "Check what files exist vs need indexing.\n\n"
      "Returns:\n"
      "    dict with 'total_files', 'ready', 'needs_work', 'index_path'\n"},
-    {"build", DFT_PYCFUNCTION(Indexer_build), METH_NOARGS,
+    {"build", DFTU_PYCFUNCTION(Indexer_build), METH_NOARGS,
      "build()\n"
      "--\n\n"
      "Build all missing index tiers based on require_* flags.\n"},
-    {"ensure_indexed", DFT_PYCFUNCTION(Indexer_ensure_indexed), METH_NOARGS,
+    {"ensure_indexed", DFTU_PYCFUNCTION(Indexer_ensure_indexed), METH_NOARGS,
      "ensure_indexed()\n"
      "--\n\n"
      "Resolve and build if needed.\n\n"
      "Returns:\n"
      "    dict with index status after building.\n"},
-    {"get_hash_table", DFT_PYCFUNCTION(Indexer_get_hash_table), METH_VARARGS,
+    {"get_hash_table", DFTU_PYCFUNCTION(Indexer_get_hash_table), METH_VARARGS,
      "get_hash_table(type)\n"
      "--\n\n"
      "Query hash table mappings.\n\n"
@@ -758,7 +757,7 @@ static PyMethodDef Indexer_methods[] = {
      "    type: 'file', 'host', 'string', or 'proc'\n\n"
      "Returns:\n"
      "    dict mapping hash values to resolved names.\n"},
-    {"query_file_pids", DFT_PYCFUNCTION(Indexer_query_file_pids), METH_VARARGS,
+    {"query_file_pids", DFTU_PYCFUNCTION(Indexer_query_file_pids), METH_VARARGS,
      "query_file_pids(file_id)\n"
      "--\n\n"
      "Query PIDs observed in a specific file.\n\n"
@@ -766,14 +765,14 @@ static PyMethodDef Indexer_methods[] = {
      "    file_id: Integer file ID from index.\n\n"
      "Returns:\n"
      "    set of PIDs.\n"},
-    {"query_all_file_pids", DFT_PYCFUNCTION(Indexer_query_all_file_pids),
+    {"query_all_file_pids", DFTU_PYCFUNCTION(Indexer_query_all_file_pids),
      METH_NOARGS,
      "query_all_file_pids()\n"
      "--\n\n"
      "Query PIDs for all indexed files.\n\n"
      "Returns:\n"
      "    dict mapping file_id to set of PIDs.\n"},
-    {"query_file_info", DFT_PYCFUNCTION(Indexer_query_file_info), METH_NOARGS,
+    {"query_file_info", DFTU_PYCFUNCTION(Indexer_query_file_info), METH_NOARGS,
      "query_file_info()\n"
      "--\n\n"
      "Query file ID to path mapping and per-file PIDs in one call.\n\n"
@@ -836,7 +835,7 @@ PyTypeObject IndexerType = {
     Indexer_new,
 };
 
-int init_indexer(PyObject* m) {
+int dftracer::utils::python::init_indexer(PyObject* m) {
     if (register_type(m, &IndexerType, "Indexer") < 0) return -1;
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW

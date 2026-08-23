@@ -1,20 +1,18 @@
 #ifndef DFTRACER_UTILS_UTILITIES_INDEXER_TYPES_STATISTICS_H
 #define DFTRACER_UTILS_UTILITIES_INDEXER_TYPES_STATISTICS_H
 
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_dimension_stats.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/chunk_statistics.h>
-#include <dftracer/utils/utilities/composites/dft/indexing/queries/queries.h>
+#include <dftracer/utils/trace/indexing/chunk_dimension_stats.h>
+#include <dftracer/utils/trace/indexing/chunk_statistics.h>
+#include <dftracer/utils/trace/indexing/queries/queries.h>
 
 #include <cstdint>
 
 namespace dftracer::utils::utilities::indexer {
 
-using ChunkStatistics = composites::dft::indexing::ChunkStatistics;
-using ChunkDimensionStats = composites::dft::indexing::ChunkDimensionStats;
-using ChunkStatisticsResult =
-    composites::dft::indexing::queries::ChunkStatisticsResult;
-using ChunkDimensionStatsResult =
-    composites::dft::indexing::ChunkDimensionStatsResult;
+using ChunkStatistics = trace::indexing::ChunkStatistics;
+using ChunkDimensionStats = trace::indexing::ChunkDimensionStats;
+using ChunkStatisticsResult = trace::indexing::queries::ChunkStatisticsResult;
+using ChunkDimensionStatsResult = trace::indexing::ChunkDimensionStatsResult;
 
 struct MergedStatisticsResult {
     ChunkStatistics stats;

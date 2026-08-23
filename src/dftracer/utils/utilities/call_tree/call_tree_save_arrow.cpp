@@ -30,10 +30,10 @@
 #include <dftracer/utils/core/common/string_intern.h>
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
+#include <dftracer/utils/trace/args_map.h>
 #include <dftracer/utils/utilities/common/arrow/column_builder.h>
 #include <dftracer/utils/utilities/common/arrow/ipc_reader.h>
 #include <dftracer/utils/utilities/common/arrow/ipc_writer.h>
-#include <dftracer/utils/utilities/composites/dft/args_map.h>
 #include <nanoarrow/nanoarrow.h>
 
 #include <cstdint>
@@ -51,13 +51,13 @@ namespace dftracer::utils::call_tree {
 
 namespace {
 
+using trace::ArgsValueProxy;
 using utilities::common::arrow::ArrowExportResult;
 using utilities::common::arrow::ColumnType;
 using utilities::common::arrow::IpcCompression;
 using utilities::common::arrow::IpcReader;
 using utilities::common::arrow::IpcWriter;
 using utilities::common::arrow::RecordBatchBuilder;
-using utilities::composites::dft::ArgsValueProxy;
 
 constexpr char ARG_SEP = '\x1f';
 
@@ -248,7 +248,7 @@ coro::CoroTask<std::unique_ptr<internal::CallTree>> load_arrow(
     auto tree = std::make_unique<internal::CallTree>();
     tree->initialize();
 
-    using utilities::composites::dft::ArgsMap;
+    using trace::ArgsMap;
 
     auto process_batch = [&](ArrowExportResult& batch) -> int {
         ArrowSchema* schema = batch.get_schema();

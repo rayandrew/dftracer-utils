@@ -8,8 +8,8 @@
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/server/router.h>
 #include <dftracer/utils/server/trace_index.h>
-#include <dftracer/utils/utilities/composites/dft/internal/utils.h>
-#include <dftracer/utils/utilities/composites/dft/metadata_collector_utility.h>
+#include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/metadata_collector_utility.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_builder_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
@@ -28,8 +28,8 @@
 
 namespace dftracer::utils::server {
 
-using namespace dftracer::utils::utilities::composites::dft;
-using namespace dftracer::utils::utilities::composites::dft::indexing;
+using namespace dftracer::utils::trace;
+using namespace dftracer::utils::trace::indexing;
 using namespace dftracer::utils::utilities::filesystem;
 namespace indexer = dftracer::utils::utilities::indexer;
 
@@ -418,7 +418,7 @@ coro::CoroTask<void> TraceIndex::initialize() {
     PatternDirectoryScannerUtility scanner;
     PatternDirectoryScannerUtilityInput scan_input{
         directory_, {".pfw", ".pfw.gz"}, false};
-    auto entries = co_await scanner.process(scan_input);
+    auto entries = co_await scanner(scan_input);
 
     files_.clear();
     path_to_index_.clear();
@@ -621,8 +621,8 @@ coro::CoroTask<void> TraceIndex::initialize() {
                                             from_file(info->path)
                                                 .with_index(info->index_path);
                                     auto metadata =
-                                        co_await MetadataCollectorUtility{}
-                                            .process(meta_input);
+                                        co_await MetadataCollectorUtility{}(
+                                            meta_input);
                                     if (metadata.success) {
                                         info->uncompressed_size =
                                             metadata.uncompressed_size;

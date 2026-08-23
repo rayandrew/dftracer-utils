@@ -54,7 +54,7 @@ void write_evenly_spaced_trace(const std::string& path, std::size_t n,
         f << "\n";
     }
     f << "]";
-    REQUIRE(!dft_utils_test::write_gz_trace(path, f.str()).empty());
+    REQUIRE(!dftu_utils_test::write_gz_trace(path, f.str()).empty());
 }
 
 struct DispatchSample {

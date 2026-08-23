@@ -62,19 +62,19 @@ class AsyncMutex {
    private:
     friend class AsyncMutexLockOperation;
 
-    // not_locked = 1 (not 0, so that 0 can mean locked_no_waiters
-    // and any other value is a pointer to a waiter list)
+    /// not_locked = 1 (not 0, so that 0 can mean locked_no_waiters
+    /// and any other value is a pointer to a waiter list)
     static constexpr std::uintptr_t NOT_LOCKED = 1;
     static constexpr std::uintptr_t LOCKED_NO_WAITERS = 0;
 
-    // Three states:
-    // - NOT_LOCKED (1)
-    // - LOCKED_NO_WAITERS (0)
-    // - pointer to head of waiter stack (LIFO push order)
+    /// Three states:
+    /// - NOT_LOCKED (1)
+    /// - LOCKED_NO_WAITERS (0)
+    /// - pointer to head of waiter stack (LIFO push order)
     std::atomic<std::uintptr_t> state_;
 
-    // FIFO list of waiters being serviced. Filled by reversing
-    // the LIFO stack from state_ on unlock.
+    /// FIFO list of waiters being serviced. Filled by reversing
+    /// the LIFO stack from state_ on unlock.
     AsyncMutexLockOperation* waiters_;
 };
 

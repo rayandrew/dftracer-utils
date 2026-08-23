@@ -30,25 +30,25 @@ struct OptimizerResult {
     bool converged = false;
 };
 
-// Sequential momentum-based optimizer.
-// Searches for the max_bound percentile that minimizes simulator e2e_error
-// while preserving fetch_block_cdf_similarity. `sample_times` is the sorted
-// flat per-call sample array used for percentile lookups (sorted in-place if
-// not).
-//
-// Each iteration:
-//   1. comp_max_bound = percentile(sample_times, current_percentile)
-//   2. comp_sampler = make_sampler(model, min=sample_times.front(),
-//   max=comp_max_bound)
-//   3. result = simulator.simulate(context, base_seed, comp_sampler)
-//   4. Adjust current_percentile via momentum-smoothed step proportional to
-//   error.
+/// Sequential momentum-based optimizer.
+/// Searches for the max_bound percentile that minimizes simulator e2e_error
+/// while preserving fetch_block_cdf_similarity. `sample_times` is the sorted
+/// flat per-call sample array used for percentile lookups (sorted in-place if
+/// not).
+///
+/// Each iteration:
+///   1. comp_max_bound = percentile(sample_times, current_percentile)
+///   2. comp_sampler = make_sampler(model, min=sample_times.front(),
+///   max=comp_max_bound)
+///   3. result = simulator.simulate(context, base_seed, comp_sampler)
+///   4. Adjust current_percentile via momentum-smoothed step proportional to
+///   error.
 OptimizerResult optimize_max_bound_percentile(
     const BarrierSimulatorContext& context, const BestModel& model,
     std::vector<double> sample_times, const OptimizerOptions& options = {});
 
-// Helper: percentile by sorted index (linear interpolation between adjacent
-// samples). Returns 0 if data is empty.
+/// Helper: percentile by sorted index (linear interpolation between adjacent
+/// samples). Returns 0 if data is empty.
 double percentile(const std::vector<double>& sorted_data, double pct);
 
 }  // namespace dftracer::utils::utilities::dlio
