@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Union
 
+from ._units import coerce_bytes, coerce_duration
 from .dftracer_utils_ext import CheckpointIndexer as _NativeCheckpointIndexer
 from .dftracer_utils_ext import Indexer as _NativeIndexer
 from .runtime import Runtime
@@ -28,7 +29,7 @@ class AggregationConfig:
             distinct files with a sketch instead (`file_nunique`).
     """
 
-    time_interval_ms: float = 5000.0
+    time_interval_ms: Union[float, str] = 5000.0
     group_keys: Optional[List[str]] = None
     custom_metric_fields: Optional[List[str]] = None
     compute_percentiles: bool = False
@@ -114,11 +115,13 @@ class Indexer:
         require_bloom: bool = True,
         build_bloom: bool = True,
         require_aggregation: Optional[Union[bool, AggregationConfig]] = None,
-        checkpoint_size: int = DEFAULT_CHECKPOINT_SIZE,
+        checkpoint_size: Union[int, str] = DEFAULT_CHECKPOINT_SIZE,
         parallelism: int = 0,
         force_rebuild: bool = False,
         runtime: Optional[Runtime] = None,
     ):
+        checkpoint_size = coerce_bytes(checkpoint_size, "checkpoint_size")
+
         # Normalize aggregation config
         if require_aggregation is True:
             agg_config = AggregationConfig()
@@ -137,7 +140,11 @@ class Indexer:
             require_bloom=require_bloom,
             build_bloom=build_bloom,
             require_aggregation=agg_config is not None,
-            time_interval_ms=agg_config.time_interval_ms if agg_config else 5000.0,
+            time_interval_ms=(
+                coerce_duration(agg_config.time_interval_ms, 1e3, "time_interval_ms")
+                if agg_config
+                else 5000.0
+            ),
             group_keys=agg_config.group_keys if agg_config else None,
             custom_metric_fields=agg_config.custom_metric_fields if agg_config else None,
             compute_percentiles=agg_config.compute_percentiles if agg_config else False,

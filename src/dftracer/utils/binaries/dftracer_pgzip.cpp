@@ -40,14 +40,15 @@ class PgzipArgParse : public cli::ArgParse {
 
         parser()
             .add_argument("--chunk-size")
-            .help("Chunk size in bytes for parallel compression (default: 4MB)")
-            .scan<'d', std::size_t>()
-            .default_value(static_cast<std::size_t>(4 * 1024 * 1024));
+            .help(
+                "Chunk size for parallel compression (default: 4MB). Accepts "
+                "units, e.g. 512KB, 4MB")
+            .default_value(std::to_string(4 * 1024 * 1024));
     }
 
     void post_parse() override {
         compression_level = parser().get<int>("--compression-level");
-        chunk_size = parser().get<std::size_t>("--chunk-size");
+        chunk_size = cli::get_bytes_arg(parser(), "--chunk-size");
     }
 };
 

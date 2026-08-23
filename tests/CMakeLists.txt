@@ -33,6 +33,7 @@ set(TEST_CPP_SOURCES
     core/test_eviction_policy.cpp
     core/test_filesystem_info.cpp
     core/test_memory_budget.cpp
+    core/test_str_format.cpp
     # Pipeline tests
     pipeline/test_pipeline.cpp
 

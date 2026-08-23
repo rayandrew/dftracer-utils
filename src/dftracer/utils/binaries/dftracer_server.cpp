@@ -16,10 +16,13 @@
 #include <dftracer/utils/server/viz_ui.h>
 #include <dftracer/utils/utilities/reader/internal/member_decode_cache.h>
 
+#include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <thread>
 
 using namespace dftracer::utils;
 using namespace dftracer::utils::server;
@@ -35,6 +38,7 @@ class ServerArgParse : public cli::ArgParse {
     uint16_t port = 8080;
     std::size_t checkpoint_size = constants::indexer::DEFAULT_CHECKPOINT_SIZE;
     std::size_t member_cache_size = 1024ull * 1024 * 1024;  // 1 GB
+    std::uint64_t timeout_seconds = 0;                      // 0 = no timeout
 
     explicit ServerArgParse(argparse::ArgumentParser& p) : ArgParse(p) {
         schema(directory, pipeline);
@@ -70,22 +74,30 @@ class ServerArgParse : public cli::ArgParse {
         parser()
             .add_argument("--checkpoint-size")
             .help(
-                "Decompression checkpoint interval in bytes for auto-indexing "
+                "Decompression checkpoint interval for auto-indexing "
                 "(default: " +
                 std::to_string(constants::indexer::DEFAULT_CHECKPOINT_SIZE) +
-                "). Smaller = finer zoom-in seeks, larger index")
-            .scan<'d', std::size_t>()
-            .default_value(static_cast<std::size_t>(
-                constants::indexer::DEFAULT_CHECKPOINT_SIZE));
+                "). Accepts units, e.g. 512KB, 4MB. Smaller = finer zoom-in "
+                "seeks, larger index")
+            .default_value(
+                std::to_string(constants::indexer::DEFAULT_CHECKPOINT_SIZE));
 
         parser()
             .add_argument("--member-cache-size")
             .help(
-                "Bytes of decoded gzip members retained to share across "
-                "concurrent queries (0 disables retention but still coalesces "
-                "in-flight decodes; default: 1 GB)")
-            .scan<'d', std::size_t>()
-            .default_value(static_cast<std::size_t>(1024ull * 1024 * 1024));
+                "Decoded gzip members retained to share across concurrent "
+                "queries (0 disables retention but still coalesces in-flight "
+                "decodes). Accepts units, e.g. 512MB, 2GB; default: 1GB")
+            .default_value(std::to_string(1024ull * 1024 * 1024));
+
+        parser()
+            .add_argument("--timeout")
+            .help(
+                "Auto-shutdown after this much uptime (0 disables; default). "
+                "Accepts units, e.g. 30s, 10m, 1.5h. Useful to stop lingering "
+                "processes when a client such as the VSCode extension closes "
+                "without killing the server")
+            .default_value(std::string("0"));
     }
 
     void post_parse() override {
@@ -93,8 +105,10 @@ class ServerArgParse : public cli::ArgParse {
         bind_addr = parser().get<std::string>("--bind");
         auth_token = parser().get<std::string>("--token");
         port = parser().get<uint16_t>("--port");
-        checkpoint_size = parser().get<std::size_t>("--checkpoint-size");
-        member_cache_size = parser().get<std::size_t>("--member-cache-size");
+        checkpoint_size = cli::get_bytes_arg(parser(), "--checkpoint-size");
+        member_cache_size = cli::get_bytes_arg(parser(), "--member-cache-size");
+        timeout_seconds = static_cast<std::uint64_t>(
+            cli::get_seconds_arg(parser(), "--timeout"));
     }
 };
 
@@ -163,6 +177,22 @@ static coro::CoroTask<int> run_server(const ServerArgParse* cli) {
                  trace_index.file_count(), dir.c_str());
 
     g_listen_fd.store(listener.fd(), std::memory_order_release);
+
+    // Raise SIGTERM at the deadline so shutdown runs the same graceful path as
+    // a real signal, letting a launcher start the server without guaranteeing
+    // it kills the process on exit.
+    if (cli->timeout_seconds > 0) {
+        auto timeout = std::chrono::seconds(cli->timeout_seconds);
+        std::fprintf(stderr, "Auto-shutdown scheduled in %llu seconds\n",
+                     static_cast<unsigned long long>(cli->timeout_seconds));
+        std::thread([timeout]() {
+            std::this_thread::sleep_for(timeout);
+            if (!g_shutdown_requested.load(std::memory_order_acquire)) {
+                std::fprintf(stderr, "Timeout reached; shutting down\n");
+                std::raise(SIGTERM);
+            }
+        }).detach();
+    }
 
     auto server_task = make_task(
         [&](CoroScope& ctx) -> coro::CoroTask<void> {

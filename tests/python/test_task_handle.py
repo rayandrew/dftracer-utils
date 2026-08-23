@@ -62,11 +62,6 @@ class TestTaskHandleBasic:
 class TestTaskHandleNaming:
     """Name auto-derivation tests."""
 
-    def test_explicit_name(self):
-        with Runtime(threads=2, python_threads=2) as rt:
-            h = rt.submit(lambda: 1, name="my-task")
-            assert h.name == "my-task"
-
     def test_auto_name_from_function(self):
         def my_function():
             return 1
@@ -139,7 +134,7 @@ class TestWaitAll:
 
     def test_concurrent_submits_all_complete(self):
         with Runtime(threads=2, python_threads=4) as rt:
-            handles = [rt.submit(lambda i=i: i * 2, name=f"task-{i}") for i in range(20)]
+            handles = [rt.submit(lambda i=i: i * 2) for i in range(20)]
             rt.wait_all()
             for i, h in enumerate(handles):
                 assert h.get() == i * 2
@@ -153,7 +148,7 @@ class TestErrorHandling:
             raise ValueError("test error")
 
         with Runtime(threads=2, python_threads=2) as rt:
-            h = rt.submit(failing, name="fail")
+            h = rt.submit(failing)
             with pytest.raises(ValueError, match="test error"):
                 h.get()
 
@@ -162,7 +157,7 @@ class TestErrorHandling:
             raise ValueError("test error")
 
         with Runtime(threads=2, python_threads=2) as rt:
-            h = rt.submit(failing, name="fail")
+            h = rt.submit(failing)
             with pytest.raises(ValueError, match="test error"):
                 h.wait()
 
@@ -171,7 +166,7 @@ class TestErrorHandling:
             raise ValueError("test error")
 
         with Runtime(threads=2, python_threads=2) as rt:
-            rt.submit(failing, name="fail")
+            rt.submit(failing)
             rt.wait_all()  # should NOT raise
 
     def test_wait_all_raise_on_error(self):
@@ -179,7 +174,7 @@ class TestErrorHandling:
             raise ValueError("test error")
 
         with Runtime(threads=2, python_threads=2) as rt:
-            rt.submit(failing, name="fail")
+            rt.submit(failing)
             with pytest.raises(RuntimeError, match="1 task.*failed"):
                 rt.wait_all(raise_on_error=True)
 
@@ -196,7 +191,7 @@ class TestErrorHandling:
 
         with Runtime(threads=2, python_threads=4) as rt:
             rt.submit(slow_ok, "a")
-            rt.submit(failing, name="fail")
+            rt.submit(failing)
             rt.submit(slow_ok, "b")
             try:
                 rt.wait_all(raise_on_error=True)
@@ -210,14 +205,12 @@ class TestErrorHandling:
             raise ValueError("test error")
 
         with Runtime(threads=2, python_threads=2) as rt:
-            rt.submit(failing, name="fail-1")
-            rt.submit(failing, name="fail-2")
+            rt.submit(failing)
+            rt.submit(failing)
             rt.wait_all()
             failed = rt.get_failed()
             assert len(failed) == 2
-            names = {h.name for h in failed}
-            assert "fail-1" in names
-            assert "fail-2" in names
+            assert all("failing" in h.name for h in failed)
 
     def test_get_failed_empty_on_success(self):
         with Runtime(threads=2, python_threads=2) as rt:
@@ -230,7 +223,7 @@ class TestErrorHandling:
             raise ValueError("test error")
 
         with Runtime(threads=2, python_threads=2) as rt:
-            rt.submit(failing, name="fail")
+            rt.submit(failing)
             rt.wait_all()
             assert len(rt.get_failed()) == 1
             rt.clear_failed()
@@ -244,10 +237,10 @@ class TestErrorHandling:
 
         with Runtime(threads=2, python_threads=2) as rt:
             rt.set_error_callback(lambda h, e: errors.append((h.name, str(e))))
-            rt.submit(failing, name="cb-test")
+            rt.submit(failing)
             rt.wait_all()
             assert len(errors) == 1
-            assert errors[0][0] == "cb-test"
+            assert "failing" in errors[0][0]
             assert "test error" in errors[0][1]
 
     def test_error_callback_clear(self):
@@ -259,7 +252,7 @@ class TestErrorHandling:
         with Runtime(threads=2, python_threads=2) as rt:
             rt.set_error_callback(lambda h, e: errors.append(1))
             rt.set_error_callback(None)
-            rt.submit(failing, name="no-cb")
+            rt.submit(failing)
             rt.wait_all()
             assert len(errors) == 0
 
@@ -268,7 +261,7 @@ class TestErrorHandling:
             raise ValueError("preserved")
 
         with Runtime(threads=2, python_threads=2) as rt:
-            h = rt.submit(failing, name="exc")
+            h = rt.submit(failing)
             rt.wait_all()
             assert h.exception is not None
             assert isinstance(h.exception, ValueError)
@@ -308,10 +301,10 @@ class TestRuntimeLifecycle:
         with Runtime(threads=2, python_threads=4) as rt:
 
             def outer():
-                h = rt.submit(lambda: 42, name="inner")
+                h = rt.submit(lambda: 42)
                 return h.get()
 
-            h = rt.submit(outer, name="outer")
+            h = rt.submit(outer)
             assert h.get() == 42
 
     def test_handle_as_input_get_pattern(self):
@@ -324,8 +317,8 @@ class TestRuntimeLifecycle:
             def step2(value):
                 return value * 3
 
-            h1 = rt.submit(step1, name="step1")
-            h2 = rt.submit(step2, h1.get(), name="step2")
+            h1 = rt.submit(step1)
+            h2 = rt.submit(step2, h1.get())
             assert h2.get() == 30
 
     def test_handle_passed_directly(self):
@@ -342,8 +335,8 @@ class TestRuntimeLifecycle:
                     val = handle_or_value
                 return val + 1
 
-            h1 = rt.submit(producer, name="producer")
-            h2 = rt.submit(consumer, h1, name="consumer")
+            h1 = rt.submit(producer)
+            h2 = rt.submit(consumer, h1)
             assert h2.get() == 8
 
     def test_chain_three_tasks(self):
@@ -351,10 +344,10 @@ class TestRuntimeLifecycle:
         with Runtime(threads=2, python_threads=4) as rt:
 
             def compose():
-                h1 = rt.submit(lambda: 5, name="a")
-                h2 = rt.submit(lambda v: v * 2, h1.get(), name="b")
-                h3 = rt.submit(lambda v: v + 100, h2.get(), name="c")
+                h1 = rt.submit(lambda: 5)
+                h2 = rt.submit(lambda v: v * 2, h1.get())
+                h3 = rt.submit(lambda v: v + 100, h2.get())
                 return h3.get()
 
-            h = rt.submit(compose, name="chain")
+            h = rt.submit(compose)
             assert h.get() == 110  # (5 * 2) + 100

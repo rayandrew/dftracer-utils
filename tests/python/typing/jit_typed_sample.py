@@ -56,7 +56,7 @@ slow_row = jit.map(key=(jit.i64,), value=jit.argmax_row(of=(jit.str_, jit.i64, j
 assert_type(slow_row, Map[tuple[int], ArgMaxRow])
 
 pid_join = jit.join(total, dur_var, how="left")
-assert_type(pid_join, JoinDecl)
+assert_type(pid_join, JoinDecl[tuple[int], Sum, tuple[int], Variance])
 
 
 @jit.plugin

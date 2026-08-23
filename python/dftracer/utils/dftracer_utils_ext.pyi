@@ -6,17 +6,27 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Generic,
     Iterable,
     List,
     Optional,
+    Sequence,
     Tuple,
     Type,
     TypedDict,
+    TypeVar,
     Union,
 )
 
 if TYPE_CHECKING:
+    import pyarrow as pa  # ty: ignore[unresolved-import]
+
     from .query import Expr
+
+_T = TypeVar("_T")
+
+# A run() map result value: emitted bytes, or an eager/streamed pyarrow object.
+_RunResultValue = Union[bytes, "pa.Table", "pa.RecordBatchReader"]
 
 class CollectTypedResult(TypedDict):
     """The three record families returned by _TraceViewer.collect_typed()."""
@@ -44,7 +54,7 @@ class _ArrowBatchCapsule:
     def num_rows(self) -> int: ...
     @property
     def num_columns(self) -> int: ...
-    def __arrow_c_array__(self, requested_schema: Any = None) -> Tuple[Any, Any]: ...
+    def __arrow_c_array__(self, requested_schema: object = None) -> Tuple[object, object]: ...
 
 class _ArrowBatchStream:
     """Zero-iteration Arrow stream backed by the C++ coroutine channel.
@@ -54,7 +64,7 @@ class _ArrowBatchStream:
     Single-use: consuming ``__arrow_c_stream__`` once exhausts the object.
     """
 
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any: ...
+    def __arrow_c_stream__(self, requested_schema: object = None) -> object: ...
 
 class JsonDictValue:
     """Zero-copy wrapper over a parsed DFTracer JSON event.
@@ -63,14 +73,14 @@ class JsonDictValue:
     Call ``.to_dict()`` to materialize a regular Python dict.
     """
 
-    def __getitem__(self, key: str) -> Any: ...
+    def __getitem__(self, key: str) -> object: ...
     def __len__(self) -> int: ...
     def __contains__(self, key: str) -> bool: ...
     def keys(self) -> List[str]: ...
-    def values(self) -> List[Any]: ...
-    def items(self) -> List[Tuple[str, Any]]: ...
-    def get(self, key: str, default: Any = None) -> Any: ...
-    def to_dict(self) -> Dict[str, Any]: ...
+    def values(self) -> List[object]: ...
+    def items(self) -> List[Tuple[str, object]]: ...
+    def get(self, key: str, default: object = None) -> object: ...
+    def to_dict(self) -> Dict[str, object]: ...
 
 class Indexer:
     """Indexer with resolve/build pattern for tiered indexing."""
@@ -116,7 +126,7 @@ class Indexer:
         """
         ...
 
-    def resolve(self) -> Dict[str, Any]:
+    def resolve(self) -> Dict[str, object]:
         """Resolve which files need indexing.
 
         Returns:
@@ -124,7 +134,7 @@ class Indexer:
         """
         ...
 
-    def build(self) -> Dict[str, Any]:
+    def build(self) -> Dict[str, object]:
         """Build indices for files that need work.
 
         Returns:
@@ -132,7 +142,7 @@ class Indexer:
         """
         ...
 
-    def ensure_indexed(self) -> Dict[str, Any]:
+    def ensure_indexed(self) -> Dict[str, object]:
         """Ensure all files are indexed by calling resolve then build if needed.
 
         Returns:
@@ -283,10 +293,10 @@ class CheckpointIndexer:
         """
         ...
 
-class TaskHandle:
+class TaskHandle(Generic[_T]):
     """Handle to a submitted C++ coroutine task."""
 
-    def get(self) -> Any:
+    def get(self) -> _T:
         """Block until task completes and return result. Raises on error."""
         ...
 
@@ -318,7 +328,7 @@ class Runtime:
     def __init__(self, threads: int = 0, io_threads: int = 0) -> None: ...
     def shutdown(self) -> None: ...
     def wait_all(self) -> None: ...
-    def get_progress(self) -> Dict[str, Any]: ...
+    def get_progress(self) -> Dict[str, object]: ...
     def is_responsive(self) -> bool: ...
     def set_timeout(self, global_ms: int = 0) -> None: ...
     def set_default_task_timeout(self, ms: int = 0) -> None: ...
@@ -353,7 +363,7 @@ class ComparatorUtility:
         index_dir: str = "",
         force_rebuild: bool = False,
         config: str = "",
-    ) -> Any: ...
+    ) -> object: ...
     def __call__(
         self,
         baseline: str,
@@ -367,7 +377,7 @@ class ComparatorUtility:
         index_dir: str = "",
         force_rebuild: bool = False,
         config: str = "",
-    ) -> Any: ...
+    ) -> object: ...
     def compare_json(
         self,
         baseline: str,
@@ -400,7 +410,7 @@ class ComparatorUtility:
 def read_arrow_files_parallel(
     paths: List[str],
     runtime: Optional[Runtime] = None,
-) -> Dict[str, Any]:
+) -> Dict[str, object]:
     """Read multiple Arrow IPC files in parallel using the Runtime.
 
     Args:
@@ -517,7 +527,7 @@ def build_sst_batch(
     parallelism: int = 0,
     flush_every_files: int = 0,
     runtime: Optional[Union[Runtime, object]] = None,
-    aggregation_config: Optional[Any] = None,
+    aggregation_config: Optional[object] = None,
     file_slices: Optional[List[Optional[Tuple[int, int, bool, List[Tuple[int, int]]]]]] = None,
     progress: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[List[Dict[str, Optional[str]]], bytes]:
@@ -728,8 +738,10 @@ class _DataFrame:
         descending: bool = False,
         limit: "int | None" = None,
     ) -> "_DataFrame": ...
-    def group_by(self, key: str, *aggs: Any) -> Any: ...
-    def _group_agg_expr(self, key: str, specs: Any) -> "_DataFrame": ...
+    # *aggs stays Any: the wrapper DataFrame.group_by narrows it to Union[str, Agg],
+    # which LSP forbids over a base typed `object`.
+    def group_by(self, key: str, *aggs: Any) -> object: ...
+    def _group_agg_expr(self, key: str, specs: List[tuple]) -> "_DataFrame": ...
     def join(self, other: "_DataFrame", how: str = "inner", on: int = 1) -> "_DataFrame": ...
     def hash_partition(self, keys: "str | list[str]", n_parts: int) -> "list[_DataFrame]": ...
     def __arrow_c_array__(self, requested_schema: object = None) -> tuple: ...
@@ -796,9 +808,9 @@ class _TraceViewer:
 
     def __init__(
         self,
-        files: Any,
+        files: Union[str, Sequence[str]],
         index_path: Optional[str] = ...,
-        runtime: Any = ...,
+        runtime: Optional[object] = ...,
     ) -> None:
         """``files`` is a trace path, a list of paths, or a directory; a
         directory is scanned recursively for ``.pfw.gz`` traces."""
@@ -897,10 +909,10 @@ class _TraceViewer:
         workers: int = ...,
         normalize: bool = ...,
         dict: bool = ...,
-    ) -> Any: ...
-    def statistics(self) -> Dict[str, Any]: ...
+    ) -> Iterable[object]: ...
+    def statistics(self) -> Dict[str, object]: ...
     def aggregate_partial(self) -> bytes: ...
-    def merge_partials_to_table(self, partials: Any) -> Any: ...
+    def merge_partials_to_table(self, partials: List[bytes]) -> object: ...
     def export_trace(
         self,
         path: str,
@@ -931,13 +943,13 @@ class _AggregatedTraceViewer(_TraceViewer):
     def topk(self, name: str, k: int, largest: bool = True) -> "_AggregatedTraceViewer": ...
     def rollup_root(self, path: str) -> "_AggregatedTraceViewer": ...
     def collect(self, cache: bool = ...) -> "_DataFrame": ...
-    def materialize_partials(self, partials: Any) -> None: ...
-    def reconstruct_if_cached(self) -> Any: ...
+    def materialize_partials(self, partials: List[bytes]) -> None: ...
+    def reconstruct_if_cached(self) -> object: ...
 
 class PluginHost:
     """Load and run compiled DFTracer plugins over trace files."""
 
-    def __init__(self, runtime: Any = ...) -> None: ...
+    def __init__(self, runtime: Optional[object] = ...) -> None: ...
     def load(self, path: str, config: Optional[str] = ...) -> None:
         """dlopen a compiled plugin; ``config`` is a JSON object string."""
         ...
@@ -947,7 +959,7 @@ class PluginHost:
         traces: "str | List[str]",
         index_dir: Optional[str] = ...,
         auto_index: bool = ...,
-    ) -> Dict[str, Any]:
+    ) -> Dict[str, _RunResultValue]:
         """Fold every loaded plugin over one fused scan; returns the emitted
         named results as ``{name: bytes | pyarrow object}``. Scan counters are
         on ``stats``."""
@@ -970,21 +982,21 @@ def count_hash_entries(index_path: str, hash_type: str) -> int:
     """
     ...
 
-def unnest(batch: Any, column: str, keep_empty: bool = ...) -> Any:
+def unnest(batch: _DataFrame, column: str, keep_empty: bool = ...) -> _DataFrame:
     """Explode a list-typed column into one row per element."""
     ...
 
 def window(
-    batch: Any,
+    batch: _DataFrame,
     partition_by: List[str],
     order_by: List[str],
-    specs: List[Tuple[Any, ...]],
-) -> Any:
+    specs: List[Tuple[object, ...]],
+) -> _DataFrame:
     """SQL window functions over one batch; specs are normalized 9-tuples."""
     ...
 
 def gap_fill(
-    batch: Any,
+    batch: _DataFrame,
     partition_by: List[str],
     time: str,
     bucket: int,
@@ -992,34 +1004,34 @@ def gap_fill(
     mode: str,
     start: Optional[int] = ...,
     end: Optional[int] = ...,
-) -> Any:
+) -> _DataFrame:
     """Materialize a regular time grid with none/locf/linear fills."""
     ...
 
-def join(left: Any, right: Any, on: List[str], how: str) -> Any:
+def join(left: _DataFrame, right: _DataFrame, on: List[str], how: str) -> _DataFrame:
     """Same-key equi join of two batches."""
     ...
 
 def asof(
-    left: Any,
-    right: Any,
+    left: _DataFrame,
+    right: _DataFrame,
     on: str,
     by: List[str],
     direction: str,
     tolerance: Optional[int] = ...,
-) -> Any:
+) -> _DataFrame:
     """Temporal nearest-match join of two batches."""
     ...
 
 def interval(
-    left: Any,
-    right: Any,
+    left: _DataFrame,
+    right: _DataFrame,
     point: str,
     lo: str,
     hi: str,
     by: List[str],
     outer: bool,
-) -> Any:
+) -> _DataFrame:
     """Point-in-range join of two batches."""
     ...
 
@@ -1032,7 +1044,7 @@ def jit_run_op(so_path: str, in_bytes: bytes, out_size: int) -> bytes:
     """
     ...
 
-def memory_budget_advice(required_bytes: int, available_bytes: int = ...) -> Dict[str, Any]:
+def memory_budget_advice(required_bytes: int, available_bytes: int = ...) -> Dict[str, object]:
     """Whether an aggregated workload of `required_bytes` fits in process.
 
     `available_bytes=0` detects it (cgroup-aware). Returns a dict with `fits`,

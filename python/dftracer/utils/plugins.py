@@ -20,14 +20,30 @@ Example::
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from .dftracer_utils_ext import PluginHost as _NativePluginHost
 
+if TYPE_CHECKING:
+    import pyarrow as pa  # ty: ignore[unresolved-import]
+
+    from .runtime import Runtime
+
 __all__ = ["PluginHost", "unnest"]
 
+# A JSON-serializable value tree (config is handed straight to json.dumps).
+JSONValue = Union[str, int, float, bool, None, List["JSONValue"], Dict[str, "JSONValue"]]
 
-def unnest(result: Any, column: str, keep_empty: bool = False) -> Any:
+# A run() map result value: emitted bytes, an eager Arrow table, or a pull-based
+# reader when the map streamed to multiple batches.
+_RunResult = Union[bytes, "pa.Table", "pa.RecordBatchReader"]
+
+
+def unnest(
+    result: "Union[pa.Table, pa.RecordBatchReader, pa.RecordBatch]",
+    column: str,
+    keep_empty: bool = False,
+) -> "pa.Table":
     """Explode a list-typed ``column`` of a ``run()`` map result into one row per
     element, repeating the other columns; the inverse of the set/list/top-k
     monoids.
@@ -68,13 +84,14 @@ class PluginHost:
 
     __slots__ = ("_native", "_renames")
 
-    def __init__(self, runtime: Any = None) -> None:
+    def __init__(self, runtime: "Optional[Runtime]" = None) -> None:
         """Create a host bound to ``runtime`` (a ``Runtime`` or None for the
         module default)."""
         self._native = _NativePluginHost(runtime)
         self._renames: Dict[str, List[str]] = {}
 
-    def load(self, path: Union[str, type], config: Optional[Dict[str, Any]] = None) -> None:
+    # config values are an arbitrary JSON-serializable object tree (json.dumps'd).
+    def load(self, path: Union[str, type], config: Optional[Dict[str, JSONValue]] = None) -> None:
         """dlopen the compiled plugin at ``path``.
 
         ``path`` is either a compiled ``.so`` path or a ``@jit.plugin`` class,
@@ -100,7 +117,7 @@ class PluginHost:
         traces: Union[str, List[str]],
         index_dir: Optional[str] = None,
         auto_index: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> "Dict[str, _RunResult]":
         """Fold every loaded plugin over one fused scan of ``traces`` (a file, a
         directory, or a list of paths).
 
@@ -122,7 +139,7 @@ class PluginHost:
         """
         return self._rename_columns(self._native.run(traces, index_dir, auto_index))
 
-    def _rename_columns(self, results: Dict[str, Any]) -> Dict[str, Any]:
+    def _rename_columns(self, results: "Dict[str, _RunResult]") -> "Dict[str, _RunResult]":
         """Rename jit product value columns v0.. to the field names a @jit.plugin
         declared; non-jit results are untouched."""
         if not self._renames:
