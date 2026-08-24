@@ -24,9 +24,25 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   `resolved.*` virtual fields.
 - Materialized views with rollups and tier-served aggregation; a new `AggregationFold`
   and extended aggregation operators.
+- Concurrency-aware occupancy aggregates `busy`, `concurrency`, `utilization` and
+  `active` measure wall-clock busy time and parallelism instead of double-counting
+  overlapping durations. They are field-less (always over `dur`), work per group and
+  time bucket, and merge across files and ranks; exposed on the `View`/`TraceViewer`
+  `agg`, the `dftracer_view --agg` CLI, and the typed `AggOp` enum.
 - Multi-member split, merge, and reorganize for intra-file parallelism.
+- Humanized sizes and durations: every `<bytes>` CLI flag accepts a unit suffix
+  (`64MB`, `1.5GiB`, `512KB`, `8kb`; 1024-based, `b` is bits) and every `<s>` flag
+  accepts a duration suffix (`30s`, `5m`, `1.5h`); a bare number keeps the flag's
+  legacy unit. The Python API's byte/duration arguments accept a number or a string.
+- `dftracer_server --timeout` bounds server uptime and then shuts down gracefully
+  (accepts a humanized duration; `0`, the default, disables it).
+- Full type coverage across the public Python surface (`Series`/`DataFrame`/viewers,
+  the jit DSL, and a generic `TaskHandle`).
 
 ### Changed
+
+- `Runtime.submit()` no longer accepts a `name=` argument; the task name is derived
+  automatically from the callable and its call-site source location.
 
 - Indexer scan core reworked to a fold-fusion, batch-native design; server query,
   viz caching, and frontend paths updated to match.

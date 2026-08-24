@@ -60,21 +60,23 @@ without a return value.
    rt = dft.Runtime(threads=8, io_threads=4)
 
    # Submit a Python callable
-   h = rt.submit(lambda x, y: x + y, 3, 4, name="add")
+   h = rt.submit(lambda x, y: x + y, 3, 4)
    result = h.get()  # blocks, returns 7
 
    # Fire multiple tasks
-   handles = [rt.submit(process, f, name=f"proc-{f}") for f in files]
+   handles = [rt.submit(process, f) for f in files]
    rt.wait_all()  # blocks until all complete
 
    # Check results
    for h in handles:
        print(h.name, h.get())
 
-Name Auto-derivation
-~~~~~~~~~~~~~~~~~~~~
+Task Naming
+~~~~~~~~~~~
 
-When ``name`` is not provided, it is derived from the callable:
+``submit()`` takes only the callable and its positional/keyword arguments;
+there is no ``name`` parameter. The task name is derived automatically from
+the callable and its call-site source location:
 
 .. code-block:: python
 
@@ -86,10 +88,7 @@ When ``name`` is not provided, it is derived from the callable:
    p = Pipeline()
    rt.submit(p.run)                 # name = "Pipeline.run"
 
-   rt.submit(lambda: None)          # name = "<lambda>"
-
-   # Explicit override
-   rt.submit(my_function, name="custom-name")
+   rt.submit(lambda: None)          # name = "<lambda>" (with source location)
 
 Composing Tasks
 ~~~~~~~~~~~~~~~
@@ -105,7 +104,7 @@ Tasks can be composed by passing resolved values or handles:
        h2 = rt.submit(process, result)      # uses resolved value
        return h2.get()
 
-   h = rt.submit(compose, "trace.pfw.gz", name="compose")
+   h = rt.submit(compose, "trace.pfw.gz")
    print(h.get())
 
    # Pattern 2: pass handle directly (utility unwraps internally)
@@ -121,7 +120,7 @@ Per-task errors are propagated via ``.get()`` and ``.wait()``:
 
 .. code-block:: python
 
-   h = rt.submit(failing_function, name="fail")
+   h = rt.submit(failing_function)
    try:
        h.get()
    except ValueError as e:
@@ -132,7 +131,7 @@ Batch error handling with ``wait_all()``:
 .. code-block:: python
 
    # Default: wait_all() does NOT raise on errors
-   rt.submit(failing_function, name="fail")
+   rt.submit(failing_function)
    rt.wait_all()
 
    # Check failures
@@ -152,7 +151,7 @@ Error callbacks for async notification:
 .. code-block:: python
 
    rt.set_error_callback(lambda h, e: print(f"FAILED {h.name}: {e}"))
-   rt.submit(failing_function, name="monitored")
+   rt.submit(failing_function)
    rt.wait_all()
 
 Progress Tracking

@@ -15,6 +15,7 @@ the :doc:`Reference <../reference/index>` documents.
    compose
    task-graph
    dataframe-model
+   python-typing
    simd
    fused-scan
    indexing-and-pushdown

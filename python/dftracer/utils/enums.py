@@ -48,11 +48,26 @@ class AggOp(str, Enum):
     KURT = "kurt"
     HIST = "hist"  # raw histogram: an arrow list<struct<lo, hi, count>> column
     ARGMAX = "argmax"
+    # Occupancy: field-less, always measured over ``dur``. See the aggregation
+    # guide for what each metric means.
+    BUSY = "busy"
+    CONCURRENCY = "concurrency"
+    UTILIZATION = "utilization"
+    ACTIVE = "active"
 
-    def of(self, field: str, by: Optional[str] = None) -> str:
+    def of(self, field: str = "", by: Optional[str] = None) -> str:
         """Build an agg spec: ``AggOp.STD.of("dur")`` -> ``"std:dur"``;
-        ``AggOp.ARGMAX.of("name", by="dur")`` -> ``"argmax:name:dur"``."""
-        if self is AggOp.COUNT:
-            return "count" if not field else f"count:{field}"
+        ``AggOp.ARGMAX.of("name", by="dur")`` -> ``"argmax:name:dur"``. The
+        field-less ops (``COUNT`` and the occupancy ops) ignore ``field`` and
+        return the bare op name, so ``AggOp.BUSY.of()`` -> ``"busy"``."""
+        if self in _FIELDLESS:
+            return self.value if not field else f"{self.value}:{field}"
         spec = f"{self.value}:{field}"
         return f"{spec}:{by}" if by else spec
+
+
+# Ops whose spec is the bare op name: the group count and the occupancy metrics,
+# which are always measured over ``dur``.
+_FIELDLESS = frozenset(
+    {AggOp.COUNT, AggOp.BUSY, AggOp.CONCURRENCY, AggOp.UTILIZATION, AggOp.ACTIVE}
+)

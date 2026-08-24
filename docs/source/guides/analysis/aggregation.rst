@@ -179,10 +179,107 @@ An ``AggSpec`` is ``{op, field, out_name}`` (plus ``by`` for ``ArgMax`` and
    * - distinct string values
      - ``SetUnion``
      - ``"set_union:name"`` / ``"uniq:name"``
+   * - busy time (occupancy)
+     - ``Busy``
+     - ``"busy"``
+   * - average concurrency
+     - ``Concurrency``
+     - ``"concurrency"``
+   * - utilization
+     - ``Utilization``
+     - ``"utilization"``
+   * - peak concurrency
+     - ``Active``
+     - ``"active"``
 
 For example, a p99 duration per category is ``AggOp::Pct`` with ``q = 0.99`` (C++)
 or ``"p99:dur"`` (Python). Percentile and histogram aggregates are backed by a
-DDSketch; see :doc:`statistics`.
+DDSketch; see :doc:`statistics`. The last four are the occupancy metrics,
+explained below.
+
+Occupancy: concurrency-aware duration
+-------------------------------------
+
+``sum(dur)`` adds up every event's duration, so overlapping or nested work
+(async I/O in flight at once, threads running in parallel, a span that wholly
+contains its children) is counted many times over. It answers "how much event-
+time was recorded", not "how much wall-clock time was actually busy". The
+occupancy metrics answer the wall-clock question. They are field-less: each is
+always measured over the event interval ``[ts, ts + dur)``, so the spec is the
+bare op name with no ``:field``.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 78
+
+   * - Metric
+     - Meaning
+   * - ``busy``
+     - Wall-clock microseconds during which at least one event was active (the
+       union of the intervals, not their sum).
+   * - ``concurrency``
+     - Average parallelism, ``sum(dur) / busy``: ``1.0`` when events never
+       overlap, ``N`` when ``N`` run concurrently on average. This is Little's
+       law, where ``sum(dur)`` is the integral of the active-event count over
+       time.
+   * - ``utilization``
+     - ``busy`` divided by the makespan (``max_end - min_ts``): the fraction of
+       the elapsed window that was busy.
+   * - ``active``
+     - Peak concurrent headcount: the largest number of events active at once.
+
+Because the field is fixed, group and bucket as usual to ask sharper questions:
+the number of concurrent ``pread`` calls per file is a ``concurrency`` (or
+``active``) aggregate grouped by name and file.
+
+.. tab-set::
+
+   .. tab-item:: C++
+
+      .. code-block:: cpp
+
+         auto df = View::from_file("trace.pfw.gz")
+                       .group_by({GroupKey::name()})
+                       .agg({{AggOp::Concurrency, "dur", "concurrency"},
+                             {AggOp::Active, "dur", "active"}})
+                       .collect()
+                       .get();
+
+   .. tab-item:: Python
+
+      .. code-block:: python
+
+         from dftracer.utils import TraceViewer, AggOp
+
+         df = (TraceViewer("trace.pfw.gz")
+               .group_by("name")
+               .agg("concurrency", "active")   # or AggOp.CONCURRENCY, AggOp.ACTIVE
+               .collect())
+
+Occupancy is computed during the parallel scan from a bounded per-bucket
+coverage mask, so it streams in constant memory and merges across files and
+ranks the same way the other aggregates do (see
+:doc:`../scale/distributed-aggregation`). ``busy`` is an upper bound on the true
+interval union that tightens as the time bucket shrinks; add
+``time_bucket(interval_us)`` to set that resolution.
+
+Typed aggregate specs
+---------------------
+
+The Python spec strings above are convenient but a type checker cannot validate
+them: ``"sum:dur"`` is an ordinary ``str``, so a typo in the op (``"sim:dur"``)
+is caught only at run time. For a checked spec, build it from the ``AggOp`` enum
+instead, which ``agg`` accepts anywhere a string is accepted:
+
+.. code-block:: python
+
+   from dftracer.utils import AggOp
+
+   AggOp.SUM.of("dur")   # -> "sum:dur"; a wrong member name is a type error
+   AggOp.BUSY.of()       # -> "busy"; the field-less ops take no field
+
+The ``F`` expression builder (``F("dur").sum()``) is the other checked form; see
+the ``F`` examples above.
 
 Time-bucketed counters
 ----------------------
