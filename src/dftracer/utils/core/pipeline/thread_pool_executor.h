@@ -92,6 +92,12 @@ class ThreadPoolExecutor : public TaskExecutor {
     static constexpr int BLK_HANDED_OFF = 2;
     // Blocks shorter than this pay no handoff; longer ones the sysmon reclaims.
     static constexpr std::int64_t BLOCK_HANDOFF_NS = 100000;
+    // Headroom above num_threads_ for blocking-handoff replacement threads. A
+    // burst of concurrent run_blocking calls parks that many workers at once
+    // and each needs a replacement runner, so a small ceiling (e.g. one per
+    // core) deadlocks when the inner scopes starve; the permit gate still
+    // bounds actually-running threads.
+    static constexpr std::size_t MAX_BLOCKING_REPLACEMENTS = 256;
 
     // Available run permits.
     alignas(DFTRACER_OPTIMAL_ALIGNMENT) std::atomic<std::ptrdiff_t> permits_{0};
