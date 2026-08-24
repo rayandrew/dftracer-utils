@@ -767,7 +767,7 @@ static coro::CoroTask<void> build_viz_summary(TraceIndex& index) {
     b.nb = nb;
     b.t0 = gmin;
     b.bucket_us = static_cast<double>(gmax - gmin) / static_cast<double>(nb);
-    b.max_lanes = std::max<std::size_t>(1, VizSummary::MAX_CELLS / nb);
+    b.max_lanes = VizSummary::MAX_LANES;
     b.nb_fine = nb << (2 * VizSummary::EXTRA_LEVELS);
     b.fine_bucket_us =
         static_cast<double>(gmax - gmin) / static_cast<double>(b.nb_fine);
