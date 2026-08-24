@@ -13,6 +13,7 @@
 #include <dftracer/utils/trace/views/index_fold_driver.h>
 #include <dftracer/utils/trace/views/mv_store.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
+#include <dftracer/utils/trace/views/typed_collect_fold.h>
 #include <dftracer/utils/trace/views/view_agg_tier.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_counter_format.h>
@@ -746,9 +747,22 @@ coro::CoroTask<TypedResult> run_collect_typed(const ViewPlan& plan,
                                               const ProgressFn* progress) {
     ensure_schema(plan);
     TypedResult out;
-    events_profiles_collect(plan, out.regular, out.aggregated, shard_begin,
-                            shard_end, progress);
-    system_collect(plan, out.counters, shard_begin, shard_end, progress);
+    if (events_profiles_collect(plan, out.regular, out.aggregated, shard_begin,
+                                shard_end, progress)) {
+        system_collect(plan, out.counters, shard_begin, shard_end, progress);
+        co_return out;
+    }
+    // The tier could not answer (a ph/ts predicate it cannot key on, or no tier
+    // built); scan the raw trace like run_collect's fallback so collect_typed
+    // returns rows rather than silently empty.
+    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
+    dftracer::utils::StringIntern intern;
+    TypedCollectFold fold(intern);
+    std::array<Fold*, 1> folds{&fold};
+    co_await fuse(plan, vdef, folds, intern);
+    out.regular = fold.build_regular();
+    out.aggregated = fold.build_aggregated();
+    out.counters = fold.build_counters();
     co_return out;
 }
 

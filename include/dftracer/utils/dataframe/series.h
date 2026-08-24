@@ -7,6 +7,7 @@
 #include <dftracer/utils/dataframe/types.h>
 
 #include <cstdint>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -114,6 +115,24 @@ class Series {
         std::string data;
         for (std::size_t i = 0; i < values.size(); ++i) {
             data += values[i];
+            offsets[i + 1] = static_cast<std::int32_t>(data.size());
+        }
+        return Series{dftu_series_new_string(
+            static_cast<dftu_dtype>(TypeId::String), offsets.data(),
+            data.data(), static_cast<std::int64_t>(values.size()), nullptr)};
+    }
+
+    /// Build a FLAT String column from `values`. Copies the bytes once into the
+    /// contiguous Arrow buffer, without the intermediate std::string vector the
+    /// overload above builds.
+    static Series strings(std::span<const std::string_view> values) {
+        std::vector<std::int32_t> offsets(values.size() + 1, 0);
+        std::size_t total = 0;
+        for (const auto& v : values) total += v.size();
+        std::string data;
+        data.reserve(total);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            data.append(values[i].data(), values[i].size());
             offsets[i + 1] = static_cast<std::int32_t>(data.size());
         }
         return Series{dftu_series_new_string(

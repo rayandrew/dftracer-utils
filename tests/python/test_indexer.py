@@ -629,6 +629,40 @@ class TestAggTierQueryFilter:
             assert self._event_count(directory, pa, "pid == 999999") == 0
 
 
+class TestCollectTypedRawFallback:
+    """collect_typed on a query the aggregation tier cannot key on (e.g. a ts
+    predicate) falls back to a raw scan and returns per-event rows, not a silent
+    empty result - consistent with the aggregate path over the same filter."""
+
+    def _viewer(self, directory):
+        files = sorted(glob.glob(os.path.join(directory, "*.pfw.gz")))
+        return dftu_utils.TraceViewer(files, index_path=directory)
+
+    def _agg_total(self, pa, base):
+        t = pa.table(base.group_by("name").agg("count").collect())
+        return int(pa.compute.sum(t["count"]).as_py()) if t.num_rows else 0
+
+    def test_ts_filter_returns_raw_rows(self):
+        pa = pytest.importorskip("pyarrow")
+        with Environment() as env:
+            directory = env.create_indexed_traces(pids=[1, 2])
+            base = self._viewer(directory).filter("ts >= 0")
+            reg = pa.table(base.collect_typed()["regular"])
+            for c in ("ts", "dur", "ph", "name", "cat", "pid", "tid"):
+                assert c in reg.column_names
+            assert reg.num_rows > 0
+            assert reg.num_rows == self._agg_total(pa, base)
+
+    def test_pid_filter_reduces_raw_rows(self):
+        pa = pytest.importorskip("pyarrow")
+        with Environment() as env:
+            directory = env.create_indexed_traces(pids=[1, 2])
+            tv = self._viewer(directory)
+            all_rows = pa.table(tv.filter("ts >= 0").collect_typed()["regular"]).num_rows
+            one = pa.table(tv.filter("ts >= 0 and pid == 1").collect_typed()["regular"]).num_rows
+            assert 0 < one < all_rows
+
+
 class TestShardPartitionCompleteness:
     """Disjoint shard ranges must union to the full scan - no dropped or
     double-counted events. Regression guard for the multi-worker typed read
