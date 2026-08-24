@@ -33,6 +33,7 @@ import builtins
 import inspect
 import textwrap
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -42,6 +43,7 @@ from typing import (
     NoReturn,
     Protocol,
     Tuple,
+    TypedDict,
     TypeVar,
     cast,
     overload,
@@ -184,6 +186,8 @@ class JitError(Exception):
 
 
 T = TypeVar("T")
+T_co = TypeVar("T_co", covariant=True)
+V2 = TypeVar("V2")
 K = TypeVar("K")
 V = TypeVar("V")
 K1 = TypeVar("K1")
@@ -202,7 +206,11 @@ class Str(Protocol):
     def __ne__(self, other: object) -> bool: ...
 
 
-class _Type(Generic[T]):
+class _Type(Generic[T_co]):
+    """Phantom type marker: the parameter tracks the Python type a jit column
+    maps to (u64 -> int, str_ -> str) and is never consumed, so it is
+    covariant - _Type[int] is a _Type[object]."""
+
     __slots__ = ("dft",)
 
     def __init__(self, dft: str) -> None:
@@ -383,29 +391,47 @@ class ArgMinRow(_Monoid):
     __slots__ = ("payload_types",)
     is_max = False
 
-    def __init__(self, payload_types: "Tuple[_Type[Any], ...]") -> None:
+    def __init__(self, payload_types: "Tuple[_Type[object], ...]") -> None:
         super().__init__("DFTU_MONOID_ARGMIN_ROW")
         self.payload_types = payload_types
 
-    def observe(self, payload: "Tuple[Any, ...]", *, by: float) -> None: ...
+    def observe(self, payload: "Tuple[object, ...]", *, by: float) -> None: ...
 
 
 class ArgMaxRow(_Monoid):
     __slots__ = ("payload_types",)
     is_max = True
 
-    def __init__(self, payload_types: "Tuple[_Type[Any], ...]") -> None:
+    def __init__(self, payload_types: "Tuple[_Type[object], ...]") -> None:
         super().__init__("DFTU_MONOID_ARGMAX_ROW")
         self.payload_types = payload_types
 
-    def observe(self, payload: "Tuple[Any, ...]", *, by: float) -> None: ...
+    def observe(self, payload: "Tuple[object, ...]", *, by: float) -> None: ...
+
+
+class _Accum(_Monoid):
+    """A :class:`Product` component: the permissive union of accumulator ops
+    (``+= n`` and ``.observe(...)``), since dict/tuple products do not carry
+    per-component monoid types."""
+
+    __slots__ = ()
+
+    def __iadd__(self, x: "int | float") -> "_Accum":
+        raise NotImplementedError
+
+    def observe(self, *args: object, **kwargs: object) -> None: ...
 
 
 class Product(_Monoid):
     __slots__ = ()
 
-    def __getitem__(self, i: int) -> Any: ...
-    def __getattr__(self, name: str) -> Any: ...
+    # Type-only (runtime access is AST-compiled; a real __setattr__ would break
+    # _Monoid.__init__). __setattr__ lets `product.cnt += 1` type-check.
+    if TYPE_CHECKING:
+
+        def __getitem__(self, i: int) -> _Accum: ...
+        def __getattr__(self, name: str) -> _Accum: ...
+        def __setattr__(self, name: str, value: _Accum) -> None: ...
 
 
 def count() -> Counter:
@@ -557,7 +583,7 @@ _MINMAX_WIDTHS = {
 }
 
 
-def _minmax_dft(op: str, of: "_Type[Any]") -> str:
+def _minmax_dft(op: str, of: "_Type[object]") -> str:
     width = _MINMAX_WIDTHS.get(of.dft)
     if width is None:
         raise JitError(f"jit.{op.lower()}(of=...) must be a fixed-width int or float type")
@@ -568,7 +594,7 @@ def _minmax_dft(op: str, of: "_Type[Any]") -> str:
 def min() -> "Min[int]": ...
 @overload
 def min(of: "_Type[T]") -> "Min[T]": ...
-def min(of: "_Type[Any]" = u64) -> Any:
+def min(of: "_Type[object]" = u64) -> "Min[object]":
     """A typed min value monoid (default u64); ``of=`` sets the element width.
 
     ``.observe(v)`` contributes; the result column materializes at ``of``'s exact width."""
@@ -579,7 +605,7 @@ def min(of: "_Type[Any]" = u64) -> Any:
 def max() -> "Max[int]": ...
 @overload
 def max(of: "_Type[T]") -> "Max[T]": ...
-def max(of: "_Type[Any]" = u64) -> Any:
+def max(of: "_Type[object]" = u64) -> "Max[object]":
     """A typed max value monoid (default u64); ``of=`` sets the element width.
 
     ``.observe(v)`` contributes; the result column materializes at ``of``'s exact width."""
@@ -605,7 +631,7 @@ def distinct() -> Distinct:
 def set() -> "SetV[Str]": ...
 @overload
 def set(of: "_Type[T]") -> "SetV[T]": ...
-def set(of: "_Type[Any]" = str_) -> Any:
+def set(of: "_Type[object]" = str_) -> "SetV[object]":
     """A set value monoid collecting distinct elements added with ``.observe``.
 
     ``of=jit.str_`` (default) collects interned strings into a list<string> column;
@@ -621,7 +647,7 @@ def set(of: "_Type[Any]" = str_) -> Any:
 def list() -> "ListV[Str]": ...
 @overload
 def list(of: "_Type[T]") -> "ListV[T]": ...
-def list(of: "_Type[Any]" = str_) -> Any:
+def list(of: "_Type[object]" = str_) -> "ListV[object]":
     """An ordered-list value monoid collecting elements added with ``.append``.
 
     ``of=jit.str_`` (default) collects interned strings into a list<string>
@@ -677,7 +703,7 @@ def quantiles(qs: "Tuple[float, ...]" = (0.5, 0.9, 0.95, 0.99)) -> Quantiles:
     return Quantiles("DFTU_MONOID_SKETCH", qs)
 
 
-def _argby_dft(op: str, of: "_Type[Any]") -> str:
+def _argby_dft(op: str, of: "_Type[object]") -> str:
     if of is str_:
         return f"DFTU_MONOID_{op}_STR"
     if of is i64:
@@ -689,7 +715,7 @@ def _argby_dft(op: str, of: "_Type[Any]") -> str:
 def argmin() -> "ArgMin[Str]": ...
 @overload
 def argmin(of: "_Type[T]") -> "ArgMin[T]": ...
-def argmin(of: "_Type[Any]" = str_) -> Any:
+def argmin(of: "_Type[object]" = str_) -> "ArgMin[object]":
     """An argmin value: keep the payload whose ``by=`` key is smallest.
 
     ``of=jit.str_`` (default) keeps an interned-string payload (string column);
@@ -701,7 +727,7 @@ def argmin(of: "_Type[Any]" = str_) -> Any:
 def argmax() -> "ArgMax[Str]": ...
 @overload
 def argmax(of: "_Type[T]") -> "ArgMax[T]": ...
-def argmax(of: "_Type[Any]" = str_) -> Any:
+def argmax(of: "_Type[object]" = str_) -> "ArgMax[object]":
     """An argmax value: keep the payload whose ``by=`` key is largest.
 
     ``of=jit.str_`` (default) keeps an interned-string payload (string column);
@@ -715,7 +741,7 @@ def _check_k(op: str, k: int) -> int:
     return k
 
 
-def _kv_dft(op: str, of: "_Type[Any]") -> str:
+def _kv_dft(op: str, of: "_Type[object]") -> str:
     if of is str_:
         return f"DFTU_MONOID_{op}_STR"
     if of is i64:
@@ -727,7 +753,7 @@ def _kv_dft(op: str, of: "_Type[Any]") -> str:
 def topk(k: int) -> "TopK[Str]": ...
 @overload
 def topk(k: int, of: "_Type[T]") -> "TopK[T]": ...
-def topk(k: int, of: "_Type[Any]" = str_) -> Any:
+def topk(k: int, of: "_Type[object]" = str_) -> "TopK[object]":
     """A bounded top-k value: keep the k payloads at the k largest ``by=`` keys.
 
     ``of=jit.str_`` (default) keeps interned-string payloads into a list<string>
@@ -741,7 +767,7 @@ def topk(k: int, of: "_Type[Any]" = str_) -> Any:
 def bottomk(k: int) -> "BottomK[Str]": ...
 @overload
 def bottomk(k: int, of: "_Type[T]") -> "BottomK[T]": ...
-def bottomk(k: int, of: "_Type[Any]" = str_) -> Any:
+def bottomk(k: int, of: "_Type[object]" = str_) -> "BottomK[object]":
     """A bounded bottom-k value: keep the k payloads at the k smallest ``by=``
     keys. ``of=`` selects a string (default) or int64 payload, mirroring
     :func:`topk`. Contribute with ``.observe(payload, by=<expr>)``."""
@@ -752,7 +778,7 @@ def bottomk(k: int, of: "_Type[Any]" = str_) -> Any:
 def approx_topk(k: int) -> "ApproxTopK[Str]": ...
 @overload
 def approx_topk(k: int, of: "_Type[T]") -> "ApproxTopK[T]": ...
-def approx_topk(k: int, of: "_Type[Any]" = str_) -> Any:
+def approx_topk(k: int, of: "_Type[object]" = str_) -> "ApproxTopK[object]":
     """An approximate heavy-hitters value: the k most FREQUENT observed values
     (SpaceSaving), in bounded memory.
 
@@ -766,7 +792,7 @@ def approx_topk(k: int, of: "_Type[Any]" = str_) -> Any:
 def sample(k: int) -> "Sample[Str]": ...
 @overload
 def sample(k: int, of: "_Type[T]") -> "Sample[T]": ...
-def sample(k: int, of: "_Type[Any]" = str_) -> Any:
+def sample(k: int, of: "_Type[object]" = str_) -> "Sample[object]":
     """A deterministic mergeable sample: keep k DISTINCT items by smallest
     hash(item) (bottom-k / KMV), not an Algorithm-R reservoir.
 
@@ -776,7 +802,7 @@ def sample(k: int, of: "_Type[Any]" = str_) -> Any:
     return Sample(_kv_dft("SAMPLE", of), _check_k("sample", k))
 
 
-def _argrow_payload(op: str, of: object) -> "Tuple[_Type[Any], ...]":
+def _argrow_payload(op: str, of: object) -> "Tuple[_Type[object], ...]":
     if not isinstance(of, tuple) or not of:
         raise JitError(
             f"jit.{op}(of=...) must be a non-empty tuple of jit types such as "
@@ -790,7 +816,7 @@ def _argrow_payload(op: str, of: object) -> "Tuple[_Type[Any], ...]":
     return tuple(of)
 
 
-def argmin_row(of: "Tuple[_Type[Any], ...]") -> "ArgMinRow":
+def argmin_row(of: "Tuple[_Type[object], ...]") -> "ArgMinRow":
     """An argmin-row value (full-row min-by, DISTINCT ON): keep the ENTIRE payload
     row - a fixed tuple of typed components ``of=(jit.str_, jit.i64, ...)`` - from
     the contribution whose ``by=`` key is smallest. Materializes to one column per
@@ -799,7 +825,7 @@ def argmin_row(of: "Tuple[_Type[Any], ...]") -> "ArgMinRow":
     return ArgMinRow(_argrow_payload("argmin_row", of))
 
 
-def argmax_row(of: "Tuple[_Type[Any], ...]") -> "ArgMaxRow":
+def argmax_row(of: "Tuple[_Type[object], ...]") -> "ArgMaxRow":
     """An argmax-row value (full-row max-by, DISTINCT ON): keep the ENTIRE payload
     row at the largest ``by=`` key, mirroring :func:`argmin_row`. Contribute with
     ``.observe((p0, p1, ...), by=<expr>)``."""
@@ -818,7 +844,7 @@ class Nested(Generic[IK, V]):
 
     def __init__(
         self,
-        inner_key_types: "Tuple[_Type[Any], ...]",
+        inner_key_types: "Tuple[_Type[object], ...]",
         values: Tuple[_Monoid, ...],
         is_product: bool,
         value_names: Tuple[str, ...] | None = None,
@@ -839,7 +865,7 @@ class Map(Generic[K, V]):
 
     def __init__(
         self,
-        key_types: "Tuple[_Type[Any], ...]",
+        key_types: "Tuple[_Type[object], ...]",
         values: Tuple[_Monoid, ...],
         is_product: bool,
         value_names: Tuple[str, ...] | None = None,
@@ -952,8 +978,8 @@ def nested(
     *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]", value: V
 ) -> "Nested[Tuple[K1, K2, K3, K4], V]": ...
 @overload
-def nested(*, key: "Tuple[_Type[Any], ...]", value: V) -> "Nested[Tuple[Any, ...], V]": ...
-def nested(key: "Tuple[_Type[Any], ...]", value: object) -> Any:
+def nested(*, key: "Tuple[_Type[object], ...]", value: V) -> "Nested[Tuple[object, ...], V]": ...
+def nested(key: "Tuple[_Type[object], ...]", value: object) -> "Nested[object, object]":
     """Declare a nested-preserved map value: an inner typed-tuple key and a scalar
     value monoid (or a tuple/dict/``@jit.record`` product of them).
 
@@ -990,6 +1016,68 @@ def nested(key: "Tuple[_Type[Any], ...]", value: object) -> Any:
     return Nested(key, values, is_product, value_names)
 
 
+# A dict/tuple of monoids is a product (value type Product); these precede the
+# generic `value: V` forms so it is not typed as a bare dict/tuple.
+@overload
+def map(
+    *, key: "_Type[K1]", value: "Dict[str, _Monoid]", ordered: bool = False
+) -> "Map[Tuple[K1], Product]": ...
+@overload
+def map(
+    *, key: "_Type[K1]", value: "Tuple[_Monoid, ...]", ordered: bool = False
+) -> "Map[Tuple[K1], Product]": ...
+@overload
+def map(
+    *, key: "Tuple[_Type[K1]]", value: "Dict[str, _Monoid]", ordered: bool = False
+) -> "Map[Tuple[K1], Product]": ...
+@overload
+def map(
+    *, key: "Tuple[_Type[K1]]", value: "Tuple[_Monoid, ...]", ordered: bool = False
+) -> "Map[Tuple[K1], Product]": ...
+@overload
+def map(
+    *, key: "Tuple[_Type[K1], _Type[K2]]", value: "Dict[str, _Monoid]", ordered: bool = False
+) -> "Map[Tuple[K1, K2], Product]": ...
+@overload
+def map(
+    *, key: "Tuple[_Type[K1], _Type[K2]]", value: "Tuple[_Monoid, ...]", ordered: bool = False
+) -> "Map[Tuple[K1, K2], Product]": ...
+@overload
+def map(
+    *,
+    key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]",
+    value: "Dict[str, _Monoid]",
+    ordered: bool = False,
+) -> "Map[Tuple[K1, K2, K3], Product]": ...
+@overload
+def map(
+    *,
+    key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]",
+    value: "Tuple[_Monoid, ...]",
+    ordered: bool = False,
+) -> "Map[Tuple[K1, K2, K3], Product]": ...
+@overload
+def map(
+    *,
+    key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]",
+    value: "Dict[str, _Monoid]",
+    ordered: bool = False,
+) -> "Map[Tuple[K1, K2, K3, K4], Product]": ...
+@overload
+def map(
+    *,
+    key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]",
+    value: "Tuple[_Monoid, ...]",
+    ordered: bool = False,
+) -> "Map[Tuple[K1, K2, K3, K4], Product]": ...
+@overload
+def map(
+    *, key: "Tuple[_Type[object], ...]", value: "Dict[str, _Monoid]", ordered: bool = False
+) -> "Map[Tuple[object, ...], Product]": ...
+@overload
+def map(
+    *, key: "Tuple[_Type[object], ...]", value: "Tuple[_Monoid, ...]", ordered: bool = False
+) -> "Map[Tuple[object, ...], Product]": ...
 @overload
 def map(*, key: "_Type[K1]", value: V, ordered: bool = False) -> "Map[Tuple[K1], V]": ...
 @overload
@@ -1011,9 +1099,11 @@ def map(
 ) -> "Map[Tuple[K1, K2, K3, K4], V]": ...
 @overload
 def map(
-    *, key: "Tuple[_Type[Any], ...]", value: V, ordered: bool = False
-) -> "Map[Tuple[Any, ...], V]": ...
-def map(key: "Tuple[_Type[Any], ...] | _Type[Any]", value: object, ordered: bool = False) -> Any:
+    *, key: "Tuple[_Type[object], ...]", value: V, ordered: bool = False
+) -> "Map[Tuple[object, ...], V]": ...
+def map(
+    key: "Tuple[_Type[object], ...] | _Type[object]", value: object, ordered: bool = False
+) -> "Map[object, object]":
     """Declare a mergeable map class-attribute: a typed-tuple key, and either one
     value monoid, a tuple of monoids (a positional product), a dict of
     name->monoid, or a :func:`record` class (both named products).
@@ -1050,21 +1140,21 @@ _JOIN_TYPES: Dict[str, str] = {
 }
 
 
-class JoinDecl:
+class JoinDecl(Generic[K, V, K2, V2]):
     __slots__ = ("left", "right", "how")
 
-    def __init__(self, left: "Map[Any, Any]", right: "Map[Any, Any]", how: str) -> None:
+    def __init__(self, left: "Map[K, V]", right: "Map[K2, V2]", how: str) -> None:
         self.left = left
         self.right = right
         self.how = how
 
 
 def join(
-    left: "Map[Any, Any]",
-    right: "Map[Any, Any]",
+    left: "Map[K, V]",
+    right: "Map[K2, V2]",
     *,
     how: Literal["inner", "left", "right", "full"] = "inner",
-) -> JoinDecl:
+) -> "JoinDecl[K, V, K2, V2]":
     """Declare a class-level equi-join of two of this plugin's maps on their shared
     key tuple; the host runs it at finalize and emits the result under this
     attribute's name. ``how`` is one of inner (default), left, right, full."""
@@ -1126,7 +1216,7 @@ def _check_cap_id(fn: str, cap_id: object) -> str:
     return cap_id
 
 
-def _port_is_f64(fn: str, of: "_Type[Any]") -> bool:
+def _port_is_f64(fn: str, of: "_Type[object]") -> bool:
     if of is f64:
         return True
     if of is u64 or of is i64:
@@ -1167,7 +1257,7 @@ def _parse_version(fn: str, s: object) -> Tuple[int, int, int]:
     return (nums[0], nums[1], nums[2])
 
 
-def publish(cap_id: str, of: "_Type[Any]" = u64, *, version: str = "0.0.0") -> Port:
+def publish(cap_id: str, of: "_Type[object]" = u64, *, version: str = "0.0.0") -> Port:
     """Declare a batch-scoped publish port under capability ``cap_id``.
 
     The plugin PROVIDES ``cap_id`` at semantic ``version`` (``MAJOR.MINOR.PATCH``,
@@ -1184,7 +1274,7 @@ def publish(cap_id: str, of: "_Type[Any]" = u64, *, version: str = "0.0.0") -> P
 
 def consume(
     cap_id: str,
-    of: "_Type[Any]" = u64,
+    of: "_Type[object]" = u64,
     *,
     required: bool = False,
     min_version: str | None = None,
@@ -1598,6 +1688,16 @@ def _int_literal(v: int) -> str:
     return f"{v}ULL" if v > _I64_MAX else str(v)
 
 
+class _FusedGroup(TypedDict):
+    """One coalesced group of same-key maps fused into a single product."""
+
+    cname: str
+    key_elts: List[ast.expr]
+    key_types: "Tuple[_Type[object], ...]"
+    members: List[str]
+    ordered: bool
+
+
 class _Compiler:
     def __init__(
         self,
@@ -1636,7 +1736,7 @@ class _Compiler:
         # Fusion plan: same-key maps coalesced into one product.
         # fused_of: map name -> (fused C name, component index, is_f64).
         self.fused_of: Dict[str, Tuple[str, int, bool]] = {}
-        self.fused_groups: List[Dict[str, Any]] = []
+        self.fused_groups: List[_FusedGroup] = []
         # Per-scope batched contributions: fused C name -> [(comp, is_f64, rhs)].
         self._fused_pending: Dict[str, List[Tuple[int, bool, str]]] = {}
 
@@ -2046,7 +2146,7 @@ class _Compiler:
 
     def _key_assigns(
         self,
-        key_types: "Tuple[_Type[Any], ...]",
+        key_types: "Tuple[_Type[object], ...]",
         keys: List[ast.expr],
         var: str = "key",
     ) -> List[str]:
@@ -2948,7 +3048,7 @@ def _emit(
     arg_helpers: builtins.set[str],
     raw: bool,
     joins: List[Tuple[str, str, str, str]],
-    fused_groups: List[Dict[str, Any]] | None = None,
+    fused_groups: List[_FusedGroup] | None = None,
     fused_of: Dict[str, Tuple[str, int, bool]] | None = None,
     op_defs: List[str] | None = None,
     ports: Dict[str, _Port] | None = None,
@@ -3306,7 +3406,7 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
     if plan_query is not None and not isinstance(plan_query, str):
         raise JitError("@jit.plugin plan_query must be a query DSL string")
     explicit_needs = _resolve_needs(needs)
-    fused_groups: List[Dict[str, Any]] = []
+    fused_groups: List[_FusedGroup] = []
     fused_of: Dict[str, Tuple[str, int, bool]] = {}
     op_defs: List[str] = []
     if each[0].raw:

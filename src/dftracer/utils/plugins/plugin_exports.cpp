@@ -455,7 +455,8 @@ coro::CoroTask<int> run_async_thunk(const void* in, void* out) {
         } else {
             emit(Invocable{}(native_in));
         }
-        co_return (rc == 0 && got) ? 0 : -1;
+        const int rv = (rc == 0 && got) ? 0 : -1;
+        co_return rv;
     } catch (...) {
         co_return -1;
     }

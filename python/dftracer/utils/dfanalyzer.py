@@ -16,7 +16,17 @@ import glob
 import json
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
 import numpy as np
 import pandas as pd
@@ -31,6 +41,12 @@ from .dask import (
     resolve_local_staging,
 )
 from .indexer import AggregationConfig, _open_readonly_indexer
+
+if TYPE_CHECKING:
+    from dask.distributed import Client  # ty: ignore[unresolved-import]
+
+    from .dask import DaskTraceViewer
+    from .dataframe import TraceViewer
 
 try:
     from dask.distributed import get_client
@@ -229,7 +245,7 @@ def view_typed_frames(
     time_granularity: float = 1.0,
     time_resolution: float = 1e6,
     query: Optional[str] = None,
-    client: Optional[Any] = None,
+    client: "Optional[Client]" = None,
     group_keys: Optional[Tuple[str, ...]] = None,
 ) -> TypedFrames:
     """One-pass read of the aggregation index's three record families, each
@@ -251,7 +267,9 @@ def view_typed_frames(
     if client is None:
         from dftracer.utils import TraceViewer
 
-        tv: Any = TraceViewer(files, index_path=index_path or None)
+        tv: "Union[TraceViewer, DaskTraceViewer]" = TraceViewer(
+            files, index_path=index_path or None
+        )
     else:
         from .dask import DaskTraceViewer
 
@@ -327,17 +345,14 @@ def _typed_read_to_ipc(
     from dftracer.utils import TraceViewer
 
     bucket_us = int(time_granularity * time_resolution)
-    tv: Any = TraceViewer(files, index_path=index_path or None)
+    tv: "TraceViewer" = TraceViewer(files, index_path=index_path or None)
     if query:
         tv = tv.filter(query)
-    kw: Dict[str, Any] = {"shard_begin": shard_begin, "shard_end": shard_end}
-    if progress is not None:
-        kw["progress"] = progress
     typed = (
         tv.group_by(*(group_keys or _TYPED_GROUP_KEYS))
         .time_bucket(bucket_us)
         .agg(*_TYPED_AGGS)
-        .collect_typed(**kw)
+        .collect_typed(shard_begin, shard_end, progress)
     )
 
     events = _typed_event_frame(

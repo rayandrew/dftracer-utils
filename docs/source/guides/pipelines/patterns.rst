@@ -22,7 +22,7 @@ matches how you need to wait:
 
    * - Entry point
      - Use when
-   * - ``rt.submit(task, name)`` -> ``TaskHandle``
+   * - ``rt.submit(task)`` -> ``TaskHandle``
      - You already have a ``coro::CoroTask<void>`` and just want to fire it
        and get a handle back.
    * - ``rt.scope(name, func)`` -> ``TaskHandle``

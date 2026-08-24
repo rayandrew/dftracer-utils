@@ -255,6 +255,14 @@ bool parse_agg_spec(const char* s, AggSpec& out) {
         out = AggSpec(AggOp::ArgMax, field, "", by);
     else if (op == "set_union" || op == "uniq")
         out = AggSpec(AggOp::SetUnion, field);
+    else if (op == "busy")
+        out = AggSpec(AggOp::Busy, field.empty() ? "dur" : field);
+    else if (op == "concurrency")
+        out = AggSpec(AggOp::Concurrency, field.empty() ? "dur" : field);
+    else if (op == "utilization")
+        out = AggSpec(AggOp::Utilization, field.empty() ? "dur" : field);
+    else if (op == "active")
+        out = AggSpec(AggOp::Active, field.empty() ? "dur" : field);
     else if (op == "pct")
         // pct:field:q  (explicit quantile)
         out = AggSpec(AggOp::Pct, field, "", "",

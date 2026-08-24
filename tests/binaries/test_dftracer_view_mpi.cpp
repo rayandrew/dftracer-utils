@@ -36,6 +36,21 @@ void write_counter_file(const std::string& path, const char* name,
     gzclose(gz);
 }
 
+// Write one complete (ph="X") event with an explicit [ts, ts+dur) interval.
+void write_event_file(const std::string& path, const char* name,
+                      std::uint64_t ts, std::uint64_t dur) {
+    gzFile gz = gzopen(path.c_str(), "wb");
+    REQUIRE(gz != nullptr);
+    gzputs(gz, "[\n");
+    std::string line =
+        "{\"ph\":\"X\",\"name\":\"" + std::string(name) +
+        "\",\"cat\":\"io\",\"pid\":0,\"tid\":0,\"ts\":" + std::to_string(ts) +
+        ",\"dur\":" + std::to_string(dur) + "}\n";
+    gzputs(gz, line.c_str());
+    gzputs(gz, "]\n");
+    gzclose(gz);
+}
+
 std::string read_sorted(const std::string& path) {
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs.is_open()) return {};
@@ -148,6 +163,42 @@ TEST_SUITE("dftracer_view_mpi") {
         CHECK(!s.empty());
         CHECK(s.find("cpu") != std::string::npos);  // group key
         CHECK(s.find("60") != std::string::npos);   // mean util across ranks
+    }
+
+    // Distributed occupancy: each rank aggregate_partial()s its shard, the
+    // coordinator merge_partials_to_table()s. Two overlapping events on
+    // separate ranks must OR-merge to the union (busy = 500000, concurrency =
+    // 2), not sum to 1000000 - which only holds if the occupancy masks survive
+    // the partial serialization the ranks ship. Guards the distributed
+    // transport end to end.
+    TEST_CASE("distributed occupancy merges across ranks") {
+        std::string bin =
+            find_binary_by_name("DFTRACER_VIEW_PATH", "dftracer_view");
+        std::string launcher = find_mpi_launcher();
+        if (bin.empty() || launcher.empty()) {
+            MESSAGE("dftracer_view or MPI launcher unavailable, skipping.");
+            return;
+        }
+
+        TestEnvironment env(1);
+        REQUIRE(env.is_valid());
+        const std::string in = env.get_dir() + "/in";
+        fs::create_directories(in);
+        write_event_file(in + "/r0.pfw.gz", "io", 0, 500000);
+        write_event_file(in + "/r1.pfw.gz", "io", 0, 500000);  // overlaps r0
+
+        const std::string o = env.get_dir() + "/occ.json";
+        const std::vector<std::string> args = {
+            "--directory", in,     "--group-by", "name",
+            "--agg",       "busy", "--output",   o};
+        REQUIRE(run_mpi(launcher, 2, bin, args) == 0);
+
+        const std::string s = read_sorted(o);
+        CHECK(!s.empty());
+        CHECK(s.find("io") != std::string::npos);
+        // busy is the union across ranks (500000), not the sum (1000000).
+        CHECK(s.find("500000") != std::string::npos);
+        CHECK(s.find("1000000") == std::string::npos);
     }
 
     // Distributed --merge: each rank writes its shard, rank 0 concatenates. The

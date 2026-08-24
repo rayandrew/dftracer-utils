@@ -136,9 +136,10 @@ class GenDlioConfigArgParse : public cli::ArgParse {
             .default_value<std::uint64_t>(100);
         parser()
             .add_argument("-t", "--time-interval")
-            .help("Aggregation time interval in ms (default: 5000)")
-            .scan<'g', double>()
-            .default_value(5000.0);
+            .help(
+                "Aggregation time interval (default: 5000ms). A bare number is "
+                "milliseconds; suffixed values like 5s are converted")
+            .default_value(std::string("5000"));
 
         parser()
             .add_argument("--event-map")
@@ -163,7 +164,7 @@ class GenDlioConfigArgParse : public cli::ArgParse {
         seed = parser().get<std::uint64_t>("--seed");
         max_samples_per_entry =
             parser().get<std::uint64_t>("--max-samples-per-entry");
-        time_interval = parser().get<double>("--time-interval");
+        time_interval = cli::get_duration_arg(parser(), "--time-interval", 1e3);
         event_map = parser().get<std::string>("--event-map");
     }
 };

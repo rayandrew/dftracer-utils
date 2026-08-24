@@ -208,15 +208,15 @@ Series Series::filter(const Series& mask) const {
 
 Series Series::str_eq(std::string_view rhs) const {
     return Series{dftu_series_str_eq(handle_, rhs.data(),
-                                     static_cast<std::int64_t>(rhs.size()))};
+                                     static_cast<std::int32_t>(rhs.size()))};
 }
 Series Series::str_contains(std::string_view needle) const {
     return Series{dftu_series_str_contains(
-        handle_, needle.data(), static_cast<std::int64_t>(needle.size()))};
+        handle_, needle.data(), static_cast<std::int32_t>(needle.size()))};
 }
 Series Series::str_starts_with(std::string_view prefix) const {
     return Series{dftu_series_str_starts_with(
-        handle_, prefix.data(), static_cast<std::int64_t>(prefix.size()))};
+        handle_, prefix.data(), static_cast<std::int32_t>(prefix.size()))};
 }
 Series Series::str_ends_with(std::string_view suffix) const {
     return Series{dftu_series_str_ends_with(

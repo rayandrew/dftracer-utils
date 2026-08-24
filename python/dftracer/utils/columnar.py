@@ -22,11 +22,20 @@ string/bool comparisons have no in-memory form; they are filter-only.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Callable, Dict, List, NamedTuple, Sequence, Union
 
 from . import dftracer_utils_ext as _ext
 from .dataframe import DataFrame
 from .series import Series, _unwrap
+
+if TYPE_CHECKING:
+    import pyarrow as pa  # ty: ignore[unresolved-import]
+
+# A source of columns for in-memory evaluation: a wrapped or native DataFrame, a
+# {name: Series} mapping, or a pyarrow Table imported at the Arrow boundary.
+_Source = Union["DataFrame", "_ext._DataFrame", Dict[str, "Series"], "pa.Table"]
+# where(): a frame in, the same kind of frame out.
+_Frame = Union["DataFrame", "_ext._DataFrame", "pa.Table"]
 
 __all__ = [
     "col",
@@ -180,7 +189,7 @@ class Expr:
     def __invert__(self) -> "Expr":
         return _Logical("not", self, None)
 
-    def apply(self, source: Any) -> Any:
+    def apply(self, source: _Source) -> Series:
         """Evaluate this expression on ``source`` and return a
         :class:`~dftracer.utils.Series`.
 
@@ -207,11 +216,33 @@ class Expr:
     def __str__(self) -> str:
         return self._dsl()
 
-    def __getattr__(self, name: str) -> Any:
-        # F.dur.ilog2(), F.hhash.mix64(), ... - a unary primitive as a method.
-        if name in _PRIM_CODES:
-            return lambda: _Prim(name, self)
-        raise AttributeError(name)
+    if TYPE_CHECKING:
+        # Prims (dispatched via __getattr__) and aggs (installed by setattr
+        # below), declared so consumers get precise types instead of Any.
+        def ilog2(self) -> "Expr": ...
+        def bit_width(self) -> "Expr": ...
+        def popcount(self) -> "Expr": ...
+        def clz(self) -> "Expr": ...
+        def ctz(self) -> "Expr": ...
+        def mix64(self) -> "Expr": ...
+        def sum(self) -> "Agg": ...
+        def min(self) -> "Agg": ...
+        def max(self) -> "Agg": ...
+        def mean(self) -> "Agg": ...
+        def var(self) -> "Agg": ...
+        def std(self) -> "Agg": ...
+        def skew(self) -> "Agg": ...
+        def kurt(self) -> "Agg": ...
+
+    # Runtime prim-method seam; hidden from the checker so unknown attributes
+    # are type errors, not Any (the real methods are declared above).
+    if not TYPE_CHECKING:
+
+        def __getattr__(self, name):
+            # F.dur.ilog2(), F.hhash.mix64(), ... - a unary primitive as a method.
+            if name in _PRIM_CODES:
+                return lambda: _Prim(name, self)
+            raise AttributeError(name)
 
 
 ColumnExpr = Expr
@@ -367,11 +398,11 @@ def _format_value(v: object) -> str:
 
 
 # Import Arrow data into the native columnar engine (the boundary for the DSL).
-def _series_from_arrow(array: Any) -> Any:
+def _series_from_arrow(array: "pa.Array") -> "_ext._Series":
     return _ext._series_from_arrow(array)
 
 
-def _dataframe_from_arrow(table: Any) -> Any:
+def _dataframe_from_arrow(table: "pa.Table") -> "_ext._DataFrame":
     return _ext._dataframe_from_arrow(table)
 
 
@@ -435,7 +466,7 @@ def columnar(expr: Expr) -> "Columnar":
     return Columnar(expr)
 
 
-def where(table: Any, pred: "Expr | str") -> Any:
+def where(table: _Frame, pred: "Expr | str") -> _Frame:
     """Keep the rows where ``pred`` is true.
 
     ``pred`` is either an expression (numeric comparisons / ``& | ~``),
@@ -471,7 +502,7 @@ class Columnar:
         """Input column names this expression reads."""
         return list(self._columns)
 
-    def apply(self, source: Any) -> Any:
+    def apply(self, source: _Source) -> Series:
         """Evaluate on the DataFrame engine and return a native ``Series``.
 
         ``source`` is either a native ``DataFrame`` (e.g. ``view.collect()``) or
@@ -493,21 +524,21 @@ class Columnar:
             return Series(_ext.vec_eval(ast, inputs))
         # Constant expression (no columns): broadcast to the row count.
         out_float = _is_float(self._expr, cols)
-        kind, value = _eval(self._expr, cols, out_float)
-        if kind == "scalar":
-            return Series(_broadcast_scalar(value, out_float, cols))
-        return Series(value)
+        result = _eval(self._expr, cols, out_float)
+        if isinstance(result, _ScalarVal):
+            return Series(_broadcast_scalar(result.value, out_float, cols))
+        return Series(result.value)
 
     # Serialize `expr` to a post-order AST (a list of (op, args...) tuples) that
     # the C++ engine rebuilds and compiles. Structural only - no type logic.
     def _serialize(self, expr: Expr, ast: List[tuple]) -> None:
         _emit_ast(expr, self._columns.index, ast)
 
-    def _to_vec_columns(self, source: Any) -> Dict[str, Any]:
+    def _to_vec_columns(self, source: _Source) -> Dict[str, "_ext._Series"]:
         return _import_vec_columns(self._columns, source)
 
 
-def _import_vec_columns(names: List[str], source: Any) -> Dict[str, Any]:
+def _import_vec_columns(names: List[str], source: _Source) -> Dict[str, "_ext._Series"]:
     """Resolve `names` to native vec columns from `source` (a native batch or a
     pyarrow Table), importing at the Arrow boundary only when needed."""
     source = _unwrap(source)  # a wrapped DataFrame -> its native handle
@@ -517,7 +548,7 @@ def _import_vec_columns(names: List[str], source: Any) -> Dict[str, Any]:
     # A pyarrow Table: import each needed column into vec at the boundary.
     import pyarrow as pa
 
-    cols: Dict[str, Any] = {}
+    cols: Dict[str, "_ext._Series"] = {}
     for name in names:
         arr = source.column(name)
         if isinstance(arr, pa.ChunkedArray):
@@ -528,7 +559,7 @@ def _import_vec_columns(names: List[str], source: Any) -> Dict[str, Any]:
     return cols
 
 
-def eval_many(exprs: "List[Expr | Columnar]", source: Any) -> "List[Series]":
+def eval_many(exprs: "List[Expr | Columnar]", source: _Source) -> "List[Series]":
     """Evaluate several value expressions in ONE compiled pass over `source`.
 
     CSE spans all of them, so a subexpression shared across outputs is computed
@@ -555,7 +586,9 @@ def eval_many(exprs: "List[Expr | Columnar]", source: Any) -> "List[Series]":
     return [Series(s) for s in _ext.vec_eval_many(asts, inputs)]
 
 
-def _broadcast_scalar(value: _Scalar, out_float: bool, cols: Dict[str, Any]) -> Any:
+def _broadcast_scalar(
+    value: _Scalar, out_float: bool, cols: Dict[str, "_ext._Series"]
+) -> "_ext._Series":
     # No constant-column kernel; derive one from any input column so a pure
     # constant expression stays in vec: (col * 0) + value, in the target type.
     if not cols:
@@ -567,7 +600,7 @@ def _broadcast_scalar(value: _Scalar, out_float: bool, cols: Dict[str, Any]) -> 
 # Serialize `expr` to a post-order AST, resolving column names to input indices
 # via `resolve` (a name -> int callable). Structural only - the C++ compiler does
 # type inference, CSE, and lowering, so every consumer gets the same engine.
-def _emit_ast(expr: Expr, resolve: Any, ast: List[tuple]) -> None:
+def _emit_ast(expr: Expr, resolve: Callable[[str], int], ast: List[tuple]) -> None:
     if isinstance(expr, _Lit):
         if isinstance(expr.value, float):
             ast.append((_AST_LIT_F, float(expr.value)))
@@ -640,7 +673,7 @@ def count() -> Agg:
     return Agg("count", None)
 
 
-def _make_agg_method(op: str) -> Any:
+def _make_agg_method(op: str) -> "Callable[[Expr], Agg]":
     def method(self: Expr) -> Agg:
         return Agg(op, self)
 
@@ -669,11 +702,11 @@ class GroupBy:
     aggregate expressions (``F.x.sum()``, ``count()``) or legacy strings
     (``"sum:dur"``). Value expressions compile in one CSE'd, pruned pass."""
 
-    def __init__(self, batch: Any, key: str) -> None:
+    def __init__(self, batch: "Union[DataFrame, _ext._DataFrame]", key: str) -> None:
         self._batch = batch
         self._key = key
 
-    def agg(self, *specs: object) -> Any:
+    def agg(self, *specs: "Union[str, Agg]") -> DataFrame:
         if not specs:
             raise TypeError("agg() needs at least one aggregate")
         native = _unwrap(self._batch)
@@ -707,7 +740,7 @@ def _collect_columns(expr: Expr) -> List[str]:
     return seen
 
 
-def _is_float(expr: Expr, cols: Dict[str, Any]) -> bool:
+def _is_float(expr: Expr, cols: Dict[str, "_ext._Series"]) -> bool:
     if isinstance(expr, _Lit):
         return isinstance(expr.value, float)
     if isinstance(expr, _Col):
@@ -721,53 +754,71 @@ def _is_float(expr: Expr, cols: Dict[str, Any]) -> bool:
     raise TypeError(f"unsupported column expression node {type(expr).__name__}")
 
 
-# Evaluate to ("scalar", python-number) or ("col", VecColumn), all in the target
-# element type. `cols` maps name -> VecColumn (native vec columns).
-def _eval(expr: Expr, cols: Dict[str, Any], out_float: bool) -> Tuple[str, Any]:
+# Discriminated result (isinstance-narrowable): a scalar or a native _Series.
+class _ScalarVal(NamedTuple):
+    value: _Scalar
+
+
+class _ColVal(NamedTuple):
+    value: "_ext._Series"
+
+
+_EvalResult = Union[_ScalarVal, _ColVal]
+
+
+def _need_col(r: _EvalResult, message: str) -> "_ext._Series":
+    if isinstance(r, _ColVal):
+        return r.value
+    raise TypeError(message)
+
+
+def _eval(expr: Expr, cols: Dict[str, "_ext._Series"], out_float: bool) -> _EvalResult:
     if isinstance(expr, _Lit):
-        return "scalar", (float(expr.value) if out_float else int(expr.value))
+        return _ScalarVal(float(expr.value) if out_float else int(expr.value))
     if isinstance(expr, _Col):
         vc = cols[expr.name]
         if out_float and vc.type not in _FLOAT_TYPES:
             vc = vc.cast(_FLOAT64)
-        return "col", vc
+        return _ColVal(vc)
     if isinstance(expr, _Bin):
-        lk, lv = _eval(expr.left, cols, out_float)
-        rk, rv = _eval(expr.right, cols, out_float)
-        if lk == "scalar" and rk == "scalar":
-            return "scalar", _fold(expr.op, lv, rv)
-        return "col", _binop(expr.op, lk, lv, rk, rv)
+        left = _eval(expr.left, cols, out_float)
+        right = _eval(expr.right, cols, out_float)
+        if isinstance(left, _ScalarVal) and isinstance(right, _ScalarVal):
+            return _ScalarVal(_fold(expr.op, left.value, right.value))
+        return _ColVal(_binop(expr.op, left, right))
     if isinstance(expr, _Prim):
         # Primitives run on a 64-bit integer column; evaluate the argument as an
         # int expression and cast if it is not already i64/u64.
-        k, v = _eval(expr.arg, cols, out_float=False)
-        if k != "col":
-            raise TypeError(f"columnar {expr.name}() needs a column argument")
+        v = _need_col(
+            _eval(expr.arg, cols, out_float=False),
+            f"columnar {expr.name}() needs a column argument",
+        )
         if v.type not in (_INT64, _UINT64):
             v = v.cast(_INT64)
-        return "col", v.prim(_PRIM_CODES[expr.name])
+        return _ColVal(v.prim(_PRIM_CODES[expr.name]))
     if isinstance(expr, _Cmp):
         if isinstance(expr.rhs, bool) or not isinstance(expr.rhs, (int, float)):
             raise TypeError(
                 "in-memory comparison needs a numeric value; a string/bool "
                 "comparison is filter-only (push it down with .filter()/.query())"
             )
-        k, v = _eval(expr.left, cols, out_float=_is_float(expr.left, cols))
-        if k != "col":
-            raise TypeError("columnar comparison needs a column on the left")
-        return "col", v.compare(_CMP_CODES[expr.op], expr.rhs)
+        v = _need_col(
+            _eval(expr.left, cols, out_float=_is_float(expr.left, cols)),
+            "columnar comparison needs a column on the left",
+        )
+        return _ColVal(v.compare(_CMP_CODES[expr.op], expr.rhs))
     if isinstance(expr, _Logical):
-        _, lv = _eval(expr.left, cols, out_float=False)
+        lv = _need_col(_eval(expr.left, cols, out_float=False), "columnar logical needs a column")
         if expr.op == "not" or expr.right is None:
-            return "col", lv.logical_not()
-        _, rv = _eval(expr.right, cols, out_float=False)
-        return "col", lv.logical(_LOGICAL_CODES[expr.op], rv)
+            return _ColVal(lv.logical_not())
+        rv = _need_col(_eval(expr.right, cols, out_float=False), "columnar logical needs a column")
+        return _ColVal(lv.logical(_LOGICAL_CODES[expr.op], rv))
     if isinstance(expr, (_Match, _Contains, _In)):
         raise TypeError(_PREDICATE_ONLY)
     raise TypeError(f"unsupported column expression node {type(expr).__name__}")
 
 
-def _fold(op: str, a: Any, b: Any) -> Any:
+def _fold(op: str, a: _Scalar, b: _Scalar) -> _Scalar:
     if op == "+":
         return a + b
     if op == "-":
@@ -781,12 +832,11 @@ _COL_OP = {"+": "add", "-": "sub", "*": "mul", "/": "div"}
 _SCALAR_OP = {"+": "add_scalar", "-": "sub_scalar", "*": "mul_scalar", "/": "div_scalar"}
 
 
-def _binop(op: str, lk: str, lv: Any, rk: str, rv: Any) -> Any:
-    if lk == "col" and rk == "col":
-        return getattr(lv, _COL_OP[op])(rv)
-    if lk == "col":  # col op scalar
-        return getattr(lv, _SCALAR_OP[op])(rv)
-    # scalar op col: + and * commute; -, / have no scalar-op-column kernel yet
-    if op in ("+", "*"):
-        return getattr(rv, _SCALAR_OP[op])(lv)
+def _binop(op: str, left: _EvalResult, right: _EvalResult) -> "_ext._Series":
+    if isinstance(left, _ColVal) and isinstance(right, _ColVal):
+        return getattr(left.value, _COL_OP[op])(right.value)
+    if isinstance(left, _ColVal):  # col op scalar
+        return getattr(left.value, _SCALAR_OP[op])(right.value)
+    if isinstance(right, _ColVal) and op in ("+", "*"):  # scalar op col (commutes)
+        return getattr(right.value, _SCALAR_OP[op])(left.value)
     raise NotImplementedError(f"scalar {op} column needs a vec kernel (not yet available)")

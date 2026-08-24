@@ -82,7 +82,7 @@ ThreadPoolExecutor::ThreadPoolExecutor(const ExecutorConfig& config)
         (config.min_workers == 0 || config.min_workers > num_threads_)
             ? num_threads_
             : config.min_workers;
-    max_live_ = num_threads_ + hardware_concurrency();
+    max_live_ = num_threads_ + MAX_BLOCKING_REPLACEMENTS;
     DFTRACER_UTILS_LOG_DEBUG(
         "Executor created with %zu threads, idle_timeout=%lld s, "
         "deadlock_timeout=%lld s",
@@ -944,6 +944,11 @@ coro::Coro ThreadPoolExecutor::run_task(std::shared_ptr<Task> task,
         // while FinalAwaiters still reference it (use-after-free).
         co_await scope.join();
 
+        // After the awaits we may have resumed on a different worker; the
+        // starting `context` can be freed (retired), so touch the live resumer.
+        auto* finishing =
+            static_cast<WorkerContext*>(get_current_worker_context());
+
         if (!task_error) {
             DFTRACER_UTILS_LOG_DEBUG(
                 "Task ID %ld ('%s') completed successfully", task->get_id(),
@@ -952,7 +957,7 @@ coro::Coro ThreadPoolExecutor::run_task(std::shared_ptr<Task> task,
             // Mark task completion
             mark_activity();
             ++tasks_completed_;
-            context->tasks_executed++;
+            if (finishing) finishing->tasks_executed++;
 
             // Update task registry to COMPLETED
             {
@@ -989,7 +994,7 @@ coro::Coro ThreadPoolExecutor::run_task(std::shared_ptr<Task> task,
 
                 mark_activity();
                 ++tasks_completed_;
-                context->tasks_executed++;
+                if (finishing) finishing->tasks_executed++;
 
                 {
                     std::unique_lock<std::shared_mutex> lock(registry_mutex_);
@@ -1014,7 +1019,7 @@ coro::Coro ThreadPoolExecutor::run_task(std::shared_ptr<Task> task,
 
                 mark_activity();
                 ++tasks_completed_;
-                context->tasks_executed++;
+                if (finishing) finishing->tasks_executed++;
 
                 {
                     std::unique_lock<std::shared_mutex> lock(registry_mutex_);
@@ -1033,11 +1038,15 @@ coro::Coro ThreadPoolExecutor::run_task(std::shared_ptr<Task> task,
         }
     }
 
-    // Clear current task info
-    context->current_task_id = -1;
-    {
-        std::lock_guard<std::mutex> lock(context->task_name_mutex);
-        context->current_task_name.clear();
+    // Clear current-task info only on the worker still showing this task: after
+    // migration the starting worker's context may be freed or already onto its
+    // next task.
+    if (auto* cur = static_cast<WorkerContext*>(get_current_worker_context());
+        cur && cur->current_task_id.load(std::memory_order_relaxed) ==
+                   task->get_id()) {
+        cur->current_task_id = -1;
+        std::lock_guard<std::mutex> lock(cur->task_name_mutex);
+        cur->current_task_name.clear();
     }
 
     co_return;

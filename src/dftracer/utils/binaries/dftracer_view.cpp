@@ -128,15 +128,17 @@ class ViewArgParse : public cli::ArgParse {
 
         parser()
             .add_argument("--min-duration")
-            .help("Minimum event duration in microseconds")
-            .scan<'g', double>()
-            .default_value(static_cast<double>(0.0));
+            .help(
+                "Minimum event duration (a bare number is microseconds; "
+                "suffixed values like 5ms are converted)")
+            .default_value(std::string("0"));
 
         parser()
             .add_argument("--max-duration")
-            .help("Maximum event duration in microseconds")
-            .scan<'g', double>()
-            .default_value(static_cast<double>(0.0));
+            .help(
+                "Maximum event duration (a bare number is microseconds; "
+                "suffixed values like 5ms are converted)")
+            .default_value(std::string("0"));
 
         parser()
             .add_argument("-o", "--output")
@@ -176,9 +178,10 @@ class ViewArgParse : public cli::ArgParse {
 
         parser()
             .add_argument("--time-bucket")
-            .help("Aggregate into time buckets of N microseconds")
-            .scan<'i', std::uint64_t>()
-            .default_value<std::uint64_t>(0);
+            .help(
+                "Aggregate into time buckets of this width (a bare number is "
+                "microseconds; suffixed values like 1ms are converted)")
+            .default_value(std::string("0"));
 
         parser()
             .add_argument("--counters")
@@ -241,10 +244,10 @@ class ViewArgParse : public cli::ArgParse {
         parser()
             .add_argument("--memory-budget")
             .help(
-                "Spill aggregation to disk past N in-core bytes (0 = auto: "
-                "~1/3 of available memory)")
-            .scan<'i', std::uint64_t>()
-            .default_value<std::uint64_t>(0);
+                "Spill aggregation to disk past this many in-core bytes (0 = "
+                "auto: ~1/3 of available memory). Accepts units, e.g. 512MB, "
+                "4GB")
+            .default_value(std::string("0"));
 
         parser()
             .add_argument("--no-spill")
@@ -277,15 +280,16 @@ class ViewArgParse : public cli::ArgParse {
         recipe = parser().get<std::string>("--recipe");
         save_recipe = parser().get<std::string>("--save-recipe");
         time_range = parser().get<std::string>("--time-range");
-        min_duration = parser().get<double>("--min-duration");
-        max_duration = parser().get<double>("--max-duration");
+        min_duration = cli::get_duration_arg(parser(), "--min-duration", 1e6);
+        max_duration = cli::get_duration_arg(parser(), "--max-duration", 1e6);
         output = parser().get<std::string>("--output");
         stream = parser().get<bool>("--stream");
         no_metadata = parser().get<bool>("--no-metadata");
         no_auto_index = parser().get<bool>("--no-auto-index");
         group_by = parser().get<std::string>("--group-by");
         agg = parser().get<std::string>("--agg");
-        time_bucket = parser().get<std::uint64_t>("--time-bucket");
+        time_bucket = static_cast<std::uint64_t>(std::llround(
+            cli::get_duration_arg(parser(), "--time-bucket", 1e6)));
         counters = parser().get<bool>("--counters");
         format = parser().get<std::string>("--format");
         phase = parser().get<std::string>("--phase");
@@ -296,7 +300,7 @@ class ViewArgParse : public cli::ArgParse {
         offset = parser().get<std::uint64_t>("--offset");
         select = parser().get<std::string>("--select");
         time_scale = parser().get<double>("--time-scale");
-        memory_budget = parser().get<std::uint64_t>("--memory-budget");
+        memory_budget = cli::get_bytes_arg(parser(), "--memory-budget");
         no_spill = parser().get<bool>("--no-spill");
         agg_numeric_args = parser().get<bool>("--agg-numeric-args");
         collect_typed = parser().get<bool>("--collect-typed");
@@ -418,6 +422,14 @@ static bool parse_agg(const std::string& spec, std::vector<AggSpec>& out) {
             out.push_back({AggOp::Skew, field, ""});
         else if (op == "kurt")
             out.push_back({AggOp::Kurt, field, ""});
+        else if (op == "busy")
+            out.push_back({AggOp::Busy, "dur", ""});
+        else if (op == "concurrency")
+            out.push_back({AggOp::Concurrency, "dur", ""});
+        else if (op == "utilization")
+            out.push_back({AggOp::Utilization, "dur", ""});
+        else if (op == "active")
+            out.push_back({AggOp::Active, "dur", ""});
         else if (op == "pct") {
             // pct:FIELD:Q  (explicit quantile, 0 < Q < 1; e.g. pct:dur:0.99)
             auto c2 = field.find(':');

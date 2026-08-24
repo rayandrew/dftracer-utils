@@ -15,6 +15,18 @@ Most tools wire in a common set of argument schemas defined in
 semantics across every binary that exposes the relevant schema and are not
 repeated in each tool's section.
 
+.. note::
+
+   **Humanized sizes and durations.** Every ``<bytes>`` flag also accepts a
+   unit suffix (``64MB``, ``1.5GiB``, ``512KB``, ``8kb``); byte units are
+   1024-based, so ``KB`` == ``KiB``, ``B`` is bytes and ``b`` is bits (divided
+   by 8). Every ``<s>`` flag also accepts a duration suffix (``30s``, ``5m``,
+   ``1.5h``, ``500ms``, ``200us``). A **bare number keeps the flag's legacy
+   unit** for back-compat: a ``<bytes>`` flag reads it as bytes, an MB-scaled
+   flag (e.g. ``--chunk-size <MB>``) reads it as MB, and a ``<s>`` flag reads
+   it as seconds. The same coercion is available from the Python API, whose
+   byte/duration arguments accept either a number or a unit string.
+
 **Pipeline** (``PipelineArgs``)
 
 - ``--executor-threads <count>`` - Number of worker threads for parallel
@@ -413,7 +425,9 @@ dftracer_view
 - ``--agg <reducers>`` - Aggregate: reducers, comma-separated (``count``,
   ``sum:FIELD``, ``min:FIELD``, ``max:FIELD``, ``mean:FIELD``, ``var:FIELD``,
   ``std:FIELD``, ``skew:FIELD``, ``kurt:FIELD``, ``pNN:FIELD`` e.g.
-  ``p99:dur``, ``pct:FIELD:Q``)
+  ``p99:dur``, ``pct:FIELD:Q``, and the field-less occupancy reducers ``busy``,
+  ``concurrency``, ``utilization``, ``active`` - see
+  :doc:`guides/analysis/aggregation`)
 - ``--time-bucket <us>`` - Aggregate into time buckets of N microseconds
 - ``--counters`` - Emit the aggregation as ``ph=C`` counter events
 - ``--format <fmt>`` - Aggregate output format: ``text`` (default) or

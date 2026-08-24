@@ -347,9 +347,10 @@ class GenFakeTraceArgParse : public cli::ArgParse {
             .default_value(2);
         parser()
             .add_argument("--step-duration-ms")
-            .help("Base step duration in milliseconds")
-            .scan<'d', int>()
-            .default_value(100);
+            .help(
+                "Base step duration (default: 100ms). A bare number is "
+                "milliseconds; suffixed values (e.g. 2s) are converted")
+            .default_value(std::string("100"));
         parser()
             .add_argument("--seed")
             .help("Random seed for duration jitter")
@@ -364,11 +365,10 @@ class GenFakeTraceArgParse : public cli::ArgParse {
         parser()
             .add_argument("--checkpoint-size")
             .help(
-                "Gzip checkpoint size in bytes for indexing (default: 2 MB). "
-                "Smaller values produce more chunks and better demonstrate "
-                "chunk-level bloom filter skipping.")
-            .scan<'d', std::size_t>()
-            .default_value(static_cast<std::size_t>(2 * 1024 * 1024));
+                "Gzip checkpoint size for indexing (default: 2MB). Accepts "
+                "units, e.g. 512KB, 2MB. Smaller values produce more chunks "
+                "and better demonstrate chunk-level bloom filter skipping.")
+            .default_value(std::to_string(2 * 1024 * 1024));
     }
 
     void post_parse() override {
@@ -381,10 +381,11 @@ class GenFakeTraceArgParse : public cli::ArgParse {
         validation_every = parser().get<int>("--validation-every");
         num_train_files = parser().get<int>("--num-train-files");
         num_val_files = parser().get<int>("--num-val-files");
-        step_dur_ms = parser().get<int>("--step-duration-ms");
+        step_dur_ms = static_cast<int>(std::lround(
+            cli::get_duration_arg(parser(), "--step-duration-ms", 1e3)));
         base_seed = parser().get<std::uint64_t>("--seed");
         verify = parser().get<bool>("--verify");
-        checkpoint_size = parser().get<std::size_t>("--checkpoint-size");
+        checkpoint_size = cli::get_bytes_arg(parser(), "--checkpoint-size");
     }
 };
 

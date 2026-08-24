@@ -9,6 +9,11 @@ authors = [
   { name = "Ray Andrew Sinurat", email = "raydreww@gmail.com" },
   { name = "Hariharan Devarajan (Hari)", email = "hariharandev1@llnl.gov" },
 ]
+dependencies = [
+  # ParamSpec / TypeVarTuple used in the typed wrappers land in typing only at
+  # 3.10 / 3.11; typing_extensions backports them for older interpreters.
+  "typing_extensions; python_version < '3.11'",
+]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",

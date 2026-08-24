@@ -29,6 +29,14 @@ Custom Configuration:
     # Use 16 worker threads for concurrent request handling
     dftracer_server -d /path/to/traces --executor-threads 16
 
+    # Auto-shutdown after 30 minutes of uptime (0, the default, disables it)
+    dftracer_server -d /path/to/traces --timeout 30m
+
+``--timeout`` bounds the server's total uptime and then triggers a graceful
+shutdown; it accepts a humanized duration (``30m``, ``1.5h``, ``0`` to
+disable). Use it to stop lingering processes when a client such as the VSCode
+extension closes without killing the server.
+
 Security
 --------
 

@@ -104,9 +104,10 @@ class ComparatorArgParse : public cli::ArgParse {
 
         parser()
             .add_argument("-t", "--time-interval")
-            .help("Time interval in milliseconds for bucketing (default: 5000)")
-            .scan<'g', double>()
-            .default_value(5000.0);
+            .help(
+                "Time interval for bucketing (default: 5000ms). A bare number "
+                "is milliseconds; suffixed values like 5s are converted")
+            .default_value(std::string("5000"));
 
         parser()
             .add_argument("--threshold")
@@ -135,7 +136,7 @@ class ComparatorArgParse : public cli::ArgParse {
         variant_index_dir = parser().get<std::string>("--variant-index-dir");
         group_by = parser().get<std::string>("--group-by");
         format = parser().get<std::string>("--format");
-        time_interval = parser().get<double>("--time-interval");
+        time_interval = cli::get_duration_arg(parser(), "--time-interval", 1e3);
         threshold = parser().get<double>("--threshold");
         no_color = parser().get<bool>("--no-color");
         compact = parser().get<bool>("--compact");

@@ -14,10 +14,34 @@ terminals (``collect`` / ``collect_typed`` / ``join``) return a wrapped
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    TypeVar,
+    Union,
+    overload,
+)
 
 from . import dftracer_utils_ext as _ext
+from ._units import coerce_bytes, coerce_duration
 from .series import Series, _register, _require_pyarrow, _unwrap, _wrap, _Wrapper
+
+if TYPE_CHECKING:
+    import numpy as np  # ty: ignore[unresolved-import]
+    import pandas as pd  # ty: ignore[unresolved-import]
+    import polars as pl  # ty: ignore[unresolved-import]
+    import pyarrow as pa  # ty: ignore[unresolved-import]
+
+    from .columnar import Agg, ColumnExpr, Expr, GroupBy
+    from .runtime import Runtime
 
 # Matches WINDOW_UNBOUNDED (int64 max): a frame bound of None means that side of
 # the ROWS frame runs to the partition edge.
@@ -35,6 +59,38 @@ _WINDOW_VALUE_ONLY = (
 )
 _WINDOW_FRAME = ("frame_sum", "frame_min", "frame_max", "frame_count", "frame_mean")
 
+# One window spec per appended output column; the func literal selects the shape.
+RankSpec = Tuple[Literal["row_number", "rank", "dense_rank"], str]
+OffsetSpec = Tuple[Literal["lag", "lead"], str, int, str]
+RunSpec = Tuple[Literal["running_sum", "running_min", "running_max", "running_count"], str, str]
+DeltaSpec = Tuple[Literal["delta"], str, str]
+RateSpec = Tuple[Literal["rate"], str, str, str]
+RateCounterSpec = Tuple[Literal["rate"], str, str, str, bool]
+SessSpec = Tuple[Literal["sessionize"], str, float, str]
+FrameSpec = Tuple[
+    Literal["frame_sum", "frame_min", "frame_max", "frame_count", "frame_mean"],
+    str,
+    Optional[int],
+    Optional[int],
+    str,
+]
+NtileSpec = Tuple[Literal["ntile"], int, str]
+PosSpec = Tuple[Literal["first_value", "last_value"], str, str]
+NthSpec = Tuple[Literal["nth_value"], str, int, str]
+WindowSpec = Union[
+    RankSpec,
+    OffsetSpec,
+    RunSpec,
+    DeltaSpec,
+    RateSpec,
+    RateCounterSpec,
+    SessSpec,
+    FrameSpec,
+    NtileSpec,
+    PosSpec,
+    NthSpec,
+]
+
 
 def _names(cols: Optional[Union[str, Sequence[str]]]) -> List[str]:
     if cols is None:
@@ -44,18 +100,20 @@ def _names(cols: Optional[Union[str, Sequence[str]]]) -> List[str]:
     return list(cols)
 
 
-def _window_bound(v: Any) -> int:
+def _window_bound(v: Optional[int]) -> int:
     return _WINDOW_UNBOUNDED if v is None else int(v)
 
 
-def _window_arity(spec: Sequence[Any], n: int) -> None:
+def _window_arity(spec: Sequence[object], n: int) -> None:
     if len(spec) != n:
         raise ValueError(
             f"window: {spec[0]!r} spec expects {n} elements, got {len(spec)}: {spec!r}"
         )
 
 
-def _norm_window_spec(spec: Sequence[Any]) -> Tuple[Any, ...]:
+# A spec is a heterogeneous positional tuple (str, col names, ints, None) read
+# by index, so its elements are genuinely Any; the output 9-tuple is mixed too.
+def _norm_window_spec(spec: Sequence[Any]) -> Tuple[object, ...]:
     # Normalize to the fixed 9-tuple the native kernel reads: (func, value|None,
     # offset, name, time|None, threshold, counter, frame_pre, frame_post).
     if not isinstance(spec, (tuple, list)) or not spec:
@@ -102,28 +160,28 @@ def _norm_window_spec(spec: Sequence[Any]) -> Tuple[Any, ...]:
     return (func, value, offset, name, time, threshold, counter, pre, post)
 
 
-class DataFrame(_Wrapper):
+class DataFrame(_Wrapper["_ext._DataFrame"]):
     """A named set of columns: native frame ops plus Arrow conversion."""
 
     @classmethod
-    def from_arrow(cls, table: Any) -> "DataFrame":
+    def from_arrow(cls, table: "pa.Table") -> "DataFrame":
         """Import a ``pyarrow.Table`` (or any ``__arrow_c_stream__`` provider),
         zero-copy via the Arrow C Data Interface."""
         return _dataframe_from_arrow(table)
 
     @classmethod
-    def from_pandas(cls, df: Any) -> "DataFrame":
+    def from_pandas(cls, df: "pd.DataFrame") -> "DataFrame":
         """Import a ``pandas.DataFrame`` (via pyarrow)."""
         pa = _require_pyarrow()
         return _dataframe_from_arrow(pa.Table.from_pandas(df))
 
     @classmethod
-    def from_polars(cls, df: Any) -> "DataFrame":
+    def from_polars(cls, df: "pl.DataFrame") -> "DataFrame":
         """Import a ``polars.DataFrame`` (zero-copy via its Arrow buffers)."""
         return _dataframe_from_arrow(df.to_arrow())
 
     @classmethod
-    def from_parquet(cls, path: Any, columns: Any = None) -> "DataFrame":
+    def from_parquet(cls, path: str, columns: Optional[Sequence[str]] = None) -> "DataFrame":
         """Read a Parquet file into a frame (needs pyarrow)."""
         _require_pyarrow()
         import pyarrow.parquet as pq  # ty: ignore[unresolved-import]
@@ -131,13 +189,17 @@ class DataFrame(_Wrapper):
         return _dataframe_from_arrow(pq.read_table(path, columns=columns))
 
     @classmethod
-    def from_dict(cls, mapping: Any) -> "DataFrame":
+    def from_dict(cls, mapping: Mapping[str, object]) -> "DataFrame":
         """Import a ``{name: array-like}`` mapping (via pyarrow)."""
         pa = _require_pyarrow()
         return _dataframe_from_arrow(pa.table(mapping))
 
     @classmethod
-    def from_numpy(cls, arr: Any, columns: Any) -> "DataFrame":
+    def from_numpy(
+        cls,
+        arr: "Union[np.ndarray, Dict[str, np.ndarray]]",
+        columns: Sequence[str],
+    ) -> "DataFrame":
         """Import NumPy columns into a frame.
 
         ``arr`` is either a 2-D array (one column per column index) or a
@@ -150,16 +212,16 @@ class DataFrame(_Wrapper):
             data = {name: Series.from_numpy(arr[:, i]).to_arrow() for i, name in enumerate(columns)}
         return _dataframe_from_arrow(pa.table(data))
 
-    def to_arrow(self) -> Any:
+    def to_arrow(self) -> "pa.Table":
         """This frame as a ``pyarrow.Table`` (zero-copy via the C Data Interface
         stream)."""
         return _require_pyarrow().table(self._native)
 
-    def to_pandas(self) -> Any:
+    def to_pandas(self) -> "pd.DataFrame":
         """This frame as a pandas DataFrame."""
         return self.to_arrow().to_pandas()
 
-    def to_polars(self) -> Any:
+    def to_polars(self) -> "pl.DataFrame":
         """This frame as a polars DataFrame."""
         try:
             import polars as pl  # ty: ignore[unresolved-import]
@@ -179,13 +241,14 @@ class DataFrame(_Wrapper):
     def __len__(self) -> int:
         return self._native.num_rows
 
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
+    # Opaque Arrow C Data Interface capsule; Python has no capsule type.
+    def __arrow_c_stream__(self, requested_schema: Optional[object] = None) -> object:
         return self._native.__arrow_c_stream__(requested_schema)
 
-    def __reduce__(self) -> Any:
+    def __reduce__(self) -> "Tuple[Callable[[object], DataFrame], Tuple[object, ...]]":
         return (_dataframe_from_arrow, (self.to_arrow(),))
 
-    def apply(self, expr: Any) -> Series:
+    def apply(self, expr: "ColumnExpr") -> Series:
         """Evaluate a columnar expression against this frame and return the
         resulting :class:`~dftracer.utils.Series`.
 
@@ -203,7 +266,7 @@ class DataFrame(_Wrapper):
             )
         return expr.apply(self)
 
-    def hash_partition(self, keys: Any, n_parts: int) -> "list[DataFrame]":
+    def hash_partition(self, keys: Union[str, List[str]], n_parts: int) -> "list[DataFrame]":
         """Hash-partition the rows into ``n_parts`` frames (the shuffle
         primitive); each part is wrapped."""
         return [DataFrame(p) for p in self._native.hash_partition(keys, n_parts)]
@@ -212,7 +275,7 @@ class DataFrame(_Wrapper):
         self,
         partition_by: Optional[Sequence[str]] = None,
         order_by: Optional[Sequence[str]] = None,
-        specs: Optional[Sequence[Any]] = None,
+        specs: Optional[Sequence[WindowSpec]] = None,
     ) -> "DataFrame":
         """SQL window functions, PARTITION BY ``partition_by`` and ORDER BY
         ``order_by``.
@@ -511,11 +574,11 @@ class DataFrame(_Wrapper):
             )
         )
 
-    def group_by(self, key: str, *aggs: Any) -> Any:
+    def group_by(self, key: str, *aggs: "Union[str, Agg]") -> "Union[DataFrame, GroupBy]":
         return _wrap(self._native.group_by(_unwrap(key), *[_unwrap(x) for x in aggs]))
 
 
-def _to_filter_dsl(predicate: Any) -> str:
+def _to_filter_dsl(predicate: "Union[str, Expr]") -> str:
     """Coerce a filter argument to a query-DSL string for pushdown.
 
     Accepts a raw DSL string unchanged, or an ``Expr`` (``F.field ...``) whose
@@ -534,7 +597,7 @@ def _to_filter_dsl(predicate: Any) -> str:
     )
 
 
-def _agg_spec_string(agg: Any) -> str:
+def _agg_spec_string(agg: "Agg") -> str:
     """Lower a bare-field :class:`~dftracer.utils.columnar.Agg` to a viewer agg
     spec string (``"op:field"``, or ``"count"``). Raises for a compound value
     expression, which the scan-time aggregator cannot express."""
@@ -551,7 +614,9 @@ def _agg_spec_string(agg: Any) -> str:
     return f"{agg.op}:{agg.value.name}"
 
 
-def _viewer_agg(native: Any, specs: Any) -> Any:
+def _viewer_agg(
+    native: "_ext._TraceViewer", specs: "Sequence[Union[str, Agg]]"
+) -> "_ext._TraceViewer":
     """Apply the aggregates to `native`. Accepts legacy spec strings and unified
     ``Agg`` expressions (``F.dur.sum()``, ``F.any.mean()``) side by side. ``F.any``
     (mean) maps to the numeric-args path; other ``F.any`` reductions raise."""
@@ -589,43 +654,164 @@ def _viewer_agg(native: Any, specs: Any) -> Any:
     return result
 
 
+_ViewerT = TypeVar("_ViewerT", bound="_ViewerFilters")
+
+
 class _ViewerFilters:
     """Shared filter/query/agg wiring for the lazy viewers: accept a DSL string
     or a unified ``Expr`` predicate for filters, and spec strings or unified
     ``Agg`` expressions for :meth:`agg`."""
 
     __slots__ = ()
-    _native: Any
+    _native: "_ext._TraceViewer"
 
-    def filter(self, predicate: Any) -> Any:
+    def filter(self: _ViewerT, predicate: "Union[str, Expr]") -> _ViewerT:
         return _wrap(self._native.filter(_to_filter_dsl(predicate)))
 
-    def query(self, predicate: Any) -> Any:
+    def query(self: _ViewerT, predicate: "Union[str, Expr]") -> _ViewerT:
         return _wrap(self._native.query(_to_filter_dsl(predicate)))
 
-    def agg(self, *specs: Any) -> Any:
+    def agg(self, *specs: "Union[str, Agg]") -> "AggregatedTraceViewer":
         if not specs:
             raise TypeError("agg() needs at least one aggregate")
         return _wrap(_viewer_agg(self._native, specs))
 
+    # Builder ops forwarded to the native viewer, wrapped back. Self-typed ones
+    # preserve the concrete viewer (plain or aggregated) through the chain.
+    def phase(self: _ViewerT, phase: str) -> _ViewerT:
+        return _wrap(self._native.phase(phase))
 
-class AggregatedTraceViewer(_ViewerFilters, _Wrapper):
+    def time_range(self: _ViewerT, begin: float, end: float) -> _ViewerT:
+        return _wrap(self._native.time_range(begin, end))
+
+    def time_unit(self: _ViewerT, unit: str) -> _ViewerT:
+        return _wrap(self._native.time_unit(unit))
+
+    def time_scale(self: _ViewerT, ns_ratio: float) -> _ViewerT:
+        return _wrap(self._native.time_scale(ns_ratio))
+
+    def select(self: _ViewerT, *cols: str) -> _ViewerT:
+        return _wrap(self._native.select(*cols))
+
+    def limit(self: _ViewerT, n: int) -> _ViewerT:
+        return _wrap(self._native.limit(n))
+
+    def offset(self: _ViewerT, n: int) -> _ViewerT:
+        return _wrap(self._native.offset(n))
+
+    def auto_spill(self: _ViewerT) -> _ViewerT:
+        return _wrap(self._native.auto_spill())
+
+    def rollup_root(self: _ViewerT, path: str) -> _ViewerT:
+        return _wrap(self._native.rollup_root(path))
+
+    def views_root(self: _ViewerT, path: str) -> _ViewerT:
+        return _wrap(self._native.views_root(path))
+
+    def sort_by(self: _ViewerT, name: str, descending: bool = False) -> _ViewerT:
+        return _wrap(self._native.sort_by(name, descending))
+
+    def topk(self: _ViewerT, name: str, k: int, largest: bool = True) -> _ViewerT:
+        return _wrap(self._native.topk(name, k, largest))
+
+    def agg_numeric_args(self) -> "AggregatedTraceViewer":
+        return _wrap(self._native.agg_numeric_args())
+
+    def collect(self) -> "DataFrame":
+        return _wrap(self._native.collect())
+
+    def time_bucket(self: _ViewerT, interval_us: Union[int, float, str]) -> _ViewerT:
+        """Bucket width; a bare number is microseconds, a string ("1ms") is
+        converted."""
+        us = int(round(coerce_duration(interval_us, 1e6, "interval_us")))
+        return _wrap(self._native.time_bucket(us))
+
+    def memory_budget(self: _ViewerT, nbytes: Union[int, str]) -> _ViewerT:
+        """Spill budget; accepts a byte count or a unit string ("512MB")."""
+        return _wrap(self._native.memory_budget(coerce_bytes(nbytes, "nbytes")))
+
+    def materialize(
+        self,
+        checkpoint_size: Union[int, str] = 0,
+        part_size: Union[int, str] = 0,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """Persist this query as a materialized view. checkpoint_size/part_size
+        accept a byte count or a unit string ("4MB")."""
+        self._native.materialize(
+            checkpoint_size=coerce_bytes(checkpoint_size, "checkpoint_size"),
+            part_size=coerce_bytes(part_size, "part_size"),
+            progress=progress,
+        )
+
+    def export_trace(
+        self,
+        path: str,
+        compress: Optional[bool] = None,
+        index: Optional[bool] = None,
+        member_size: Optional[Union[int, str]] = None,
+        level: Optional[int] = None,
+        part_size: Optional[Union[int, str]] = None,
+    ) -> None:
+        """Export to a trace file. member_size/part_size accept a byte count or
+        a unit string ("4MB"); unset args keep the native defaults."""
+        kwargs: Dict[str, Union[bool, int]] = {}
+        if compress is not None:
+            kwargs["compress"] = compress
+        if index is not None:
+            kwargs["index"] = index
+        if level is not None:
+            kwargs["level"] = level
+        if member_size is not None:
+            kwargs["member_size"] = coerce_bytes(member_size, "member_size")
+        if part_size is not None:
+            kwargs["part_size"] = coerce_bytes(part_size, "part_size")
+        # Unpacking a runtime-built kwargs dict onto the native method's
+        # individually-typed parameters is a known checker gap.
+        self._native.export_trace(path, **kwargs)  # ty: ignore[invalid-argument-type]
+
+
+class AggregatedTraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
     """The aggregated form of a TraceViewer (after group_by/agg); terminals
     return a wrapped DataFrame."""
 
 
-class TraceViewer(_ViewerFilters, _Wrapper):
+class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
     """A lazy view over trace files. Builder methods chain; terminals
     (``collect`` / ``collect_typed`` / ``join``) return a wrapped DataFrame."""
 
+    @overload
+    def __init__(self, native: "_ext._TraceViewer", /) -> None: ...
+    @overload
+    def __init__(
+        self,
+        files: Union[str, Sequence[str]],
+        index_path: Optional[str] = ...,
+        runtime: "Optional[Runtime]" = ...,
+    ) -> None: ...
+
+    # Erased dispatcher (overloads carry the contract): wrap a native handle, or
+    # build one from real args.
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if len(args) == 1 and not kwargs and isinstance(args[0], _ext._TraceViewer):
             super().__init__(args[0])
         else:
             super().__init__(_ext._TraceViewer(*args, **kwargs))
 
-    def collect_typed(self, *args: Any, **kwargs: Any) -> Dict[str, DataFrame]:
-        result = self._native.collect_typed(*args, **kwargs)
+    # group_by / join are TraceViewer-only (not on the aggregated form).
+    def group_by(self, *keys: str) -> "AggregatedTraceViewer":
+        return _wrap(self._native.group_by(*keys))
+
+    def join(self, other: "TraceViewer", how: str = "inner") -> "DataFrame":
+        return _wrap(self._native.join(_unwrap(other), how))
+
+    def collect_typed(
+        self,
+        shard_begin: int = 0,
+        shard_end: int = 0,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> Dict[str, DataFrame]:
+        result = self._native.collect_typed(shard_begin, shard_end, progress)
         return {k: _wrap(v) for k, v in result.items()}
 
 
@@ -636,6 +822,6 @@ _register(_ext._AggregatedTraceViewer, AggregatedTraceViewer)
 _register(_ext._TraceViewer, TraceViewer)
 
 
-def _dataframe_from_arrow(table: Any) -> DataFrame:
+def _dataframe_from_arrow(table: "pa.Table") -> DataFrame:
     """Import a pyarrow Table into a native DataFrame wrapper."""
     return DataFrame(_ext._dataframe_from_arrow(table))

@@ -150,21 +150,26 @@ class ReplayArgParse : public cli::ArgParse {
             .default_value(std::string(""));
 
         p.add_argument("--start-timestamp")
-            .help("Only replay events after this timestamp (microseconds)")
-            .default_value(std::uint64_t(0))
-            .scan<'u', std::uint64_t>();
+            .help(
+                "Only replay events after this timestamp (a bare number is "
+                "microseconds; suffixed values like 5s are converted)")
+            .default_value(std::string("0"));
         p.add_argument("--end-timestamp")
-            .help("Only replay events before this timestamp (microseconds)")
-            .default_value(UINT64_MAX)
-            .scan<'u', std::uint64_t>();
+            .help(
+                "Only replay events before this timestamp (a bare number is "
+                "microseconds; suffixed values like 5s are converted; empty = "
+                "no limit)")
+            .default_value(std::string(""));
         p.add_argument("--min-size")
-            .help("Only replay operations with size >= this value (bytes)")
-            .default_value(std::int64_t(-1))
-            .scan<'i', std::int64_t>();
+            .help(
+                "Only replay operations with size >= this value (-1 = no "
+                "limit). Accepts units, e.g. 4KB, 1MB")
+            .default_value(std::string("-1"));
         p.add_argument("--max-size")
-            .help("Only replay operations with size <= this value (bytes)")
-            .default_value(std::int64_t(-1))
-            .scan<'i', std::int64_t>();
+            .help(
+                "Only replay operations with size <= this value (-1 = no "
+                "limit). Accepts units, e.g. 4KB, 1MB")
+            .default_value(std::string("-1"));
 
         p.add_argument("--sample-rate")
             .help("Sample rate for replay (0.0-1.0, 1.0=all events, 0.1=10%)")
@@ -207,10 +212,16 @@ class ReplayArgParse : public cli::ArgParse {
         filter_category_csv = p.get<std::string>("--filter-category");
         exclude_category_csv = p.get<std::string>("--exclude-category");
 
-        start_timestamp = p.get<std::uint64_t>("--start-timestamp");
-        end_timestamp = p.get<std::uint64_t>("--end-timestamp");
-        min_size = p.get<std::int64_t>("--min-size");
-        max_size = p.get<std::int64_t>("--max-size");
+        start_timestamp = static_cast<std::uint64_t>(
+            std::llround(cli::get_duration_arg(p, "--start-timestamp", 1e6)));
+        const auto end_raw = p.get<std::string>("--end-timestamp");
+        end_timestamp =
+            end_raw.empty()
+                ? UINT64_MAX
+                : static_cast<std::uint64_t>(std::llround(
+                      cli::get_duration_arg(p, "--end-timestamp", 1e6)));
+        min_size = cli::get_bytes_arg_signed(p, "--min-size");
+        max_size = cli::get_bytes_arg_signed(p, "--max-size");
         sample_rate = p.get<double>("--sample-rate");
         sample_seed = p.get<std::uint64_t>("--sample-seed");
         max_events = p.get<std::size_t>("--max-events");

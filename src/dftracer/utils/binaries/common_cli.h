@@ -20,8 +20,11 @@
 #include <algorithm>
 #include <argparse/argparse.hpp>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -78,14 +81,14 @@ class ArgParse {
     bool parse(int argc, char** argv) {
         try {
             parser_.parse_args(argc, argv);
+            apply_log_level_arg(parser_);
+            for (auto* s : schemas_) s->parse_from(parser_);
+            post_parse();
         } catch (const std::exception& err) {
             DFTRACER_UTILS_LOG_ERROR("Error: %s", err.what());
             std::fprintf(stderr, "%s\n", parser_.help().str().c_str());
             return false;
         }
-        apply_log_level_arg(parser_);
-        for (auto* s : schemas_) s->parse_from(parser_);
-        post_parse();
         for (auto* s : schemas_) {
             if (!s->validate()) return false;
         }
@@ -131,6 +134,88 @@ int cli_main(int argc, char** argv, const char* name, const char* description,
     CliT cli(program);
     if (!setup_and_parse(cli, argc, argv)) return 1;
     return run(cli);
+}
+
+// Human-readable byte count, e.g. "1.5 MB" or "3.0 MB/s"; see
+// dftracer::utils::human_bytes.
+inline std::string human_bytes(double value, const char* per_suffix = "",
+                               int precision = 1) {
+    return dftracer::utils::human_bytes(value, per_suffix, precision);
+}
+
+// Read a string-valued argument as a byte size, accepting human-readable units
+// (e.g. "64MB", "1.5GiB") as well as a bare byte count. Throws
+// std::runtime_error on malformed input so ArgParse::parse reports it like any
+// other parse error.
+inline std::size_t get_bytes_arg(const argparse::ArgumentParser& p,
+                                 const char* name) {
+    const auto raw = p.get<std::string>(name);
+    auto parsed = dftracer::utils::parse_bytes(raw);
+    if (!parsed) {
+        throw std::runtime_error(
+            dftracer::utils::str_cat("Invalid byte size for ", name, ": '", raw,
+                                     "' (use e.g. 65536, 64KB, 1.5GB)"));
+    }
+    return static_cast<std::size_t>(*parsed);
+}
+
+// As get_bytes_arg, but a bare number is measured in `native_bytes` units (e.g.
+// 1024*1024 when the flag has historically taken MB); a unit-suffixed value is
+// absolute. Preserves back-compat for MB-denominated flags.
+inline std::size_t get_bytes_arg(const argparse::ArgumentParser& p,
+                                 const char* name, std::uint64_t native_bytes) {
+    const auto raw = p.get<std::string>(name);
+    auto parsed = dftracer::utils::parse_bytes_as(raw, native_bytes);
+    if (!parsed) {
+        throw std::runtime_error(
+            dftracer::utils::str_cat("Invalid byte size for ", name, ": '", raw,
+                                     "' (use e.g. 4, 4MB, 512KB)"));
+    }
+    return static_cast<std::size_t>(*parsed);
+}
+
+// As get_bytes_arg, but a negative value passes through unchanged as a sentinel
+// (e.g. -1 = "no limit"); non-negative values parse as byte sizes.
+inline std::int64_t get_bytes_arg_signed(const argparse::ArgumentParser& p,
+                                         const char* name) {
+    const auto raw = p.get<std::string>(name);
+    const auto trimmed = dftracer::utils::detail::trim_ws(raw);
+    if (!trimmed.empty() && trimmed.front() == '-') {
+        return static_cast<std::int64_t>(
+            std::strtoll(raw.c_str(), nullptr, 10));
+    }
+    return static_cast<std::int64_t>(get_bytes_arg(p, name));
+}
+
+// Read a string-valued argument as a duration in seconds, accepting units
+// (e.g. "30s", "5m", "1.5h") as well as a bare second count. Throws
+// std::runtime_error on malformed input.
+inline double get_seconds_arg(const argparse::ArgumentParser& p,
+                              const char* name) {
+    const auto raw = p.get<std::string>(name);
+    auto parsed = dftracer::utils::parse_duration_seconds(raw);
+    if (!parsed) {
+        throw std::runtime_error(
+            dftracer::utils::str_cat("Invalid duration for ", name, ": '", raw,
+                                     "' (use e.g. 30, 30s, 5m, 1.5h)"));
+    }
+    return *parsed;
+}
+
+// Read a string-valued duration argument, returning it in the flag's native
+// unit (`native_per_second`, e.g. 1e3 for ms, 1e6 for us). A bare number keeps
+// that native unit; a unit-suffixed value ("5m") is converted. Throws on
+// malformed input.
+inline double get_duration_arg(const argparse::ArgumentParser& p,
+                               const char* name, double native_per_second) {
+    const auto raw = p.get<std::string>(name);
+    auto parsed = dftracer::utils::parse_duration_as(raw, native_per_second);
+    if (!parsed) {
+        throw std::runtime_error(
+            dftracer::utils::str_cat("Invalid duration for ", name, ": '", raw,
+                                     "' (use e.g. 5000, 5s, 500ms, 1.5h)"));
+    }
+    return *parsed;
 }
 
 enum class DirMode { DEFAULT_DOT, DEFAULT_EMPTY, REQUIRED };
@@ -272,12 +357,11 @@ struct IndexingArgs : CliSchema {
                 .default_value<std::string>("");
         }
         p.add_argument("--checkpoint-size")
-            .help("Checkpoint size for gzip indexing in bytes (default: " +
+            .help("Checkpoint size for gzip indexing (default: " +
                   std::to_string(constants::indexer::DEFAULT_CHECKPOINT_SIZE) +
-                  ")")
-            .scan<'d', std::size_t>()
-            .default_value(static_cast<std::size_t>(
-                constants::indexer::DEFAULT_CHECKPOINT_SIZE));
+                  "). Accepts units, e.g. 512KB, 4MB")
+            .default_value(
+                std::to_string(constants::indexer::DEFAULT_CHECKPOINT_SIZE));
         if (with_force) {
             p.add_argument("-f", "--force").help(force_help).flag();
         }
@@ -287,7 +371,7 @@ struct IndexingArgs : CliSchema {
         if (with_index_dir) {
             index_dir = p.get<std::string>("--index-dir");
         }
-        checkpoint_size = p.get<std::size_t>("--checkpoint-size");
+        checkpoint_size = get_bytes_arg(p, "--checkpoint-size");
         if (with_force) {
             force = p.get<bool>("--force");
         }
@@ -328,42 +412,47 @@ struct WatchdogArgs : CliSchema {
             .flag();
         p.add_argument("--watchdog-global-timeout")
             .help(
-                "Watchdog global timeout for pipeline execution in "
-                "seconds (0 = no timeout)")
-            .scan<'d', int>()
-            .default_value(0);
+                "Watchdog global timeout for pipeline execution (0 = no "
+                "timeout). Accepts units, e.g. 30s, 5m")
+            .default_value(std::string("0"));
         p.add_argument("--watchdog-task-timeout")
-            .help("Watchdog default task timeout in seconds (0 = no timeout)")
-            .scan<'d', int>()
-            .default_value(0);
+            .help(
+                "Watchdog default task timeout (0 = no timeout). Accepts "
+                "units, e.g. 30s, 5m")
+            .default_value(std::string("0"));
         p.add_argument("--watchdog-interval")
-            .help("Watchdog check interval in seconds")
-            .scan<'d', int>()
-            .default_value(1);
+            .help("Watchdog check interval. Accepts units, e.g. 1s, 500ms")
+            .default_value(std::string("1"));
         p.add_argument("--watchdog-warning-threshold")
-            .help("Watchdog long-running task warning threshold in seconds")
-            .scan<'d', int>()
-            .default_value(300);
+            .help(
+                "Watchdog long-running task warning threshold. Accepts units, "
+                "e.g. 300s, 5m")
+            .default_value(std::string("300"));
         p.add_argument("--watchdog-idle-timeout")
-            .help("Watchdog idle timeout in seconds (0 = use default)")
-            .scan<'d', int>()
-            .default_value(300);
+            .help("Watchdog idle timeout (0 = use default). Accepts units")
+            .default_value(std::string("300"));
         p.add_argument("--watchdog-deadlock-timeout")
-            .help("Watchdog deadlock timeout in seconds (0 = use default)")
-            .scan<'d', int>()
-            .default_value(600);
+            .help("Watchdog deadlock timeout (0 = use default). Accepts units")
+            .default_value(std::string("600"));
     }
 
     void parse_from(const argparse::ArgumentParser& p) override {
         disable = p.get<bool>("--disable-watchdog");
-        global_timeout = p.get<int>("--watchdog-global-timeout");
-        task_timeout = p.get<int>("--watchdog-task-timeout");
-        interval = p.get<int>("--watchdog-interval");
-        warning_threshold = p.get<int>("--watchdog-warning-threshold");
-        idle_timeout = p.get<int>("--watchdog-idle-timeout");
-        deadlock_timeout = p.get<int>("--watchdog-deadlock-timeout");
+        global_timeout = seconds_int(p, "--watchdog-global-timeout");
+        task_timeout = seconds_int(p, "--watchdog-task-timeout");
+        interval = seconds_int(p, "--watchdog-interval");
+        warning_threshold = seconds_int(p, "--watchdog-warning-threshold");
+        idle_timeout = seconds_int(p, "--watchdog-idle-timeout");
+        deadlock_timeout = seconds_int(p, "--watchdog-deadlock-timeout");
     }
 
+   private:
+    static int seconds_int(const argparse::ArgumentParser& p,
+                           const char* name) {
+        return static_cast<int>(std::lround(get_seconds_arg(p, name)));
+    }
+
+   public:
     void apply(PipelineConfig& config) const {
         config.with_watchdog(!disable)
             .with_global_timeout(std::chrono::seconds(global_timeout))
@@ -410,13 +499,6 @@ inline std::vector<std::string> split_csv(const std::string& str) {
         if (!item.empty()) out.push_back(item);
     }
     return out;
-}
-
-// Human-readable byte count, e.g. "1.5 MB" or "3.0 MB/s"; see
-// dftracer::utils::human_bytes.
-inline std::string human_bytes(double value, const char* per_suffix = "",
-                               int precision = 1) {
-    return dftracer::utils::human_bytes(value, per_suffix, precision);
 }
 
 // Warn when an aggregated workload of `required_bytes` will not fit in one

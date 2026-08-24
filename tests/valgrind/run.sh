@@ -301,7 +301,16 @@ PY
       failed_names+=("$rname (KILLED: timeout SIGKILL or OOM)")
     else
       failed_names+=("$rname")
-      sed -n '1,120p' "$logf" >&2 || true
+      # --log-file uses %p, so a test that traced children (binaries/*) leaves
+      # one log per process; dump each rather than a single clobbered file.
+      local lf found=0
+      for lf in "$logf".*; do
+        [[ -e "$lf" ]] || continue
+        found=1
+        printf '===== %s =====\n' "$(basename "$lf")" >&2
+        sed -n '1,120p' "$lf" >&2 || true
+      done
+      ((found == 0)) && [[ -e "$logf" ]] && sed -n '1,120p' "$logf" >&2 || true
     fi
   done
 
@@ -354,6 +363,13 @@ run_cpp_one() {
   local -a extra=()
   if [[ "$name" == binaries/* ]]; then
     extra+=(--trace-children=yes)
+    # The fake-trace generator is only test setup outside its own test (which
+    # has dedicated Valgrind coverage). Instrumenting it on every spawn - each a
+    # full Valgrind startup over the heavy shared libs - times the comparator
+    # test out, so skip tracing it everywhere but there.
+    if [[ "${name##*/}" != test_dftracer_gen_fake_trace ]]; then
+      extra+=(--trace-children-skip='*dftracer_gen_fake_trace')
+    fi
   fi
 
   local -a doctest_args=()
@@ -380,7 +396,7 @@ run_cpp_one() {
     --show-leak-kinds=definite,indirect \
     --errors-for-leak-kinds=definite,indirect \
     --suppressions="$SUPP_DIR/valgrind-cpp.supp" \
-    --log-file="$logf" \
+    --log-file="${logf}.%p" \
     "$exe" "${doctest_args[@]}" >/dev/null 2>&1) || rc=$?
   printf '%s\t%s\n' "$rc" "$name" >"$rdir/${name//\//_}.rc"
   printf '%s\t%s\n' "$name" \

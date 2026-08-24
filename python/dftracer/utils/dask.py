@@ -4,23 +4,40 @@ import os
 import shutil
 from collections import defaultdict, namedtuple
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Set,
+    Tuple,
+    TypedDict,
+    Union,
+)
 
-# pyarrow's stubs are well-behaved, so type-checkers get the real module.
+# dask/distributed/pyarrow have no type stubs ty can resolve; TYPE_CHECKING
+# imports name the true types for annotations while the runtime `else` branch
+# provides real values (or None fallbacks for the optional deps).
 if TYPE_CHECKING:
-    import pyarrow as pa
+    import pyarrow as pa  # ty: ignore[unresolved-import]
+    from dask.distributed import Client, WorkerPlugin, get_client  # ty: ignore[unresolved-import]
+    from distributed import Future, Worker  # ty: ignore[unresolved-import]
+
+    from .indexer import AggregationConfig
 else:
     try:
         import pyarrow as pa
     except ImportError:
         pa = None
 
-try:
-    from dask.distributed import Client, WorkerPlugin, get_client
-except ImportError:
-    Client: Optional[Any] = None
-    WorkerPlugin: Optional[Any] = None
-    get_client: Optional[Any] = None
+    try:
+        from dask.distributed import Client, WorkerPlugin, get_client
+    except ImportError:
+        Client = None
+        WorkerPlugin = None
+        get_client = None
 
 try:
     import dask
@@ -34,7 +51,15 @@ from dftracer.utils import (
     peek_default_runtime,
     set_default_runtime,
 )
+from dftracer.utils._units import coerce_bytes, coerce_duration
 from dftracer.utils.dataframe import AggregatedTraceViewer, TraceViewer
+
+# A per-shard viewer is either the plain or the aggregated wrapper (group_by/agg
+# promotes one to the other); the two are sibling wrappers, not a subtype pair.
+_AnyViewer = Union[TraceViewer, AggregatedTraceViewer]
+# One intra-file work slice: (member_begin, member_end, is_partial, members),
+# members being (offset, size) pairs. Matches build_sst_batch's file_slices.
+_FileSlice = Tuple[int, int, bool, List[Tuple[int, int]]]
 
 __all__ = [
     "DaskTraceViewer",
@@ -87,7 +112,25 @@ _plugin_registered_schedulers: set = set()
 _PROGRESS_TOPIC = "dft-progress"
 
 
-def _worker_progress_forwarder(phase: str, batch: Any) -> Callable[[int, int], None]:
+class _ProgressMsg(TypedDict):
+    """The per-event payload published to _PROGRESS_TOPIC."""
+
+    phase: str
+    batch: str
+    done: int
+    total: int
+
+
+class DistributedIndexResult(TypedDict):
+    """Return shape of :func:`distributed_index`."""
+
+    total_files: int
+    per_worker: List[int]
+    index_path: str
+    artifact_batches: int
+
+
+def _worker_progress_forwarder(phase: str, batch: str) -> Callable[[int, int], None]:
     """Callback that publishes (done, total) progress for `phase`/`batch` to the
     coordinator. Runs on a Dask worker; no-op off-worker (inline mode)."""
     try:
@@ -100,7 +143,12 @@ def _worker_progress_forwarder(phase: str, batch: Any) -> Callable[[int, int], N
     def _cb(done: int, total: int) -> None:
         if worker is None:
             return
-        msg = {"phase": phase, "batch": batch, "done": int(done), "total": int(total)}
+        msg: _ProgressMsg = {
+            "phase": phase,
+            "batch": batch,
+            "done": int(done),
+            "total": int(total),
+        }
         # Called from a C++ worker thread; hop to the IOLoop so the event is
         # sent on the worker's own loop rather than a foreign thread.
         try:
@@ -118,12 +166,15 @@ class ProgressAggregator:
     """Subscribe to the progress topic and forward aggregated
     (done, total, phase) to `callback`, summing per (phase, batch)."""
 
-    def __init__(self, client, callback: Optional[Callable[[int, int, str], None]]):
+    def __init__(
+        self, client: "Client", callback: Optional[Callable[[int, int, str], None]]
+    ) -> None:
         self._client = client
         self._callback = callback
-        self._state: Dict[tuple, tuple] = {}
+        self._state: Dict[Tuple[str, str], Tuple[int, int]] = {}
 
-    def _handler(self, event) -> None:
+    # event is a distributed topic payload: (timestamp, msg).
+    def _handler(self, event: "Tuple[float, _ProgressMsg]") -> None:
         if self._callback is None:
             return
         try:
@@ -136,7 +187,7 @@ class ProgressAggregator:
         except Exception:
             pass
 
-    def __enter__(self):
+    def __enter__(self) -> "ProgressAggregator":
         # NullClient (in-process) has no pub/sub topic; skip quietly.
         if self._callback is not None and hasattr(self._client, "subscribe_topic"):
             self._client.subscribe_topic(_PROGRESS_TOPIC, self._handler)
@@ -151,7 +202,7 @@ class ProgressAggregator:
         return False
 
 
-def resolve_local_staging(client) -> str:
+def resolve_local_staging(client: "Client") -> str:
     """Derive node-local SST scratch from each Dask worker's own scratch.
 
     Workers share the path *string* (e.g. ``/scratch/$USER``) but each resolves
@@ -171,7 +222,7 @@ def _rmtree_quiet(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def _runtime_threads(worker, host_worker_counts, total_cpus):
+def _runtime_threads(worker: "Worker", host_worker_counts: Dict[str, int], total_cpus: int) -> int:
     """C++ Runtime thread count for one Dask worker.
 
     Dask already divided the node between its workers and the Runtime is shared
@@ -296,7 +347,7 @@ class _Plan:
     views_root: Optional[str] = None
 
 
-def _apply_plan(tv: Any, plan: _Plan) -> Any:
+def _apply_plan(tv: "_AnyViewer", plan: _Plan) -> "_AnyViewer":
     """Apply a DaskTraceViewer plan to a per-shard TraceViewer. group_by/agg
     return the AggregatedTraceViewer subclass, still a TraceViewer."""
     for dsl in plan.filters:
@@ -334,16 +385,22 @@ def _apply_plan(tv: Any, plan: _Plan) -> Any:
     return tv
 
 
-def _make_viewer(files, index_dir, plan: _Plan) -> Any:
+def _make_viewer(files: List[str], index_dir: str, plan: _Plan) -> "_AnyViewer":
     return _apply_plan(TraceViewer(files, index_path=index_dir or None), plan)
 
 
-def _dv_partial_task(files, index_dir, plan):
+def _dv_partial_task(files: List[str], index_dir: str, plan: _Plan) -> bytes:
     """Worker: combinable aggregation partial for this shard (bytes)."""
     return _make_viewer(files, index_dir, plan).aggregate_partial()
 
 
-def _dv_events_task(files, index_dir, plan, cursor, page_size):
+def _dv_events_task(
+    files: List[str],
+    index_dir: str,
+    plan: _Plan,
+    cursor: Optional[int],
+    page_size: int,
+) -> "Optional[pa.Table]":
     """Worker: this shard's matching events at ts >= cursor, up to page_size."""
     import pyarrow as pa
 
@@ -357,13 +414,26 @@ def _dv_events_task(files, index_dir, plan, cursor, page_size):
     return pa.Table.from_batches(batches) if batches else None
 
 
-def _dv_write_task(files, index_dir, plan, output_path, build_index):
+def _dv_write_task(
+    files: List[str],
+    index_dir: str,
+    plan: _Plan,
+    output_path: str,
+    build_index: bool,
+) -> Dict[str, str]:
     """Worker: export this shard to one re-indexable .pfw.gz."""
     _make_viewer(files, index_dir, plan).export_trace(output_path, compress=True, index=build_index)
     return {"path": output_path}
 
 
-def _dv_materialize_shard_task(files, index_dir, plan, subdir, checkpoint_size, part_size):
+def _dv_materialize_shard_task(
+    files: List[str],
+    index_dir: str,
+    plan: _Plan,
+    subdir: str,
+    checkpoint_size: int,
+    part_size: int,
+) -> str:
     """Worker: materialize this shard's filtered events into its own MV subdir
     (a self-contained part + index), for a distributed row-MV build."""
     os.makedirs(subdir, exist_ok=True)
@@ -377,7 +447,13 @@ def _dv_materialize_shard_task(files, index_dir, plan, subdir, checkpoint_size, 
     return subdir
 
 
-def _dv_collect_typed_task(files, index_dir, plan, shard_begin, shard_end):
+def _dv_collect_typed_task(
+    files: List[str],
+    index_dir: str,
+    plan: _Plan,
+    shard_begin: int,
+    shard_end: int,
+) -> "Dict[str, Optional[pa.Table]]":
     """Worker: one CF shard range of the typed read. The tier is index-wide, so
     every worker sees all files but a distinct shard range of the aggregation
     CF - returns {regular, aggregated, counters} pyarrow Tables.
@@ -445,7 +521,15 @@ class DaskTraceViewer:
     distributes across workers/nodes.
     """
 
-    def __init__(self, files, index_dir="", *, client=None, files_per_task=1, _plan=None):
+    def __init__(
+        self,
+        files: List[str],
+        index_dir: str = "",
+        *,
+        client: "Optional[Client]" = None,
+        files_per_task: int = 1,
+        _plan: Optional[_Plan] = None,
+    ) -> None:
         if dask is None:
             raise ImportError("dask is required for DaskTraceViewer")
         self._files = list(files)
@@ -493,8 +577,9 @@ class DaskTraceViewer:
     def time_scale(self, ns_ratio: float) -> "DaskTraceViewer":
         return self._clone(replace(self._plan, time_scale=float(ns_ratio)))
 
-    def time_bucket(self, interval_us: int) -> "DaskTraceViewer":
-        return self._clone(replace(self._plan, time_bucket=int(interval_us)))
+    def time_bucket(self, interval_us: Union[int, float, str]) -> "DaskTraceViewer":
+        bucket = int(round(coerce_duration(interval_us, 1e6, "interval_us")))
+        return self._clone(replace(self._plan, time_bucket=bucket))
 
     def group_by(self, *keys: str) -> "DaskAggregatedTraceViewer":
         return self._agg_clone(replace(self._plan, group_by=tuple(keys)))
@@ -505,8 +590,8 @@ class DaskTraceViewer:
     def select(self, *cols: str) -> "DaskTraceViewer":
         return self._clone(replace(self._plan, select=tuple(cols)))
 
-    def memory_budget(self, nbytes: int) -> "DaskTraceViewer":
-        return self._clone(replace(self._plan, memory_budget=int(nbytes)))
+    def memory_budget(self, nbytes: Union[int, str]) -> "DaskTraceViewer":
+        return self._clone(replace(self._plan, memory_budget=coerce_bytes(nbytes, "nbytes")))
 
     def auto_spill(self) -> "DaskTraceViewer":
         return self._clone(replace(self._plan, auto_spill=True))
@@ -528,11 +613,11 @@ class DaskTraceViewer:
     def agg_numeric_args(self) -> "DaskAggregatedTraceViewer":
         return self._agg_clone(replace(self._plan, auto_numeric=True))
 
-    def _shards(self):
+    def _shards(self) -> List[List[str]]:
         step = max(1, self._files_per_task)
         return [self._files[i : i + step] for i in range(0, len(self._files), step)]
 
-    def _resolve_client(self):
+    def _resolve_client(self) -> "Client":
         return self._client or get_client()  # pyright: ignore[reportOptionalCall]  # ty: ignore[call-non-callable]
 
     def collect(self):
@@ -590,7 +675,7 @@ class DaskTraceViewer:
         time_resolution: float,
         group_keys: Optional[Tuple[str, ...]] = None,
         drop_file_patterns: Tuple[str, ...] = (),
-    ) -> Tuple[List[Any], List[Optional[str]]]:
+    ) -> "Tuple[List[Future], List[Optional[str]]]":
         """Distributed typed read as per-worker IPC futures.
 
         Fans the CF shard space across the cluster (the index-wide tier can't be
@@ -635,7 +720,7 @@ class DaskTraceViewer:
             addrs.append(addr)
         return futures, addrs
 
-    def _gather_partials(self, client):
+    def _gather_partials(self, client: "Client") -> List[bytes]:
         """Fan the aggregation across shards, gather combinable partials."""
         futures = [
             client.submit(_dv_partial_task, s, self._index_dir, self._plan, pure=False)
@@ -681,7 +766,7 @@ class DaskTraceViewer:
                 break
             cursor = pg.next_cursor
 
-    def export_trace(self, output_dir: str, *, build_index: bool = False) -> Dict[str, Any]:
+    def export_trace(self, output_dir: str, *, build_index: bool = False) -> Dict[str, List[str]]:
         """Export per-shard re-indexable ``<output_dir>/part-<n>.pfw.gz`` files."""
         client = self._resolve_client()
         os.makedirs(output_dir, exist_ok=True)
@@ -700,12 +785,20 @@ class DaskTraceViewer:
         results = client.gather(futures)
         return {"files": [r["path"] for r in results if r["path"]]}
 
-    def materialize(self, *, checkpoint_size: int = 0, part_size: int = 0) -> "DaskTraceViewer":
+    def materialize(
+        self,
+        *,
+        checkpoint_size: Union[int, str] = 0,
+        part_size: Union[int, str] = 0,
+    ) -> "DaskTraceViewer":
         """Distributed row-MV materialize: each shard writes its filtered events
         into its own subdir of the shared MV directory (a self-contained part +
         index), then the coordinator writes one manifest over the full base set.
         A later matching read reuses it. Needs a views anchor - a shared index
-        location or views_root()."""
+        location or views_root(). checkpoint_size/part_size accept unit strings
+        (e.g. "4MB")."""
+        checkpoint_size = coerce_bytes(checkpoint_size, "checkpoint_size")
+        part_size = coerce_bytes(part_size, "part_size")
         client = self._resolve_client()
         coord = _make_viewer(self._files, self._index_dir, self._plan)
         mv_dir = coord.materialize_dir()
@@ -747,7 +840,10 @@ class DaskAggregatedTraceViewer(DaskTraceViewer):
         return v
 
     def materialize(
-        self, *, checkpoint_size: int = 0, part_size: int = 0
+        self,
+        *,
+        checkpoint_size: Union[int, str] = 0,
+        part_size: Union[int, str] = 0,
     ) -> "DaskAggregatedTraceViewer":
         """Distributed materialize of the rollup: ingest the MV from per-shard
         partials, no re-scan. A later collect() reads it back."""
@@ -771,8 +867,8 @@ def distributed_write_trace(
     view: Optional[str] = None,
     files_per_task: int = 1,
     build_index: bool = False,
-    client: Optional[Any] = None,
-) -> Dict[str, Any]:
+    client: "Optional[Client]" = None,
+) -> Dict[str, List[str]]:
     """Thin wrapper over ``DaskTraceViewer(...).filter(view).export_trace(...)``."""
     dv = DaskTraceViewer(files, index_dir, client=client, files_per_task=files_per_task)
     if view:
@@ -781,7 +877,7 @@ def distributed_write_trace(
 
 
 def assign_files_by_pid(
-    file_pids: Dict[int, set],
+    file_pids: Dict[int, Set[int]],
     n_workers: int,
 ) -> Dict[int, List[int]]:
     """Assign files to workers based on majority PID affinity.
@@ -816,7 +912,7 @@ def assign_files_by_pid(
 def _build_sst_task(
     files: List[str],
     file_ids: List[int],
-    file_slices: Optional[List[Any]],
+    file_slices: Optional[List[Optional[_FileSlice]]],
     local_staging: str,
     shared_staging: str,
     batch_id: str,
@@ -827,9 +923,10 @@ def _build_sst_task(
     parallelism: int,
     flush_every_files: int,
     build_bloom: bool = True,
-    aggregation_config: Optional[Any] = None,
+    # Opaque native aggregation-config object, forwarded straight to build_sst_batch.
+    aggregation_config: "Optional[Union[bool, AggregationConfig]]" = None,
     enable_det_ids: bool = False,
-) -> tuple:
+) -> Tuple[List[Dict[str, Optional[str]]], bytes]:
     """Dask worker task: build per-worker SSTs and relocate to shared FS.
 
     Returns ``(artifact_dicts, tracker_blob)``."""
@@ -896,7 +993,7 @@ def _build_sst_task(
     return artifact_dicts, tracker_blob
 
 
-def _scan_gzip_members_task(paths: List[str]) -> List[List[tuple]]:
+def _scan_gzip_members_task(paths: List[str]) -> List[List[Tuple[int, int]]]:
     """Worker task: scan gzip member offsets for its file subset."""
     from .dftracer_utils_ext import enumerate_gzip_members
 
@@ -909,8 +1006,8 @@ def distributed_index(
     index_path: str = "",
     local_staging: str = "",
     shared_staging: str = "",
-    client: Optional[Any] = None,
-    checkpoint_size: int = 32 * 1024 * 1024,
+    client: "Optional[Client]" = None,
+    checkpoint_size: Union[int, str] = 32 * 1024 * 1024,
     bloom_dimensions: Optional[List[str]] = None,
     force_rebuild: bool = False,
     build_bloom: bool = True,
@@ -918,9 +1015,9 @@ def distributed_index(
     rebuild_root_summaries: bool = True,
     parallelism_per_worker: int = 0,
     flush_every_files: int = 0,
-    aggregation_config: Optional[Any] = None,
+    aggregation_config: "Optional[Union[bool, AggregationConfig]]" = None,
     progress: Optional[Callable[[int, int, str], None]] = None,
-) -> Dict[str, Any]:
+) -> DistributedIndexResult:
     """Index a set of trace files using Dask workers writing SSTs in parallel.
 
     Steps (all O(1) on the coordinator except the fan-out):
@@ -957,6 +1054,7 @@ def distributed_index(
     """
     if dask is None:
         raise ImportError("dask is required for distributed_index")
+    checkpoint_size = coerce_bytes(checkpoint_size, "checkpoint_size")
     if not index_path:
         raise ValueError("index_path is required")
     if not local_staging:
@@ -1000,7 +1098,12 @@ def distributed_index(
     _log.info("distributed_index: scanned %d files in %.1fs", len(entries), _time.monotonic() - _t0)
 
     if not entries:
-        return {"total_files": 0, "per_worker": [], "index_path": index_path}
+        return {
+            "total_files": 0,
+            "per_worker": [],
+            "index_path": index_path,
+            "artifact_batches": 0,
+        }
 
     n_workers = 1
     if client is not None:
@@ -1056,7 +1159,7 @@ def distributed_index(
     #    per file_idx). Each worker sends back only its 1/N member maps;
     #    coordinator stitches into the full map.
     _t2 = _time.monotonic()
-    member_map: List[List[tuple]] = [[] for _ in range(len(entries))]
+    member_map: List[List[Tuple[int, int]]] = [[] for _ in range(len(entries))]
     if client is None:
         member_map = list(_enumerate_gzip_members(all_paths, None))
     else:
@@ -1110,11 +1213,11 @@ def distributed_index(
 
     worker_file_lists: List[List[str]] = []
     worker_file_ids: List[List[int]] = []
-    worker_slices: List[List[Any]] = []
+    worker_slices: List[List[Optional[_FileSlice]]] = []
     for w, units in enumerate(per_worker_units):
         paths_w: List[str] = []
         ids_w: List[int] = []
-        slices_w: List[Any] = []
+        slices_w: List[Optional[_FileSlice]] = []
         for file_idx, mb, me, _csz in units:
             paths_w.append(all_paths[file_idx])
             ids_w.append(int(all_file_ids[file_idx]))
@@ -1142,7 +1245,7 @@ def distributed_index(
     worker_ids: List[int] = []
     worker_addrs: List[str] = []
     # Each entry is (artifact_dicts, tracker_blob) returned by _build_sst_task.
-    worker_results: List[Any] = []
+    worker_results: List[Tuple[List[Dict[str, Optional[str]]], bytes]] = []
     if client is None:
         for w, (paths_w, ids_w, slices_w) in enumerate(
             zip(worker_file_lists, worker_file_ids, worker_slices)

@@ -2,44 +2,109 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import (
     TYPE_CHECKING,
-    Any,
     Callable,
-    Dict,
     Generic,
     List,
     Optional,
+    TypedDict,
     TypeVar,
+    Union,
+    cast,
     overload,
 )
 
+from ._units import coerce_duration
 from .dftracer_utils_ext import Runtime as _NativeRuntime
 from .dftracer_utils_ext import TaskHandle as _NativeTaskHandle
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-T = TypeVar("T")
+    from typing_extensions import ParamSpec
+
+    # Only the type checker needs P: submit's overloads reference it in string
+    # annotations (from __future__ import annotations), so it is never evaluated
+    # at runtime and needs no import there.
+    P = ParamSpec("P")
+
+# Covariant (get() -> T_co only) so the runtime can hold one list of handles
+# typed TaskHandle[object] instead of Any.
+T_co = TypeVar("T_co", covariant=True)
+# Invariant binder for submit(): ties the callable's return to TaskHandle[R].
+R = TypeVar("R")
+
+
+class WorkerProgress(TypedDict):
+    """One worker's slice of :meth:`Runtime.get_progress`."""
+
+    id: int
+    idle: bool
+    task: str
+    queue_depth: int
+
+
+class TaskProgress(TypedDict):
+    """One task's slice of :meth:`Runtime.get_progress` (``children`` recurses)."""
+
+    name: str
+    state: str
+    queued_duration_ms: float
+    execution_duration_ms: float
+    total_subtasks: int
+    completed_subtasks: int
+    progress_pct: float
+    location: str
+    children: List["TaskProgress"]
+
+
+class RuntimeProgress(TypedDict):
+    """Return shape of :meth:`Runtime.get_progress`."""
+
+    total: int
+    completed: int
+    running: int
+    queued: int
+    failed: int
+    workers: List[WorkerProgress]
+    tasks: List[TaskProgress]
+
+
+def _source_location(fn: object) -> str:
+    """``basename:lineno`` of a callable's definition, or "" if unavailable.
+
+    Column info would need ``code.co_positions`` (Python 3.11+); the supported
+    floor is 3.8, so only file and line are reported.
+    """
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        return ""
+    filename = getattr(code, "co_filename", "")
+    lineno = getattr(code, "co_firstlineno", 0)
+    if not filename or not lineno:
+        return ""
+    return f"{os.path.basename(filename)}:{lineno}"
 
 
 def _derive_name(fn: object) -> str:
-    """Derive task name from callable."""
+    """Derive a task name: the callable's qualified name plus, when available,
+    the source location where it is defined (e.g. ``"mod.fn (worker.py:42)"``)."""
     qualname = getattr(fn, "__qualname__", None)
     if qualname:
         module = getattr(fn, "__module__", None)
-        if module and module != "__main__":
-            return f"{module}.{qualname}"
-        return str(qualname)
-    name = getattr(fn, "__name__", None)
-    if name:
-        return str(name)
-    return type(fn).__name__
+        base = f"{module}.{qualname}" if module and module != "__main__" else str(qualname)
+    else:
+        name = getattr(fn, "__name__", None)
+        base = str(name) if name else type(fn).__name__
+    location = _source_location(fn)
+    return f"{base} ({location})" if location else base
 
 
-class TaskHandle(Generic[T]):
+class TaskHandle(Generic[T_co]):
     """Unified handle for both C++ and Python tasks.
 
     Wraps either a C++ _NativeTaskHandle or a concurrent.futures.Future.
@@ -56,8 +121,8 @@ class TaskHandle(Generic[T]):
 
     def __init__(
         self,
-        native: Optional[_NativeTaskHandle] = None,
-        future: Optional[Future[T]] = None,
+        native: "Optional[_NativeTaskHandle[T_co]]" = None,
+        future: "Optional[Future[T_co]]" = None,
         name: str = "",
         task_id: int = -1,
     ) -> None:
@@ -67,7 +132,7 @@ class TaskHandle(Generic[T]):
         self._task_id = task_id
         self._exception: Optional[BaseException] = None
 
-    def get(self) -> T:
+    def get(self) -> T_co:
         """Block until task completes and return result. Raises on error."""
         if self._native is not None:
             return self._native.get()
@@ -139,10 +204,12 @@ class Runtime:
     def _init_fields(self, python_threads: int = 0) -> None:
         self._py_pool: Optional[ThreadPoolExecutor] = None
         self._py_pool_size = python_threads
-        self._handles: List[TaskHandle[Any]] = []
-        self._failed_handles: List[TaskHandle[Any]] = []
+        # TaskHandle[object]: these collections hold handles of every submitted
+        # task, whose result types are heterogeneous and not tracked per handle.
+        self._handles: List[TaskHandle[object]] = []
+        self._failed_handles: List[TaskHandle[object]] = []
         self._lock = threading.Lock()
-        self._on_task_error: Optional[Callable[[TaskHandle[Any], BaseException], None]] = None
+        self._on_task_error: Optional[Callable[[TaskHandle[object], BaseException], None]] = None
         self._py_task_counter = 0
 
     @classmethod
@@ -163,59 +230,37 @@ class Runtime:
         return self._py_pool
 
     @overload
-    def submit(
-        self,
-        task_or_fn: _NativeTaskHandle,
-        *args: Any,
-        name: Optional[str] = ...,
-        **kwargs: Any,
-    ) -> TaskHandle[Any]: ...
-
+    def submit(self, task_or_fn: _NativeTaskHandle) -> TaskHandle[object]: ...
     @overload
     def submit(
-        self,
-        task_or_fn: Callable[..., T],
-        *args: Any,
-        name: Optional[str] = ...,
-        **kwargs: Any,
-    ) -> TaskHandle[T]: ...
+        self, task_or_fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs
+    ) -> TaskHandle[R]: ...
 
+    # Erased dispatcher; the overloads carry the precise contract. There is no
+    # name= arg because PEP 612 forbids a keyword alongside **P.kwargs, so the
+    # name is derived from the callable and its source location.
     def submit(
         self,
-        task_or_fn: Any,
-        *args: Any,
-        name: Optional[str] = None,
-        **kwargs: Any,
-    ) -> TaskHandle[Any]:
+        task_or_fn: "Union[_NativeTaskHandle, Callable[..., object]]",
+        *args: object,
+        **kwargs: object,
+    ) -> TaskHandle[object]:
         """Submit a task for async execution.
 
-        Accepts either a C++ TaskHandle (pass-through) or a Python callable.
-
-        Args:
-            task_or_fn: Python callable or a C++ _NativeTaskHandle to wrap.
-            *args: Arguments for callable (ignored for C++ TaskHandle).
-            name: Task name for tracking. If None, auto-derived:
-
-                - C++ TaskHandle: uses name from the handle
-                - callable: qualified name (e.g. ``"module.func"``)
-            **kwargs: Keyword arguments for callable.
-
-        Returns:
-            TaskHandle that can be waited on or used to get the result.
-
-        Raises:
-            TypeError: If task_or_fn is not callable or a TaskHandle.
+        Accepts either a C++ TaskHandle (pass-through) or a Python callable; the
+        callable's args are passed through and type-checked against it. The task
+        name is derived automatically (qualified name plus source location).
 
         Example::
 
-            h = rt.submit(lambda x, y: x + y, 3, 4, name="add")
+            h = rt.submit(lambda x, y: x + y, 3, 4)
             result = h.get()  # 7
         """
         if isinstance(task_or_fn, _NativeTaskHandle):
             # C++ coroutine path: wrap a native TaskHandle from utility
             # bindings. Currently unused — will be used when utilities
             # are ported to Python.
-            handle: TaskHandle[Any] = TaskHandle(native=task_or_fn, name=name or task_or_fn.name)
+            handle: TaskHandle[object] = TaskHandle(native=task_or_fn, name=task_or_fn.name)
             with self._lock:
                 self._handles.append(handle)
             return handle
@@ -223,15 +268,15 @@ class Runtime:
         if not callable(task_or_fn):
             raise TypeError(f"Expected callable or TaskHandle, got {type(task_or_fn).__name__}")
 
-        derived_name = name or _derive_name(task_or_fn)
-
         with self._lock:
             task_id = self._py_task_counter
             self._py_task_counter += 1
 
-        handle = TaskHandle[Any](name=derived_name, task_id=task_id)
+        handle = TaskHandle[object](name=_derive_name(task_or_fn), task_id=task_id)
 
-        def wrapper() -> Any:
+        # The result is opaque at the pool layer; callers retrieve it typed
+        # through the handle's overloaded get().
+        def wrapper() -> object:
             try:
                 return task_or_fn(*args, **kwargs)
             except BaseException as e:
@@ -253,7 +298,7 @@ class Runtime:
 
         return handle
 
-    def wait(self, handle: TaskHandle[Any]) -> None:
+    def wait(self, handle: TaskHandle[object]) -> None:
         """Block until a specific task completes."""
         handle.wait()
 
@@ -291,7 +336,7 @@ class Runtime:
         if raise_on_error and errors:
             raise RuntimeError(f"{len(errors)} task(s) failed:\n" + "\n".join(errors))
 
-    def get_failed(self) -> List[TaskHandle[Any]]:
+    def get_failed(self) -> List[TaskHandle[object]]:
         """Return handles of tasks that failed since last clear.
 
         Call after ``wait_all()`` to inspect failures.
@@ -306,7 +351,7 @@ class Runtime:
 
     def set_error_callback(
         self,
-        callback: Optional[Callable[[TaskHandle[Any], BaseException], None]],
+        callback: Optional[Callable[[TaskHandle[object], BaseException], None]],
     ) -> None:
         """Set callback invoked when any task fails.
 
@@ -337,21 +382,25 @@ class Runtime:
             self._py_pool = None
         self._native.shutdown()
 
-    def get_progress(self) -> Dict[str, Any]:
+    def get_progress(self) -> RuntimeProgress:
         """Return progress dict from C++ executor."""
-        return self._native.get_progress()
+        return cast(RuntimeProgress, self._native.get_progress())
 
     def is_responsive(self) -> bool:
         """Return True if the runtime is making progress."""
         return self._native.is_responsive()
 
-    def set_timeout(self, global_ms: int = 0) -> None:
-        """Set global timeout in milliseconds."""
-        self._native.set_timeout(global_ms=global_ms)
+    def set_timeout(self, global_ms: Union[int, float, str] = 0) -> None:
+        """Set the global timeout. A bare number is milliseconds; a string such
+        as "30s" or "5m" is converted."""
+        ms = int(round(coerce_duration(global_ms, 1e3, "global_ms")))
+        self._native.set_timeout(global_ms=ms)
 
-    def set_default_task_timeout(self, ms: int = 0) -> None:
-        """Set default per-task timeout in milliseconds."""
-        self._native.set_default_task_timeout(ms=ms)
+    def set_default_task_timeout(self, ms: Union[int, float, str] = 0) -> None:
+        """Set the default per-task timeout. A bare number is milliseconds; a
+        string such as "30s" or "5m" is converted."""
+        ms_val = int(round(coerce_duration(ms, 1e3, "ms")))
+        self._native.set_default_task_timeout(ms=ms_val)
 
     @property
     def threads(self) -> int:

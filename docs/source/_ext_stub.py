@@ -9,7 +9,9 @@ from __future__ import annotations
 import sys
 import types
 from types import TracebackType
-from typing import Iterator
+from typing import Generic, Iterator, TypeVar
+
+_T = TypeVar("_T")
 
 
 def install_extension_stub() -> None:
@@ -141,6 +143,18 @@ def install_extension_stub() -> None:
         def group_by(self, *keys: str) -> "AggregatedTraceViewer":
             """Group by one or more keys (promotes to AggregatedTraceViewer)."""
             return AggregatedTraceViewer(None)
+
+        def sort_by(self, name: str, descending: bool = False) -> "TraceViewer":
+            """Sort result rows by a column."""
+            return self
+
+        def topk(self, name: str, k: int, largest: bool = True) -> "TraceViewer":
+            """Keep the top/bottom ``k`` rows by a column."""
+            return self
+
+        def join(self, other: "TraceViewer", how: str = "inner") -> object:
+            """Join against another view, returning a DataFrame."""
+            return None
 
         def agg(self, *specs: str) -> "AggregatedTraceViewer":
             """Aggregate with ``op:field`` specs (e.g. 'count', 'sum:dur')."""
@@ -518,12 +532,12 @@ def install_extension_stub() -> None:
             """
             return None
 
-    class TaskHandle(_BaseNative):
+    class TaskHandle(_BaseNative, Generic[_T]):
         """Handle to a submitted C++ coroutine task."""
 
-        def get(self) -> object:
+        def get(self) -> _T:
             """Block until task completes and return result. Raises on error."""
-            return None
+            return None  # type: ignore[return-value]
 
         def wait(self) -> None:
             """Block until task completes. Raises on error."""

@@ -25,7 +25,7 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from typing import Any, Dict, List
+from typing import Callable, Dict, List, Union
 
 from . import _plugin_build
 
@@ -73,7 +73,7 @@ class JitOpError(Exception):
 class Op:
     """A composable value transform, one or more leaf stages piped in order."""
 
-    def __init__(self, stages: List[Dict[str, Any]]):
+    def __init__(self, stages: List[Dict[str, str]]):
         self.stages = stages
 
     @property
@@ -93,7 +93,7 @@ class Op:
             )
         return Op(self.stages + other.stages)
 
-    def __call__(self, value: Any) -> Any:
+    def __call__(self, value: Union[int, float]) -> Union[int, float]:
         """Run this op over `value` in plain Python: JIT-compile it and drive the
         graph on a standalone compose host, returning the output value.
 
@@ -103,7 +103,7 @@ class Op:
         return run_op(self, value)
 
 
-def _type_of(t: Any) -> str:
+def _type_of(t: object) -> str:
     dft = getattr(t, "dft", None)
     if dft not in _CTYPE:
         raise JitOpError(f"unsupported op value type {t!r}; use jit.i64/i32/u64/f64/...")
@@ -133,7 +133,8 @@ def _lower(node: ast.expr, var: str) -> str:
     raise JitOpError("op body must be `return <arithmetic on the input>`")
 
 
-def op(fn: Any) -> Op:
+# fn is an arbitrary user-authored one-argument function (jit-typed annotations).
+def op(fn: Callable[..., object]) -> Op:
     """Turn a typed one-argument function into a compose leaf.
 
     The body must be a single ``return <arithmetic on the argument>``; anything
@@ -245,7 +246,7 @@ def compile_op(op_obj: Op, *, name: str = "op") -> str:
     return str(out)
 
 
-def run_op(op_obj: Op, value: Any) -> Any:
+def run_op(op_obj: Op, value: Union[int, float]) -> Union[int, float]:
     """Compile `op_obj`, then build and run its dftu_op graph over `value` on a
     standalone compose host (no plugin, no scan), returning the output value."""
     import struct

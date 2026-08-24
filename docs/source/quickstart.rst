@@ -91,8 +91,8 @@ Async Task Submission
 
    with Runtime(threads=8, python_threads=4) as rt:
        # Submit Python callables -- runs on Python thread pool
-       h1 = rt.submit(process_file, "trace1.pfw.gz", name="proc-1")
-       h2 = rt.submit(process_file, "trace2.pfw.gz", name="proc-2")
+       h1 = rt.submit(process_file, "trace1.pfw.gz")
+       h2 = rt.submit(process_file, "trace2.pfw.gz")
 
        # Wait for all tasks
        rt.wait_all()
@@ -100,7 +100,7 @@ Async Task Submission
        # Or get individual results
        result = h1.get()  # blocks until h1 completes
 
-Task names are auto-derived from the callable when not provided:
+Task names are auto-derived from the callable (there is no ``name`` argument):
 
 .. code-block:: python
 
@@ -118,7 +118,7 @@ Composing tasks with dependency chains:
        h2 = rt.submit(query_index, result)     # use result
        return h2.get()
 
-   h = rt.submit(compose, "trace.pfw.gz", name="compose")
+   h = rt.submit(compose, "trace.pfw.gz")
    print(h.get())
 
 Error handling:

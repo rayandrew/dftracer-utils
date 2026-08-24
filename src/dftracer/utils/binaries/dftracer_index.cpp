@@ -62,9 +62,10 @@ class IndexArgParse : public cli::ArgParse {
 
         parser()
             .add_argument("--read-batch-size")
-            .help("Batch read size in MB for stream processing (default: 4)")
-            .scan<'d', std::size_t>()
-            .default_value(static_cast<std::size_t>(4));
+            .help(
+                "Batch read size for stream processing (default: 4MB). A bare "
+                "number is MB; suffixed values (e.g. 512KB) are absolute")
+            .default_value(std::string("4"));
 
         parser()
             .add_argument("--expected-entries")
@@ -84,7 +85,8 @@ class IndexArgParse : public cli::ArgParse {
     void post_parse() override {
         dimensions = parser().get<std::string>("--dimensions");
         rebuild_summaries = parser().get<bool>("--rebuild-summaries");
-        read_batch_size = parser().get<std::size_t>("--read-batch-size");
+        read_batch_size =
+            cli::get_bytes_arg(parser(), "--read-batch-size", 1024ull * 1024);
         expected_entries = parser().get<std::size_t>("--expected-entries");
         false_positive_rate = parser().get<double>("--false-positive-rate");
     }

@@ -36,7 +36,7 @@ class SplitArgParse : public cli::ArgParse {
 
     std::string app_name = "app";
     std::string output_dir = "./split";
-    int chunk_size_mb = 4;
+    std::size_t chunk_size_bytes = 4ull * 1024 * 1024;
     bool compress = true;
     bool verify = false;
 
@@ -61,9 +61,10 @@ class SplitArgParse : public cli::ArgParse {
         parser()
             .add_argument("-s", "--chunk-size")
             .help(
-                "Output file size in MB (approximate compressed/on-disk size)")
-            .scan<'d', int>()
-            .default_value(4);
+                "Output file size, approximate compressed/on-disk (default: "
+                "4MB). A bare number is MB; suffixed values (e.g. 512KB) are "
+                "absolute")
+            .default_value(std::string("4"));
 
         parser()
             .add_argument("-c", "--compress")
@@ -80,7 +81,8 @@ class SplitArgParse : public cli::ArgParse {
     void post_parse() override {
         app_name = parser().get<std::string>("--app-name");
         output_dir = parser().get<std::string>("--output");
-        chunk_size_mb = parser().get<int>("--chunk-size");
+        chunk_size_bytes =
+            cli::get_bytes_arg(parser(), "--chunk-size", 1024ull * 1024);
         compress = parser().get<bool>("--compress");
         verify = parser().get<bool>("--verify");
     }
@@ -90,7 +92,9 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
     const auto log_dir = fs::absolute(cli->directory.value).string();
     const auto output_dir = fs::absolute(cli->output_dir).string();
     const auto& app_name = cli->app_name;
-    const auto chunk_size_mb = cli->chunk_size_mb;
+    const auto chunk_size_bytes = cli->chunk_size_bytes;
+    const double chunk_size_mb =
+        static_cast<double>(chunk_size_bytes) / (1024.0 * 1024.0);
     const auto force = cli->indexing.force;
     const auto compress = cli->compress;
     const auto verify = cli->verify;
@@ -121,7 +125,7 @@ static coro::CoroTask<int> run_split(const SplitArgParse* cli) {
     std::printf("  Compress: %s\n", compress ? "true" : "false");
     std::printf("  Data dir: %s\n", log_dir.c_str());
     std::printf("  Output dir: %s\n", output_dir.c_str());
-    std::printf("  Chunk size: %d MB (compressed)\n", chunk_size_mb);
+    std::printf("  Chunk size: %.2f MB (compressed)\n", chunk_size_mb);
     std::printf("  Checkpoint / gzip member size: %zu bytes\n",
                 member_size_bytes);
     std::printf("  Executor threads: %zu\n", executor_threads);

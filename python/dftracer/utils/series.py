@@ -11,11 +11,31 @@ counterpart.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List, Tuple, Type, Union
+import builtins
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generic,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 from . import dftracer_utils_ext as _ext
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
+    import numpy as np  # ty: ignore[unresolved-import]
+    import pandas as pd  # ty: ignore[unresolved-import]
+    import polars as pl  # ty: ignore[unresolved-import]
+    import pyarrow as pa  # ty: ignore[unresolved-import]
+
     from .dataframe import DataFrame
 
 # (native handle type, Python wrapper) pairs, filled as each wrapper module
@@ -28,6 +48,7 @@ def _register(native_type: type, wrapper: Type["_Wrapper"]) -> None:
     _WRAP.append((native_type, wrapper))
 
 
+# Any: precise overloads break self-typed builder methods that return _ViewerT.
 def _wrap(obj: Any) -> Any:
     for native_type, wrapper in _WRAP:
         if isinstance(obj, native_type):
@@ -35,36 +56,50 @@ def _wrap(obj: Any) -> Any:
     return obj
 
 
+_N = TypeVar("_N")
+
+
+# Any: a `_Wrapper[_N] -> _N` overload mis-resolves on union-typed arguments.
 def _unwrap(obj: Any) -> Any:
     return obj._native if isinstance(obj, _Wrapper) else obj
 
 
-class _Wrapper:
+class _Wrapper(Generic[_N]):
     """Holds a native handle and forwards unknown attributes to it, wrapping the
-    handles it hands back and unwrapping the ones passed in."""
+    handles it hands back and unwrapping the ones passed in. Parameterized by the
+    concrete native handle type."""
 
     __slots__ = ("_native",)
 
-    def __init__(self, native: Any) -> None:
+    _native: _N
+
+    def __init__(self, native: _N) -> None:
         self._native = native
 
-    def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._native, name)
-        if not callable(attr):
-            return _wrap(attr)
+    # Runtime-only forwarder for native methods not explicitly wrapped; hidden
+    # from the checker so unknown attributes are type errors, not Any.
+    if not TYPE_CHECKING:
 
-        def forward(*args: Any, **kwargs: Any) -> Any:
-            uargs = [_unwrap(a) for a in args]
-            ukwargs = {k: _unwrap(v) for k, v in kwargs.items()}
-            return _wrap(attr(*uargs, **ukwargs))
+        def __getattr__(self, name):
+            attr = getattr(self._native, name)
+            if not callable(attr):
+                return _wrap(attr)
 
-        return forward
+            def forward(*args, **kwargs):
+                uargs = [_unwrap(a) for a in args]
+                ukwargs = {k: _unwrap(v) for k, v in kwargs.items()}
+                return _wrap(attr(*uargs, **ukwargs))
 
-    def __arrow_c_array__(self, requested_schema: Any = None) -> Any:
+            return forward
+
+    # Opaque Arrow C Data Interface capsules; Python has no capsule type.
+    def __arrow_c_array__(
+        self, requested_schema: Optional[object] = None
+    ) -> "Tuple[object, object]":
         return self._native.__arrow_c_array__(requested_schema)
 
 
-def _require_pyarrow() -> Any:
+def _require_pyarrow() -> "ModuleType":
     try:
         import pyarrow as pa  # ty: ignore[unresolved-import]
     except ImportError:
@@ -82,8 +117,12 @@ _CMP_LE = 3
 _CMP_EQ = 4
 _CMP_NE = 5
 
+# Right-hand operand for a Series op: another Series or a Python scalar.
+_Scalar = Union[int, float]
+_SeriesOrScalar = Union["Series", int, float]
 
-class Series(_Wrapper):
+
+class Series(_Wrapper["_ext._Series"]):
     """A typed column: SIMD ops from the native engine plus Arrow/NumPy conversion.
 
     Supports NumPy-style ``+ - * /`` against another Series (elementwise) or a
@@ -93,24 +132,24 @@ class Series(_Wrapper):
     ``ne``) return a boolean mask Series."""
 
     @classmethod
-    def from_arrow(cls, arr: Any) -> "Series":
+    def from_arrow(cls, arr: "pa.Array") -> "Series":
         """Import a ``pyarrow.Array`` (or any ``__arrow_c_array__`` provider),
         zero-copy via the Arrow C Data Interface."""
         return _series_from_arrow(arr)
 
     @classmethod
-    def from_pandas(cls, s: Any) -> "Series":
+    def from_pandas(cls, s: "pd.Series") -> "Series":
         """Import a ``pandas.Series`` (zero-copy for numeric, via pyarrow)."""
         pa = _require_pyarrow()
         return _series_from_arrow(pa.Array.from_pandas(s))
 
     @classmethod
-    def from_polars(cls, s: Any) -> "Series":
+    def from_polars(cls, s: "pl.Series") -> "Series":
         """Import a ``polars.Series`` (zero-copy via its Arrow buffers)."""
         return _series_from_arrow(s.to_arrow())
 
     @classmethod
-    def from_numpy(cls, a: Any) -> "Series":
+    def from_numpy(cls, a: "np.ndarray") -> "Series":
         """Import a NumPy array.
 
         A 1-D C-contiguous fixed-width numeric array takes the native
@@ -124,21 +163,21 @@ class Series(_Wrapper):
             return _series_from_arrow(pa.array(a))
 
     @classmethod
-    def from_list(cls, values: Any, dtype: Any = None) -> "Series":
+    def from_list(cls, values: Sequence[object], dtype: "Optional[pa.DataType]" = None) -> "Series":
         """Import a Python sequence, optionally typed by a pyarrow ``dtype``."""
         pa = _require_pyarrow()
         return _series_from_arrow(pa.array(values, type=dtype))
 
-    def to_arrow(self) -> Any:
+    def to_arrow(self) -> "pa.Array":
         """This column as a ``pyarrow.Array`` (zero-copy via the C Data
         Interface)."""
         return _require_pyarrow().array(self._native)
 
-    def to_pandas(self) -> Any:
+    def to_pandas(self) -> "pd.Series":
         """This column as a pandas Series."""
         return self.to_arrow().to_pandas()
 
-    def to_numpy(self) -> Any:
+    def to_numpy(self) -> "np.ndarray":
         """This column as a NumPy array.
 
         A flat, non-null, fixed-width numeric column is read directly from the
@@ -149,11 +188,12 @@ class Series(_Wrapper):
         try:
             # memoryview forces the native buffer protocol (a plain
             # np.asarray(handle) can fall back to a 0-d object array).
-            return np.asarray(memoryview(self._native))
+            # _Series's C buffer support is not in the stub (PEP 688 is 3.12+).
+            return np.asarray(memoryview(self._native))  # ty: ignore[invalid-argument-type]
         except (BufferError, TypeError):
             return self.to_arrow().to_numpy(zero_copy_only=False)
 
-    def to_polars(self) -> Any:
+    def to_polars(self) -> "pl.Series":
         """This column as a polars Series."""
         try:
             import polars as pl  # ty: ignore[unresolved-import]
@@ -163,7 +203,9 @@ class Series(_Wrapper):
             ) from None
         return pl.from_arrow(self.to_arrow())
 
-    def __array__(self, dtype: Any = None, copy: Any = None) -> Any:
+    def __array__(
+        self, dtype: "Optional[np.dtype]" = None, copy: Optional[bool] = None
+    ) -> "np.ndarray":
         """NumPy array protocol, so ``np.asarray(series)`` works."""
         import numpy as np  # ty: ignore[unresolved-import]
 
@@ -172,7 +214,8 @@ class Series(_Wrapper):
     def __len__(self) -> int:
         return self._native.length
 
-    def __getitem__(self, key: Any) -> Any:
+    # builtins.slice (not bare `slice`): ty otherwise binds it to Series.slice.
+    def __getitem__(self, key: "Union[int, builtins.slice]") -> "Union[Series, object]":
         """``s[i]`` returns the element as a Python scalar; ``s[a:b]`` returns a
         Series (step-1 slices only)."""
         arr = self.to_arrow()
@@ -181,73 +224,74 @@ class Series(_Wrapper):
         idx = key + len(self) if key < 0 else key
         return arr[idx].as_py()
 
-    def _elementwise(self, other: Any, series_op: str, scalar_op: str) -> Any:
+    # Returns a Series, or NotImplemented for an unsupported right operand.
+    def _elementwise(self, other: _SeriesOrScalar, series_op: str, scalar_op: str) -> "Series":
         if isinstance(other, Series):
             return getattr(self, series_op)(other)
         if isinstance(other, (int, float)) and not isinstance(other, bool):
             return getattr(self, scalar_op)(other)
         return NotImplemented
 
-    def __add__(self, other: Any) -> Any:
+    def __add__(self, other: _SeriesOrScalar) -> "Series":
         return self._elementwise(other, "add", "add_scalar")
 
-    def __radd__(self, other: Any) -> Any:
+    def __radd__(self, other: _Scalar) -> "Series":
         return self._elementwise(other, "add", "add_scalar")
 
-    def __sub__(self, other: Any) -> Any:
+    def __sub__(self, other: _SeriesOrScalar) -> "Series":
         return self._elementwise(other, "sub", "sub_scalar")
 
-    def __rsub__(self, other: Any) -> Any:
+    def __rsub__(self, other: _Scalar) -> "Series":
         # other - self; a Series left operand would take __sub__, so other is a scalar.
         if isinstance(other, (int, float)) and not isinstance(other, bool):
             return self.mul_scalar(-1).add_scalar(other)
         return NotImplemented
 
-    def __mul__(self, other: Any) -> Any:
+    def __mul__(self, other: _SeriesOrScalar) -> "Series":
         return self._elementwise(other, "mul", "mul_scalar")
 
-    def __rmul__(self, other: Any) -> Any:
+    def __rmul__(self, other: _Scalar) -> "Series":
         return self._elementwise(other, "mul", "mul_scalar")
 
-    def __truediv__(self, other: Any) -> Any:
+    def __truediv__(self, other: _SeriesOrScalar) -> "Series":
         return self._elementwise(other, "div", "div_scalar")
 
     # Comparisons return a boolean mask Series. __eq__/__ne__ are intentionally
     # not defined (they would break hashing / `in`); use eq()/ne() instead, as
     # the C++ Series has no operator==/!= either.
-    def __lt__(self, other: Any) -> Any:
+    def __lt__(self, other: _Scalar) -> "Series":
         return self.compare(_CMP_LT, other)
 
-    def __le__(self, other: Any) -> Any:
+    def __le__(self, other: _Scalar) -> "Series":
         return self.compare(_CMP_LE, other)
 
-    def __gt__(self, other: Any) -> Any:
+    def __gt__(self, other: _Scalar) -> "Series":
         return self.compare(_CMP_GT, other)
 
-    def __ge__(self, other: Any) -> Any:
+    def __ge__(self, other: _Scalar) -> "Series":
         return self.compare(_CMP_GE, other)
 
-    def gt(self, value: Any) -> Any:
+    def gt(self, value: _Scalar) -> "Series":
         """Boolean mask where the value is greater than ``value``."""
         return self.compare(_CMP_GT, value)
 
-    def ge(self, value: Any) -> Any:
+    def ge(self, value: _Scalar) -> "Series":
         """Boolean mask where the value is greater than or equal to ``value``."""
         return self.compare(_CMP_GE, value)
 
-    def lt(self, value: Any) -> Any:
+    def lt(self, value: _Scalar) -> "Series":
         """Boolean mask where the value is less than ``value``."""
         return self.compare(_CMP_LT, value)
 
-    def le(self, value: Any) -> Any:
+    def le(self, value: _Scalar) -> "Series":
         """Boolean mask where the value is less than or equal to ``value``."""
         return self.compare(_CMP_LE, value)
 
-    def eq(self, value: Any) -> Any:
+    def eq(self, value: _Scalar) -> "Series":
         """Boolean mask where the value equals ``value``."""
         return self.compare(_CMP_EQ, value)
 
-    def ne(self, value: Any) -> Any:
+    def ne(self, value: _Scalar) -> "Series":
         """Boolean mask where the value does not equal ``value``."""
         return self.compare(_CMP_NE, value)
 
@@ -593,12 +637,12 @@ class Series(_Wrapper):
 
     # -- native property accessors --------------------------------------------
     @property
-    def type(self) -> Any:
+    def type(self) -> int:
         """The native element type of the column."""
         return self._native.type
 
     @property
-    def encoding(self) -> Any:
+    def encoding(self) -> int:
         """The native storage encoding (flat, dictionary, selection)."""
         return self._native.encoding
 
@@ -612,13 +656,13 @@ class Series(_Wrapper):
         """Number of null elements."""
         return self._native.null_count
 
-    def __reduce__(self) -> Any:
+    def __reduce__(self) -> "Tuple[Callable[[object], Series], Tuple[object, ...]]":
         return (_series_from_arrow, (self.to_arrow(),))
 
 
 _register(_ext._Series, Series)
 
 
-def _series_from_arrow(array: Any) -> Series:
+def _series_from_arrow(array: "pa.Array") -> Series:
     """Import a pyarrow Array into a native Series wrapper."""
     return Series(_ext._series_from_arrow(array))

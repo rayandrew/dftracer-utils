@@ -4,13 +4,12 @@
 // live worker count right after construction is the observable (an elastic pool
 // starts at its floor, an eager pool starts at the full width).
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <dftracer/utils/core/common/platform_compat.h>
+#include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/pipeline/pipeline_config.h>
 #include <dftracer/utils/core/runtime.h>
 #include <doctest/doctest.h>
 
-#include <algorithm>
 #include <cstdlib>
 #include <string>
 
@@ -50,6 +49,18 @@ std::size_t live_workers(const Pipeline& p) {
     return p.runtime().get_progress().workers.size();
 }
 
+// An eager pool starts at its full compute width. Nothing clamps that to the
+// core count - a pool asked for THREADS workers runs THREADS of them even on a
+// host with fewer cores (blocking coroutines need a real thread each). Valgrind
+// mode is the one exception: it caps the pool at 2 to bound thread churn.
+std::size_t eager_full_width() {
+#ifdef DFTRACER_UTILS_VALGRIND_MODE
+    return THREADS < 2 ? THREADS : 2;
+#else
+    return THREADS;
+#endif
+}
+
 PipelineConfig base() {
     return PipelineConfig().with_compute_threads(THREADS).with_watchdog(false);
 }
@@ -66,9 +77,7 @@ TEST_SUITE("PipelineElasticity") {
         SUBCASE("with_eager under an elastic env starts at full width") {
             ElasticEnv env("1");
             Pipeline p(base().with_eager());
-            // Full width is capped at hardware_concurrency (2 under Valgrind,
-            // and on any host with fewer than THREADS cores).
-            CHECK(live_workers(p) == std::min(THREADS, hardware_concurrency()));
+            CHECK(live_workers(p) == eager_full_width());
         }
     }
 
@@ -76,9 +85,7 @@ TEST_SUITE("PipelineElasticity") {
         SUBCASE("env off -> eager") {
             ElasticEnv env("0");
             Pipeline p(base());
-            // Full width is capped at hardware_concurrency (2 under Valgrind,
-            // and on any host with fewer than THREADS cores).
-            CHECK(live_workers(p) == std::min(THREADS, hardware_concurrency()));
+            CHECK(live_workers(p) == eager_full_width());
         }
         SUBCASE("env on -> elastic floor") {
             ElasticEnv env("1");
