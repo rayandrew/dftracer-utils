@@ -534,8 +534,12 @@ set(DFTU_GENERATED_HEADER
     ${CMAKE_BINARY_DIR}/include/dftracer/utils/plugins/dftu_generated_utilities.h)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/include/dftracer/utils/plugins)
 
+# GCC emits the reflected utilities' inline coroutine bodies even unused at -O0,
+# so the tool needs the gzip codec they call; compile it in (libdeflate only, no
+# cycle).
 add_executable(gen_plugin_abi
-  ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/codegen/gen_plugin_abi.cpp)
+  ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/codegen/gen_plugin_abi.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/utilities/fileio/compress/libdeflate_gzip.cpp)
 target_include_directories(gen_plugin_abi PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -549,6 +553,7 @@ elseif(TARGET dftracer_utils_core::shared)
   target_link_libraries(gen_plugin_abi PRIVATE dftracer_utils_core::shared)
 endif()
 link_pfr(gen_plugin_abi)
+link_libdeflate(gen_plugin_abi)
 add_stdfs_if_needed(gen_plugin_abi)
 # Reflecting the domain I/O types transitively includes headers that reference
 # nanoarrow (Arrow-gated members); the tool needs only the headers, never the
