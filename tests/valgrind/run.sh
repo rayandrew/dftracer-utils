@@ -363,6 +363,13 @@ run_cpp_one() {
   local -a extra=()
   if [[ "$name" == binaries/* ]]; then
     extra+=(--trace-children=yes)
+    # The fake-trace generator is only test setup outside its own test (which
+    # has dedicated Valgrind coverage). Instrumenting it on every spawn - each a
+    # full Valgrind startup over the heavy shared libs - times the comparator
+    # test out, so skip tracing it everywhere but there.
+    if [[ "${name##*/}" != test_dftracer_gen_fake_trace ]]; then
+      extra+=(--trace-children-skip='*dftracer_gen_fake_trace')
+    fi
   fi
 
   local -a doctest_args=()
