@@ -17,18 +17,20 @@ using namespace dftracer::utils;
 
 namespace {
 
-// Wait until the pool is quiescent (all workers idle) or the deadline passes,
-// so permit/blocked invariants are read after any surplus thread has converted
-// from a permit-waiter back to an idle parker.
-void settle(ThreadPoolExecutor* exec, std::size_t cap) {
+// True once all permits are back and no worker is mid-handoff, observed within
+// the deadline. Assert the return, not a re-read: an idle worker briefly takes
+// a permit to re-check for work, so a bare available_permits() read races that
+// cycle; a real leak never lets it observe cap, so it still returns false.
+bool settle(ThreadPoolExecutor* exec, std::size_t cap) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < deadline) {
         if (exec->available_permits() == static_cast<std::ptrdiff_t>(cap) &&
             exec->blocked_workers() == 0) {
-            return;
+            return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+    return false;
 }
 
 }  // namespace
@@ -40,8 +42,7 @@ TEST_SUITE("BlockingHandoff") {
         auto* exec = static_cast<ThreadPoolExecutor*>(rt.executor());
         // Workers grab a permit on startup then release it when they find no
         // work; the cap invariant holds once that settles.
-        settle(exec, cap);
-        REQUIRE(exec->available_permits() == static_cast<std::ptrdiff_t>(cap));
+        REQUIRE(settle(exec, cap));
 
         std::atomic<int> inner_done{0};
         const int N = 300;
@@ -66,12 +67,10 @@ TEST_SUITE("BlockingHandoff") {
 
         CHECK(inner_done.load() == N);  // every nested scope ran, no deadlock
 
-        settle(exec, cap);
         // Permit conservation: every enter_blocking release is matched by an
-        // exit_blocking acquire, and idle workers release, so at rest all
-        // permits are back and no worker is mid-handoff.
-        CHECK(exec->available_permits() == static_cast<std::ptrdiff_t>(cap));
-        CHECK(exec->blocked_workers() == 0);
+        // exit_blocking acquire, and idle workers release, so all permits come
+        // back and no worker is left mid-handoff.
+        CHECK(settle(exec, cap));
         // Live may have grown past the cap for the handoff, but never
         // unbounded.
         CHECK(exec->live_workers() >= cap);
@@ -107,8 +106,6 @@ TEST_SUITE("BlockingHandoff") {
           }).get();
 
         CHECK(reached.load() == 1);
-        settle(exec, 2);
-        CHECK(exec->available_permits() == 2);
-        CHECK(exec->blocked_workers() == 0);
+        CHECK(settle(exec, 2));
     }
 }
