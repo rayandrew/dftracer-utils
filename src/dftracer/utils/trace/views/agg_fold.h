@@ -181,6 +181,31 @@ void fold_event_over(GroupMap& map, const Src& src, const ViewPlan& plan,
     AggAccum& a = it->second;
     ++a.count;
 
+    // Occupancy (time-window reduction): OR the event's [ts, ts+dur) coverage
+    // into every bucket it spans. The scan already applied the window
+    // predicate, so these are the in-window events; popcount at finalize turns
+    // the covered sub-slots into busy time.
+    if (sch.want_occupancy && sch.occ_bucket_us > 0) {
+        auto ts = src.number("ts");
+        auto dur = src.number("dur");
+        if (ts && dur && *dur > 0) {
+            const auto s = static_cast<std::uint64_t>(*ts);
+            const auto d = static_cast<std::uint64_t>(*dur);
+            const std::uint64_t w = sch.occ_bucket_us;
+            a.occ_bucket_us = w;
+            a.occ_total += d;
+            if (s < a.occ_ts) a.occ_ts = s;
+            if (s + d > a.occ_te) a.occ_te = s + d;
+            const std::uint64_t first = (s / w) * w;
+            const std::uint64_t last = (s + d - 1) / w * w;
+            for (std::uint64_t b = first; b <= last; b += w) {
+                auto& ob = a.occ_buckets[b];
+                ob.mask |= occ_coverage_slots(s, d, b, w);
+                ob.active += 1;
+            }
+        }
+    }
+
     for (std::size_t fi = 0; fi < sch.fields.size(); ++fi) {
         auto v = agg_field_typed_t(src, sch.fields[fi]);
         if (!v) continue;

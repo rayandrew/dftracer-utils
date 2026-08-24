@@ -663,6 +663,202 @@ class TestCollectTypedRawFallback:
             assert 0 < one < all_rows
 
 
+class TestOccupancyMetrics:
+    """busy/concurrency/utilization via the time-window reduction: each bucket is
+    a 64-sub-slot coverage mask, an event ORs the sub-slots it covers, and busy
+    is popcount * bucket/64 summed over buckets (the interval union to bucket/64
+    resolution). Bounded by bucket count and OR-mergeable, so it streams over big
+    traces and across shards."""
+
+    def _index(self, env, lines, interval_ms=1000):
+        import gzip
+
+        from dftracer.utils import AggregationConfig, Indexer
+
+        p = os.path.join(env.temp_dir, "occ.pfw.gz")
+        with gzip.open(p, "wt") as f:
+            f.write("\n".join(lines) + "\n")
+        Indexer(
+            files=[p],
+            require_aggregation=AggregationConfig(time_interval_ms=interval_ms),
+            force_rebuild=True,
+        ).ensure_indexed()
+        return p
+
+    def _index_files(self, env, per_file, interval_ms=1000):
+        import gzip
+
+        from dftracer.utils import AggregationConfig, Indexer
+
+        paths = []
+        for i, lines in enumerate(per_file):
+            p = os.path.join(env.temp_dir, f"occ_{i}.pfw.gz")
+            with gzip.open(p, "wt") as f:
+                f.write("\n".join(lines) + "\n")
+            paths.append(p)
+        Indexer(
+            files=paths,
+            require_aggregation=AggregationConfig(time_interval_ms=interval_ms),
+            force_rebuild=True,
+        ).ensure_indexed()
+        return paths
+
+    def test_concurrent_caps_at_window(self):
+        # Two events fully overlapping [0, 500000) on two threads: sum(dur) is
+        # 1000000, but only 500000 of wall-clock passed, so busy caps at the
+        # window and concurrency = sum / busy = 2.
+        pa = pytest.importorskip("pyarrow")
+        lines = [
+            '{"name":"a","cat":"c","pid":1,"tid":1,"ts":0,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}',
+            '{"name":"a","cat":"c","pid":1,"tid":2,"ts":0,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}',
+        ]
+        with Environment() as env:
+            p = self._index(env, lines)
+            tv = dftu_utils.TraceViewer([p], index_path=env.temp_dir)
+            t = pa.table(
+                tv.time_range(0, 500_000)
+                .filter('cat == "c" and ts < 500000')
+                .group_by("cat")
+                .agg("busy", "concurrency", "sum:dur")
+                .collect()
+            )
+            assert t["sum_dur"][0].as_py() == 1_000_000
+            assert t["busy"][0].as_py() == 500_000  # capped at the window
+            assert abs(t["concurrency"][0].as_py() - 2.0) < 1e-9
+
+    def test_serial_fills_window(self):
+        # Two back-to-back events covering the whole window: no overlap, so busy
+        # equals the window and concurrency = 1.
+        pa = pytest.importorskip("pyarrow")
+        lines = [
+            '{"name":"a","cat":"c","pid":1,"tid":1,"ts":0,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}',
+            '{"name":"a","cat":"c","pid":1,"tid":1,"ts":500000,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}',
+        ]
+        with Environment() as env:
+            p = self._index(env, lines)
+            tv = dftu_utils.TraceViewer([p], index_path=env.temp_dir)
+            t = pa.table(
+                tv.time_range(0, 1_000_000)
+                .filter('cat == "c" and ts < 1000000')
+                .group_by("cat")
+                .agg("busy", "concurrency", "sum:dur")
+                .collect()
+            )
+            assert t["sum_dur"][0].as_py() == 1_000_000
+            assert t["busy"][0].as_py() == 1_000_000
+            assert abs(t["concurrency"][0].as_py() - 1.0) < 1e-9
+
+    def test_windowed_and_filtered(self):
+        pa = pytest.importorskip("pyarrow")
+        lines = [
+            '{"name":"a","cat":"c","pid":1,"tid":1,"ts":0,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}',
+            '{"name":"b","cat":"c","pid":1,"tid":2,"ts":250000,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}',
+        ]
+        with Environment() as env:
+            p = self._index(env, lines)
+            tv = dftu_utils.TraceViewer([p], index_path=env.temp_dir)
+            # Window excludes A (ts=0) and keeps only B [250000, 750000): busy is
+            # B's duration, uncapped since it fits the window.
+            win = pa.table(
+                tv.time_range(100_000, 900_000)
+                .filter('cat == "c" and ts >= 100000')
+                .group_by("cat")
+                .agg("busy", "count")
+                .collect()
+            )
+            assert win["count"][0].as_py() == 1
+            assert win["busy"][0].as_py() == 500_000
+
+    def test_merges_across_files(self):
+        # Two events overlapping the same window but in SEPARATE files: occupancy
+        # must OR-merge across sources to the union (500000), not sum to 1000000.
+        # This is the same merge_accum path shards/MPI ranks combine through, so
+        # it guards the distributed merge, not just a single scan.
+        pa = pytest.importorskip("pyarrow")
+        f0 = [
+            '{"name":"a","cat":"c","pid":1,"tid":1,"ts":0,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}'
+        ]
+        f1 = [
+            '{"name":"a","cat":"c","pid":2,"tid":1,"ts":0,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}'
+        ]
+        with Environment() as env:
+            paths = self._index_files(env, [f0, f1])
+            tv = dftu_utils.TraceViewer(paths, index_path=env.temp_dir)
+            t = pa.table(
+                tv.time_range(0, 500_000)
+                .filter('cat == "c" and ts < 500000')
+                .group_by("cat")
+                .agg("busy", "concurrency", "sum:dur")
+                .collect()
+            )
+            assert t["sum_dur"][0].as_py() == 1_000_000
+            assert t["busy"][0].as_py() == 500_000  # union across files, OR-merged
+            assert abs(t["concurrency"][0].as_py() - 2.0) < 1e-9
+
+    def test_active_peak_concurrency(self):
+        # 3 events overlapping the window -> peak concurrent headcount 3.
+        pa = pytest.importorskip("pyarrow")
+        lines = [
+            '{"name":"a","cat":"c","pid":1,"tid":%d,"ts":0,"dur":100000,'
+            '"ph":"X","args":{"hhash":"aa"}}' % tid
+            for tid in (1, 2, 3)
+        ]
+        with Environment() as env:
+            p = self._index(env, lines)
+            tv = dftu_utils.TraceViewer([p], index_path=env.temp_dir)
+            t = pa.table(
+                tv.time_range(0, 100_000)
+                .filter('cat == "c" and ts < 100000')
+                .group_by("cat")
+                .agg("active", "count")
+                .collect()
+            )
+            assert t["count"][0].as_py() == 3
+            assert t["active"][0].as_py() == 3  # peak concurrent
+
+    def test_partial_transport_round_trip(self):
+        # The distributed wire: each "rank" viewer serializes a partial via
+        # aggregate_partial(); the coordinator merges them with
+        # merge_partials_to_table(). Occupancy must survive that serialization
+        # and OR-merge to the union - if the partial dropped the masks, busy
+        # would come back 0.
+        pa = pytest.importorskip("pyarrow")
+        f0 = [
+            '{"name":"a","cat":"c","pid":1,"tid":1,"ts":0,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}'
+        ]
+        f1 = [
+            '{"name":"a","cat":"c","pid":2,"tid":1,"ts":0,"dur":500000,'
+            '"ph":"X","args":{"hhash":"aa"}}'
+        ]
+        with Environment() as env:
+            p0, p1 = self._index_files(env, [f0, f1])
+
+            def partial(path):
+                v = (
+                    dftu_utils.TraceViewer([path], index_path=env.temp_dir)
+                    .filter('cat == "c"')
+                    .group_by("cat")
+                    .agg("busy", "concurrency", "sum:dur")
+                )
+                return v, v.aggregate_partial()
+
+            v0, b0 = partial(p0)
+            _, b1 = partial(p1)
+            t = pa.table(v0.merge_partials_to_table([b0, b1]))
+            assert t["sum_dur"][0].as_py() == 1_000_000
+            assert t["busy"][0].as_py() == 500_000  # union survived the wire
+            assert abs(t["concurrency"][0].as_py() - 2.0) < 1e-9
+
+
 class TestShardPartitionCompleteness:
     """Disjoint shard ranges must union to the full scan - no dropped or
     double-counted events. Regression guard for the multi-worker typed read

@@ -107,13 +107,27 @@ enum class AggOp {
     ArgMax,
     SumSq,
     Pct,
-    Skew,     ///< population skewness of `field`
-    Kurt,     ///< population excess kurtosis of `field`
-    Hist,     ///< raw histogram of `field` from a DDSketch
-              ///< (list<struct<lo,hi,count>>)
-    SetUnion  ///< distinct string values of `field`, emitted as a delimiter-
-              ///< joined text column (sorted)
+    Skew,      ///< population skewness of `field`
+    Kurt,      ///< population excess kurtosis of `field`
+    Hist,      ///< raw histogram of `field` from a DDSketch
+               ///< (list<struct<lo,hi,count>>)
+    SetUnion,  ///< distinct string values of `field`, emitted as a delimiter-
+               ///< joined text column (sorted)
+    Busy,      ///< occupancy: wall-clock us at least one event was active
+               ///< (interval union via the per-bucket coverage mask)
+    Concurrency,  ///< average parallelism: sum(dur) / busy
+    Utilization,  ///< busy / makespan (max_end - min_ts)
+    Active        ///< peak concurrent headcount: max over buckets of the number
+            ///< of events overlapping a bucket (resolution = bucket width)
 };
+
+/// True for the occupancy ops (busy/concurrency/utilization/active): time-
+/// interval reductions over [ts, ts+dur), computed in the scan, with no value
+/// field.
+inline bool is_occupancy_op(AggOp op) {
+    return op == AggOp::Busy || op == AggOp::Concurrency ||
+           op == AggOp::Utilization || op == AggOp::Active;
+}
 
 /// `field` is the field to reduce (ignored for `Count()`; for `ArgMax` it is
 /// the value returned, e.g. "name"). `by` is the numeric field maximized over

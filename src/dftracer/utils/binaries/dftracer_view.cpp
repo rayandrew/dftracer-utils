@@ -422,6 +422,14 @@ static bool parse_agg(const std::string& spec, std::vector<AggSpec>& out) {
             out.push_back({AggOp::Skew, field, ""});
         else if (op == "kurt")
             out.push_back({AggOp::Kurt, field, ""});
+        else if (op == "busy")
+            out.push_back({AggOp::Busy, "dur", ""});
+        else if (op == "concurrency")
+            out.push_back({AggOp::Concurrency, "dur", ""});
+        else if (op == "utilization")
+            out.push_back({AggOp::Utilization, "dur", ""});
+        else if (op == "active")
+            out.push_back({AggOp::Active, "dur", ""});
         else if (op == "pct") {
             // pct:FIELD:Q  (explicit quantile, 0 < Q < 1; e.g. pct:dur:0.99)
             auto c2 = field.find(':');

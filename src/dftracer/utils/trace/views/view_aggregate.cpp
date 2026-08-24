@@ -122,6 +122,7 @@ AggSchema make_agg_schema(const ViewPlan& plan) {
                 s.spec_set[i] = static_cast<int>(s.set_count++);
             continue;
         }
+        if (is_occupancy_op(spec.op)) s.want_occupancy = true;
         // Count() reduces over rows (group count), not a field; every other op
         // (including Count(field)) reads its field's stat.
         if (spec.field.empty()) continue;
@@ -140,6 +141,19 @@ AggSchema make_agg_schema(const ViewPlan& plan) {
         const int fi = s.spec_field[i];
         if (fi >= 0 && s.field_sketch[fi] < 0)
             s.field_sketch[fi] = static_cast<int>(s.sketch_count++);
+    }
+    // Occupancy bucket width: the query's time_bucket if set (finer buckets),
+    // else the whole requested window as one bucket, else a 1s fallback. A
+    // narrower bucket resolves intra-bucket overlap better.
+    if (s.want_occupancy) {
+        if (plan.time_bucket_us > 0)
+            s.occ_bucket_us = plan.time_bucket_us;
+        else if (plan.time_range &&
+                 plan.time_range->second > plan.time_range->first)
+            s.occ_bucket_us = static_cast<std::uint64_t>(
+                plan.time_range->second - plan.time_range->first);
+        else
+            s.occ_bucket_us = 1000000;
     }
     return s;
 }
@@ -160,6 +174,33 @@ int schema_field_index(const AggSchema& s, const std::string& field) {
     for (std::size_t i = 0; i < s.fields.size(); ++i)
         if (s.fields[i] == field) return static_cast<int>(i);
     return -1;
+}
+
+// Occupancy summary from the per-bucket masks: busy (sum over buckets of
+// popcount * bucket/64, i.e. the interval union to bucket/64 resolution),
+// active (peak concurrency = max over buckets of the overlap headcount), total
+// (sum of raw dur, for concurrency) and span (max_end - min_start, for
+// utilization). Empty when the group had no timed events.
+struct OccSummary {
+    std::uint64_t busy = 0;
+    std::uint64_t active = 0;
+    std::uint64_t total = 0;
+    std::uint64_t span = 0;
+};
+
+static OccSummary occupancy_summary(const AggAccum& a) {
+    OccSummary o;
+    if (a.occ_bucket_us == 0) return o;
+    std::uint64_t slots = 0;
+    for (const auto& [b, ob] : a.occ_buckets) {
+        (void)b;
+        slots += static_cast<std::uint64_t>(std::popcount(ob.mask));
+        if (ob.active > o.active) o.active = ob.active;
+    }
+    o.busy = slots * a.occ_bucket_us / 64;
+    o.total = a.occ_total;
+    o.span = a.occ_te > a.occ_ts ? a.occ_te - a.occ_ts : 0;
+    return o;
 }
 
 double finalize_value(const AggAccum& a, const ViewPlan& plan, std::size_t i) {
@@ -221,6 +262,22 @@ double finalize_value(const AggAccum& a, const ViewPlan& plan, std::size_t i) {
             return 0.0;  // emitted as a list<struct> column via finalize_hist
         case AggOp::SetUnion:
             return 0.0;  // emitted as a joined text column
+        case AggOp::Busy:
+            return static_cast<double>(occupancy_summary(a).busy);
+        case AggOp::Concurrency: {
+            const OccSummary o = occupancy_summary(a);
+            return o.busy ? static_cast<double>(o.total) /
+                                static_cast<double>(o.busy)
+                          : 0.0;
+        }
+        case AggOp::Utilization: {
+            const OccSummary o = occupancy_summary(a);
+            return (o.busy && o.span) ? static_cast<double>(o.busy) /
+                                            static_cast<double>(o.span)
+                                      : 0.0;
+        }
+        case AggOp::Active:
+            return static_cast<double>(occupancy_summary(a).active);
     }
     return 0.0;
 }
@@ -333,6 +390,17 @@ void merge_accum(AggAccum& da, const AggAccum& sa, const ViewPlan& plan) {
     for (std::size_t i = 0; i < da.sets.size() && i < sa.sets.size(); ++i)
         da.sets[i].insert(sa.sets[i].begin(), sa.sets[i].end());
     for (const auto& [name, sm] : sa.dyn) da.dyn[name].merge(sm);
+    if (sa.occ_bucket_us) {
+        da.occ_bucket_us = sa.occ_bucket_us;
+        da.occ_total += sa.occ_total;
+        if (sa.occ_ts < da.occ_ts) da.occ_ts = sa.occ_ts;
+        if (sa.occ_te > da.occ_te) da.occ_te = sa.occ_te;
+        for (const auto& [b, ob] : sa.occ_buckets) {
+            auto& d = da.occ_buckets[b];
+            d.mask |= ob.mask;
+            d.active += ob.active;
+        }
+    }
 }
 
 void merge_maps(GroupMap& dst, const GroupMap& src, const ViewPlan& plan) {
@@ -499,6 +567,14 @@ std::string agg_col_name(const AggSpec& spec) {
             return "argmax_" + spec.field;
         case AggOp::SetUnion:
             return "set_" + spec.field;
+        case AggOp::Busy:
+            return "busy";
+        case AggOp::Concurrency:
+            return "concurrency";
+        case AggOp::Utilization:
+            return "utilization";
+        case AggOp::Active:
+            return "active";
     }
     return {};
 }

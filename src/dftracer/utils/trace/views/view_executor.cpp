@@ -626,8 +626,10 @@ static coro::CoroTask<GroupMap> run_scan_aggregate(const ViewPlan& plan) {
 
     // Answer covered chunks from a materialized aggregate (per-chunk stats,
     // summary, ...); scan only what it leaves behind. The source emits AggAccum
-    // partials, merged exactly like scanned groups.
-    if (plan.agg_source) {
+    // partials, merged exactly like scanned groups. Skipped for occupancy:
+    // those partials carry no per-event intervals, so the union must see every
+    // event.
+    if (plan.agg_source && !plan.schema->want_occupancy) {
         auto [field, single_field] = source_agg_field(plan);
         // Materialized chunk aggregates cover ALL events in a chunk, so they
         // are only valid when the query constrains nothing but ts (the window,
@@ -732,6 +734,21 @@ static coro::CoroTask<GroupMap> run_scan_aggregate(const ViewPlan& plan) {
 
 coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan) {
     ensure_schema(plan);
+
+    // Occupancy is an exact interval union computed in the scan, so it works
+    // for any window/filter/group_by and stays accurate for tiny events a
+    // coarse tier mask would overcount. Go straight to the scan: the
+    // rollup/bootstrap/ tier fast paths carry no per-event intervals. Disable
+    // spill - the intervals live in the accumulator, and the spill format does
+    // not serialize them.
+    const bool has_occupancy =
+        std::any_of(plan.agg.begin(), plan.agg.end(),
+                    [](const AggSpec& s) { return is_occupancy_op(s.op); });
+    if (has_occupancy) {
+        ViewPlan p = plan;
+        p.memory_budget = 0;
+        co_return co_await run_scan_aggregate(p);
+    }
 
     {
         GroupMap served;
@@ -1108,7 +1125,13 @@ coro::CoroTask<std::string> run_aggregate_partial(const ViewPlan& plan) {
     // no trace read. Restricted to plain event aggregations: the tier is
     // EVENT-only, so counter and dynamic-numeric-args plans still scan (their
     // values are not in the tier).
-    if (plan.phase != Phase::Counters && !plan.auto_numeric_metrics) {
+    // Occupancy is computed in the scan fold (the tier carries no per-event
+    // intervals), so it cannot take the tier fast path.
+    const bool has_occupancy =
+        std::any_of(plan.agg.begin(), plan.agg.end(),
+                    [](const AggSpec& s) { return is_occupancy_op(s.op); });
+    if (plan.phase != Phase::Counters && !plan.auto_numeric_metrics &&
+        !has_occupancy) {
         GroupMap tier;
         if (agg_tier_collect(plan, tier)) {
             std::string out;
