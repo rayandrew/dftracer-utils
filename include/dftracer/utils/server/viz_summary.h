@@ -17,10 +17,17 @@ namespace dftracer::utils::server {
 /// still fit inside one output pixel. Zooms below the finest level, and
 /// filtered queries, scan live.
 struct VizSummary {
-    /// Level-0 (counter grid) budget: ~60 MB at 20 bytes/cell. Also caps lanes.
+    /// Level-0 (counter grid) budget: ~60 MB at 20 bytes/cell. Sizes the coarse
+    /// time resolution (buckets per lane).
     static constexpr std::size_t MAX_CELLS = 3'000'000;
     static constexpr std::size_t MIN_BUCKETS_PER_LANE = 4'096;
     static constexpr std::size_t MAX_BUCKETS_PER_LANE = 65'536;
+
+    /// Backstop only: memory is bounded by coarsening the time axis, not by
+    /// dropping lanes, so this must stay well above any real process/thread
+    /// count. Too low and whole hosts vanish from the overview; it bites only a
+    /// pathological trace with a unique pid/tid per event.
+    static constexpr std::size_t MAX_LANES = 16'384;
 
     /// Levels below level 0, each 4x finer. The build coarsens the pyramid
     /// rather than exceed MAX_FINE_CELLS.
