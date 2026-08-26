@@ -3,15 +3,50 @@
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
+#include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <doctest/doctest.h>
 
 #include <array>
+#include <atomic>
 #include <map>
 
 #include "test_view_common.h"
 
 namespace {
+
+// A minimal external Fold for the fold-factory seam: counts events over the
+// shared scan, publishing the total in finalize.
+struct CountFold : dftracer::utils::trace::views::detail::Fold {
+    std::shared_ptr<std::atomic<std::uint64_t>> total;
+    std::uint64_t local = 0;
+    explicit CountFold(std::shared_ptr<std::atomic<std::uint64_t>> t)
+        : total(std::move(t)) {}
+    bool accepts(const dftracer::utils::trace::views::detail::ScanShape&)
+        const override {
+        return true;
+    }
+    std::unique_ptr<dftracer::utils::trace::views::detail::Fold> slice()
+        const override {
+        return std::make_unique<CountFold>(total);
+    }
+    void step(
+        const dftracer::utils::trace::views::detail::FoldBatch& b) override {
+        local += b.events.size();
+    }
+    void seal_unit(
+        const dftracer::utils::trace::views::detail::ScanUnit&) override {}
+    void drop_unit(
+        const dftracer::utils::trace::views::detail::ScanUnit&) override {}
+    void merge(dftracer::utils::trace::views::detail::Fold& o) override {
+        local += static_cast<CountFold&>(o).local;
+    }
+    dftracer::utils::coro::CoroTask<bool> finalize(
+        const dftracer::utils::trace::views::detail::CoverageSet&) override {
+        total->fetch_add(local);
+        co_return true;
+    }
+};
 
 struct HistBin {
     double lower;
@@ -73,6 +108,62 @@ TEST_SUITE("View") {
         REQUIRE(tk_view.num_rows() == 1);
         CHECK(bnum(tk_view, 0, "n") == bnum(tk_vec, 0, "n"));
         CHECK(bstr(tk_view, 0, "cat") == "posix");
+    }
+
+    TEST_CASE(
+        "View - session collect(View) applies each branch's full plan over one "
+        "scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_mixed_trace(env, 30, 20);  // posix=30, stdio=20
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+
+        auto run = base.session();
+        auto a = run.collect(base.group_by({GroupKey::cat()})
+                                 .agg({{AggOp::Count, "", "n"}})
+                                 .sort_by("n", true));
+        auto b = run.collect(
+            base.filter(Query::from_string(R"(cat == "POSIX")").value())
+                .group_by({GroupKey::cat()})
+                .agg({{AggOp::Count, "", "n"}}));
+        run.execute().get();
+
+        REQUIRE(a->num_rows() == 2);
+        CHECK(bstr(*a, 0, "cat") == "posix");  // count desc: 30 before 20
+        CHECK(bnum(*a, 0, "n") == 30);
+        CHECK(bnum(*a, 1, "n") == 20);
+
+        REQUIRE(b->num_rows() == 1);  // per-branch filter is independent
+        CHECK(bstr(*b, 0, "cat") == "posix");
+        CHECK(bnum(*b, 0, "n") == 30);
+    }
+
+    TEST_CASE(
+        "View - session fold factory rides the shared scan with a collect") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_mixed_trace(env, 30, 20);  // 50 events
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+
+        auto run = base.session();
+        auto cat = run.collect(
+            base.group_by({GroupKey::cat()}).agg({{AggOp::Count, "", "n"}}));
+        auto total = std::make_shared<std::atomic<std::uint64_t>>(0);
+        run.attach_fold_factory(
+            [total](dftracer::utils::StringIntern&)
+                -> std::unique_ptr<
+                    dftracer::utils::trace::views::detail::Fold> {
+                return std::make_unique<CountFold>(total);
+            },
+            []() {});
+        run.execute().get();
+
+        // The factory fold counted every event over the same scan the collect
+        // aggregated (posix 30 + stdio 20).
+        CHECK(total->load() == 50);
+        REQUIRE(cat->num_rows() == 2);
     }
 
     TEST_CASE("View - agg accepts unified F field expressions") {

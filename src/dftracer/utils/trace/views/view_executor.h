@@ -6,6 +6,8 @@
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_plan.h>
 
+#include <functional>
+#include <memory>
 #include <span>
 
 namespace dftracer::utils {
@@ -96,13 +98,23 @@ coro::CoroTask<ExportStats> run_scan_batches(
 // The fused-session engine behind ViewSession; internal to the executor.
 struct ViewSessionState;
 
-// A cache-hittable aggregation branch: its group_by/agg complete the partition
-// base plan into a full plan whose rollup run_session tries to reconstruct
-// before scanning. A hit fills `out` and the branch skips the scan.
+// A cache-hittable aggregation branch: its group_by/agg complete the base plan
+// into a full plan whose rollup run_session tries to reconstruct before
+// scanning. A hit fills `out` and the branch skips the scan.
 struct AggBranch {
     std::vector<GroupKey> group_by;
     std::vector<AggSpec> agg;
     std::shared_ptr<dataframe::DataFrame> out;
+    // The branch's full plan (collect(const View&)): used directly instead of
+    // overlaying group_by/agg on the base. apply_query filters per event on the
+    // shared scan, which also keeps the branch off the no-scan rollup/tier
+    // path.
+    std::shared_ptr<const ViewPlan> plan;
+    bool apply_query = false;
+    // When set, this branch emits the serialized (raw-keyed, unresolved)
+    // aggregate partial into `partial_out` for a distributed merge, instead of
+    // a DataFrame into `out`. Forces the scan (raw partial, no rollup relabel).
+    std::shared_ptr<std::string> partial_out;
 };
 
 // One branch of a fused session: a predicate selecting events, a per-event
@@ -123,6 +135,13 @@ void add_fold_branch(
         consume,
     std::function<void()> finalize);
 
+// Match-all fold branch (no per-branch predicate): consume every scanned event.
+void add_fold_branch(
+    ViewSessionState& state,
+    std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
+        consume,
+    std::function<void()> finalize);
+
 // Attach a match-all branch that aggregates (group_by + agg) and, on finalize,
 // persists the result as a rollup under the session's base plan overlaid with
 // this branch's group_by/agg. Build-only (no Batch), so one scan materializes
@@ -133,6 +152,14 @@ void add_materialize_branch(ViewSessionState& state,
 std::shared_ptr<ViewSessionState> make_view_session_state(
     std::shared_ptr<const ViewPlan> plan, std::size_t num_slots);
 void add_branch(ViewSessionState& state, BranchHooks hooks);
+
+// Attach an externally-built Fold to the session's shared scan: `make`
+// constructs it with the scan's intern, `finalize` runs after the merge. The
+// seam behind a plugin/JIT branch; the plugins layer supplies `make`.
+void add_fold_factory(
+    ViewSessionState& state,
+    std::function<std::unique_ptr<Fold>(dftracer::utils::StringIntern&)> make,
+    std::function<void()> finalize);
 coro::CoroTask<ExportStats> run_session(
     std::shared_ptr<ViewSessionState> state);
 

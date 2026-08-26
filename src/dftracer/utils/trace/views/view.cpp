@@ -1,13 +1,18 @@
 #include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/platform_compat.h>
+#include <dftracer/utils/core/common/string_arena.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
+#include <dftracer/utils/json/parser.h>
 #include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/time_metric.h>
 #include <dftracer/utils/trace/views/mv_store.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/trace/views/view_executor.h>
 #include <dftracer/utils/trace/views/view_plan.h>
+#include <dftracer/utils/utilities/common/arrow/column_builder.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
+#include <dftracer/utils/utilities/reader/internal/arrow_row_builder.h>
 
 #include <algorithm>
 #include <functional>
@@ -353,21 +358,7 @@ coro::CoroTask<ExportStats> View::export_trace(TraceWriteOptions opts) const {
 
 coro::CoroTask<dataframe::DataFrame> View::collect() const {
     detail::GroupMap m = co_await detail::run_collect(*plan_);
-    dataframe::DataFrame b = detail::to_batch(m, *plan_);
-    if (!plan_->sort_col.empty())
-        b = dataframe::sort_by(b, plan_->sort_col, plan_->sort_desc);
-    if (!plan_->topk_col.empty())
-        b = dataframe::topk(b, plan_->topk_col, plan_->topk_k,
-                            plan_->topk_largest);
-    if (plan_->offset || plan_->limit) {
-        const std::int64_t off = static_cast<std::int64_t>(plan_->offset);
-        const std::int64_t len = plan_->limit
-                                     ? static_cast<std::int64_t>(plan_->limit)
-                                     : b.num_rows();
-        b = dataframe::slice(b, off, len);
-    }
-    detail::project_columns(b, plan_->select);
-    co_return b;
+    co_return detail::finalize_collect_batch(m, *plan_);
 }
 
 coro::CoroTask<ExportStats> View::run_folds(
@@ -443,6 +434,13 @@ void ViewSession::attach_fold(
                             std::move(finalize));
 }
 
+void ViewSession::attach_fold_factory(
+    std::function<std::unique_ptr<detail::Fold>(dftracer::utils::StringIntern&)>
+        make,
+    std::function<void()> finalize) {
+    detail::add_fold_factory(*state_, std::move(make), std::move(finalize));
+}
+
 Deferred<dataframe::DataFrame> ViewSession::collect(
     Query predicate, std::vector<GroupKey> group_by, std::vector<AggSpec> agg) {
     auto out = std::make_shared<dataframe::DataFrame>();
@@ -460,9 +458,34 @@ Deferred<dataframe::DataFrame> ViewSession::collect(
         detail::make_collect_branch(group_by, agg, out, num_slots_);
     // predicate left unset: match all scanned events. The descriptor lets
     // execute() serve this branch from a rollup instead of scanning.
-    h.agg = detail::AggBranch{std::move(group_by), std::move(agg), out};
+    h.agg = detail::AggBranch{
+        std::move(group_by), std::move(agg), out, nullptr, false, nullptr};
     detail::add_branch(*state_, std::move(h));
     return {out, executed_};
+}
+
+Deferred<dataframe::DataFrame> ViewSession::collect(const View& branch) {
+    auto out = std::make_shared<dataframe::DataFrame>();
+    const auto& bp = *branch.plan_;
+    detail::BranchHooks h =
+        detail::make_collect_branch(bp.group_by, bp.agg, out, num_slots_);
+    h.agg = detail::AggBranch{bp.group_by,          bp.agg, out, branch.plan_,
+                              bp.query.has_value(), nullptr};
+    detail::add_branch(*state_, std::move(h));
+    return {out, executed_};
+}
+
+Deferred<std::string> ViewSession::aggregate_partial(const View& branch) {
+    auto out =
+        std::make_shared<dataframe::DataFrame>();  // unused; partial path
+    auto partial = std::make_shared<std::string>();
+    const auto& bp = *branch.plan_;
+    detail::BranchHooks h =
+        detail::make_collect_branch(bp.group_by, bp.agg, out, num_slots_);
+    h.agg = detail::AggBranch{bp.group_by,          bp.agg, out, branch.plan_,
+                              bp.query.has_value(), partial};
+    detail::add_branch(*state_, std::move(h));
+    return {partial, executed_};
 }
 
 void ViewSession::materialize(std::vector<GroupKey> group_by,
@@ -478,6 +501,72 @@ Deferred<ExportStats> ViewSession::export_json(Query predicate,
     h.predicate = std::move(predicate);
     detail::add_branch(*state_, std::move(h));
     return {out, executed_};
+}
+
+Deferred<ExportStats> ViewSession::export_json(ExportSink& sink) {
+    auto out = std::make_shared<ExportStats>();
+    detail::BranchHooks h = detail::make_export_branch(sink, out);
+    // predicate left unset: stream every scanned event.
+    detail::add_branch(*state_, std::move(h));
+    return {out, executed_};
+}
+
+Deferred<dataframe::DataFrame> ViewSession::collect_events(const View& branch) {
+#ifndef DFTRACER_UTILS_ENABLE_ARROW
+    (void)branch;
+    throw DFTUtilsException(ErrorCode::INVALID_ARGUMENT,
+                            "collect_events requires the arrow-enabled build");
+#else
+    namespace rd = utilities::reader::internal;
+    namespace arw = utilities::common::arrow;
+    const auto& bp = *branch.plan_;
+    auto out = std::make_shared<dataframe::DataFrame>();
+    const std::size_t slots = num_slots_ ? num_slots_ : 1;
+    // One Arrow row builder per worker slot (indexed, never moved). The JSON
+    // row builder is the only JSON -> columns path, so events cross Arrow once
+    // here and from_arrow converts into our native columns.
+    auto builders =
+        std::make_shared<std::vector<arw::RecordBatchBuilder> >(slots);
+    auto parsers = std::make_shared<std::vector<json::JsonParser> >(slots);
+    auto arenas = std::make_shared<std::vector<StringArena> >(slots);
+    auto tscales = std::make_shared<std::vector<trace::TimeScaleState> >(slots);
+    auto keep = std::make_shared<std::vector<std::string> >(bp.select);
+    rd::RowBuildOptions ropts;
+    if (!keep->empty()) ropts.keep = keep.get();
+    ropts.time_scale = bp.time_scale;
+
+    auto consume = [builders, parsers, arenas, tscales, keep, ropts, slots](
+                       std::size_t slot, const json::JsonValue&,
+                       std::string_view raw) {
+        if (slot >= slots) return;
+        rd::process_json_line((*builders)[slot], (*parsers)[slot],
+                              (*arenas)[slot], raw, /*normalize=*/false,
+                              (*tscales)[slot], ropts);
+    };
+    auto finalize = [builders, slots, out]() {
+        std::vector<dataframe::DataFrame> frames;
+        frames.reserve(slots);
+        for (std::size_t s = 0; s < slots; ++s) {
+            if ((*builders)[s].num_rows() == 0) continue;
+            auto res = (*builders)[s].finish();
+            frames.push_back(dataframe::DataFrame::from_arrow(res.get_schema(),
+                                                              res.get_array()));
+        }
+        if (frames.empty()) return;  // out stays an empty frame
+        std::vector<const dataframe::DataFrame*> parts;
+        parts.reserve(frames.size());
+        for (const auto& f : frames) parts.push_back(&f);
+        *out = dataframe::concat(parts);
+    };
+
+    if (bp.query)
+        detail::add_fold_branch(*state_, *bp.query, std::move(consume),
+                                std::move(finalize));
+    else
+        detail::add_fold_branch(*state_, std::move(consume),
+                                std::move(finalize));
+    return {out, executed_};
+#endif
 }
 
 coro::CoroTask<ExportStats> ViewSession::execute() {

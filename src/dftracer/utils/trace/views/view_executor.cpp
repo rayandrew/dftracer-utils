@@ -849,10 +849,20 @@ coro::CoroTask<ExportStats> run_scan_batches(
     co_return stats;
 }
 
+// An externally-built Fold joined to the shared scan (the plugin/JIT seam):
+// `make` builds it with the scan's intern so ids agree and per-worker slices
+// merge; `finalize` runs after the merge. The plugins layer supplies `make`, so
+// the views layer never names PluginFold.
+struct FoldFactory {
+    std::function<std::unique_ptr<Fold>(dftracer::utils::StringIntern&)> make;
+    std::function<void()> finalize;
+};
+
 struct ViewSessionState {
     std::shared_ptr<const ViewPlan> plan;
     std::size_t num_slots = 1;
     std::vector<BranchHooks> branches;
+    std::vector<FoldFactory> fold_factories;
 };
 
 std::shared_ptr<ViewSessionState> make_view_session_state(
@@ -867,6 +877,13 @@ void add_branch(ViewSessionState& state, BranchHooks hooks) {
     state.branches.push_back(std::move(hooks));
 }
 
+void add_fold_factory(
+    ViewSessionState& state,
+    std::function<std::unique_ptr<Fold>(dftracer::utils::StringIntern&)> make,
+    std::function<void()> finalize) {
+    state.fold_factories.push_back({std::move(make), std::move(finalize)});
+}
+
 void add_fold_branch(
     ViewSessionState& state, Query predicate,
     std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
@@ -874,6 +891,17 @@ void add_fold_branch(
     std::function<void()> finalize) {
     BranchHooks h;
     h.predicate = std::move(predicate);
+    h.consume = std::move(consume);
+    h.finalize = std::move(finalize);
+    add_branch(state, std::move(h));
+}
+
+void add_fold_branch(
+    ViewSessionState& state,
+    std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
+        consume,
+    std::function<void()> finalize) {
+    BranchHooks h;  // predicate unset = match all scanned events
     h.consume = std::move(consume);
     h.finalize = std::move(finalize);
     add_branch(state, std::move(h));
@@ -1030,38 +1058,52 @@ coro::CoroTask<ExportStats> run_session(
     struct ScanBranch {
         const BranchHooks* br;
         std::shared_ptr<ViewPlan> agg_plan;  // set only for a match-all agg
+        bool apply_query = false;            // branch AggFold filters per event
     };
     std::vector<ScanBranch> scan_branches;
     scan_branches.reserve(state->branches.size());
     for (const auto& br : state->branches) {
         if (br.agg && !br.predicate) {
-            auto full = std::make_shared<ViewPlan>(plan);
-            full->group_by = br.agg->group_by;
-            full->agg = br.agg->agg;
+            auto full = br.agg->plan ? std::make_shared<ViewPlan>(*br.agg->plan)
+                                     : std::make_shared<ViewPlan>(plan);
+            if (!br.agg->plan) {
+                full->group_by = br.agg->group_by;
+                full->agg = br.agg->agg;
+            }
             full->schema.reset();
             full->resolver.reset();
             ensure_schema(*full);
-            GroupMap served;
-            if (co_await try_serve_aggregate_no_scan(*full, served)) {
-                *br.agg->out = to_batch(served, *full);
-                continue;
+            // A per-branch predicate is not servable from a match-all rollup or
+            // the tier; a partial wants the raw (unresolved) map. Both scan.
+            if (!br.agg->apply_query && !br.agg->partial_out) {
+                GroupMap served;
+                if (co_await try_serve_aggregate_no_scan(*full, served)) {
+                    *br.agg->out = finalize_collect_batch(served, *full);
+                    continue;
+                }
             }
-            scan_branches.push_back({&br, std::move(full)});
+            scan_branches.push_back(
+                {&br, std::move(full), br.agg->apply_query});
             continue;
         }
-        scan_branches.push_back({&br, nullptr});
+        scan_branches.push_back({&br, nullptr, false});
     }
-    if (scan_branches.empty()) co_return ExportStats{};
+    const bool has_factories = !state->fold_factories.empty();
+    if (scan_branches.empty() && !has_factories) co_return ExportStats{};
 
     std::vector<const ScanBranch*> agg_b, raw_b;
     for (const auto& sb : scan_branches)
         (sb.agg_plan ? agg_b : raw_b).push_back(&sb);
 
     // A lone aggregation with no raw branches: the full single-scan engine
-    // (agg_source coverage + rollup persist).
-    if (agg_b.size() == 1 && raw_b.empty()) {
+    // (agg_source coverage + rollup persist). A fold factory (plugin) must ride
+    // the shared fused scan, and a partial wants the raw map, so both
+    // disqualify this fast path.
+    if (agg_b.size() == 1 && raw_b.empty() && !has_factories &&
+        !agg_b[0]->br->agg->partial_out) {
         GroupMap m = co_await run_scan_aggregate(*agg_b[0]->agg_plan);
-        *agg_b[0]->br->agg->out = to_batch(m, *agg_b[0]->agg_plan);
+        *agg_b[0]->br->agg->out =
+            finalize_collect_batch(m, *agg_b[0]->agg_plan);
         co_return ExportStats{};
     }
 
@@ -1070,12 +1112,30 @@ coro::CoroTask<ExportStats> run_session(
     ViewPlan scan_plan = plan;
     if (auto mv = find_subsuming_view(plan)) scan_plan.files = std::move(*mv);
     ViewDefinition avdef = make_vdef(scan_plan, /*for_aggregation=*/true);
+    // The shared scan's vdef comes from the base plan, but a branch's own plan
+    // may need more than the base: a Rank group key harvests the PR metadata
+    // during the scan, so if any branch wants it the fused scan must keep
+    // metadata (make_vdef dropped it for the base). This is the metadata half
+    // of the per-branch scan-requirement union.
+    const bool any_wants_rank =
+        std::any_of(agg_b.begin(), agg_b.end(), [](const ScanBranch* sb) {
+            return std::any_of(sb->agg_plan->group_by.begin(),
+                               sb->agg_plan->group_by.end(),
+                               [](const GroupKey& g) {
+                                   return g.kind == GroupKey::Kind::Rank;
+                               });
+        });
+    if (any_wants_rank) {
+        avdef.include_metadata = true;
+        avdef.emit_all_metadata = true;
+    }
     dftracer::utils::StringIntern intern;
 
     std::vector<std::unique_ptr<AggFold>> aggs;
     aggs.reserve(agg_b.size());
     for (const auto* sb : agg_b)
-        aggs.push_back(std::make_unique<AggFold>(*sb->agg_plan, intern));
+        aggs.push_back(
+            std::make_unique<AggFold>(*sb->agg_plan, intern, sb->apply_query));
 
     std::unique_ptr<BranchDriverFold> raw_fold;
     if (!raw_b.empty()) {
@@ -1085,23 +1145,51 @@ coro::CoroTask<ExportStats> run_session(
         raw_fold = std::make_unique<BranchDriverFold>(std::move(branches));
     }
 
+    // Externally-built folds (plugins), constructed with the shared intern so
+    // their ids agree with the rest and per-worker slices merge. A plugin needs
+    // metadata (its own hash lookups), so keep it on the shared scan.
+    std::vector<std::unique_ptr<Fold>> factory_folds;
+    factory_folds.reserve(state->fold_factories.size());
+    for (auto& ff : state->fold_factories)
+        if (auto f = ff.make(intern)) factory_folds.push_back(std::move(f));
+    if (has_factories) {
+        avdef.include_metadata = true;
+        avdef.emit_all_metadata = true;
+    }
+
     std::vector<Fold*> fold_ptrs;
-    fold_ptrs.reserve(aggs.size() + 1);
+    fold_ptrs.reserve(aggs.size() + factory_folds.size() + 1);
     for (auto& a : aggs) fold_ptrs.push_back(a.get());
     if (raw_fold) fold_ptrs.push_back(raw_fold.get());
+    for (auto& f : factory_folds) fold_ptrs.push_back(f.get());
 
     // A scan cap (viz-style early-out) applies only to a pure raw session; an
-    // aggregation must see every event, and its limit is post-aggregation.
-    const std::uint64_t scan_cap = agg_b.empty() ? plan.limit : 0;
+    // aggregation or plugin must see every event, and its limit is
+    // post-aggregation.
+    const std::uint64_t scan_cap =
+        (agg_b.empty() && !has_factories) ? plan.limit : 0;
     ExportStats stats =
         co_await fuse(scan_plan, avdef, fold_ptrs, intern, nullptr, scan_cap);
 
     for (std::size_t i = 0; i < agg_b.size(); ++i) {
         GroupMap m = aggs[i]->finish_map();
+        // A partial serializes the raw (unresolved) map for a distributed
+        // merge; a collect resolves group keys and materializes the DataFrame.
+        if (agg_b[i]->br->agg->partial_out) {
+            std::string out;
+            for (const auto& [k, a] : m) serialize_accum(out, k, a);
+            *agg_b[i]->br->agg->partial_out = std::move(out);
+            continue;
+        }
         apply_ranks(*agg_b[i]->agg_plan, aggs[i]->ranks());
         resolve_group_keys(m, *agg_b[i]->agg_plan);
-        *agg_b[i]->br->agg->out = to_batch(m, *agg_b[i]->agg_plan);
+        *agg_b[i]->br->agg->out =
+            finalize_collect_batch(m, *agg_b[i]->agg_plan);
     }
+    // Factory folds published their results in Fold::finalize during the fuse;
+    // let the caller pull them (while the folds are still alive here).
+    for (auto& ff : state->fold_factories)
+        if (ff.finalize) ff.finalize();
     co_return stats;
 }
 

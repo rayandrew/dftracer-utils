@@ -286,6 +286,8 @@ class Deferred {
     std::shared_ptr<const bool> executed_;
 };
 
+class View;  // defined below; ViewSession::collect(const View&) references it
+
 /// A batch of read ops over one shared scan of a base View. Register ops
 /// (collect/materialize/fold/export_json) - each returns a Deferred handle -
 /// then execute() runs them together, serving a materialized aggregate from its
@@ -305,6 +307,17 @@ class ViewSession {
     Deferred<dftracer::utils::dataframe::DataFrame> collect(
         std::vector<GroupKey> group_by, std::vector<AggSpec> agg);
 
+    /// Register an aggregation view as a branch, carrying its full plan
+    /// (group_by/agg + time_bucket/occ_cell/select/sort_by/topk/limit/offset
+    /// and its own filter). `branch` must be built off this session's base
+    /// view.
+    Deferred<dftracer::utils::dataframe::DataFrame> collect(const View& branch);
+
+    /// Aggregate `branch` into a serialized partial (opaque bytes) for a
+    /// distributed merge, over the shared scan. Like collect(const View&), but
+    /// the raw-keyed partial replaces the DataFrame (merge and resolve later).
+    Deferred<std::string> aggregate_partial(const View& branch);
+
     /// Persist the (group_by + agg) aggregation over ALL scanned events as a
     /// rollup, sharing the one scan. Build-only (no handle); a later matching
     /// collect() reads it back.
@@ -312,6 +325,17 @@ class ViewSession {
 
     /// Stream the branch's matching events verbatim to `sink`.
     Deferred<ExportStats> export_json(Query predicate, ExportSink& sink);
+
+    /// Stream every scanned event to `sink` (no per-branch predicate), so an
+    /// export shares the scan with the session's aggregations.
+    Deferred<ExportStats> export_json(ExportSink& sink);
+
+    /// Materialize the branch's matching events (its filter/select) into a
+    /// DataFrame over the shared scan. `branch` is built off this session's
+    /// base view; `select` restricts the columns. The whole matching set is
+    /// held in the result, so filter to bound it.
+    Deferred<dftracer::utils::dataframe::DataFrame> collect_events(
+        const View& branch);
 
     /// Fold the branch's matching events into a caller partial `P`, reduced
     /// across slots by `combine`. The fold gets the parsed event (no re-parse)
@@ -347,6 +371,17 @@ class ViewSession {
         std::function<P(P&&, P&&)> combine) {
         return fold<P>(predicate.to_query(), std::move(f), std::move(combine));
     }
+
+    /// Attach an externally-built Fold to the shared scan: `make` constructs it
+    /// with the scan's StringIntern (so ids agree and per-worker slices merge),
+    /// `finalize` runs after the scan while the fold is still alive. The seam
+    /// behind a plugin/JIT branch; the plugins layer supplies the factory, so
+    /// this header never names the concrete fold. Forces a scan (a plugin
+    /// cannot be served from a rollup).
+    void attach_fold_factory(std::function<std::unique_ptr<detail::Fold>(
+                                 dftracer::utils::StringIntern&)>
+                                 make,
+                             std::function<void()> finalize);
 
     /// Scan the base once and run every attached branch, resolving every
     /// Deferred handle returned above.
@@ -626,6 +661,9 @@ class View {
     std::shared_ptr<const detail::ViewPlan> plan_;
 
    private:
+    // ViewSession reads a branch view's plan_ to register it as a full-plan
+    // aggregation branch (ViewSession::collect(const View&)).
+    friend class ViewSession;
     explicit View(std::shared_ptr<const detail::ViewPlan> plan);
 };
 

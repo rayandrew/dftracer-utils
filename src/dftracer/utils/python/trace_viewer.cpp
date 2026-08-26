@@ -6,7 +6,9 @@
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>
+#include <dftracer/utils/plugins/host.h>
 #include <dftracer/utils/python/dataframe.h>
+#include <dftracer/utils/python/plugin_host.h>
 #include <dftracer/utils/python/py_dict_helpers.h>
 #include <dftracer/utils/python/py_errors.h>
 #include <dftracer/utils/python/py_list_helpers.h>
@@ -61,12 +63,14 @@ using dftracer::utils::query::Query;
 using dftracer::utils::trace::views::AggOp;
 using dftracer::utils::trace::views::AggregatedView;
 using dftracer::utils::trace::views::AggSpec;
+using dftracer::utils::trace::views::Deferred;
 using dftracer::utils::trace::views::ExportStats;
 using dftracer::utils::trace::views::GroupKey;
 using dftracer::utils::trace::views::Phase;
 using dftracer::utils::trace::views::TypedResult;
 using dftracer::utils::trace::views::View;
 using dftracer::utils::trace::views::ViewFile;
+using dftracer::utils::trace::views::ViewSession;
 using dftracer::utils::utilities::filesystem::FileEntry;
 using dftracer::utils::utilities::filesystem::PatternDirectoryScannerUtility;
 using dftracer::utils::utilities::filesystem::
@@ -765,6 +769,260 @@ PyObject* tv_collect(TraceViewerObject* self, PyObject*) {
         }))
         return nullptr;
     return dftracer::utils::python::wrap_dataframe(std::move(table));
+#endif
+}
+
+// A file-backed NDJSON sink for a session export branch. Lives for the whole
+// scan (owned in tv_session_run), closing its file on destruction.
+class SessionFileSink : public dftracer::utils::trace::views::ExportSink {
+   public:
+    explicit SessionFileSink(FILE* f) : f_(f) {}
+    ~SessionFileSink() override {
+        if (f_) std::fclose(f_);
+    }
+    void write(std::string_view data) override {
+        if (f_) std::fwrite(data.data(), 1, data.size(), f_);
+    }
+
+   private:
+    FILE* f_;
+};
+
+// One shared scan driving several ViewSession branches. `branches` is a list of
+// (kind:str, viewer:_TraceViewer, sink:str|None) tuples; each viewer carries
+// the branch's full plan (group_by/agg/time_bucket/filter/sort/...). kind is
+// "collect" (-> _DataFrame), "materialize" (-> None), or "export" (-> a stats
+// dict, writing NDJSON to `sink`). Results come back in the same order. The
+// base viewer's files/phase/time settings scope the shared scan.
+PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
+#ifndef DFTRACER_UTILS_ENABLE_ARROW
+    PyErr_SetString(PyExc_RuntimeError,
+                    "session() requires the arrow-enabled build");
+    return nullptr;
+#else
+    if (!PyList_Check(branches)) {
+        PyErr_SetString(PyExc_TypeError, "session branches must be a list");
+        return nullptr;
+    }
+    const Py_ssize_t nb = PyList_Size(branches);
+
+    enum class Kind { Collect, Materialize, Export, Events, Plugin, Partial };
+    struct BranchData {
+        Kind kind = Kind::Collect;
+        std::vector<std::string> files;
+        std::string index_dir;
+        ViewerPlan plan;  // the branch viewer's full plan
+        std::string sink;
+        // Plugin branch: the C++ host (attached to the session before execute)
+        // and the Python host object (its named results are read after).
+        dftracer::utils::plugins::PluginHost* host_cpp = nullptr;
+        PyObject* host_obj = nullptr;  // borrowed; the branches list holds it
+    };
+    std::vector<BranchData> bdata(nb);
+
+    // Snapshot each branch viewer's plan while the GIL is held.
+    for (Py_ssize_t i = 0; i < nb; ++i) {
+        PyObject* t = PyList_GetItem(branches, i);
+        if (!PyTuple_Check(t) || PyTuple_Size(t) != 3) {
+            PyErr_SetString(
+                PyExc_TypeError,
+                "each branch must be a 3-tuple (kind, viewer, sink)");
+            return nullptr;
+        }
+        const char* kind = as_utf8(PyTuple_GetItem(t, 0));
+        if (!kind) return nullptr;
+        PyObject* vobj = PyTuple_GetItem(t, 1);
+        PyObject* sk = PyTuple_GetItem(t, 2);
+
+        const std::string k(kind);
+        if (k == "collect")
+            bdata[i].kind = Kind::Collect;
+        else if (k == "materialize")
+            bdata[i].kind = Kind::Materialize;
+        else if (k == "export")
+            bdata[i].kind = Kind::Export;
+        else if (k == "events")
+            bdata[i].kind = Kind::Events;
+        else if (k == "partial")
+            bdata[i].kind = Kind::Partial;
+        else if (k == "plugin")
+            bdata[i].kind = Kind::Plugin;
+        else {
+            PyErr_Format(PyExc_ValueError, "unknown session branch kind: %s",
+                         kind);
+            return nullptr;
+        }
+
+        // A plugin branch carries a PluginHost (not a viewer); the rest carry a
+        // branch TraceViewer whose full plan drives the branch.
+        if (bdata[i].kind == Kind::Plugin) {
+            if (!PyObject_TypeCheck(vobj, &PluginHostType)) {
+                PyErr_SetString(PyExc_TypeError,
+                                "a plugin branch needs a PluginHost");
+                return nullptr;
+            }
+            bdata[i].host_obj = vobj;  // borrowed; branches list holds it
+            bdata[i].host_cpp =
+                static_cast<dftracer::utils::plugins::PluginHost*>(
+                    ((PluginHostObject*)vobj)->host_ptr);
+            continue;
+        }
+
+        if (!PyObject_TypeCheck(vobj, &TraceViewerType)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "session branch viewer must be a TraceViewer");
+            return nullptr;
+        }
+        auto* v = (TraceViewerObject*)vobj;
+        bdata[i].files = extract_files(v);
+        bdata[i].index_dir = extract_index_dir(v);
+        bdata[i].plan = *plan_of(v);
+        if (sk != Py_None) {
+            const char* s = as_utf8(sk);
+            if (!s) return nullptr;
+            bdata[i].sink = s;
+        }
+        if (bdata[i].kind == Kind::Export && bdata[i].sink.empty()) {
+            PyErr_SetString(PyExc_ValueError,
+                            "an export branch needs a sink path");
+            return nullptr;
+        }
+    }
+
+    Runtime* rt = resolve_runtime(self);
+    auto base_files = extract_files(self);
+    auto base_index = extract_index_dir(self);
+    ViewerPlan base_plan = *plan_of(self);
+
+    // AND-combine a branch's DSL filters into one export predicate ("" = all).
+    auto combine_filters = [](const std::vector<std::string>& fs) {
+        std::string out;
+        for (std::size_t i = 0; i < fs.size(); ++i) {
+            if (i) out += " and ";
+            out += "(" + fs[i] + ")";
+        }
+        return out;
+    };
+
+    std::vector<DataFrame> results(nb);
+    std::vector<ExportStats> export_stats(nb);
+    std::vector<std::string> partial_results(nb);
+    std::string err;
+    if (!run_blocking([&] {
+            View base = build_view_from_data(base_files, base_index, base_plan,
+                                             /*aggregate=*/false);
+            ViewSession sess = base.session();
+            std::vector<Deferred<DataFrame>> agg_handles(nb);
+            std::vector<Deferred<ExportStats>> exp_handles(nb);
+            std::vector<Deferred<std::string>> partial_handles(nb);
+            std::vector<std::unique_ptr<SessionFileSink>> sinks;
+            for (Py_ssize_t i = 0; i < nb; ++i) {
+                switch (bdata[i].kind) {
+                    case Kind::Collect: {
+                        View bview = build_view_from_data(
+                            bdata[i].files, bdata[i].index_dir, bdata[i].plan,
+                            /*aggregate=*/true);
+                        agg_handles[i] = sess.collect(bview);
+                        break;
+                    }
+                    case Kind::Events: {
+                        View bview = build_view_from_data(
+                            bdata[i].files, bdata[i].index_dir, bdata[i].plan,
+                            /*aggregate=*/true);
+                        agg_handles[i] = sess.collect_events(bview);
+                        break;
+                    }
+                    case Kind::Partial: {
+                        View bview = build_view_from_data(
+                            bdata[i].files, bdata[i].index_dir, bdata[i].plan,
+                            /*aggregate=*/true);
+                        partial_handles[i] = sess.aggregate_partial(bview);
+                        break;
+                    }
+                    case Kind::Materialize:
+                        sess.materialize(bdata[i].plan.group_by,
+                                         bdata[i].plan.agg);
+                        break;
+                    case Kind::Export: {
+                        std::optional<Query> q;
+                        const std::string f =
+                            combine_filters(bdata[i].plan.filters);
+                        if (!f.empty()) {
+                            auto parsed = Query::from_string(f);
+                            if (!parsed) {
+                                err = "invalid filter query: " + f;
+                                return;
+                            }
+                            q = std::move(parsed.value());
+                        }
+                        FILE* fp = std::fopen(bdata[i].sink.c_str(), "wb");
+                        if (!fp) {
+                            err = "cannot open export sink: " + bdata[i].sink;
+                            return;
+                        }
+                        sinks.push_back(std::make_unique<SessionFileSink>(fp));
+                        exp_handles[i] =
+                            q ? sess.export_json(std::move(*q), *sinks.back())
+                              : sess.export_json(*sinks.back());
+                        break;
+                    }
+                    case Kind::Plugin:
+                        // C++-only (no Python), safe with the GIL released; the
+                        // named results are read back after execute below.
+                        bdata[i].host_cpp->attach_to_session(sess);
+                        break;
+                }
+            }
+            rt->submit(sess.execute()).get();
+            for (Py_ssize_t i = 0; i < nb; ++i) {
+                if (bdata[i].kind == Kind::Collect ||
+                    bdata[i].kind == Kind::Events)
+                    results[i] = std::move(agg_handles[i].get());
+                else if (bdata[i].kind == Kind::Export)
+                    export_stats[i] = exp_handles[i].get();
+                else if (bdata[i].kind == Kind::Partial)
+                    partial_results[i] = std::move(partial_handles[i].get());
+            }
+        }))
+        return nullptr;
+    if (!err.empty()) {
+        PyErr_SetString(PyExc_ValueError, err.c_str());
+        return nullptr;
+    }
+
+    PyObject* out = PyList_New(nb);
+    if (!out) return nullptr;
+    for (Py_ssize_t i = 0; i < nb; ++i) {
+        PyObject* item = nullptr;
+        if (bdata[i].kind == Kind::Collect || bdata[i].kind == Kind::Events) {
+            item =
+                dftracer::utils::python::wrap_dataframe(std::move(results[i]));
+        } else if (bdata[i].kind == Kind::Export) {
+            const ExportStats& st = export_stats[i];
+            item = Py_BuildValue(
+                "{s:K,s:K,s:K}", "events_matched",
+                (unsigned long long)st.events_matched, "events_scanned",
+                (unsigned long long)st.events_scanned, "chunks_scanned",
+                (unsigned long long)st.chunks_scanned);
+        } else if (bdata[i].kind == Kind::Partial) {
+            item = PyBytes_FromStringAndSize(
+                partial_results[i].data(),
+                (Py_ssize_t)partial_results[i].size());
+        } else if (bdata[i].kind == Kind::Plugin) {
+            // {name: pyarrow|bytes}; the Python Session shapes it to DataFrame.
+            item = dftracer::utils::python::plugin_host_results_dict(
+                bdata[i].host_obj);
+        } else {
+            Py_INCREF(Py_None);
+            item = Py_None;
+        }
+        if (!item) {
+            Py_DECREF(out);
+            return nullptr;
+        }
+        PyList_SET_ITEM(out, i, item);
+    }
+    return out;
 #endif
 }
 
@@ -1522,6 +1780,10 @@ static PyMethodDef tv_methods[] = {
     {"stream", DFTU_PYCFUNCTION(tv_stream), METH_VARARGS | METH_KEYWORDS,
      "Iterate matching events as pyarrow record batches (parallel, bounded "
      "memory). kwargs: batch_size, workers, normalize."},
+    {"_session_execute", DFTU_PYCFUNCTION(tv_session_run), METH_O,
+     "Internal: run a Session's branches over one shared scan. Arg: a list of "
+     "(kind, viewer, sink) tuples; returns a list of _DataFrame (collect) / "
+     "stats dict (export) / None (materialize) in the same order."},
     {"statistics", DFTU_PYCFUNCTION(tv_statistics), METH_NOARGS,
      "One-row summary: count, mean/stddev dur, min/max ts (dict)."},
     {"aggregate_partial", DFTU_PYCFUNCTION(tv_aggregate_partial), METH_NOARGS,

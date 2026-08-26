@@ -281,6 +281,132 @@ class TestTraceViewer:
         assert df.loc["2", "count"] == 3 and df.loc["2", "sumsq_dur"] == 3 * 20**2
         assert df.loc["3", "count"] == 1 and df.loc["3", "sumsq_dur"] == 1 * 5**2
 
+    def test_session_fuses_branches_with_parity(self, tmp_path):
+        """A session runs several aggregation branches over one scan; each branch
+        matches its standalone collect(), and per-branch filters/rank work."""
+        gz = str(tmp_path / "sess.pfw.gz")
+        with gzip.open(gz, "wt") as f:
+            f.write(
+                '{"ph":"M","name":"PR","cat":"dftracer","pid":100,"tid":0,'
+                '"args":{"name":"rank","value":"0"}}\n'
+            )
+            f.write(
+                '{"ph":"M","name":"PR","cat":"dftracer","pid":200,"tid":0,'
+                '"args":{"name":"rank","value":"1"}}\n'
+            )
+            for i in range(3):
+                f.write(
+                    '{"ph":"X","name":"read","cat":"POSIX","pid":100,"tid":1,'
+                    '"ts":%d,"dur":5,"args":{}}\n' % (1000 + i)
+                )
+            for i in range(2):
+                f.write(
+                    '{"ph":"X","name":"write","cat":"STDIO","pid":200,"tid":1,'
+                    '"ts":%d,"dur":7,"args":{}}\n' % (2000 + i)
+                )
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+            ix.ensure_indexed()
+        out = str(tmp_path / "posix.pfw")
+        tv = dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
+        with tv.session() as s:
+            by_cat = s.view().group_by("cat").agg("count", "mean:dur").collect()
+            by_rank = s.view().group_by("rank").agg("count").collect()
+            posix = s.view().filter('cat == "POSIX"').group_by("cat").agg("count").collect()
+            exported = s.view().filter('cat == "POSIX"').export(out)
+
+        cat = pa.table(by_cat.result()).to_pandas().set_index("cat")
+        rank = pa.table(by_rank.result()).to_pandas().set_index("rank")
+        pox = pa.table(posix.result()).to_pandas().set_index("cat")
+
+        assert cat.loc["posix", "count"] == 3 and cat.loc["stdio", "count"] == 2
+        # rank resolves the pid groups via the PR metadata harvested in the scan.
+        assert rank.loc["0", "count"] == 3 and rank.loc["1", "count"] == 2
+        # per-branch filter is independent of the other branches.
+        assert list(pox.index) == ["posix"] and pox.loc["posix", "count"] == 3
+        # the export branch streamed just its matching events over the same scan.
+        assert exported.result()["events_matched"] == 3
+        lines = [json.loads(line) for line in open(out) if line.strip()]
+        assert len(lines) == 3 and all(e["cat"] == "POSIX" for e in lines)
+
+        # per-branch sort_by/limit apply to that branch only.
+        with tv.session() as s2:
+            top = s2.view().group_by("cat").agg("count").sort_by("count", True).limit(1).collect()
+        top_df = pa.table(top.result()).to_pandas()
+        assert len(top_df) == 1 and top_df.iloc[0]["cat"] == "posix"
+
+        # statistics branch matches the standalone TraceViewer.statistics().
+        with tv.session() as s3:
+            allst = s3.view().statistics()
+            poxst = s3.view().filter('cat == "POSIX"').statistics()
+        assert allst.result() == tv.statistics()
+        assert poxst.result()["duration_count"] == 3
+
+        # join / compare of two collect branches over the one scan.
+        with tv.session() as s5:
+            a = s5.view().group_by("cat").agg("count").collect()
+            b = s5.view().filter('cat == "POSIX"').group_by("cat").agg("count").collect()
+            j = s5.join(a, b, "left")
+            c = s5.compare(a, b)
+        jdf = pa.table(j.result()).to_pandas().set_index("cat")
+        assert sorted(jdf.columns) == ["l_count", "r_count"]
+        assert jdf.loc["posix", "l_count"] == 3 and jdf.loc["posix", "r_count"] == 3
+        cdf = pa.table(c.result()).to_pandas().set_index("cat")
+        assert {"l_count", "r_count", "delta_count", "pct_count"} <= set(cdf.columns)
+        assert (
+            cdf.loc["stdio", "r_count"] != cdf.loc["stdio", "r_count"]
+        )  # NaN: stdio absent in variant
+
+        # aggregate_partial branch: a raw serialized partial that merges back to
+        # the same table a direct collect produces.
+        with tv.session() as s6:
+            p = s6.view().group_by("cat").agg("count").aggregate_partial()
+        part = p.result()
+        assert isinstance(part, bytes) and len(part) > 0
+        merged = (
+            pa.table(tv.group_by("cat").agg("count").merge_partials_to_table([part]))
+            .to_pandas()
+            .set_index("cat")
+        )
+        assert merged["count"].to_dict() == {"posix": 3, "stdio": 2}
+
+        # events (raw events -> DataFrame) and stream (chunks) fuse with collect.
+        with tv.session() as s4:
+            ev = s4.view().events()
+            evp = s4.view().filter('cat == "POSIX"').select("cat", "dur").events()
+            stc = s4.view().stream(batch_size=2)
+        edf = pa.table(ev.result()).to_pandas()
+        assert len(edf) == 5 and "ts" in edf.columns
+        pdf = pa.table(evp.result()).to_pandas()
+        assert len(pdf) == 3 and sorted(pdf.columns) == ["cat", "dur"]
+        assert (pdf["cat"] == "POSIX").all()
+        chunks = list(stc.result())
+        assert [c.num_rows for c in chunks] == [2, 2, 1]
+
+        # Parity: the fused branch equals the standalone aggregation.
+        standalone = (
+            pa.table(tv.group_by("cat").agg("count", "mean:dur").collect())
+            .to_pandas()
+            .set_index("cat")
+            .sort_index()
+        )
+        assert standalone["count"].to_dict() == cat.sort_index()["count"].to_dict()
+
+    def test_session_result_triggers_lazy_execute(self, tmp_path):
+        """Reading a Handle before an explicit execute() runs the shared scan."""
+        gz = str(tmp_path / "e.pfw.gz")
+        with gzip.open(gz, "wt") as f:
+            f.write(
+                '{"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,'
+                '"ts":1000,"dur":5,"args":{}}\n'
+            )
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+            ix.ensure_indexed()
+        tv = dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
+        s = tv.session()
+        h = s.view().group_by("cat").agg("count").collect()
+        # no explicit execute(): the first result() triggers the shared scan.
+        assert pa.table(h.result()).num_rows == 1
+
     def test_group_by_rank_resolves_pid_via_pr_metadata(self, tmp_path):
         """group_by("rank") harvests pid -> rank from PR metadata at query time."""
         gz = str(tmp_path / "rank.pfw.gz")

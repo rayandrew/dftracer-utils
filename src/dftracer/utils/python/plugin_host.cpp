@@ -1027,3 +1027,11 @@ int dftracer::utils::python::init_plugin_host(PyObject* m) {
 #endif
     return register_type(m, &PluginHostType, "PluginHost");
 }
+
+PyObject* dftracer::utils::python::plugin_host_results_dict(PyObject* host) {
+    if (!PyObject_TypeCheck(host, &PluginHostType)) {
+        PyErr_SetString(PyExc_TypeError, "expected a PluginHost");
+        return nullptr;
+    }
+    return results_to_dict(host_of((PluginHostObject*)host));
+}

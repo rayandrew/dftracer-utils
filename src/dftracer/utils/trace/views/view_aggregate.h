@@ -241,6 +241,13 @@ dftracer::utils::dataframe::DataFrame to_batch(const GroupMap& map,
 void project_columns(dftracer::utils::dataframe::DataFrame& batch,
                      const std::vector<std::string>& select);
 
+// The whole post-aggregation finalize in one place: to_batch, then the plan's
+// sort_by/topk/offset+limit/select. Shared by View::collect() and every
+// ViewSession collect branch so the two surfaces cannot drift. Apply only at
+// the final result boundary (after all merges).
+dftracer::utils::dataframe::DataFrame finalize_collect_batch(
+    const GroupMap& map, const ViewPlan& plan);
+
 }  // namespace dftracer::utils::trace::views::detail
 
 #endif  // DFTRACER_UTILS_TRACE_VIEWS_VIEW_AGGREGATE_H

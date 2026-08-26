@@ -24,6 +24,7 @@
 #include <dftracer/utils/python/series.h>
 #include <dftracer/utils/query/errc.h>
 #include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/comparator/compare_view.h>
 #include <dftracer/utils/trace/views/result_join.h>
 
 #include <cstdint>
@@ -755,6 +756,24 @@ PyObject* DataFrame_join(PyObject* self, PyObject* args, PyObject* kwds) {
     });
 }
 
+// compare_agg(variant, n_key): FULL-join this baseline with `variant` on the
+// first n_key group-key columns and append delta_/pct_ per numeric metric, the
+// same result CompareView produces. For the fused-session compare.
+PyObject* DataFrame_compare_agg(PyObject* self, PyObject* args) {
+    namespace comparator = dftracer::utils::trace::comparator;
+    DataFrameObject* b = as_dataframe(self);
+    if (!b) return nullptr;
+    PyObject* other = nullptr;
+    Py_ssize_t n_key = 1;
+    if (!PyArg_ParseTuple(args, "On", &other, &n_key)) return nullptr;
+    DataFrameObject* o = as_dataframe(other);
+    if (!o) return nullptr;
+    return run_batch_op([&] {
+        return comparator::CompareView::compare_batches(
+            to_dataframe(b), to_dataframe(o), static_cast<std::int64_t>(n_key));
+    });
+}
+
 // Read a sequence (or single str) of column names into `out`. Returns false and
 // sets a Python error on a non-string element.
 bool names_from_obj(PyObject* obj, std::vector<std::string>& out) {
@@ -1133,6 +1152,10 @@ PyMethodDef DataFrame_methods[] = {
      "join(other, how='inner', on=1) -> DataFrame equi-joined on the first "
      "`on` "
      "key columns; how=inner|left|right|full|semi|anti."},
+    {"compare_agg", DataFrame_compare_agg, METH_VARARGS,
+     "compare_agg(variant, n_key) -> DataFrame: FULL-join two aggregation "
+     "results on the first n_key group-key columns and append delta_/pct_ per "
+     "numeric metric (the CompareView result)."},
     {"hash_partition", DataFrame_hash_partition, METH_VARARGS,
      "hash_partition(keys, n_parts) -> list[DataFrame] partitioned by a stable "
      "hash of the key columns (the distributed shuffle primitive)."},

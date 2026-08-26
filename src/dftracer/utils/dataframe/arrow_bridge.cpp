@@ -398,7 +398,35 @@ Series import_list(const ArrowSchema* schema, const ArrowArray* arr,
     return Series{col};
 }
 
-// Dispatch on the Arrow type: List goes through import_list, everything else
+// STRUCT: validity + one child array per field. Mirrors export_struct; each
+// field column is imported recursively and aliases `arr` through `owner`.
+Series import_struct(const ArrowSchema* schema, const ArrowArray* arr,
+                     std::shared_ptr<void> owner) {
+    if (schema->n_children != arr->n_children) return Series{};
+    auto* col = new dftu_series();
+    col->type = TypeId::Struct;
+    col->encoding = Encoding::Flat;
+    col->length = arr->length;
+    col->null_count = arr->null_count < 0 ? 0 : arr->null_count;
+    const std::int64_t n = arr->length;
+    if (arr->n_buffers > 0 && arr->buffers[0] != nullptr)
+        col->validity = Buffer::wrap(
+            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[0])),
+            (static_cast<std::size_t>(n) + 7) / 8, [owner](void*) {});
+    for (std::int64_t i = 0; i < arr->n_children; ++i) {
+        Series child = import_any(schema->children[i], arr->children[i], owner);
+        if (!child.valid()) {
+            delete col;
+            return Series{};
+        }
+        col->children.push_back(std::shared_ptr<dftu_series>(child.release()));
+        col->field_names.emplace_back(
+            schema->children[i]->name ? schema->children[i]->name : "");
+    }
+    return Series{col};
+}
+
+// Dispatch on the Arrow type: List/Struct nest recursively, everything else
 // (flat fixed-width and variable-width) through import_flat.
 Series import_any(const ArrowSchema* schema, const ArrowArray* arr,
                   std::shared_ptr<void> owner) {
@@ -408,6 +436,8 @@ Series import_any(const ArrowSchema* schema, const ArrowArray* arr,
         return Series{};
     if (view.type == NANOARROW_TYPE_LIST)
         return import_list(schema, arr, owner);
+    if (view.type == NANOARROW_TYPE_STRUCT)
+        return import_struct(schema, arr, owner);
     return import_flat(schema, arr, owner);
 }
 

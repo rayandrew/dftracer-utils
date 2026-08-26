@@ -399,6 +399,32 @@ coro::CoroTask<ExportStats> PluginHost::run(const View& view) const {
     co_return co_await scan_view.run_folds(folds, intern);
 }
 
+void PluginHost::attach_to_session(trace::views::ViewSession& session) const {
+    namespace views = trace::views;
+    // Shared registry for the whole session run; captured by the factory
+    // closures (which the session owns through execute) so it outlives the
+    // scan.
+    auto results = std::make_shared<SharedResultRegistry>();
+    impl_->named_results.clear();
+    NamedResultRegistry* named = &impl_->named_results;
+    std::vector<std::size_t> order = fold_order();
+    if (order.empty())
+        for (std::size_t i = 0; i < impl_->plugins.size(); ++i)
+            order.push_back(i);
+    for (std::size_t i : order) {
+        const dftu_plugin* plugin = impl_->plugins[i].plugin;
+        std::string name = impl_->plugins[i].name;
+        session.attach_fold_factory(
+            [plugin, results, named,
+             name](dftracer::utils::StringIntern& intern)
+                -> std::unique_ptr<views::detail::Fold> {
+                return std::make_unique<PluginFold>(plugin, intern,
+                                                    results.get(), named, name);
+            },
+            []() {});
+    }
+}
+
 NamedResultRegistry& PluginHost::results() const {
     return impl_->named_results;
 }
