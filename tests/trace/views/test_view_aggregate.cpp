@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
+#include <dftracer/utils/trace/comparator/compare_view.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <doctest/doctest.h>
@@ -164,6 +165,75 @@ TEST_SUITE("View") {
         // aggregated (posix 30 + stdio 20).
         CHECK(total->load() == 50);
         REQUIRE(cat->num_rows() == 2);
+    }
+
+    TEST_CASE(
+        "View - session join/compare combine two branches over the one scan") {
+        namespace cmp = dftracer::utils::trace::comparator;
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_mixed_trace(env, 30, 20);  // posix=30, stdio=20
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+        Query posix = Query::from_string(R"(cat == "POSIX")").value();
+        auto by_cat = [] { return std::vector<GroupKey>{GroupKey::cat()}; };
+        auto count = [] {
+            return std::vector<AggSpec>{{AggOp::Count, "", "n"}};
+        };
+
+        auto run = base.session();
+        auto a = run.collect(base.group_by(by_cat()).agg(count()));
+        auto b =
+            run.collect(base.filter(posix).group_by(by_cat()).agg(count()));
+        auto j = run.join(a, b, JoinType::INNER);  // n_key inferred (1)
+        auto c = run.compare(a, b);
+        run.execute().get();
+
+        // Reference: collect both branches standalone, combine with the same
+        // primitives the session ops wrap. The session must match exactly.
+        auto ra = View::from_file(gz, idx)
+                      .group_by(by_cat())
+                      .agg(count())
+                      .collect()
+                      .get();
+        auto rb = View::from_file(gz, idx)
+                      .filter(posix)
+                      .group_by(by_cat())
+                      .agg(count())
+                      .collect()
+                      .get();
+        auto rj = join_batches(ra, rb, 1, JoinType::INNER);
+        auto rc = cmp::CompareView::compare_batches(ra, rb, 1);
+
+        // INNER join keeps only cat=posix (b is posix-only).
+        REQUIRE(j->num_rows() == rj.num_rows());
+        REQUIRE(j->num_rows() == 1);
+        CHECK(bstr(*j, 0, "cat") == "posix");
+        CHECK(bnum(*j, 0, "l_n") == 30);
+        CHECK(bnum(*j, 0, "r_n") == 30);
+
+        // compare is a FULL join with delta_/pct_ appended: both cats present.
+        REQUIRE(c->num_rows() == rc.num_rows());
+        REQUIRE(c->num_rows() == 2);
+        CHECK(bcol(*c, "delta_n") >= 0);
+        CHECK(bcol(*c, "pct_n") >= 0);
+    }
+
+    TEST_CASE("View - session join rejects a foreign handle") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_mixed_trace(env, 30, 20);
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+
+        auto run = base.session();
+        auto other = base.session();
+        auto a = run.collect(
+            base.group_by({GroupKey::cat()}).agg({{AggOp::Count, "", "n"}}));
+        auto foreign = other.collect(
+            base.group_by({GroupKey::cat()}).agg({{AggOp::Count, "", "n"}}));
+        CHECK_THROWS_AS(run.join(a, foreign, JoinType::INNER),
+                        DFTUtilsException);
     }
 
     TEST_CASE("View - agg accepts unified F field expressions") {

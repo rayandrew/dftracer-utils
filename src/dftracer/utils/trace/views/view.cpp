@@ -4,6 +4,7 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/json/parser.h>
+#include <dftracer/utils/trace/comparator/compare_view.h>
 #include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/time_metric.h>
 #include <dftracer/utils/trace/views/mv_store.h>
@@ -444,6 +445,8 @@ void ViewSession::attach_fold_factory(
 Deferred<dataframe::DataFrame> ViewSession::collect(
     Query predicate, std::vector<GroupKey> group_by, std::vector<AggSpec> agg) {
     auto out = std::make_shared<dataframe::DataFrame>();
+    key_counts_.emplace_back(out.get(),
+                             static_cast<std::int64_t>(group_by.size()));
     detail::BranchHooks h = detail::make_collect_branch(
         std::move(group_by), std::move(agg), out, num_slots_);
     h.predicate = std::move(predicate);
@@ -454,6 +457,8 @@ Deferred<dataframe::DataFrame> ViewSession::collect(
 Deferred<dataframe::DataFrame> ViewSession::collect(
     std::vector<GroupKey> group_by, std::vector<AggSpec> agg) {
     auto out = std::make_shared<dataframe::DataFrame>();
+    key_counts_.emplace_back(out.get(),
+                             static_cast<std::int64_t>(group_by.size()));
     detail::BranchHooks h =
         detail::make_collect_branch(group_by, agg, out, num_slots_);
     // predicate left unset: match all scanned events. The descriptor lets
@@ -467,11 +472,66 @@ Deferred<dataframe::DataFrame> ViewSession::collect(
 Deferred<dataframe::DataFrame> ViewSession::collect(const View& branch) {
     auto out = std::make_shared<dataframe::DataFrame>();
     const auto& bp = *branch.plan_;
+    // Output key columns are [time_bucket?, group_by...], so a bucketed branch
+    // has one more leading key column than its group_by (matches join layout).
+    key_counts_.emplace_back(out.get(),
+                             static_cast<std::int64_t>(bp.group_by.size()) +
+                                 (bp.time_bucket_us > 0 ? 1 : 0));
     detail::BranchHooks h =
         detail::make_collect_branch(bp.group_by, bp.agg, out, num_slots_);
     h.agg = detail::AggBranch{bp.group_by,          bp.agg, out, branch.plan_,
                               bp.query.has_value(), nullptr};
     detail::add_branch(*state_, std::move(h));
+    return {out, executed_};
+}
+
+std::int64_t ViewSession::key_count_of(const void* out) const {
+    for (const auto& [ptr, n] : key_counts_)
+        if (ptr == out) return n;
+    return -1;
+}
+
+Deferred<dataframe::DataFrame> ViewSession::join(
+    Deferred<dataframe::DataFrame> left, Deferred<dataframe::DataFrame> right,
+    JoinType how, std::int64_t n_key) {
+    if (!left.value_ || !right.value_ || left.executed_ != executed_ ||
+        right.executed_ != executed_)
+        throw DFTUtilsException::cat(
+            ErrorCode::INVALID_ARGUMENT,
+            "ViewSession::join: both handles must be collect() results of "
+            "this session");
+    if (n_key < 0) n_key = key_count_of(left.value_.get());
+    if (n_key < 0)
+        throw DFTUtilsException::cat(
+            ErrorCode::INVALID_ARGUMENT,
+            "ViewSession::join: cannot infer n_key; pass it explicitly");
+    auto out = std::make_shared<dataframe::DataFrame>();
+    combines_.emplace_back(
+        [out, l = left.value_, r = right.value_, n_key, how]() {
+            *out = join_batches(*l, *r, n_key, how);
+        });
+    return {out, executed_};
+}
+
+Deferred<dataframe::DataFrame> ViewSession::compare(
+    Deferred<dataframe::DataFrame> baseline,
+    Deferred<dataframe::DataFrame> variant, std::int64_t n_key) {
+    if (!baseline.value_ || !variant.value_ ||
+        baseline.executed_ != executed_ || variant.executed_ != executed_)
+        throw DFTUtilsException::cat(
+            ErrorCode::INVALID_ARGUMENT,
+            "ViewSession::compare: both handles must be collect() results of "
+            "this session");
+    if (n_key < 0) n_key = key_count_of(baseline.value_.get());
+    if (n_key < 0)
+        throw DFTUtilsException::cat(
+            ErrorCode::INVALID_ARGUMENT,
+            "ViewSession::compare: cannot infer n_key; pass it explicitly");
+    auto out = std::make_shared<dataframe::DataFrame>();
+    combines_.emplace_back(
+        [out, b = baseline.value_, v = variant.value_, n_key]() {
+            *out = comparator::CompareView::compare_batches(*b, *v, n_key);
+        });
     return {out, executed_};
 }
 
@@ -569,6 +629,9 @@ Deferred<dataframe::DataFrame> ViewSession::collect_events(const View& branch) {
 
 coro::CoroTask<ExportStats> ViewSession::execute() {
     ExportStats stats = co_await detail::run_session(state_);
+    // Branch outputs are populated; run the post-scan combines before flipping
+    // executed_ so a combine reads the raw branch out, not a resolved handle.
+    for (auto& c : combines_) c();
     *executed_ = true;
     co_return stats;
 }

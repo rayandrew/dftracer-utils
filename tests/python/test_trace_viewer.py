@@ -356,6 +356,14 @@ class TestTraceViewer:
             cdf.loc["stdio", "r_count"] != cdf.loc["stdio", "r_count"]
         )  # NaN: stdio absent in variant
 
+        # default (inner) join drops stdio (absent on the posix-filtered side);
+        # exercises the native n_key inference with no explicit key width.
+        with tv.session() as s7:
+            ai = s7.view().group_by("cat").agg("count").collect()
+            bi = s7.view().filter('cat == "POSIX"').group_by("cat").agg("count").collect()
+            ji = s7.join(ai, bi)
+        assert list(pa.table(ji.result()).to_pandas()["cat"]) == ["posix"]
+
         # aggregate_partial branch: a raw serialized partial that merges back to
         # the same table a direct collect produces.
         with tv.session() as s6:

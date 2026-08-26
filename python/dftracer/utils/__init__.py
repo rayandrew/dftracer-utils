@@ -16,7 +16,6 @@ from .columnar import (  # noqa: F401
 )
 from .dataframe import (  # noqa: F401
     AggregatedTraceViewer,
-    Combine,
     DataFrame,
     Handle,
     Session,
@@ -148,7 +147,6 @@ __all__ = [
     "Session",
     "SessionView",
     "Handle",
-    "Combine",
     "DataFrame",
     "Series",
     "Runtime",

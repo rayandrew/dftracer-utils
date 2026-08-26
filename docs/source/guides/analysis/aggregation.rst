@@ -421,11 +421,12 @@ first ``Handle.result()``) runs every branch over one decompression:
 Reading a ``Handle`` before the session executes triggers the scan; adding a
 branch after it has executed raises. Two collect branches that group the same
 way can be combined after the one scan without a second read: ``s.join(a, b,
-how)`` is the same equi-join ``DataFrame.join`` gives, and ``s.compare(baseline,
-variant)`` produces the ``delta_``/``pct_`` result ``View.compare`` does. Both
-return a ``Combine`` whose ``result()`` runs the scan (if needed) and then the
-combine. This is the Python form of the C++ ``ViewSession``
-(:doc:`views`).
+how)`` equi-joins them into ``l_``/``r_`` columns, and ``s.compare(baseline,
+variant)`` appends the ``delta_``/``pct_`` result ``View.compare`` produces. The
+shared key width is inferred, so neither takes it. Each returns a ``Handle``
+resolved on execute like any other branch. ``join``/``compare`` are methods of
+the C++ ``ViewSession`` too (:doc:`views`); the Python session forwards to
+them.
 
 See also
 --------

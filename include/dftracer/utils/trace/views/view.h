@@ -6,6 +6,7 @@
 #include <dftracer/utils/dataframe/field.h>
 #include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/trace_config.h>
+#include <dftracer/utils/trace/views/result_join.h>
 #include <dftracer/utils/utilities/common/statistics/ddsketch.h>
 
 #include <cstddef>
@@ -278,6 +279,7 @@ class Deferred {
     T* operator->() const { return &get(); }
 
    private:
+    friend class ViewSession;
     std::shared_ptr<T> value_;
     std::shared_ptr<const bool> executed_;
 };
@@ -327,6 +329,25 @@ class ViewSession {
     /// bound it.
     Deferred<dftracer::utils::dataframe::DataFrame> collect_events(
         const View& branch);
+
+    /// Equi-join two collect branches on their shared leading group keys, after
+    /// the one scan. `left` and `right` must be collect() handles from this
+    /// session that group the same way. `n_key` (the number of leading key
+    /// columns) is inferred from `left`'s group_by when left as -1. Resolved on
+    /// execute(), like every other handle here.
+    Deferred<dftracer::utils::dataframe::DataFrame> join(
+        Deferred<dftracer::utils::dataframe::DataFrame> left,
+        Deferred<dftracer::utils::dataframe::DataFrame> right,
+        JoinType how = JoinType::INNER, std::int64_t n_key = -1);
+
+    /// FULL-join two collect branches on their shared leading group keys and
+    /// append `delta_<m>`/`pct_<m>` per metric, after the one scan. `baseline`
+    /// and `variant` must be collect() handles from this session that group and
+    /// aggregate the same way. `n_key` is inferred from `baseline` when -1.
+    Deferred<dftracer::utils::dataframe::DataFrame> compare(
+        Deferred<dftracer::utils::dataframe::DataFrame> baseline,
+        Deferred<dftracer::utils::dataframe::DataFrame> variant,
+        std::int64_t n_key = -1);
 
     /// Fold the branch's matching events into a caller partial `P`, reduced
     /// across slots by `combine`. The fold gets the parsed event (no re-parse)
@@ -386,9 +407,19 @@ class ViewSession {
                                         std::string_view)>
                          consume,
                      std::function<void()> finalize);
+    /// Look up the leading key-column count recorded for a collect branch's
+    /// output, or -1 if that output was not a collect() of this session.
+    std::int64_t key_count_of(const void* out) const;
     std::size_t num_slots_;
     std::shared_ptr<detail::ViewSessionState> state_;
     std::shared_ptr<bool> executed_ = std::make_shared<bool>(false);
+    /// Leading key-column count per collect branch, keyed by its output
+    /// pointer, so join()/compare() can infer n_key without the caller passing
+    /// it.
+    std::vector<std::pair<const void*, std::int64_t>> key_counts_;
+    /// Post-scan combines (join/compare), run after every branch finalize in
+    /// execute() since they read two already-resolved branch outputs.
+    std::vector<std::function<void()>> combines_;
 };
 
 class AggregatedView;
