@@ -4,6 +4,7 @@
 // columns opaquely, so it is generic over any aggregation schema.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/trace/views/result_join.h>
 #include <doctest/doctest.h>
@@ -183,5 +184,17 @@ TEST_SUITE("ResultJoin") {
         r.columns.push_back(dataframe::Series::strings({"read"}));
         dataframe::DataFrame j = join_batches(l, r, 1, JoinType::INNER);
         CHECK(j.num_columns() == 0);
+    }
+
+    TEST_CASE("a non-string key column throws instead of crashing") {
+        // Keys are matched with string_at(); a numeric key would read a null
+        // offset buffer, so join_batches rejects it up front.
+        const double keys[] = {1.0, 2.0};
+        dataframe::DataFrame b;
+        b.names = {"k", "count"};
+        b.columns.push_back(dataframe::Series::flat_f64(keys, 2));
+        b.columns.push_back(dataframe::Series::flat_f64(keys, 2));
+        CHECK_THROWS_AS(join_batches(b, b, 1, JoinType::INNER),
+                        dftracer::utils::DFTUtilsException);
     }
 }

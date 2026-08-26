@@ -143,6 +143,33 @@ def test_join_int_on_uses_native_leading_keys():
     assert _dict(out) == {"k": [2, 3], "lv": [20, 30], "rv": [200, 300]}
 
 
+def test_compare_agg_delta_pct():
+    # FULL-join two aggregation results on the key, append delta_/pct_ per metric.
+    # Group keys are string columns, as an aggregation always emits them.
+    base = _df({"k": ["a", "b"], "count": [10, 20]})
+    variant = _df({"k": ["a", "b"], "count": [15, 20]})
+    out = base.compare_agg(variant, on="k")
+    assert {"k", "l_count", "r_count", "delta_count", "pct_count"} <= set(
+        out.to_arrow().column_names
+    )
+    d = _dict(out)
+    assert d["l_count"] == [10, 20]
+    assert d["r_count"] == [15, 20]
+    assert d["delta_count"] == [5, 0]  # r - l
+    assert d["pct_count"] == [50.0, 0.0]  # 100 * delta / l
+    # an int `on` count is equivalent to naming the one leading key column.
+    assert _dict(base.compare_agg(variant, on=1)) == d
+
+
+def test_compare_agg_rejects_non_string_key():
+    # A non-string key column would make the native string_at() read a null
+    # offset buffer; it must raise, not crash.
+    base = _df({"k": [1, 2], "count": [10, 20]})
+    variant = _df({"k": [1, 2], "count": [15, 20]})
+    with pytest.raises(Exception, match="string"):
+        base.compare_agg(variant, on="k")
+
+
 def test_asof_backward():
     left = _df({"ts": [10, 20, 30], "ev": ["a", "b", "c"]})
     right = _df({"ts": [5, 25], "val": [100, 200]})

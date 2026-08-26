@@ -206,7 +206,10 @@ single pass over the same base view - a custom fold alongside a built-in
 aggregate, or several unrelated aggregates at once - open a
 ``ViewSession``. Register ops (``collect``, ``materialize``, ``fold``,
 ``export_json``); each returns a ``Deferred<T>`` handle that resolves only
-once; then call ``execute()`` to run every registered op together:
+once; then call ``execute()`` to run every registered op together. ``join`` and
+``compare`` combine two ``collect`` handles that group the same way after the
+one scan (their shared key width is inferred), returning a ``Deferred`` like any
+other op:
 
 .. code-block:: cpp
 

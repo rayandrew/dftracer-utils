@@ -791,6 +791,28 @@ class SessionFileSink : public dftracer::utils::trace::views::ExportSink {
 // (kind:str, viewer:_TraceViewer, sink:str|None) tuples; each viewer carries
 // the branch's full plan. Results come back in branch order. The base viewer's
 // files/phase/time settings scope the shared scan.
+// Map a join-type name to the enum. Returns false on an unknown name.
+bool parse_join_type(const char* how,
+                     dftracer::utils::trace::views::JoinType* out) {
+    namespace views = dftracer::utils::trace::views;
+    const std::string h(how);
+    if (h == "inner")
+        *out = views::JoinType::INNER;
+    else if (h == "left")
+        *out = views::JoinType::LEFT;
+    else if (h == "right")
+        *out = views::JoinType::RIGHT;
+    else if (h == "full")
+        *out = views::JoinType::FULL;
+    else if (h == "semi")
+        *out = views::JoinType::LEFT_SEMI;
+    else if (h == "anti")
+        *out = views::JoinType::LEFT_ANTI;
+    else
+        return false;
+    return true;
+}
+
 PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
 #ifndef DFTRACER_UTILS_ENABLE_ARROW
     PyErr_SetString(PyExc_RuntimeError,
@@ -803,7 +825,16 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
     }
     const Py_ssize_t nb = PyList_Size(branches);
 
-    enum class Kind { Collect, Materialize, Export, Events, Plugin, Partial };
+    enum class Kind {
+        Collect,
+        Materialize,
+        Export,
+        Events,
+        Plugin,
+        Partial,
+        Join,
+        Compare
+    };
     struct BranchData {
         Kind kind = Kind::Collect;
         std::vector<std::string> files;
@@ -814,6 +845,12 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
         // Python object whose named results are read after execute.
         dftracer::utils::plugins::PluginHost* host_cpp = nullptr;
         PyObject* host_obj = nullptr;  // borrowed; the branches list holds it
+        // Combine branch (Join/Compare) only: the two source branch indices and
+        // the join type; n_key is inferred natively from the source branch.
+        Py_ssize_t left_idx = -1;
+        Py_ssize_t right_idx = -1;
+        dftracer::utils::trace::views::JoinType how =
+            dftracer::utils::trace::views::JoinType::INNER;
     };
     std::vector<BranchData> bdata(nb);
 
@@ -844,10 +881,44 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
             bdata[i].kind = Kind::Partial;
         else if (k == "plugin")
             bdata[i].kind = Kind::Plugin;
+        else if (k == "join")
+            bdata[i].kind = Kind::Join;
+        else if (k == "compare")
+            bdata[i].kind = Kind::Compare;
         else {
             PyErr_Format(PyExc_ValueError, "unknown session branch kind: %s",
                          kind);
             return nullptr;
+        }
+
+        if (bdata[i].kind == Kind::Join || bdata[i].kind == Kind::Compare) {
+            // vobj is (left_idx, right_idx[, how]); both indices must refer to
+            // earlier collect branches. n_key is inferred natively.
+            if (!PyTuple_Check(vobj) || PyTuple_Size(vobj) < 2) {
+                PyErr_SetString(PyExc_TypeError,
+                                "a join/compare branch needs (left, right[, "
+                                "how]) branch indices");
+                return nullptr;
+            }
+            bdata[i].left_idx = PyLong_AsSsize_t(PyTuple_GetItem(vobj, 0));
+            bdata[i].right_idx = PyLong_AsSsize_t(PyTuple_GetItem(vobj, 1));
+            if (PyErr_Occurred()) return nullptr;
+            if (bdata[i].left_idx < 0 || bdata[i].left_idx >= i ||
+                bdata[i].right_idx < 0 || bdata[i].right_idx >= i) {
+                PyErr_SetString(PyExc_ValueError,
+                                "join/compare indices must refer to earlier "
+                                "branches");
+                return nullptr;
+            }
+            if (bdata[i].kind == Kind::Join && PyTuple_Size(vobj) >= 3) {
+                const char* h = as_utf8(PyTuple_GetItem(vobj, 2));
+                if (!h) return nullptr;
+                if (!parse_join_type(h, &bdata[i].how)) {
+                    PyErr_Format(PyExc_ValueError, "unknown join type: %s", h);
+                    return nullptr;
+                }
+            }
+            continue;
         }
 
         if (bdata[i].kind == Kind::Plugin) {
@@ -966,12 +1037,24 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                         // are read back after execute.
                         bdata[i].host_cpp->attach_to_session(sess);
                         break;
+                    case Kind::Join:
+                        agg_handles[i] = sess.join(
+                            agg_handles[bdata[i].left_idx],
+                            agg_handles[bdata[i].right_idx], bdata[i].how);
+                        break;
+                    case Kind::Compare:
+                        agg_handles[i] =
+                            sess.compare(agg_handles[bdata[i].left_idx],
+                                         agg_handles[bdata[i].right_idx]);
+                        break;
                 }
             }
             rt->submit(sess.execute()).get();
             for (Py_ssize_t i = 0; i < nb; ++i) {
                 if (bdata[i].kind == Kind::Collect ||
-                    bdata[i].kind == Kind::Events)
+                    bdata[i].kind == Kind::Events ||
+                    bdata[i].kind == Kind::Join ||
+                    bdata[i].kind == Kind::Compare)
                     results[i] = std::move(agg_handles[i].get());
                 else if (bdata[i].kind == Kind::Export)
                     export_stats[i] = exp_handles[i].get();
@@ -989,7 +1072,8 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
     if (!out) return nullptr;
     for (Py_ssize_t i = 0; i < nb; ++i) {
         PyObject* item = nullptr;
-        if (bdata[i].kind == Kind::Collect || bdata[i].kind == Kind::Events) {
+        if (bdata[i].kind == Kind::Collect || bdata[i].kind == Kind::Events ||
+            bdata[i].kind == Kind::Join || bdata[i].kind == Kind::Compare) {
             item =
                 dftracer::utils::python::wrap_dataframe(std::move(results[i]));
         } else if (bdata[i].kind == Kind::Export) {
@@ -1042,20 +1126,7 @@ PyObject* tv_join(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
         return nullptr;
     }
     views::JoinType type = views::JoinType::INNER;
-    const std::string h(how);
-    if (h == "inner")
-        type = views::JoinType::INNER;
-    else if (h == "left")
-        type = views::JoinType::LEFT;
-    else if (h == "right")
-        type = views::JoinType::RIGHT;
-    else if (h == "full")
-        type = views::JoinType::FULL;
-    else if (h == "semi")
-        type = views::JoinType::LEFT_SEMI;
-    else if (h == "anti")
-        type = views::JoinType::LEFT_ANTI;
-    else {
+    if (!parse_join_type(how, &type)) {
         PyErr_Format(PyExc_ValueError,
                      "join() how must be inner|left|right|full|semi|anti, "
                      "got '%s'",

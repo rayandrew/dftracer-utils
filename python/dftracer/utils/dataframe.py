@@ -368,6 +368,33 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
 
         return _wrap(_join(self._native, _unwrap(other), keys, how))
 
+    def compare_agg(
+        self, variant: "DataFrame", on: Union[int, str, Sequence[str]] = 1
+    ) -> "DataFrame":
+        """Compare two aggregation results: FULL-join on the shared leading key
+        columns, then append ``delta_<m>``/``pct_<m>`` for each numeric
+        ``l_``/``r_`` metric pair.
+
+        ``on`` is an int count of the leading key columns both frames share, or
+        the shared key column name(s). Output is [key columns, ``l_``/``r_`` per
+        metric, ``delta_``/``pct_`` per metric]. Both frames must group and
+        aggregate the same way."""
+        if isinstance(on, bool):
+            raise TypeError("compare_agg: 'on' must be a key name/list or an int count")
+        if isinstance(on, int):
+            names = list(self._native.column_names)
+            if on < 1 or on > len(names):
+                raise ValueError(
+                    f"compare_agg: 'on' count {on} is out of range for a {len(names)}-column frame"
+                )
+            n_key = on
+        else:
+            keys = _names(on)
+            if not keys:
+                raise ValueError("compare_agg: 'on' must name at least one key column")
+            n_key = len(keys)
+        return _wrap(self._native.compare_agg(_unwrap(variant), n_key))
+
     def asof(
         self,
         other: "DataFrame",
@@ -909,10 +936,13 @@ class Handle:
     branch's value (a DataFrame for ``collect``, a stats dict for ``export``)
     once the session has executed; reading it before then triggers execute."""
 
-    __slots__ = ("_session", "_value", "_resolved", "_transform", "_n_key")
+    __slots__ = ("_session", "_value", "_resolved", "_transform", "_index")
 
     def __init__(
-        self, session: "Session", transform: "Optional[Callable[[Any], Any]]" = None
+        self,
+        session: "Session",
+        index: int,
+        transform: "Optional[Callable[[Any], Any]]" = None,
     ) -> None:
         self._session = session
         self._value: object = None
@@ -920,33 +950,12 @@ class Handle:
         # Post-execute shaping of the native result (e.g. a 1-row DataFrame to a
         # stats dict). Applied once in execute().
         self._transform = transform
-        # Leading group-key column count of a collect result, for join/compare.
-        self._n_key = 0
+        # This branch's position in the session, so join/compare can reference it.
+        self._index = index
 
     def result(self) -> object:
         if not self._resolved:
             self._session.execute()
-        return self._value
-
-
-class Combine:
-    """A deferred post-scan combine of two Session handles (``join``/``compare``).
-    ``result()`` runs the one shared scan (if needed), then the combine."""
-
-    __slots__ = ("_session", "_fn", "_value", "_done")
-
-    def __init__(self, session: "Session", fn: "Callable[[], DataFrame]") -> None:
-        self._session = session
-        self._fn = fn
-        self._value: "Optional[DataFrame]" = None
-        self._done = False
-
-    def result(self) -> "DataFrame":
-        if not self._done:
-            self._session.execute()
-            self._value = self._fn()
-            self._done = True
-        assert self._value is not None
         return self._value
 
 
@@ -961,41 +970,15 @@ class SessionView(_ViewerFilters):
 
     _session: "Session"
 
-    def __init__(
-        self,
-        session: "Session",
-        native: "_ext._TraceViewer",
-        n_group: int = 0,
-        n_bucket: int = 0,
-    ) -> None:
+    def __init__(self, session: "Session", native: "_ext._TraceViewer") -> None:
         self._native = native
         self._session = session
-        # Leading group-key columns of a collect result: group_by keys + a
-        # time_bucket column. Tracked so a join knows the key width.
-        self._n_group = n_group
-        self._n_bucket = n_bucket
-
-    @property
-    def _n_key(self) -> int:
-        return self._n_group + self._n_bucket
 
     def _rewrap(self, native: object) -> "SessionView":
-        return SessionView(
-            self._session,
-            native,  # ty: ignore[invalid-argument-type]
-            self._n_group,
-            self._n_bucket,
-        )
+        return SessionView(self._session, native)  # ty: ignore[invalid-argument-type]
 
     def group_by(self, *keys: str) -> "SessionView":
-        v = self._rewrap(self._native.group_by(*keys))
-        v._n_group = len(keys)
-        return v
-
-    def time_bucket(self, interval_us: "Union[int, float, str]") -> "SessionView":
-        v = super().time_bucket(interval_us)
-        v._n_bucket = 1
-        return v
+        return self._rewrap(self._native.group_by(*keys))
 
     def agg(self, *specs: "Union[str, Agg]") -> "SessionView":  # ty: ignore[invalid-method-override]
         return self._rewrap(_viewer_agg(self._native, specs))
@@ -1005,9 +988,7 @@ class SessionView(_ViewerFilters):
 
     def collect(self) -> Handle:  # ty: ignore[invalid-method-override]
         """Register an aggregation branch; ``result()`` is a DataFrame."""
-        handle = self._session._register("collect", self, None)
-        handle._n_key = self._n_key
-        return handle
+        return self._session._register("collect", self, None)
 
     def export(self, sink: str) -> Handle:
         """Register a raw-event export branch to ``sink`` (NDJSON); ``result()``
@@ -1106,7 +1087,7 @@ class Session:
     ) -> Handle:
         if self._executed:
             raise RuntimeError("cannot add a branch after the session has executed")
-        handle = Handle(self, transform)
+        handle = Handle(self, len(self._branches), transform)
         self._branches.append((kind, viewer, sink))
         self._handles.append(None if kind == "materialize" else handle)
         return handle
@@ -1127,8 +1108,20 @@ class Session:
             shaped = {name: host._shape(name, val) for name, val in raw.items()}
             return next(iter(shaped.values())) if len(shaped) == 1 else shaped
 
-        handle = Handle(self, shape)
+        handle = Handle(self, len(self._branches), shape)
         self._branches.append(("plugin", host, None))
+        self._handles.append(handle)
+        return handle
+
+    def _register_combine(
+        self, kind: str, left: Handle, right: Handle, spec: "Tuple[Any, ...]"
+    ) -> Handle:
+        if self._executed:
+            raise RuntimeError("cannot add a branch after the session has executed")
+        if left._session is not self or right._session is not self:
+            raise ValueError(f"{kind} handles must come from this session")
+        handle = Handle(self, len(self._branches))
+        self._branches.append((kind, spec, None))
         self._handles.append(handle)
         return handle
 
@@ -1137,36 +1130,31 @@ class Session:
         left: Handle,
         right: Handle,
         how: "Literal['inner', 'left', 'right', 'full', 'semi', 'anti']" = "inner",
-    ) -> "Combine":
+    ) -> Handle:
         """Equi-join two collect branches on their shared group key after the one
         scan, the same join View.join uses (key columns, then ``l_``/``r_`` value
         columns). ``result()`` is a DataFrame. Both branches must group the same
-        way."""
+        way; the shared key width is inferred natively."""
+        return self._register_combine("join", left, right, (left._index, right._index, how))
 
-        def combine() -> DataFrame:
-            ld, rd = left.result(), right.result()
-            return _wrap(ld._native.join(rd._native, how, left._n_key))  # type: ignore[union-attr]
-
-        return Combine(self, combine)
-
-    def compare(self, baseline: Handle, variant: Handle) -> "Combine":
+    def compare(self, baseline: Handle, variant: Handle) -> Handle:
         """Compare two collect branches on the shared group key after the one
         scan: key columns, ``l_``/``r_`` per metric, plus ``delta_``/``pct_``,
         the same result View.compare produces. Both branches must group and
         aggregate the same way."""
-
-        def combine() -> DataFrame:
-            ld, rd = baseline.result(), variant.result()
-            return _wrap(ld._native.compare_agg(rd._native, baseline._n_key))  # type: ignore[union-attr]
-
-        return Combine(self, combine)
+        return self._register_combine(
+            "compare", baseline, variant, (baseline._index, variant._index)
+        )
 
     def execute(self) -> None:
         """Run every registered branch over one scan and resolve the Handles.
         Idempotent: a second call is a no-op."""
         if self._executed:
             return
-        spec = [(kind, v._native, sink) for kind, v, sink in self._branches]
+        spec = [
+            (kind, v if kind in ("join", "compare") else v._native, sink)
+            for kind, v, sink in self._branches
+        ]
         results = self._viewer._native._session_execute(spec)
         for handle, native in zip(self._handles, results):
             if handle is not None:

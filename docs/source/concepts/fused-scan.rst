@@ -80,13 +80,11 @@ registered branch sees every matching event from the same traversal.
          hist_df = hist.result()
 
 Two ``collect`` branches that group the same way can be combined after the one
-scan, so a delta between two filtered aggregates still costs a single
-traversal. In Python ``session.join`` and ``session.compare`` do it directly;
-in C++ collect both branches, then combine the resulting DataFrames with
-``views::join_batches`` or ``comparator::CompareView::compare_batches`` (the
-same primitives the Python convenience methods wrap). See
-:doc:`../guides/analysis/aggregation` for the Python how-to and
-:doc:`../guides/analysis/views` for the C++ terminals.
+scan with ``session.join`` and ``session.compare`` (C++ and Python alike), so a
+delta between two filtered aggregates still costs a single traversal. The shared
+key width is inferred from the branch, and each returns a handle resolved on
+execute like any other branch. See :doc:`../guides/analysis/aggregation` for the
+Python how-to and :doc:`../guides/analysis/views` for the C++ terminals.
 
 This is why a CLI invocation with multiple analytics, or a query that runs a
 compiled plugin alongside a built-in aggregation, does not multiply the I/O

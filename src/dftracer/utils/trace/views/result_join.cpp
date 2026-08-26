@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/dataframe/kernels/filter.h>
 #include <dftracer/utils/trace/views/result_join.h>
 #include <dftracer/utils/trace/views/view.h>
@@ -46,6 +47,18 @@ dataframe::DataFrame join_batches(const dataframe::DataFrame& left,
         if (left.names[static_cast<std::size_t>(i)] !=
             right.names[static_cast<std::size_t>(i)])
             return {};
+
+    // Keys are matched via string_at(), which reads the offset buffer a
+    // non-string column does not have. Aggregation keys are always strings;
+    // reject a non-string key loudly instead of dereferencing null.
+    for (std::int64_t i = 0; i < n_key; ++i)
+        if (left.columns[static_cast<std::size_t>(i)].type() !=
+                dataframe::TypeId::String ||
+            right.columns[static_cast<std::size_t>(i)].type() !=
+                dataframe::TypeId::String)
+            throw DFTUtilsException::cat(
+                ErrorCode::INVALID_ARGUMENT,
+                "join/compare key columns must be string-typed");
 
     const bool anti = type == JoinType::LEFT_ANTI;
     const bool left_only = type == JoinType::LEFT_SEMI || anti;
