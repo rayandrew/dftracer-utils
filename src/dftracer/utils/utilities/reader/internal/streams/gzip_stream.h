@@ -197,8 +197,8 @@ class GzipStream : public StreamBase {
         // stays in the caller's frame. See docs/concepts/coroutine-caveats.
         use_member_ = false;
         if (indexer_ && indexer_->find_member(start_bytes_, member_)) {
-            use_member_ =
-                co_await inflater_.seek_to_member(fd_, file_offset_, member_);
+            use_member_ = co_await inflater_.seek_to_member(
+                fd_, file_offset_, member_, expected_out_bytes());
             if (use_member_)
                 DFTRACER_UTILS_LOG_DEBUG(
                     "Using member %" PRIu64 " at uncompressed offset %" PRIu64
@@ -209,7 +209,8 @@ class GzipStream : public StreamBase {
         if (!use_member_) {
             if (!co_await inflater_.initialize(
                     fd_, file_offset_, 0,
-                    constants::indexer::ZLIB_GZIP_WINDOW_BITS)) {
+                    constants::indexer::ZLIB_GZIP_WINDOW_BITS,
+                    expected_out_bytes())) {
                 throw ReaderError(ReaderError::COMPRESSION_ERROR,
                                   "Failed to initialize inflater");
             }
@@ -240,18 +241,27 @@ class GzipStream : public StreamBase {
         return current_position_ >= target_end_bytes_;
     }
 
+    // Decode-buffer size hint (uncompressed span); 0 for an unbounded end.
+    std::size_t expected_out_bytes() const {
+        if (target_end_bytes_ <= start_bytes_) return 0;
+        const std::size_t span = target_end_bytes_ - start_bytes_;
+        if (max_file_bytes_ == 0 || span > max_file_bytes_) return 0;
+        return span;
+    }
+
     coro::CoroTask<void> restart_compression() {
         inflater_.reset();
         if (use_member_) {
-            if (!co_await inflater_.seek_to_member(fd_, file_offset_,
-                                                   member_)) {
+            if (!co_await inflater_.seek_to_member(fd_, file_offset_, member_,
+                                                   expected_out_bytes())) {
                 throw ReaderError(ReaderError::COMPRESSION_ERROR,
                                   "Failed to reinitialize from member");
             }
         } else {
             if (!co_await inflater_.initialize(
                     fd_, file_offset_, 0,
-                    constants::indexer::ZLIB_GZIP_WINDOW_BITS)) {
+                    constants::indexer::ZLIB_GZIP_WINDOW_BITS,
+                    expected_out_bytes())) {
                 throw ReaderError(ReaderError::COMPRESSION_ERROR,
                                   "Failed to initialize inflater");
             }

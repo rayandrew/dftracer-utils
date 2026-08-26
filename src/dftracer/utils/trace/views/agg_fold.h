@@ -116,8 +116,15 @@ void append_group_dim(std::string& out, const Src& src, const GroupKey& gk) {
         case GroupKey::Kind::AccPat:
             out.push_back('0');
             break;
+        case GroupKey::Kind::Rank:
+            // Group on pid; the post-aggregation resolver relabels it to rank.
+            src.append_value(out, "pid");
+            break;
         case GroupKey::Kind::Arg:
             src.append_arg(out, gk.arg);
+            break;
+        case GroupKey::Kind::Field:
+            src.append_value(out, gk.arg);
             break;
     }
 }

@@ -19,6 +19,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Iterator,
     List,
     Literal,
     Mapping,
@@ -665,70 +666,102 @@ class _ViewerFilters:
     __slots__ = ()
     _native: "_ext._TraceViewer"
 
+    # Wrap a native builder result back into a viewer. Overridden by SessionView
+    # so every inherited builder returns a SessionView instead of a TraceViewer,
+    # giving the session branch full builder parity with no duplicated methods.
+    def _rewrap(self, native: object) -> Any:
+        return _wrap(native)
+
     def filter(self: _ViewerT, predicate: "Union[str, Expr]") -> _ViewerT:
-        return _wrap(self._native.filter(_to_filter_dsl(predicate)))
+        return self._rewrap(self._native.filter(_to_filter_dsl(predicate)))
 
     def query(self: _ViewerT, predicate: "Union[str, Expr]") -> _ViewerT:
-        return _wrap(self._native.query(_to_filter_dsl(predicate)))
+        return self._rewrap(self._native.query(_to_filter_dsl(predicate)))
 
     def agg(self, *specs: "Union[str, Agg]") -> "AggregatedTraceViewer":
         if not specs:
             raise TypeError("agg() needs at least one aggregate")
-        return _wrap(_viewer_agg(self._native, specs))
+        return self._rewrap(_viewer_agg(self._native, specs))
 
     # Builder ops forwarded to the native viewer, wrapped back. Self-typed ones
     # preserve the concrete viewer (plain or aggregated) through the chain.
     def phase(self: _ViewerT, phase: str) -> _ViewerT:
-        return _wrap(self._native.phase(phase))
+        return self._rewrap(self._native.phase(phase))
 
     def time_range(self: _ViewerT, begin: float, end: float) -> _ViewerT:
-        return _wrap(self._native.time_range(begin, end))
+        return self._rewrap(self._native.time_range(begin, end))
 
     def time_unit(self: _ViewerT, unit: str) -> _ViewerT:
-        return _wrap(self._native.time_unit(unit))
+        return self._rewrap(self._native.time_unit(unit))
 
     def time_scale(self: _ViewerT, ns_ratio: float) -> _ViewerT:
-        return _wrap(self._native.time_scale(ns_ratio))
+        return self._rewrap(self._native.time_scale(ns_ratio))
 
     def select(self: _ViewerT, *cols: str) -> _ViewerT:
-        return _wrap(self._native.select(*cols))
+        return self._rewrap(self._native.select(*cols))
 
     def limit(self: _ViewerT, n: int) -> _ViewerT:
-        return _wrap(self._native.limit(n))
+        return self._rewrap(self._native.limit(n))
 
     def offset(self: _ViewerT, n: int) -> _ViewerT:
-        return _wrap(self._native.offset(n))
+        return self._rewrap(self._native.offset(n))
 
     def auto_spill(self: _ViewerT) -> _ViewerT:
-        return _wrap(self._native.auto_spill())
+        return self._rewrap(self._native.auto_spill())
 
     def rollup_root(self: _ViewerT, path: str) -> _ViewerT:
-        return _wrap(self._native.rollup_root(path))
+        return self._rewrap(self._native.rollup_root(path))
 
     def views_root(self: _ViewerT, path: str) -> _ViewerT:
-        return _wrap(self._native.views_root(path))
+        return self._rewrap(self._native.views_root(path))
 
     def sort_by(self: _ViewerT, name: str, descending: bool = False) -> _ViewerT:
-        return _wrap(self._native.sort_by(name, descending))
+        return self._rewrap(self._native.sort_by(name, descending))
 
     def topk(self: _ViewerT, name: str, k: int, largest: bool = True) -> _ViewerT:
-        return _wrap(self._native.topk(name, k, largest))
+        return self._rewrap(self._native.topk(name, k, largest))
 
     def agg_numeric_args(self) -> "AggregatedTraceViewer":
-        return _wrap(self._native.agg_numeric_args())
+        return self._rewrap(self._native.agg_numeric_args())
 
     def collect(self) -> "DataFrame":
         return _wrap(self._native.collect())
+
+    def stream(
+        self,
+        batch_size: int = 65536,
+        workers: int = 0,
+        normalize: bool = False,
+        dict: bool = True,
+    ) -> "Iterator[object]":
+        """Iterate matching events as pyarrow record batches (parallel, bounded
+        memory). Yields raw ``pyarrow.RecordBatch`` objects, not wrapped
+        DataFrames. ``workers=0`` uses the runtime's worker count."""
+        return iter(
+            self._native.stream(
+                batch_size=batch_size,
+                workers=workers,
+                normalize=normalize,
+                dict=dict,
+            )
+        )
 
     def time_bucket(self: _ViewerT, interval_us: Union[int, float, str]) -> _ViewerT:
         """Bucket width; a bare number is microseconds, a string ("1ms") is
         converted."""
         us = int(round(coerce_duration(interval_us, 1e6, "interval_us")))
-        return _wrap(self._native.time_bucket(us))
+        return self._rewrap(self._native.time_bucket(us))
+
+    def occ_cell(self: _ViewerT, cell_us: Union[int, float, str]) -> _ViewerT:
+        """Occupancy cell size (busy quantum); a bare number is microseconds, a
+        string ("1ms") is converted. 0 = default. Finer resolves overlap on
+        short events; honored with time_range."""
+        us = int(round(coerce_duration(cell_us, 1e6, "cell_us")))
+        return self._rewrap(self._native.occ_cell(us))
 
     def memory_budget(self: _ViewerT, nbytes: Union[int, str]) -> _ViewerT:
         """Spill budget; accepts a byte count or a unit string ("512MB")."""
-        return _wrap(self._native.memory_budget(coerce_bytes(nbytes, "nbytes")))
+        return self._rewrap(self._native.memory_budget(coerce_bytes(nbytes, "nbytes")))
 
     def materialize(
         self,
@@ -770,6 +803,35 @@ class _ViewerFilters:
         # individually-typed parameters is a known checker gap.
         self._native.export_trace(path, **kwargs)  # ty: ignore[invalid-argument-type]
 
+    def statistics(self) -> Dict[str, object]:
+        """One-row summary of the matching events: count, mean/stddev dur,
+        min/max ts."""
+        return self._native.statistics()
+
+    def aggregate_partial(self) -> bytes:
+        """A combinable aggregation partial (opaque bytes) for a distributed
+        merge; combine several with merge_partials_to_table."""
+        return self._native.aggregate_partial()
+
+    def merge_partials_to_table(self, partials: List[bytes]) -> "DataFrame":
+        """Merge aggregate_partial() bytes from several ranks into one
+        DataFrame."""
+        return _wrap(self._native.merge_partials_to_table(partials))
+
+    def mv_source(self) -> List[str]:
+        """The materialized-view trace file(s) that would serve this query, or an
+        empty list if a read would scan the base."""
+        return self._native.mv_source()
+
+    def materialize_dir(self) -> str:
+        """Distributed row-MV coordinator: create and return the shared MV dir
+        (call on a view over the full file set)."""
+        return self._native.materialize_dir()
+
+    def register_materialized(self, dir: str) -> None:
+        """Write the MV manifest at ``dir`` over this view's base set."""
+        self._native.register_materialized(dir)
+
 
 class AggregatedTraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
     """The aggregated form of a TraceViewer (after group_by/agg); terminals
@@ -805,6 +867,11 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
     def join(self, other: "TraceViewer", how: str = "inner") -> "DataFrame":
         return _wrap(self._native.join(_unwrap(other), how))
 
+    def compare(self, other: "TraceViewer") -> "DataFrame":
+        """Aggregate both viewers and compare on the shared group key, returning
+        the difference DataFrame."""
+        return _wrap(self._native.compare(_unwrap(other)))
+
     def collect_typed(
         self,
         shard_begin: int = 0,
@@ -813,6 +880,307 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
     ) -> Dict[str, DataFrame]:
         result = self._native.collect_typed(shard_begin, shard_end, progress)
         return {k: _wrap(v) for k, v in result.items()}
+
+    def session(self) -> "Session":
+        """Open a Session that fuses several branch views over one shared scan of
+        this view. ``s.view()`` starts a branch (a full lazy TraceViewer); its
+        terminal (``collect``/``export``/``materialize``) returns a Handle. The
+        trace is decompressed once and every branch reads it. See
+        :class:`Session`."""
+        return Session(self)
+
+
+def _stats_to_dict(df: "DataFrame") -> Dict[str, object]:
+    """Shape a no-group (count, mean/std dur, min/max ts) collect into the same
+    dict TraceViewer.statistics returns."""
+    tbl = _require_pyarrow().table(df)
+    row = {c: tbl.column(c)[0].as_py() for c in tbl.column_names} if tbl.num_rows else {}
+    return {
+        "duration_count": row.get("count", 0),
+        "duration_mean_us": row.get("mean_dur", 0.0),
+        "duration_stddev_us": row.get("std_dur", 0.0),
+        "min_timestamp_us": row.get("min_ts", 0),
+        "max_timestamp_us": row.get("max_ts", 0),
+    }
+
+
+class Handle:
+    """A deferred result from a :class:`Session` branch. ``result()`` returns the
+    branch's value (a DataFrame for ``collect``, a stats dict for ``export``)
+    once the session has executed; reading it before then triggers execute."""
+
+    __slots__ = ("_session", "_value", "_resolved", "_transform", "_n_key")
+
+    def __init__(
+        self, session: "Session", transform: "Optional[Callable[[Any], Any]]" = None
+    ) -> None:
+        self._session = session
+        self._value: object = None
+        self._resolved = False
+        # Post-execute shaping of the native result (e.g. a 1-row DataFrame to a
+        # stats dict). Applied once in execute().
+        self._transform = transform
+        # Leading group-key column count of a collect result, for join/compare.
+        self._n_key = 0
+
+    def result(self) -> object:
+        if not self._resolved:
+            self._session.execute()
+        return self._value
+
+
+class Combine:
+    """A deferred post-scan combine of two Session handles (``join``/``compare``).
+    ``result()`` runs the one shared scan (if needed), then the combine."""
+
+    __slots__ = ("_session", "_fn", "_value", "_done")
+
+    def __init__(self, session: "Session", fn: "Callable[[], DataFrame]") -> None:
+        self._session = session
+        self._fn = fn
+        self._value: "Optional[DataFrame]" = None
+        self._done = False
+
+    def result(self) -> "DataFrame":
+        if not self._done:
+            self._session.execute()
+            self._value = self._fn()
+            self._done = True
+        assert self._value is not None
+        return self._value
+
+
+class SessionView(_ViewerFilters):
+    """A branch of a :class:`Session`: a full lazy view (the whole TraceViewer
+    builder API, via ``_ViewerFilters``) whose terminals register the branch on
+    the shared scan instead of running at once. Builder ops chain and stay a
+    SessionView; a terminal (``collect``/``export``/``materialize``) returns a
+    :class:`Handle`. Scan-wide settings (phase/time_range/time_scale/
+    memory_budget) come from the base view; setting them per-branch is honored
+    only where it does not change what the shared scan reads."""
+
+    _session: "Session"
+
+    def __init__(
+        self,
+        session: "Session",
+        native: "_ext._TraceViewer",
+        n_group: int = 0,
+        n_bucket: int = 0,
+    ) -> None:
+        self._native = native
+        self._session = session
+        # Leading group-key columns of a collect result: group_by keys + a
+        # time_bucket column. Tracked so a join knows the key width.
+        self._n_group = n_group
+        self._n_bucket = n_bucket
+
+    @property
+    def _n_key(self) -> int:
+        return self._n_group + self._n_bucket
+
+    def _rewrap(self, native: object) -> "SessionView":
+        return SessionView(
+            self._session,
+            native,  # ty: ignore[invalid-argument-type]
+            self._n_group,
+            self._n_bucket,
+        )
+
+    def group_by(self, *keys: str) -> "SessionView":
+        v = self._rewrap(self._native.group_by(*keys))
+        v._n_group = len(keys)
+        return v
+
+    def time_bucket(self, interval_us: "Union[int, float, str]") -> "SessionView":
+        v = super().time_bucket(interval_us)
+        v._n_bucket = 1
+        return v
+
+    def agg(self, *specs: "Union[str, Agg]") -> "SessionView":  # ty: ignore[invalid-method-override]
+        return self._rewrap(_viewer_agg(self._native, specs))
+
+    def agg_numeric_args(self) -> "SessionView":  # ty: ignore[invalid-method-override]
+        return self._rewrap(self._native.agg_numeric_args())
+
+    def collect(self) -> Handle:  # ty: ignore[invalid-method-override]
+        """Register an aggregation branch; ``result()`` is a DataFrame."""
+        handle = self._session._register("collect", self, None)
+        handle._n_key = self._n_key
+        return handle
+
+    def export(self, sink: str) -> Handle:
+        """Register a raw-event export branch to ``sink`` (NDJSON); ``result()``
+        is a stats dict."""
+        return self._session._register("export", self, sink)
+
+    def materialize(self) -> None:  # ty: ignore[invalid-method-override]
+        """Register a build-only rollup branch (no Handle)."""
+        self._session._register("materialize", self, None)
+
+    def statistics(self) -> Handle:  # ty: ignore[invalid-method-override]
+        """Register a summary-statistics branch (count, mean/stddev dur, min/max
+        ts) over the shared scan; ``result()`` is a dict, matching
+        :meth:`TraceViewer.statistics`. Reuses the collect aggregation."""
+        view = self.group_by().agg("count", "mean:dur", "std:dur", "min:ts", "max:ts")
+        return self._session._register("collect", view, None, transform=_stats_to_dict)
+
+    def events(self) -> Handle:
+        """Register a raw-events branch: the matching events (this branch's
+        filter/select) materialized into one DataFrame over the shared scan.
+        ``result()`` is a DataFrame. Holds the whole matching set, so filter it."""
+        return self._session._register("events", self, None)
+
+    def stream(  # ty: ignore[invalid-method-override]
+        self, batch_size: int = 65536
+    ) -> Handle:
+        """Register a raw-events branch yielding the matching events as DataFrame
+        chunks of ~``batch_size`` rows over the shared scan. ``result()`` is an
+        iterator of DataFrames. Fused, so the events are buffered during execute;
+        use the standalone ``TraceViewer.stream`` for bounded-memory streaming."""
+
+        def to_chunks(df: "DataFrame") -> "Iterator[DataFrame]":
+            n = df.num_rows
+            return (df.slice(i, min(batch_size, n - i)) for i in range(0, n, batch_size))
+
+        return self._session._register("events", self, None, transform=to_chunks)
+
+    def aggregate_partial(self) -> Handle:  # ty: ignore[invalid-method-override]
+        """Register a distributed-partial branch: aggregate this branch into an
+        opaque serialized partial (bytes) over the shared scan, for a distributed
+        merge (combine several with ``DataFrame.merge_partials_to_table``)."""
+        return self._session._register("partial", self, None)
+
+    def plugin(
+        self, plugin: "Union[str, type]", config: "Optional[Dict[str, Any]]" = None
+    ) -> Handle:
+        """Register a plugin/JIT branch fused into the shared scan. ``plugin`` is
+        a compiled ``.so`` path or a ``@jit.plugin`` class. ``result()`` is the
+        plugin's DataFrame result (a ``{name: DataFrame}`` dict when the plugin
+        emits several named results). The branch scans over the same pass as the
+        session's aggregations. Scan-wide settings come from the base; a plugin
+        does its own per-event filtering, so this branch's builder ops (filter/
+        select/...) do not narrow it."""
+        return self._session._register_plugin(plugin, config)
+
+
+class Session:
+    """A batch of branch views over one shared scan of a base TraceViewer.
+
+    ``s.view()`` starts a branch - a full lazy TraceViewer - and its terminal
+    (``collect``/``export``/``materialize``) registers it and returns a Handle.
+    :meth:`execute` (or a ``with`` block, or the first ``Handle.result()``) runs
+    every branch over one scan, so several views of the same trace cost one
+    decompression, not one per view. Branches are independent: each has its own
+    schema.
+
+    ::
+
+        with tv.session() as s:
+            a = s.view().group_by("cat").agg("count", "mean:dur").collect()
+            b = s.view().group_by("rank").agg("count").sort_by("count").collect()
+            c = s.view().filter('cat == "POSIX"').export("posix.pfw")
+        da, db = a.result(), b.result()
+    """
+
+    def __init__(self, viewer: "TraceViewer") -> None:
+        self._viewer = viewer
+        # (kind, branch-object, sink); branch-object is a SessionView, or a
+        # PluginHost for a plugin branch (both expose ._native to the native
+        # session executor).
+        self._branches: List[Tuple[str, Any, Optional[str]]] = []
+        self._handles: List[Optional[Handle]] = []
+        self._executed = False
+
+    def view(self) -> SessionView:
+        """Start a new branch view off the session's base (shares its files and
+        scan settings). Chain the per-branch builder API, then a terminal."""
+        return SessionView(self, self._viewer._native)
+
+    def _register(
+        self,
+        kind: str,
+        viewer: SessionView,
+        sink: Optional[str],
+        transform: "Optional[Callable[[Any], Any]]" = None,
+    ) -> Handle:
+        if self._executed:
+            raise RuntimeError("cannot add a branch after the session has executed")
+        handle = Handle(self, transform)
+        self._branches.append((kind, viewer, sink))
+        self._handles.append(None if kind == "materialize" else handle)
+        return handle
+
+    def _register_plugin(
+        self, plugin: "Union[str, type]", config: "Optional[Dict[str, Any]]"
+    ) -> Handle:
+        if self._executed:
+            raise RuntimeError("cannot add a branch after the session has executed")
+        # plugins imports dataframe, so import lazily to avoid a cycle.
+        from .plugins import PluginHost
+
+        host = PluginHost()
+        host.load(plugin, config)
+        host.resolve()
+
+        def shape(raw: "Dict[str, Any]") -> object:
+            shaped = {name: host._shape(name, val) for name, val in raw.items()}
+            return next(iter(shaped.values())) if len(shaped) == 1 else shaped
+
+        handle = Handle(self, shape)
+        self._branches.append(("plugin", host, None))
+        self._handles.append(handle)
+        return handle
+
+    def join(
+        self,
+        left: Handle,
+        right: Handle,
+        how: "Literal['inner', 'left', 'right', 'full', 'semi', 'anti']" = "inner",
+    ) -> "Combine":
+        """Equi-join two collect branches on their shared group key after the one
+        scan, the same join View.join uses (key columns, then ``l_``/``r_`` value
+        columns). ``result()`` is a DataFrame. Both branches must group the same
+        way."""
+
+        def combine() -> DataFrame:
+            ld, rd = left.result(), right.result()
+            return _wrap(ld._native.join(rd._native, how, left._n_key))  # type: ignore[union-attr]
+
+        return Combine(self, combine)
+
+    def compare(self, baseline: Handle, variant: Handle) -> "Combine":
+        """Compare two collect branches on the shared group key after the one
+        scan: key columns, ``l_``/``r_`` per metric, plus ``delta_``/``pct_``,
+        the same result View.compare produces. Both branches must group and
+        aggregate the same way."""
+
+        def combine() -> DataFrame:
+            ld, rd = baseline.result(), variant.result()
+            return _wrap(ld._native.compare_agg(rd._native, baseline._n_key))  # type: ignore[union-attr]
+
+        return Combine(self, combine)
+
+    def execute(self) -> None:
+        """Run every registered branch over one scan and resolve the Handles.
+        Idempotent: a second call is a no-op."""
+        if self._executed:
+            return
+        spec = [(kind, v._native, sink) for kind, v, sink in self._branches]
+        results = self._viewer._native._session_execute(spec)
+        for handle, native in zip(self._handles, results):
+            if handle is not None:
+                value = _wrap(native)
+                handle._value = handle._transform(value) if handle._transform else value
+                handle._resolved = True
+        self._executed = True
+
+    def __enter__(self) -> "Session":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if exc_type is None:
+            self.execute()
 
 
 _register(_ext._DataFrame, DataFrame)

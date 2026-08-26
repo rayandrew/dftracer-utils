@@ -7,14 +7,14 @@ and materializes it to an Arrow table surfaced to Python as a pyarrow.Table. The
 graph is then built in bulk from the columns (numpy + scipy), no per-edge Python.
 """
 
-import glob
 import gzip
-import os
 from pathlib import Path
 
 import pytest
 
 from dftracer.utils.plugins import PluginHost, unnest
+
+from .common import find_example_plugin
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -24,17 +24,7 @@ pa = pytest.importorskip("pyarrow")
 
 
 def _find_plugin(name: str, env_var: str) -> str:
-    env = os.environ.get(env_var)
-    if env and os.access(env, os.R_OK):
-        return env
-    for suffix in ("so", "dylib"):
-        hits = glob.glob(
-            str(_REPO_ROOT / "**" / "examples" / "plugins" / f"{name}.{suffix}"),
-            recursive=True,
-        )
-        if hits:
-            return hits[0]
-    return ""
+    return find_example_plugin(name, env_var, _REPO_ROOT)
 
 
 _PLUGIN = _find_plugin("process_file_edges", "DFTRACER_PROCESS_FILE_EDGES_PLUGIN_PATH")

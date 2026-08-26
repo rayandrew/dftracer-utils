@@ -81,6 +81,10 @@ struct AggAccum {
     std::uint64_t occ_te = 0;
 };
 
+// Sub-slots per occupancy bucket. Tied to the 64-bit `OccBucket::mask`, so it
+// is 64 by construction and cannot be raised without widening the mask.
+inline constexpr std::uint64_t OCC_SUB_SLOTS = 64;
+
 // Sub-slots of [bucket_start, bucket_start+w) that [ts, ts+dur) covers, as a
 // 64-bit mask: slot i is [bucket_start + i*w/64, bucket_start + (i+1)*w/64),
 // set when the interval touches any of it. busy for the bucket is popcount *
@@ -199,6 +203,11 @@ void resolve_group_keys(GroupMap& map, const ViewPlan& plan);
 // when the plan has no resolved-name group key.
 const GroupResolver* ensure_resolver(const ViewPlan& plan);
 
+// Feed pid -> rank harvested from PR metadata into the plan's resolver so the
+// Rank group key relabels pid groups post-aggregation. Empties `ranks`.
+void apply_ranks(const ViewPlan& plan,
+                 std::unordered_map<std::uint64_t, std::string>& ranks);
+
 // Resolve one group value from its stored hash to the name for `kind`
 // (FilePath/FileName/HostName); returns `hash` unchanged for other kinds.
 std::string resolve_group_value(const GroupResolver& r, GroupKey::Kind kind,
@@ -230,6 +239,12 @@ dftracer::utils::dataframe::DataFrame to_batch(const GroupMap& map,
 // merged further.
 void project_columns(dftracer::utils::dataframe::DataFrame& batch,
                      const std::vector<std::string>& select);
+
+// Post-aggregation finalize: to_batch, then the plan's sort_by/topk/
+// offset+limit/select. Apply only at the final result boundary, after all
+// merges. Shared by View::collect() and the ViewSession collect branches.
+dftracer::utils::dataframe::DataFrame finalize_collect_batch(
+    const GroupMap& map, const ViewPlan& plan);
 
 }  // namespace dftracer::utils::trace::views::detail
 

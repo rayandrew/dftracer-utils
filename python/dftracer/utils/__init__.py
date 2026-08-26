@@ -16,7 +16,11 @@ from .columnar import (  # noqa: F401
 )
 from .dataframe import (  # noqa: F401
     AggregatedTraceViewer,
+    Combine,
     DataFrame,
+    Handle,
+    Session,
+    SessionView,
     TraceViewer,
 )
 from .dftracer_utils_ext import (  # noqa: F401
@@ -141,6 +145,10 @@ __all__ = [
     "TimeUnit",
     "TraceViewer",
     "AggregatedTraceViewer",
+    "Session",
+    "SessionView",
+    "Handle",
+    "Combine",
     "DataFrame",
     "Series",
     "Runtime",

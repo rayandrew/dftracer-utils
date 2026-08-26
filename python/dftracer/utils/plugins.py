@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
+from .dataframe import DataFrame
 from .dftracer_utils_ext import PluginHost as _NativePluginHost
 
 if TYPE_CHECKING:
@@ -36,7 +37,7 @@ JSONValue = Union[str, int, float, bool, None, List["JSONValue"], Dict[str, "JSO
 
 # A run() map result value: emitted bytes, an eager Arrow table, or a pull-based
 # reader when the map streamed to multiple batches.
-_RunResult = Union[bytes, "pa.Table", "pa.RecordBatchReader"]
+_RunResult = Union[bytes, "DataFrame", "pa.Table", "pa.RecordBatchReader"]
 
 
 def unnest(
@@ -127,37 +128,39 @@ class PluginHost:
 
         A result's type depends on what the plugin emitted:
 
+        - An in-memory map (the default) -> our
+          :class:`~dftracer.utils.DataFrame`, zero-copy from the plugin's Arrow
+          output. Call ``.to_arrow()`` / ``.to_pandas()`` for other shapes.
+        - A map with a nested value the columnar engine cannot import yet -> a
+          ``pyarrow.Table`` fallback.
+        - A streamed map (``DFTRACER_PLUGIN_MAP_STREAM=1``, spilled to several
+          batches) -> a pull-based ``pyarrow.RecordBatchReader``, left lazy.
+          Call ``.read_all()`` for a table.
         - ``emit_result`` bytes -> ``bytes``.
-        - A map that materialized to a single Arrow batch (the default, and any
-          map that fit in memory) -> an eager Arrow table (``pa.table(result)``
-          works, as do ``.column`` / ``.num_rows``).
-        - A map materialized as multiple batches (streamed: the runtime has map
-          streaming enabled via ``DFTRACER_PLUGIN_MAP_STREAM=1`` and the map
-          spilled/partitioned into more than one batch) -> a pull-based
-          ``pyarrow.RecordBatchReader``. Call ``.read_all()`` for a table. This
-          keeps peak memory near one partition instead of the whole result.
         """
-        return self._rename_columns(self._native.run(traces, index_dir, auto_index))
+        raw = self._native.run(traces, index_dir, auto_index)
+        return {name: self._shape(name, obj) for name, obj in raw.items()}
 
-    def _rename_columns(self, results: "Dict[str, _RunResult]") -> "Dict[str, _RunResult]":
-        """Rename jit product value columns v0.. to the field names a @jit.plugin
-        declared; non-jit results are untouched."""
-        if not self._renames:
-            return results
+    def _shape(self, name: str, obj: object) -> "_RunResult":
+        """Wrap an in-memory tabular result as a DataFrame, renaming jit v0..
+        columns to the declared field names. Readers and bytes pass through."""
         import pyarrow as pa
 
-        for name, fields in self._renames.items():
-            obj = results.get(name)
-            if obj is None:
-                continue
-            table = pa.table(obj)
+        if isinstance(obj, bytes) or isinstance(obj, pa.RecordBatchReader):
+            return obj
+        table = pa.table(obj)
+        fields = self._renames.get(name)
+        if fields:
             cols = list(table.column_names)
             for i, field in enumerate(fields):
                 v = f"v{i}"
                 if v in cols:
                     cols[cols.index(v)] = field
-            results[name] = table.rename_columns(cols)
-        return results
+            table = table.rename_columns(cols)
+        try:
+            return DataFrame.from_arrow(table)
+        except ValueError:
+            return table  # nested Arrow type the engine cannot import yet
 
     @property
     def stats(self) -> Optional[Dict[str, int]]:

@@ -19,6 +19,17 @@ def _indexed(env):
     return gz
 
 
+def _make_trace(env, name, rows):
+    import os
+
+    path = os.path.join(env.temp_dir, name)
+    with gzip.open(path, "wt") as f:
+        f.write("\n".join(json.dumps(r) for r in rows) + "\n")
+    with dftu_utils.Indexer(files=[path]) as indexer:
+        indexer.ensure_indexed()
+    return path
+
+
 class TestTraceViewer:
     def test_collect_group_by_agg_returns_arrow(self):
         with Environment(lines=200) as env:
@@ -270,6 +281,169 @@ class TestTraceViewer:
         assert df.loc["2", "count"] == 3 and df.loc["2", "sumsq_dur"] == 3 * 20**2
         assert df.loc["3", "count"] == 1 and df.loc["3", "sumsq_dur"] == 1 * 5**2
 
+    def test_session_fuses_branches_with_parity(self, tmp_path):
+        """A session runs several aggregation branches over one scan; each branch
+        matches its standalone collect(), and per-branch filters/rank work."""
+        gz = str(tmp_path / "sess.pfw.gz")
+        with gzip.open(gz, "wt") as f:
+            f.write(
+                '{"ph":"M","name":"PR","cat":"dftracer","pid":100,"tid":0,'
+                '"args":{"name":"rank","value":"0"}}\n'
+            )
+            f.write(
+                '{"ph":"M","name":"PR","cat":"dftracer","pid":200,"tid":0,'
+                '"args":{"name":"rank","value":"1"}}\n'
+            )
+            for i in range(3):
+                f.write(
+                    '{"ph":"X","name":"read","cat":"POSIX","pid":100,"tid":1,'
+                    '"ts":%d,"dur":5,"args":{}}\n' % (1000 + i)
+                )
+            for i in range(2):
+                f.write(
+                    '{"ph":"X","name":"write","cat":"STDIO","pid":200,"tid":1,'
+                    '"ts":%d,"dur":7,"args":{}}\n' % (2000 + i)
+                )
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+            ix.ensure_indexed()
+        out = str(tmp_path / "posix.pfw")
+        tv = dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
+        with tv.session() as s:
+            by_cat = s.view().group_by("cat").agg("count", "mean:dur").collect()
+            by_rank = s.view().group_by("rank").agg("count").collect()
+            posix = s.view().filter('cat == "POSIX"').group_by("cat").agg("count").collect()
+            exported = s.view().filter('cat == "POSIX"').export(out)
+
+        cat = pa.table(by_cat.result()).to_pandas().set_index("cat")
+        rank = pa.table(by_rank.result()).to_pandas().set_index("rank")
+        pox = pa.table(posix.result()).to_pandas().set_index("cat")
+
+        assert cat.loc["posix", "count"] == 3 and cat.loc["stdio", "count"] == 2
+        # rank resolves the pid groups via the PR metadata harvested in the scan.
+        assert rank.loc["0", "count"] == 3 and rank.loc["1", "count"] == 2
+        # per-branch filter is independent of the other branches.
+        assert list(pox.index) == ["posix"] and pox.loc["posix", "count"] == 3
+        # the export branch streamed just its matching events over the same scan.
+        assert exported.result()["events_matched"] == 3
+        lines = [json.loads(line) for line in open(out) if line.strip()]
+        assert len(lines) == 3 and all(e["cat"] == "POSIX" for e in lines)
+
+        # per-branch sort_by/limit apply to that branch only.
+        with tv.session() as s2:
+            top = s2.view().group_by("cat").agg("count").sort_by("count", True).limit(1).collect()
+        top_df = pa.table(top.result()).to_pandas()
+        assert len(top_df) == 1 and top_df.iloc[0]["cat"] == "posix"
+
+        # statistics branch matches the standalone TraceViewer.statistics().
+        with tv.session() as s3:
+            allst = s3.view().statistics()
+            poxst = s3.view().filter('cat == "POSIX"').statistics()
+        assert allst.result() == tv.statistics()
+        assert poxst.result()["duration_count"] == 3
+
+        # join / compare of two collect branches over the one scan.
+        with tv.session() as s5:
+            a = s5.view().group_by("cat").agg("count").collect()
+            b = s5.view().filter('cat == "POSIX"').group_by("cat").agg("count").collect()
+            j = s5.join(a, b, "left")
+            c = s5.compare(a, b)
+        jdf = pa.table(j.result()).to_pandas().set_index("cat")
+        assert sorted(jdf.columns) == ["l_count", "r_count"]
+        assert jdf.loc["posix", "l_count"] == 3 and jdf.loc["posix", "r_count"] == 3
+        cdf = pa.table(c.result()).to_pandas().set_index("cat")
+        assert {"l_count", "r_count", "delta_count", "pct_count"} <= set(cdf.columns)
+        assert (
+            cdf.loc["stdio", "r_count"] != cdf.loc["stdio", "r_count"]
+        )  # NaN: stdio absent in variant
+
+        # aggregate_partial branch: a raw serialized partial that merges back to
+        # the same table a direct collect produces.
+        with tv.session() as s6:
+            p = s6.view().group_by("cat").agg("count").aggregate_partial()
+        part = p.result()
+        assert isinstance(part, bytes) and len(part) > 0
+        merged = (
+            pa.table(tv.group_by("cat").agg("count").merge_partials_to_table([part]))
+            .to_pandas()
+            .set_index("cat")
+        )
+        assert merged["count"].to_dict() == {"posix": 3, "stdio": 2}
+
+        # events (raw events -> DataFrame) and stream (chunks) fuse with collect.
+        with tv.session() as s4:
+            ev = s4.view().events()
+            evp = s4.view().filter('cat == "POSIX"').select("cat", "dur").events()
+            stc = s4.view().stream(batch_size=2)
+        edf = pa.table(ev.result()).to_pandas()
+        assert len(edf) == 5 and "ts" in edf.columns
+        pdf = pa.table(evp.result()).to_pandas()
+        assert len(pdf) == 3 and sorted(pdf.columns) == ["cat", "dur"]
+        assert (pdf["cat"] == "POSIX").all()
+        chunks = list(stc.result())
+        assert [c.num_rows for c in chunks] == [2, 2, 1]
+
+        # Parity: the fused branch equals the standalone aggregation.
+        standalone = (
+            pa.table(tv.group_by("cat").agg("count", "mean:dur").collect())
+            .to_pandas()
+            .set_index("cat")
+            .sort_index()
+        )
+        assert standalone["count"].to_dict() == cat.sort_index()["count"].to_dict()
+
+    def test_session_result_triggers_lazy_execute(self, tmp_path):
+        """Reading a Handle before an explicit execute() runs the shared scan."""
+        gz = str(tmp_path / "e.pfw.gz")
+        with gzip.open(gz, "wt") as f:
+            f.write(
+                '{"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,'
+                '"ts":1000,"dur":5,"args":{}}\n'
+            )
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+            ix.ensure_indexed()
+        tv = dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
+        s = tv.session()
+        h = s.view().group_by("cat").agg("count").collect()
+        # no explicit execute(): the first result() triggers the shared scan.
+        assert pa.table(h.result()).num_rows == 1
+
+    def test_group_by_rank_resolves_pid_via_pr_metadata(self, tmp_path):
+        """group_by("rank") harvests pid -> rank from PR metadata at query time."""
+        gz = str(tmp_path / "rank.pfw.gz")
+        with gzip.open(gz, "wt") as f:
+            f.write(
+                '{"ph":"M","name":"PR","cat":"dftracer","pid":100,"tid":0,'
+                '"args":{"name":"rank","value":"0"}}\n'
+            )
+            f.write(
+                '{"ph":"M","name":"PR","cat":"dftracer","pid":200,"tid":0,'
+                '"args":{"name":"rank","value":"1"}}\n'
+            )
+            for i in range(3):
+                f.write(
+                    '{"ph":"X","name":"read","cat":"POSIX","pid":100,"tid":1,'
+                    '"ts":%d,"dur":5,"args":{}}\n' % (1000 + i)
+                )
+            for i in range(2):
+                f.write(
+                    '{"ph":"X","name":"read","cat":"POSIX","pid":200,"tid":1,'
+                    '"ts":%d,"dur":5,"args":{}}\n' % (2000 + i)
+                )
+        with dftu_utils.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+            ix.ensure_indexed()
+        df = (
+            pa.table(
+                dftu_utils.TraceViewer(gz, index_path=str(tmp_path))
+                .group_by("rank")
+                .agg("count")
+                .collect()
+            )
+            .to_pandas()
+            .set_index("rank")
+        )
+        assert df.loc["0", "count"] == 3
+        assert df.loc["1", "count"] == 2
+
     def test_size_derived_from_ret_for_io(self, tmp_path):
         """For POSIX read/write, ret is the byte count, so size == sum(ret)."""
         gz = str(tmp_path / "io.pfw.gz")
@@ -367,3 +541,144 @@ class TestTraceViewer:
             # base is unchanged by the derived view's filter.
             assert base.statistics()["duration_count"] == 50
             assert narrowed.statistics()["duration_count"] < 50
+
+    def test_group_by_resolves_any_field_and_nested_paths(self):
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "ph": "X",
+                    "name": "op",
+                    "cat": "POSIX",
+                    "type": typ,
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": ts,
+                    "dur": 10,
+                    "args": {"meta": {"host": host}, "tags": [tag0, "y"], "n": {"v": v}},
+                }
+                for typ, host, tag0, v, ts in [
+                    ("c_app", "A", "x", 7, 1000),
+                    ("c_app", "A", "x", 7, 1100),
+                    ("posix", "B", "z", 9, 1200),
+                    ("posix", "B", "z", 9, 1300),
+                ]
+            ]
+            gz = _make_trace(env, "schemaless.pfw.gz", rows)
+
+            def counts(col, key):
+                t = pa.table(TraceViewer(gz).group_by(key).agg("count").collect())
+                return {
+                    k: int(v)
+                    for k, v in zip(t.column(col).to_pylist(), t.column("count").to_pylist())
+                }
+
+            # Top-level "type" (not a POD scalar) and nested/indexed args resolve
+            # the same way filter and select do.
+            assert counts("type", "type") == {"c_app": 2, "posix": 2}
+            assert counts("args.meta.host", "args.meta.host") == {"A": 2, "B": 2}
+            assert counts("args.tags[0]", "args.tags[0]") == {"x": 2, "z": 2}
+            assert counts("args.tags.0", "args.tags.0") == {"x": 2, "z": 2}
+
+            t = pa.table(TraceViewer(gz).group_by("args.meta.host").agg("mean:args.n.v").collect())
+            m = {
+                k: v
+                for k, v in zip(
+                    t.column("args.meta.host").to_pylist(),
+                    t.column("mean_args.n.v").to_pylist(),
+                )
+            }
+            assert m["A"] == 7.0 and m["B"] == 9.0
+
+    def test_top_level_field_is_not_shadowed_by_same_named_arg(self):
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "ph": "X",
+                    "name": "kv",
+                    "cat": "MPI",
+                    "type": "mpi",  # top-level schema field
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 1000 + i,
+                    "dur": 5,
+                    "args": {"type": i + 1},  # unrelated same-named param
+                }
+                for i in range(4)
+            ] + [
+                {
+                    "ph": "X",
+                    "name": "send",
+                    "cat": "MPI",
+                    "type": "mpi",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 2000 + i,
+                    "dur": 5,
+                    "args": {"count": 10},
+                }
+                for i in range(6)
+            ]
+            gz = _make_trace(env, "shadow.pfw.gz", rows)
+
+            def counts(col, key):
+                t = pa.table(TraceViewer(gz).group_by(key).agg("count").collect())
+                return {
+                    k: int(v)
+                    for k, v in zip(t.column(col).to_pylist(), t.column("count").to_pylist())
+                }
+
+            # Bare "type" is the top-level field, never the args param.
+            by_type = counts("type", "type")
+            assert by_type == {"mpi": 10}
+            # The param is still reachable through the explicit args path.
+            assert counts("args.type", "args.type") == {"1": 1, "2": 1, "3": 1, "4": 1, "": 6}
+
+    def test_occupancy_invariants_and_cell_knob(self):
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "ph": "X",
+                    "name": name,
+                    "cat": "POSIX",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": ts,
+                    "dur": dur,
+                    "args": {},
+                }
+                for name, ts, dur in [
+                    ("overlap", 1000, 100),  # union 150 < sum 200
+                    ("overlap", 1050, 100),
+                    ("serial", 1000, 100),  # disjoint, union 200
+                    ("serial", 2000, 100),
+                ]
+            ]
+            gz = _make_trace(env, "occ.pfw.gz", rows)
+            t = pa.table(
+                TraceViewer(gz)
+                .time_range(900, 2200)
+                .occ_cell(5)
+                .group_by("name")
+                .agg("count", "sum:dur", "busy", "concurrency", "utilization")
+                .collect()
+            )
+            assert "busy_cell_us" in t.column_names
+            cols = {c: t.column(c).to_pylist() for c in t.column_names}
+            row = {name: i for i, name in enumerate(cols["name"])}
+
+            def g(name, col):
+                return cols[col][row[name]]
+
+            assert int(g("overlap", "busy_cell_us")) == 5
+            # overlap: busy clamps to the makespan (150); serial: to sum(dur).
+            assert int(g("overlap", "sum_dur")) == 200
+            assert int(g("overlap", "busy")) == 150
+            assert abs(g("overlap", "concurrency") - 200 / 150) < 1e-9
+            assert abs(g("overlap", "utilization") - 1.0) < 1e-9
+            assert int(g("serial", "busy")) == 200
+            assert abs(g("serial", "concurrency") - 1.0) < 1e-9
+            # Invariants hold everywhere a coverage bitmap can only overshoot.
+            for i in range(t.num_rows):
+                assert cols["busy"][i] <= cols["sum_dur"][i]
+                assert cols["concurrency"][i] >= 1.0 - 1e-9
+                assert cols["utilization"][i] <= 1.0 + 1e-9

@@ -420,8 +420,13 @@ dftracer_view
 
 **Aggregation:**
 
-- ``--group-by <cols>`` - Aggregate: group by columns, comma-separated
-  (``name``, ``cat``, ``pid``, ``tid``, ``fhash``, ``arg:KEY``)
+- ``--group-by <cols>`` - Aggregate: group by columns, comma-separated. Any
+  field name works (top-level then args); named dims are ``name``, ``cat``,
+  ``pid``, ``tid``, ``fhash``, ``hhash``, ``io_cat``, ``acc_pat``,
+  ``file_path``, ``file_name``, ``host_name``, ``rank`` (pid resolved to MPI
+  rank via ``PR`` metadata), or ``arg:KEY`` for an args
+  field. Dotted/bracketed paths descend nested args (``args.meta.host``,
+  ``args.tags[0]``) - see :doc:`guides/analysis/aggregation`
 - ``--agg <reducers>`` - Aggregate: reducers, comma-separated (``count``,
   ``sum:FIELD``, ``min:FIELD``, ``max:FIELD``, ``mean:FIELD``, ``var:FIELD``,
   ``std:FIELD``, ``skew:FIELD``, ``kurt:FIELD``, ``pNN:FIELD`` e.g.
@@ -429,6 +434,9 @@ dftracer_view
   ``concurrency``, ``utilization``, ``active`` - see
   :doc:`guides/analysis/aggregation`)
 - ``--time-bucket <us>`` - Aggregate into time buckets of N microseconds
+- ``--occ-cell <us>`` - Occupancy cell size (busy quantum) for
+  ``busy``/``concurrency``/``utilization``; finer resolves overlap on short
+  events (honored with ``--time-range``, default 64 us)
 - ``--counters`` - Emit the aggregation as ``ph=C`` counter events
 - ``--format <fmt>`` - Aggregate output format: ``text`` (default) or
   ``arrow`` (IPC file)

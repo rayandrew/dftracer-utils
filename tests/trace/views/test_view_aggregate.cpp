@@ -3,15 +3,50 @@
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
+#include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <doctest/doctest.h>
 
 #include <array>
+#include <atomic>
 #include <map>
 
 #include "test_view_common.h"
 
 namespace {
+
+// Minimal external Fold for the fold-factory seam: counts events over the
+// shared scan.
+struct CountFold : dftracer::utils::trace::views::detail::Fold {
+    std::shared_ptr<std::atomic<std::uint64_t>> total;
+    std::uint64_t local = 0;
+    explicit CountFold(std::shared_ptr<std::atomic<std::uint64_t>> t)
+        : total(std::move(t)) {}
+    bool accepts(const dftracer::utils::trace::views::detail::ScanShape&)
+        const override {
+        return true;
+    }
+    std::unique_ptr<dftracer::utils::trace::views::detail::Fold> slice()
+        const override {
+        return std::make_unique<CountFold>(total);
+    }
+    void step(
+        const dftracer::utils::trace::views::detail::FoldBatch& b) override {
+        local += b.events.size();
+    }
+    void seal_unit(
+        const dftracer::utils::trace::views::detail::ScanUnit&) override {}
+    void drop_unit(
+        const dftracer::utils::trace::views::detail::ScanUnit&) override {}
+    void merge(dftracer::utils::trace::views::detail::Fold& o) override {
+        local += static_cast<CountFold&>(o).local;
+    }
+    dftracer::utils::coro::CoroTask<bool> finalize(
+        const dftracer::utils::trace::views::detail::CoverageSet&) override {
+        total->fetch_add(local);
+        co_return true;
+    }
+};
 
 struct HistBin {
     double lower;
@@ -73,6 +108,62 @@ TEST_SUITE("View") {
         REQUIRE(tk_view.num_rows() == 1);
         CHECK(bnum(tk_view, 0, "n") == bnum(tk_vec, 0, "n"));
         CHECK(bstr(tk_view, 0, "cat") == "posix");
+    }
+
+    TEST_CASE(
+        "View - session collect(View) applies each branch's full plan over one "
+        "scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_mixed_trace(env, 30, 20);  // posix=30, stdio=20
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+
+        auto run = base.session();
+        auto a = run.collect(base.group_by({GroupKey::cat()})
+                                 .agg({{AggOp::Count, "", "n"}})
+                                 .sort_by("n", true));
+        auto b = run.collect(
+            base.filter(Query::from_string(R"(cat == "POSIX")").value())
+                .group_by({GroupKey::cat()})
+                .agg({{AggOp::Count, "", "n"}}));
+        run.execute().get();
+
+        REQUIRE(a->num_rows() == 2);
+        CHECK(bstr(*a, 0, "cat") == "posix");  // count desc: 30 before 20
+        CHECK(bnum(*a, 0, "n") == 30);
+        CHECK(bnum(*a, 1, "n") == 20);
+
+        REQUIRE(b->num_rows() == 1);  // per-branch filter is independent
+        CHECK(bstr(*b, 0, "cat") == "posix");
+        CHECK(bnum(*b, 0, "n") == 30);
+    }
+
+    TEST_CASE(
+        "View - session fold factory rides the shared scan with a collect") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_mixed_trace(env, 30, 20);  // 50 events
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+
+        auto run = base.session();
+        auto cat = run.collect(
+            base.group_by({GroupKey::cat()}).agg({{AggOp::Count, "", "n"}}));
+        auto total = std::make_shared<std::atomic<std::uint64_t>>(0);
+        run.attach_fold_factory(
+            [total](dftracer::utils::StringIntern&)
+                -> std::unique_ptr<
+                    dftracer::utils::trace::views::detail::Fold> {
+                return std::make_unique<CountFold>(total);
+            },
+            []() {});
+        run.execute().get();
+
+        // The factory fold counted every event over the same scan the collect
+        // aggregated (posix 30 + stdio 20).
+        CHECK(total->load() == 50);
+        REQUIRE(cat->num_rows() == 2);
     }
 
     TEST_CASE("View - agg accepts unified F field expressions") {
@@ -859,6 +950,45 @@ TEST_SUITE("View") {
         CHECK(bnum(table, 0, "max_dur") == doctest::Approx(99));  // max_dur
     }
 
+    TEST_CASE("View - group_by rank resolves pid via PR metadata") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // Two processes, each declared once by a PR metadata record mapping
+        // pid -> rank. Grouping by rank harvests that map during the scan and
+        // relabels the pid groups to "0"/"1" at the resolver, like host_name.
+        std::string pfw = env.get_dir() + "/rank.pfw";
+        {
+            std::ofstream ofs(pfw);
+            ofs << R"({"ph":"M","name":"PR","cat":"dftracer","pid":100,"tid":0,"args":{"name":"rank","value":"0"}})"
+                << "\n"
+                << R"({"ph":"M","name":"PR","cat":"dftracer","pid":200,"tid":0,"args":{"name":"rank","value":"1"}})"
+                << "\n";
+            for (int i = 0; i < 3; ++i)
+                ofs << R"({"ph":"X","name":"read","cat":"POSIX","pid":100,"tid":1,"ts":)"
+                    << (1000 + i * 10) << R"(,"dur":5,"args":{}})" << "\n";
+            for (int i = 0; i < 2; ++i)
+                ofs << R"({"ph":"X","name":"read","cat":"POSIX","pid":200,"tid":1,"ts":)"
+                    << (2000 + i * 10) << R"(,"dur":5,"args":{}})" << "\n";
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        auto table = View::from_file(gz, idx)
+                         .group_by({GroupKey::rank()})
+                         .agg({{AggOp::Count, "", "n"}})
+                         .collect()
+                         .get();
+
+        REQUIRE(bhas(table, "rank"));
+        std::map<std::string, double> n;
+        for (std::int64_t i = 0; i < table.num_rows(); ++i)
+            n[bstr(table, i, "rank")] = bnum(table, i, "n");
+        CHECK(n["0"] == doctest::Approx(3));
+        CHECK(n["1"] == doctest::Approx(2));
+    }
+
     TEST_CASE(
         "View - map_batches folds a custom partial over the scan and reduces "
         "it") {
@@ -1162,5 +1292,184 @@ TEST_SUITE("View") {
             .export_json(reread)
             .get();
         CHECK(reread.lines().size() == lines.size());
+    }
+
+    TEST_CASE(
+        "View - occupancy busy holds its invariants and honors occ_cell") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // "overlap" has two overlapping intervals (union 150 < sum 200), so
+        // busy clamps to the makespan; "serial" has two disjoint ones, so busy
+        // clamps to sum(dur). occ_cell divides every ts/dur, so the grid is
+        // exact.
+        std::string pfw = env.get_dir() + "/occ.pfw";
+        {
+            std::ofstream ofs(pfw);
+            auto ev = [&](const char* name, long ts, long dur) {
+                ofs << R"({"ph":"X","name":")" << name
+                    << R"(","cat":"POSIX","pid":1,"tid":1,"ts":)" << ts
+                    << R"(,"dur":)" << dur << R"(,"args":{}})" << "\n";
+            };
+            ev("overlap", 1000, 100);
+            ev("overlap", 1050, 100);
+            ev("serial", 1000, 100);
+            ev("serial", 2000, 100);
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+        dataframe::DataFrame b =
+            View::from_file(gz, idx)
+                .time_range(900, 2200)
+                .occ_cell(5)
+                .group_by({GroupKey::name()})
+                .agg({{AggOp::Count, "", "n"},
+                      {AggOp::Sum, "dur", "sum_dur"},
+                      {AggOp::Busy, "", "busy"},
+                      {AggOp::Concurrency, "", "concurrency"},
+                      {AggOp::Utilization, "", "utilization"}})
+                .collect()
+                .get();
+
+        REQUIRE(bhas(b, "busy_cell_us"));
+        auto row_of = [&](const std::string& nm) {
+            for (std::int64_t i = 0; i < b.num_rows(); ++i)
+                if (bstr(b, i, "name") == nm) return i;
+            return static_cast<std::int64_t>(-1);
+        };
+        const std::int64_t ov = row_of("overlap");
+        const std::int64_t se = row_of("serial");
+        REQUIRE(ov >= 0);
+        REQUIRE(se >= 0);
+
+        CHECK(bnum(b, ov, "busy_cell_us") == 5);
+        // overlap: union 150 == makespan, so busy is clamped to 150.
+        CHECK(bnum(b, ov, "sum_dur") == 200);
+        CHECK(bnum(b, ov, "busy") == 150);
+        CHECK(bnum(b, ov, "concurrency") == doctest::Approx(200.0 / 150.0));
+        CHECK(bnum(b, ov, "utilization") == doctest::Approx(1.0));
+        // serial: disjoint, so busy is clamped to sum(dur) and concurrency
+        // is 1.
+        CHECK(bnum(b, se, "busy") == 200);
+        CHECK(bnum(b, se, "concurrency") == doctest::Approx(1.0));
+
+        for (std::int64_t i = 0; i < b.num_rows(); ++i) {
+            CHECK(bnum(b, i, "busy") <= bnum(b, i, "sum_dur"));
+            CHECK(bnum(b, i, "concurrency") >= 1.0 - 1e-9);
+            CHECK(bnum(b, i, "utilization") <= 1.0 + 1e-9);
+        }
+    }
+
+    TEST_CASE("View - group_by resolves any field, top-level and nested") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string pfw = env.get_dir() + "/schemaless.pfw";
+        {
+            std::ofstream ofs(pfw);
+            auto ev = [&](const char* type, const char* host, const char* tag0,
+                          int v, long ts) {
+                ofs << R"({"ph":"X","name":"op","cat":"POSIX","type":")" << type
+                    << R"(","pid":1,"tid":1,"ts":)" << ts
+                    << R"(,"dur":10,"args":{"meta":{"host":")" << host
+                    << R"("},"tags":[")" << tag0 << R"(","y"],"n":{"v":)" << v
+                    << R"(}}})" << "\n";
+            };
+            ev("c_app", "A", "x", 7, 1000);
+            ev("c_app", "A", "x", 7, 1100);
+            ev("posix", "B", "z", 9, 1200);
+            ev("posix", "B", "z", 9, 1300);
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+        auto counts = [&](const std::string& col, const GroupKey& gk) {
+            dataframe::DataFrame b = View::from_file(gz, idx)
+                                         .group_by({gk})
+                                         .agg({{AggOp::Count, "", "n"}})
+                                         .collect()
+                                         .get();
+            std::map<std::string, double> m;
+            for (std::int64_t i = 0; i < b.num_rows(); ++i)
+                m[bstr(b, i, col)] = bnum(b, i, "n");
+            return m;
+        };
+
+        // Top-level "type" is not a POD scalar; it resolves to the raw string.
+        auto by_type = counts("type", GroupKey::field("type"));
+        CHECK(by_type["c_app"] == 2);
+        CHECK(by_type["posix"] == 2);
+
+        auto by_host =
+            counts("args.meta.host", GroupKey::field("args.meta.host"));
+        CHECK(by_host["A"] == 2);
+        CHECK(by_host["B"] == 2);
+
+        // Bracket and dot-numeric array index agree.
+        for (const char* p : {"args.tags[0]", "args.tags.0"}) {
+            auto by_tag = counts(p, GroupKey::field(p));
+            CHECK(by_tag["x"] == 2);
+            CHECK(by_tag["z"] == 2);
+        }
+
+        dataframe::DataFrame b =
+            View::from_file(gz, idx)
+                .group_by({GroupKey::field("args.meta.host")})
+                .agg({{AggOp::Mean, "args.n.v", "mv"}})
+                .collect()
+                .get();
+        std::map<std::string, double> mv;
+        for (std::int64_t i = 0; i < b.num_rows(); ++i)
+            mv[bstr(b, i, "args.meta.host")] = bnum(b, i, "mv");
+        CHECK(mv["A"] == doctest::Approx(7.0));
+        CHECK(mv["B"] == doctest::Approx(9.0));
+    }
+
+    TEST_CASE(
+        "View - a same-named arg never shadows a top-level schema field") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string pfw = env.get_dir() + "/shadow.pfw";
+        {
+            std::ofstream ofs(pfw);
+            // Top-level type "mpi" on every record; four also carry an
+            // unrelated args.type parameter (the shadowing trap).
+            for (int i = 0; i < 4; ++i)
+                ofs << R"({"ph":"X","name":"kv","cat":"MPI","type":"mpi","pid":1,"tid":1,"ts":)"
+                    << (1000 + i) << R"(,"dur":5,"args":{"type":)" << (i + 1)
+                    << R"(}})" << "\n";
+            for (int i = 0; i < 6; ++i)
+                ofs << R"({"ph":"X","name":"send","cat":"MPI","type":"mpi","pid":1,"tid":1,"ts":)"
+                    << (2000 + i) << R"(,"dur":5,"args":{"count":10}})" << "\n";
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+        auto counts = [&](const std::string& col, const GroupKey& gk) {
+            dataframe::DataFrame b = View::from_file(gz, idx)
+                                         .group_by({gk})
+                                         .agg({{AggOp::Count, "", "n"}})
+                                         .collect()
+                                         .get();
+            std::map<std::string, double> m;
+            for (std::int64_t i = 0; i < b.num_rows(); ++i)
+                m[bstr(b, i, col)] = bnum(b, i, "n");
+            return m;
+        };
+
+        // Bare "type" is the top-level field for every record, not the param.
+        auto by_type = counts("type", GroupKey::field("type"));
+        CHECK(by_type["mpi"] == 10);
+        CHECK(by_type.count("1") == 0);
+
+        // The args parameter stays reachable through the explicit paths.
+        auto by_args_type = counts("args.type", GroupKey::field("args.type"));
+        CHECK(by_args_type["1"] == 1);
+        CHECK(by_args_type["4"] == 1);
+        auto by_arg = counts("type", GroupKey::of_arg("type"));
+        CHECK(by_arg["1"] == 1);
+        CHECK(by_arg.count("mpi") == 0);
     }
 }

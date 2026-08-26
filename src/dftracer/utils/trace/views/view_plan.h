@@ -46,6 +46,11 @@ struct ViewPlan {
     bool emit_all_metadata = false;  // harvest every hash-metadata record
 
     std::uint64_t time_bucket_us = 0;
+    /// Target occupancy cell size (busy quantum), microseconds; 0 = engine
+    /// default. The per-bucket coverage mask has 64 sub-slots, so this sets
+    /// occ_bucket_us = occ_cell_us * 64. Only honored when a time_range bounds
+    /// the window; without one the grid falls back to a coarse default.
+    std::uint64_t occ_cell_us = 0;
     /// Multiply ts/dur/te by this to normalize from the trace's native time
     /// unit to a target (source_ns / target_ns; 1.0 = no scaling). Applied
     /// before time_bucket so bucketing is in the target unit.

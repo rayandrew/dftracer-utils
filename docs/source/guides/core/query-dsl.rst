@@ -29,10 +29,15 @@ Start from a field, compare it, and combine.
 
       ``F.dur`` is shorthand for ``Field("dur")``. For a nested or
       non-identifier field name, call or subscript it:
-      ``F("args.level")`` or ``F["args.io.size"]``. This is the same ``F`` used
-      for columnar value expressions (see :doc:`../../api/columnar`); a pure
-      predicate pushes down to the index, while a predicate that mixes in value
-      ops is refused by ``filter()`` (compute it with ``.apply()`` instead).
+      ``F("args.level")`` or ``F["args.io.size"]``. A path descends objects by
+      ``.`` and indexes arrays by ``[N]`` or a bare numeric segment
+      (``args.tags[0]`` and ``args.tags.0`` are the same); a bare name (no
+      ``.``/``[``) resolves top-level then under ``args``. The same paths group
+      and aggregate (see :doc:`../analysis/aggregation`). This is the same ``F``
+      used for columnar value expressions (see :doc:`../../api/columnar`); a
+      pure predicate pushes down to the index, while a predicate that mixes in
+      value ops is refused by ``filter()`` (compute it with ``.apply()``
+      instead).
 
    .. tab-item:: C++
 

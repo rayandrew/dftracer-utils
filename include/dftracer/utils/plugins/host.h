@@ -74,6 +74,13 @@ class PluginHost {
     coro::CoroTask<trace::views::ExportStats> run(
         const trace::views::View& view) const;
 
+    /// Attach every loaded plugin to `session` as a fused fold branch (in
+    /// fold_order) so they co-scan with its other branches. Call before
+    /// session.execute(); results() holds the named results after. Each
+    /// plugin's plan_query prune is not applied, so it sees every scanned
+    /// event.
+    void attach_to_session(trace::views::ViewSession& session) const;
+
     /// The named results the most recent run() collected, keyed by name.
     NamedResultRegistry& results() const;
 

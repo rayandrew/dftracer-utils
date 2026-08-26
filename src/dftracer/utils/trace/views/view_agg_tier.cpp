@@ -156,7 +156,9 @@ bool answerable(const ViewPlan& plan, const AggSchema& sch) {
         return false;
     if (plan.query && !query_answerable(*plan.query)) return false;
     for (const auto& gk : plan.group_by)
-        if (gk.kind == GroupKey::Kind::Arg) return false;
+        if (gk.kind == GroupKey::Kind::Arg ||
+            gk.kind == GroupKey::Kind::Field || gk.kind == GroupKey::Kind::Rank)
+            return false;
     return aggs_and_fields_answerable(plan, sch);
 }
 
@@ -184,7 +186,11 @@ std::string key_value(const AggKeyView& kv, const GroupKey& gk,
                 static_cast<int>(trace::internal::io_category(kv.name)));
         case GroupKey::Kind::AccPat:
             return "0";
+        case GroupKey::Kind::Rank:
+            // Never reached: Rank keeps a plan off the tier (answerable()).
+            return std::to_string(kv.pid);
         case GroupKey::Kind::Arg:
+        case GroupKey::Kind::Field:
             // Resolved from the key's extra_keys (e.g. PROFILE epoch/step);
             // requires the key to have been parsed with want_extra_keys.
             for (const auto& [k, v] : kv.extra_keys)

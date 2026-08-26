@@ -166,9 +166,12 @@ coro::CoroTask<Result<ViewPlannerOutput>> ViewPlannerUtility::operator()(
                     }
                 }
             } catch (const std::exception& e) {
-                DFTRACER_UTILS_LOG_WARN(
-                    "ViewPlanner: index read failed for %s: %s",
-                    input.file_path.c_str(), e.what());
+                // Fail loudly: swallowing this leaves chunk_spans empty, which
+                // reads downstream as a prune and silently drops the file.
+                co_return make_error(
+                    ErrorCode::INDEXER,
+                    std::string("ViewPlanner: index read failed for ") +
+                        input.file_path + ": " + e.what());
             }
         }
 

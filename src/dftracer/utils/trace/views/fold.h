@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -98,6 +99,11 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
                                  dftracer::utils::StringIntern& intern,
                                  const CoverageSet* covered = nullptr,
                                  std::uint64_t limit = 0);
+
+/// Fields the scanner must capture into each event's args for this plan: the
+/// non-scalar Field group keys and nested agg fields the POD does not natively
+/// carry (type/ph, a.b, a[0]). Empty for a plain plan.
+std::vector<std::string> extra_capture_fields(const ViewPlan& plan);
 
 }  // namespace dftracer::utils::trace::views::detail
 

@@ -1,5 +1,8 @@
+#include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/platform_compat.h>
+#include <dftracer/utils/core/coro/async_semaphore.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/view_scanner_utility.h>
 
@@ -13,6 +16,15 @@
 namespace dftracer::utils::trace::views::detail {
 
 namespace {
+
+struct ScanPermit {
+    coro::CoroSemaphore& sem;
+    std::uint64_t bytes;
+    ScanPermit(coro::CoroSemaphore& s, std::uint64_t n) : sem(s), bytes(n) {}
+    ~ScanPermit() { sem.release(bytes); }
+    ScanPermit(const ScanPermit&) = delete;
+    ScanPermit& operator=(const ScanPermit&) = delete;
+};
 
 std::uint32_t intern_string(dftracer::utils::StringIntern& intern,
                             simdjson::dom::element val) {
@@ -98,13 +110,43 @@ FoldEvent build_fold_event(const DFTracerEvent& scalars,
 
 FoldEvent extract_fold_event(simdjson::dom::element root,
                              dftracer::utils::StringIntern& intern,
-                             bool needs_args) {
+                             bool needs_args,
+                             const std::vector<std::string>* extra_fields) {
     DFTracerEvent scalars;
     simdjson::dom::element args;
     bool has_args = false;
     if (!DFTracerEvent::parse_scalars(root, scalars, args, has_args))
         return FoldEvent{};
-    return build_fold_event(scalars, args, has_args, intern, needs_args);
+    FoldEvent ev =
+        build_fold_event(scalars, args, has_args, intern, needs_args);
+    if (extra_fields)
+        for (const auto& name : *extra_fields)
+            capture_extra_field(ev, root, intern, name);
+    return ev;
+}
+
+std::vector<std::string> extra_capture_fields(const ViewPlan& plan) {
+    // Flat args come from needs_args; only top-level fields the POD does not
+    // carry (anything but the six scalars) and nested paths need capture.
+    auto is_pod_scalar = [](const std::string& f) {
+        return f == "name" || f == "cat" || f == "pid" || f == "tid" ||
+               f == "ts" || f == "dur";
+    };
+    std::vector<std::string> out;
+    auto add = [&](const std::string& f) {
+        if (f.empty()) return;
+        for (const auto& e : out)
+            if (e == f) return;
+        out.push_back(f);
+    };
+    for (const auto& gk : plan.group_by)
+        if (gk.kind == GroupKey::Kind::Field && !is_pod_scalar(gk.arg))
+            add(gk.arg);
+    for (const auto& spec : plan.agg) {
+        if (is_nested_path(spec.field)) add(spec.field);
+        if (spec.op == AggOp::ArgMax && is_nested_path(spec.by)) add(spec.by);
+    }
+    return out;
 }
 
 coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
@@ -138,11 +180,17 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
             any_wants_fold_event = true;
     }
 
+    std::vector<std::string> extra_fields = extra_capture_fields(plan);
+
     // Coarse fan-out: one worker coroutine per runtime slot draining the shared
     // unit queue, so under the elastic runtime live threads grow toward the
     // cap.
     const std::size_t nworkers =
         std::min<std::size_t>(units.size(), available_parallelism());
+    // Bound bytes decoded concurrently so a scan cannot OOM the box. Always on:
+    // an explicit memory_budget() or a RAM-fraction default. Workers park when
+    // full, so a generous budget never throttles.
+    coro::CoroSemaphore budget_sem(compute_memory_budget(plan.memory_budget));
     std::atomic<std::size_t> next_unit{0};
     std::vector<std::uint64_t> matched_v(nworkers, 0), scanned_v(nworkers, 0);
     std::vector<CoverageSet> covered_v(nworkers);
@@ -171,6 +219,13 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
                                                    units[i].checkpoint_idx))
                         continue;
 
+                    const std::uint64_t reserve =
+                        units[i].end_byte > units[i].start_byte
+                            ? units[i].end_byte - units[i].start_byte
+                            : 0;
+                    co_await budget_sem.acquire(reserve);
+                    ScanPermit permit{budget_sem, reserve};
+
                     ViewScannerInput sin =
                         make_scanner_input(units[i], vdef, vdef.query);
                     // A FoldEvent fold gets the parsed stream; a raw fold
@@ -179,6 +234,8 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
                     sin.fold_intern = any_wants_fold_event ? &intern : nullptr;
                     sin.fold_needs_args = any_needs_args;
                     sin.fold_keep_raw = any_wants_raw && any_wants_fold_event;
+                    if (!extra_fields.empty())
+                        sin.fold_extra_fields = &extra_fields;
                     ViewScannerUtility scanner;
                     auto gen = scanner(sin);
                     bool complete = true;

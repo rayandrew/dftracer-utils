@@ -76,6 +76,35 @@ TEST_SUITE("dataframe_arrow_public") {
             CHECK(vp[i] == doctest::Approx(reals[i]));
         }
     }
+
+    TEST_CASE("Struct column round-trips through the Arrow bridge") {
+        std::vector<std::int64_t> a = {10, 20, 30};
+        std::vector<double> b = {1.5, 2.5, 3.5};
+        std::vector<Series> fields;
+        fields.push_back(Series::flat_i64(a.data(), 3));
+        fields.push_back(Series::flat_f64(b.data(), 3));
+        Series st = Series::structs({"a", "b"}, std::move(fields));
+
+        DataFrame df;
+        df.names = {"s"};
+        df.columns.push_back(std::move(st));
+
+        OwnedArrow arw = df.to_arrow();
+        DataFrame back = DataFrame::from_arrow(arw.schema(), arw.array());
+        REQUIRE(back.num_columns() == 1);
+        REQUIRE(back.num_rows() == 3);
+        Series s = back.column("s");
+        REQUIRE(s.valid());
+        REQUIRE(s.num_children() == 2);
+        const std::int64_t* ap = s.child(0).data<std::int64_t>();
+        const double* bp = s.child(1).data<double>();
+        REQUIRE(ap != nullptr);
+        REQUIRE(bp != nullptr);
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            CHECK(ap[i] == a[i]);
+            CHECK(bp[i] == doctest::Approx(b[i]));
+        }
+    }
 }
 #else
 TEST_SUITE("dataframe_arrow_public") {

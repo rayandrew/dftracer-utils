@@ -5,7 +5,11 @@
 #include <dftracer/utils/trace/event.h>
 #include <simdjson.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -35,7 +39,127 @@ struct FoldEvent {
     /// interned arg-name id.
     using ArgValue = std::variant<double, std::int64_t, std::uint32_t>;
     std::vector<std::pair<std::uint32_t, ArgValue>> args;
+    /// Top-level values for schema fields the POD does not carry as a scalar
+    /// (type/ph/id), kept apart from `args` so a same-named args key cannot
+    /// shadow the real top-level field. Same encoding as `args`.
+    std::vector<std::pair<std::uint32_t, ArgValue>> top_fields;
 };
+
+/// The fixed top-level fields of the trace schema. A bare reference to one of
+/// these resolves to the top-level value, never a same-named args key; reach an
+/// args field with the same name through the explicit `args.<name>` path.
+inline bool is_schema_field(std::string_view f) {
+    return f == "name" || f == "cat" || f == "pid" || f == "tid" || f == "ts" ||
+           f == "dur" || f == "ph" || f == "id" || f == "type";
+}
+
+/// True when `field` addresses a nested value (`a.b`, `a[0]`, `a.0.b`), so it
+/// needs path resolution rather than a single object-key lookup.
+inline bool is_nested_path(std::string_view field) {
+    return field.find_first_of(".[") != std::string_view::npos;
+}
+
+/// Resolve a dotted/bracketed path from `root` (`a.b[0].c`, `a.b.0`); `ok` is
+/// false if any segment is missing. Rooted at `root` with no args fallback,
+/// matching the query evaluator's treatment of dotted paths.
+inline simdjson::dom::element resolve_json_path(simdjson::dom::element root,
+                                                std::string_view path,
+                                                bool& ok) {
+    ok = true;
+    simdjson::dom::element cur = root;
+    std::size_t i = 0;
+    const std::size_t n = path.size();
+    auto index = [&](std::size_t idx) {
+        auto r = cur.at(idx);
+        if (r.error()) {
+            ok = false;
+            return;
+        }
+        cur = r.value_unsafe();
+    };
+    while (i < n) {
+        if (path[i] == '.') {
+            ++i;
+            continue;
+        }
+        if (path[i] == '[') {
+            ++i;
+            std::size_t idx = 0;
+            bool any = false;
+            while (i < n && path[i] >= '0' && path[i] <= '9') {
+                idx = idx * 10 + static_cast<std::size_t>(path[i] - '0');
+                ++i;
+                any = true;
+            }
+            if (i < n && path[i] == ']') ++i;
+            if (!any) {
+                ok = false;
+                return cur;
+            }
+            index(idx);
+            if (!ok) return cur;
+            continue;
+        }
+        const std::size_t start = i;
+        while (i < n && path[i] != '.' && path[i] != '[') ++i;
+        std::string_view key = path.substr(start, i - start);
+        auto r = cur[key];
+        if (!r.error()) {
+            cur = r.value_unsafe();
+            continue;
+        }
+        // A numeric key indexes an array (dot-numeric form, e.g. "tags.0").
+        bool all_digits = !key.empty();
+        std::size_t idx = 0;
+        for (char c : key) {
+            if (c < '0' || c > '9') {
+                all_digits = false;
+                break;
+            }
+            idx = idx * 10 + static_cast<std::size_t>(c - '0');
+        }
+        if (all_digits && cur.is_array()) {
+            index(idx);
+            if (!ok) return cur;
+            continue;
+        }
+        ok = false;
+        return cur;
+    }
+    return cur;
+}
+
+/// Capture a field the POD does not natively carry (top-level type/ph/id, or a
+/// nested a.b/a[0]), JSON type preserved. A bare schema field goes to
+/// `top_fields` so a same-named args key cannot shadow it; everything else to
+/// `args`. No-op when the path is absent.
+inline void capture_extra_field(FoldEvent& ev, simdjson::dom::element root,
+                                dftracer::utils::StringIntern& intern,
+                                const std::string& name) {
+    bool ok = false;
+    simdjson::dom::element v = resolve_json_path(root, name, ok);
+    if (!ok) return;
+    const std::uint32_t key_id = intern.get_or_insert(name);
+    auto& into = (!is_nested_path(name) && is_schema_field(name))
+                     ? ev.top_fields
+                     : ev.args;
+    for (const auto& [k, existing] : into)
+        if (k == key_id) return;
+    if (v.is_string()) {
+        into.emplace_back(key_id, intern.get_or_insert(v.get_string()));
+    } else if (v.is_int64()) {
+        into.emplace_back(key_id, static_cast<std::int64_t>(v.get_int64()));
+    } else if (v.is_uint64()) {
+        const std::uint64_t u = v.get_uint64().value_unsafe();
+        if (u <= static_cast<std::uint64_t>(
+                     std::numeric_limits<std::int64_t>::max()))
+            into.emplace_back(key_id, static_cast<std::int64_t>(u));
+        else
+            into.emplace_back(key_id, static_cast<double>(u));
+    } else if (v.is_double()) {
+        into.emplace_back(key_id, v.get_double().value_unsafe());
+    }
+}
 
 /// Build an owned event from already-parsed scalars + the args element, for
 /// callers (like the index parse) that have run DFTracerEvent::parse_scalars
@@ -47,10 +171,12 @@ FoldEvent build_fold_event(const DFTracerEvent& scalars,
 
 /// Parse a DOM object into an owned event. Every string is interned, so the
 /// result stays valid after the parser that produced `root` is reused. Args are
-/// captured only when `needs_args`.
-FoldEvent extract_fold_event(simdjson::dom::element root,
-                             dftracer::utils::StringIntern& intern,
-                             bool needs_args);
+/// captured only when `needs_args`. `extra_fields`, if given, names fields the
+/// POD does not natively carry (type/ph, a nested a.b/a[0]) to capture into the
+/// event.
+FoldEvent extract_fold_event(
+    simdjson::dom::element root, dftracer::utils::StringIntern& intern,
+    bool needs_args, const std::vector<std::string>* extra_fields = nullptr);
 
 }  // namespace dftracer::utils::trace::views::detail
 

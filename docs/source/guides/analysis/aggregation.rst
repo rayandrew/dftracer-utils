@@ -131,6 +131,9 @@ A ``GroupKey`` names one column of a (possibly composite) key.
    * - host hash / resolved name
      - ``GroupKey::hhash()`` / ``::host_name()``
      - ``"hhash"`` / ``"host_name"``
+   * - MPI rank (resolved from pid)
+     - ``GroupKey::rank()``
+     - ``"rank"``
    * - an args-map entry
      - ``GroupKey::of_arg("level")``
      - ``"arg:level"``
@@ -138,6 +141,29 @@ A ``GroupKey`` names one column of a (possibly composite) key.
 Group on several keys at once by passing more than one; the group key is the
 composite. Also available: ``GroupKey::io_cat()`` / ``::acc_pat()`` /
 ``::file_name()``.
+
+``rank`` groups on ``pid`` and relabels each group to its MPI rank, read from
+the ``PR`` metadata record the trace writes per process (``{"name": "PR",
+"pid": P, "args": {"name": "rank", "value": N}}``). The pid -> rank map is
+harvested during the scan and applied post-aggregation, the same way
+``host_name`` resolves a host hash; a pid with no ``PR`` record resolves to the
+empty string. Rank is never persisted to the index, so a rank query always
+scans rather than serving from a rollup.
+
+The table is named shorthand, not a fixed allowlist. Grouping is schemaless:
+any field name works, resolved the same way ``filter`` and ``select`` resolve
+fields. A bare name that is not one of the named keys becomes a field group key
+(``GroupKey::field("type")`` in C++), so ``"type"``, ``"ph"``, or any args key
+groups with no prefix. A dotted or bracketed path descends into nested args:
+``"args.meta.host"``, ``"args.tags[0]"`` and ``"args.tags.0"`` (the bracket and
+dot-numeric forms both index an array). The same path syntax works for an
+aggregate field (``mean:args.n.v``) and in the :doc:`../core/query-dsl`.
+
+A bare name resolves to the top-level schema field when there is one
+(``name``, ``cat``, ``pid``, ``tid``, ``ts``, ``dur``, ``ph``, ``id``,
+``type``); those always win, so a same-named args parameter never shadows them.
+Reach that parameter explicitly with ``args.<name>`` (or ``arg:<name>``). A bare
+name that is not a schema field resolves to the args key of that name.
 
 Aggregates
 ----------
@@ -259,9 +285,18 @@ the number of concurrent ``pread`` calls per file is a ``concurrency`` (or
 Occupancy is computed during the parallel scan from a bounded per-bucket
 coverage mask, so it streams in constant memory and merges across files and
 ranks the same way the other aggregates do (see
-:doc:`../scale/distributed-aggregation`). ``busy`` is an upper bound on the true
-interval union that tightens as the time bucket shrinks; add
-``time_bucket(interval_us)`` to set that resolution.
+:doc:`../scale/distributed-aggregation`). The mask can only overshoot the true
+interval union, so ``busy`` is clamped to ``min(sum(dur), makespan)``: this
+makes ``concurrency >= 1`` and ``utilization <= 1`` hold exactly, never the
+impossible values a raw mask would report.
+
+Resolution is a fixed cell, independent of the output ``time_bucket``. The cell
+is the busy quantum: a shorter event rounds up to one cell, so finer cells
+measure overlap on short events more tightly. Set it with ``occ_cell(cell_us)``
+(the ``--occ-cell`` CLI flag), honored when a ``time_range`` bounds the window;
+the default is 64 us. Every occupancy result carries a ``busy_cell_us`` column
+reporting the effective cell (a wide window can coarsen it), so a caller can
+tell a grid-derived ``busy`` from a clamped one.
 
 Typed aggregate specs
 ---------------------

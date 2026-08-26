@@ -52,10 +52,18 @@ class CompareView {
         auto [base, variant] = co_await coro::when_all(
             baseline_.group_by(group_by_).agg(agg_).collect(),
             variant_.group_by(group_by_).agg(agg_).collect());
+        co_return compare_batches(base, variant,
+                                  static_cast<std::int64_t>(group_by_.size()));
+    }
 
-        dataframe::DataFrame joined = views::join_batches(
-            base, variant, static_cast<std::int64_t>(group_by_.size()),
-            views::JoinType::FULL);
+    /// FULL-join two aggregation results on their first `n_key` group-key
+    /// columns and append `delta_<m>`/`pct_<m>` for each numeric `l_`/`r_`
+    /// metric pair.
+    static dataframe::DataFrame compare_batches(
+        const dataframe::DataFrame& base, const dataframe::DataFrame& variant,
+        std::int64_t n_key) {
+        dataframe::DataFrame joined =
+            views::join_batches(base, variant, n_key, views::JoinType::FULL);
 
         // Each numeric metric shows up as an l_<m>/r_<m> pair after the join
         // (the group-key columns keep their names). Derive the metrics from the
@@ -78,7 +86,7 @@ class CompareView {
             joined = joined.with_column("delta_" + m, delta);
             joined = joined.with_column("pct_" + m, pct);
         }
-        co_return joined;
+        return joined;
     }
 
    private:

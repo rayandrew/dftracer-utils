@@ -79,6 +79,7 @@ class ViewArgParse : public cli::ArgParse {
     std::string group_by;
     std::string agg;
     std::uint64_t time_bucket = 0;
+    std::uint64_t occ_cell = 0;
     bool counters = false;
     std::string format;
     std::string phase;
@@ -164,8 +165,11 @@ class ViewArgParse : public cli::ArgParse {
         parser()
             .add_argument("--group-by")
             .help(
-                "Aggregate: group by columns, comma-separated "
-                "(name,cat,pid,tid,fhash,arg:KEY)")
+                "Aggregate: group by columns, comma-separated. Any field name "
+                "works (top-level then args); named dims name/cat/pid/tid/"
+                "fhash/hhash/io_cat/acc_pat/file_path/file_name/host_name/"
+                "rank, "
+                "or arg:KEY / args.KEY for an args field")
             .default_value<std::string>("");
 
         parser()
@@ -181,6 +185,15 @@ class ViewArgParse : public cli::ArgParse {
             .help(
                 "Aggregate into time buckets of this width (a bare number is "
                 "microseconds; suffixed values like 1ms are converted)")
+            .default_value(std::string("0"));
+
+        parser()
+            .add_argument("--occ-cell")
+            .help(
+                "Occupancy cell size (busy quantum) for busy/concurrency/"
+                "utilization; a bare number is microseconds, 0 = default. "
+                "Finer resolves overlap on short events (honored with "
+                "--time-range)")
             .default_value(std::string("0"));
 
         parser()
@@ -290,6 +303,8 @@ class ViewArgParse : public cli::ArgParse {
         agg = parser().get<std::string>("--agg");
         time_bucket = static_cast<std::uint64_t>(std::llround(
             cli::get_duration_arg(parser(), "--time-bucket", 1e6)));
+        occ_cell = static_cast<std::uint64_t>(
+            std::llround(cli::get_duration_arg(parser(), "--occ-cell", 1e6)));
         counters = parser().get<bool>("--counters");
         format = parser().get<std::string>("--format");
         phase = parser().get<std::string>("--phase");
@@ -382,13 +397,26 @@ static bool parse_group_by(const std::string& spec,
             out.push_back(GroupKey::tid());
         else if (tok == "fhash")
             out.push_back(GroupKey::fhash());
+        else if (tok == "hhash")
+            out.push_back(GroupKey::hhash());
+        else if (tok == "io_cat")
+            out.push_back(GroupKey::io_cat());
+        else if (tok == "acc_pat")
+            out.push_back(GroupKey::acc_pat());
+        else if (tok == "file_path")
+            out.push_back(GroupKey::file_path());
+        else if (tok == "file_name")
+            out.push_back(GroupKey::file_name());
+        else if (tok == "host_name")
+            out.push_back(GroupKey::host_name());
+        else if (tok == "rank")
+            out.push_back(GroupKey::rank());
         else if (tok.rfind("arg:", 0) == 0)
             out.push_back(GroupKey::of_arg(tok.substr(4)));
-        else {
-            DFTRACER_UTILS_LOG_ERROR("Unknown --group-by column: %s",
-                                     tok.c_str());
-            return false;
-        }
+        else
+            // Schemaless fallback: a bare name resolves top-level then args; a
+            // dotted/bracketed path (a.b, a[0], args.a.b) resolves that path.
+            out.push_back(GroupKey::field(tok));
     }
     return true;
 }
@@ -918,6 +946,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         if (time_range) v = v.time_range(time_range->first, time_range->second);
         if (cli->time_scale > 0) v = v.time_scale(cli->time_scale);
         if (time_bucket > 0) v = v.time_bucket(time_bucket);
+        if (cli->occ_cell > 0) v = v.occ_cell(cli->occ_cell);
         if (!group_keys.empty()) v = v.group_by(group_keys);
         if (!agg_specs.empty()) v = v.agg(agg_specs);
         if (cli->agg_numeric_args) v = v.agg_numeric_args();

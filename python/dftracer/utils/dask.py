@@ -335,6 +335,7 @@ class _Plan:
     time_unit: Optional[str] = None
     time_scale: Optional[float] = None
     time_bucket: Optional[int] = None
+    occ_cell: Optional[int] = None
     group_by: Tuple[str, ...] = ()
     agg: Tuple[str, ...] = ()
     select: Tuple[str, ...] = ()
@@ -362,6 +363,8 @@ def _apply_plan(tv: "_AnyViewer", plan: _Plan) -> "_AnyViewer":
         tv = tv.time_scale(plan.time_scale)
     if plan.time_bucket is not None:
         tv = tv.time_bucket(plan.time_bucket)
+    if plan.occ_cell is not None:
+        tv = tv.occ_cell(plan.occ_cell)
     if plan.group_by:
         tv = tv.group_by(*plan.group_by)
     if plan.agg:
@@ -580,6 +583,10 @@ class DaskTraceViewer:
     def time_bucket(self, interval_us: Union[int, float, str]) -> "DaskTraceViewer":
         bucket = int(round(coerce_duration(interval_us, 1e6, "interval_us")))
         return self._clone(replace(self._plan, time_bucket=bucket))
+
+    def occ_cell(self, cell_us: Union[int, float, str]) -> "DaskTraceViewer":
+        cell = int(round(coerce_duration(cell_us, 1e6, "cell_us")))
+        return self._clone(replace(self._plan, occ_cell=cell))
 
     def group_by(self, *keys: str) -> "DaskAggregatedTraceViewer":
         return self._agg_clone(replace(self._plan, group_by=tuple(keys)))

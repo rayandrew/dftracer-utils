@@ -63,7 +63,13 @@ struct GroupKey {
         FilePath,
         FileName,
         HostName,
-        Arg
+        /// Group by pid, relabeled to the rank from the trace's PR metadata.
+        /// rank is stable across runs where pid is not.
+        Rank,
+        Arg,
+        /// Any field by name, resolved top-level then args; `arg` holds the
+        /// name. Unlike Arg (args-only) this also sees top-level fields.
+        Field
     };
     /// Value transform applied to the resolved group value, before the
     /// merge key is built. Coarsens the grain (many values fold to one), so
@@ -88,8 +94,12 @@ struct GroupKey {
     static GroupKey file_path() { return {Kind::FilePath, {}}; }
     static GroupKey file_name() { return {Kind::FileName, {}}; }
     static GroupKey host_name() { return {Kind::HostName, {}}; }
+    static GroupKey rank() { return {Kind::Rank, {}}; }
     static GroupKey of_arg(std::string key) {
         return {Kind::Arg, std::move(key)};
+    }
+    static GroupKey field(std::string name) {
+        return {Kind::Field, std::move(name)};
     }
 };
 
@@ -272,6 +282,8 @@ class Deferred {
     std::shared_ptr<const bool> executed_;
 };
 
+class View;
+
 /// A batch of read ops over one shared scan of a base View. Register ops
 /// (collect/materialize/fold/export_json) - each returns a Deferred handle -
 /// then execute() runs them together, serving a materialized aggregate from its
@@ -291,6 +303,14 @@ class ViewSession {
     Deferred<dftracer::utils::dataframe::DataFrame> collect(
         std::vector<GroupKey> group_by, std::vector<AggSpec> agg);
 
+    /// Register an aggregation view as a branch, carrying its full plan.
+    /// `branch` must be built off this session's base view.
+    Deferred<dftracer::utils::dataframe::DataFrame> collect(const View& branch);
+
+    /// Aggregate `branch` into a serialized partial (opaque bytes) for a
+    /// distributed merge, over the shared scan. Merge and resolve later.
+    Deferred<std::string> aggregate_partial(const View& branch);
+
     /// Persist the (group_by + agg) aggregation over ALL scanned events as a
     /// rollup, sharing the one scan. Build-only (no handle); a later matching
     /// collect() reads it back.
@@ -298,6 +318,15 @@ class ViewSession {
 
     /// Stream the branch's matching events verbatim to `sink`.
     Deferred<ExportStats> export_json(Query predicate, ExportSink& sink);
+
+    /// Stream every scanned event to `sink`, sharing the session's scan.
+    Deferred<ExportStats> export_json(ExportSink& sink);
+
+    /// Materialize the branch's matching events into a DataFrame over the
+    /// shared scan. The whole matching set is held in memory, so filter to
+    /// bound it.
+    Deferred<dftracer::utils::dataframe::DataFrame> collect_events(
+        const View& branch);
 
     /// Fold the branch's matching events into a caller partial `P`, reduced
     /// across slots by `combine`. The fold gets the parsed event (no re-parse)
@@ -333,6 +362,15 @@ class ViewSession {
         std::function<P(P&&, P&&)> combine) {
         return fold<P>(predicate.to_query(), std::move(f), std::move(combine));
     }
+
+    /// Attach an externally-built Fold to the shared scan. `make` constructs it
+    /// with the scan's StringIntern so ids agree and per-worker slices merge;
+    /// `finalize` runs after the scan while the fold is still alive. Forces a
+    /// scan (a plugin cannot be served from a rollup).
+    void attach_fold_factory(std::function<std::unique_ptr<detail::Fold>(
+                                 dftracer::utils::StringIntern&)>
+                                 make,
+                             std::function<void()> finalize);
 
     /// Scan the base once and run every attached branch, resolving every
     /// Deferred handle returned above.
@@ -387,6 +425,9 @@ class View {
     View phase(Phase p) const;
     View time_range(double begin, double end) const;
     View time_bucket(std::uint64_t interval_us) const;
+    /// Target occupancy cell size (busy quantum) in us; 0 = engine default.
+    /// Honored only with a time_range (see ViewPlan::occ_cell_us).
+    View occ_cell(std::uint64_t cell_us) const;
     /// Normalize ts/dur/te by `ns_ratio` = source_ns_per_unit /
     /// target_ns_per_unit (1.0 = none), applied before time_bucket. Callers
     /// resolve the trace's native unit (read_time_metric) and the target.
@@ -608,6 +649,7 @@ class View {
     std::shared_ptr<const detail::ViewPlan> plan_;
 
    private:
+    friend class ViewSession;
     explicit View(std::shared_ptr<const detail::ViewPlan> plan);
 };
 
@@ -644,6 +686,9 @@ class AggregatedView : public View {
     }
     AggregatedView time_bucket(std::uint64_t interval_us) const {
         return {View::time_bucket(interval_us)};
+    }
+    AggregatedView occ_cell(std::uint64_t cell_us) const {
+        return {View::occ_cell(cell_us)};
     }
     AggregatedView time_scale(double ns_ratio) const {
         return {View::time_scale(ns_ratio)};

@@ -214,6 +214,19 @@ dftracer::utils::expected<std::vector<Token>, QueryError> tokenize(
             while (pos < input.size() && is_ident_char(input[pos])) {
                 ++pos;
             }
+            // A `[digits]` abutting the identifier is part of a field path
+            // (tags[0]); an `in [list]` bracket does not abut, so it stays a
+            // separate token.
+            while (pos < input.size() && input[pos] == '[') {
+                std::size_t look = pos + 1;
+                while (look < input.size() &&
+                       std::isdigit(static_cast<unsigned char>(input[look])))
+                    ++look;
+                if (look > pos + 1 && look < input.size() && input[look] == ']')
+                    pos = look + 1;
+                else
+                    break;
+            }
             auto text = input.substr(start, pos - start);
             TokenKind kind = TokenKind::IDENT;
             if (iequals(text, "and"))

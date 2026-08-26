@@ -2482,3 +2482,37 @@ def test_jit_rejects_observe_on_join_result():
             @jit.each_event
             def step(self, e):
                 self.joined[e.pid] += 1
+
+
+@jit.plugin
+class _SessionCounts:
+    hits = jit.map(key=(jit.i64,), value=jit.count())
+
+    @jit.each_event
+    def step(self, e):
+        self.hits[(e.pid,)] += 1
+
+
+@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
+def test_jit_plugin_fused_in_session(tmp_path):
+    import dftracer.utils as dftu
+
+    gz = str(tmp_path / "t.pfw.gz")
+    _write_trace(gz, 10, [100, 200, 300], ["f0"])
+    with dftu.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+        ix.ensure_indexed()
+
+    tv = dftu.TraceViewer(gz, index_path=str(tmp_path))
+    with tv.session() as s:
+        by_cat = s.view().group_by("cat").agg("count").collect()
+        counts = s.view().plugin(_SessionCounts)
+
+    # collect and the plugin ran over one shared scan.
+    cat = pa.table(by_cat.result()).to_pandas()
+    assert int(cat["count"].sum()) == 10
+
+    res = counts.result()  # single named result -> our DataFrame
+    assert isinstance(res, dftu.DataFrame)
+    pdf = pa.table(res).to_pandas()
+    assert int(pdf["value"].sum()) == 10  # every event counted on the same scan
+    assert len(pdf) == 3  # three distinct pids
