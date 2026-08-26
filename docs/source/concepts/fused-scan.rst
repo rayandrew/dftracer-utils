@@ -29,18 +29,64 @@ plan, at which point the surviving chunks (after :doc:`predicate pushdown
 
 What happens during that one pass is a fold, not a callback per event: each
 worker slice accumulates its own partial state as it walks a chunk, and the
-partials are combined once the scan finishes. ``ViewSession`` is the surface
-that makes many folds share a single scan explicitly: register several ops
-(``collect``, ``export_json``, ``fold``, ``materialize``) against one base
-``View``, then call ``execute()`` once. Every registered branch sees every
-matching event from the same traversal:
+partials are combined once the scan finishes. The session is the surface that
+makes many folds share a single scan explicitly: open one off a base view,
+register several branches (a ``collect``, an ``export``, a ``materialize``, a
+custom fold, or a compiled plugin / JIT op), then run them together. Every
+registered branch sees every matching event from the same traversal.
 
-.. code-block:: cpp
+.. admonition:: Recommended
+   :class: tip
 
-   ViewSession session = base_view.session();
-   auto counts = session.collect(predicate_a, group_by_a, agg_a);
-   auto stats  = session.fold<Stats>(predicate_b, accumulate, combine);
-   co_await session.execute();  // one scan, both branches resolved
+   When you need more than one read of the same trace - a few unrelated
+   aggregations, or an aggregate next to an export - reach for a session
+   rather than issuing each read on its own. Separate reads each pay for their
+   own decompression and JSON parse; a session pays once and splits the result.
+
+.. tab-set::
+
+   .. tab-item:: C++
+
+      ``ViewSession`` (``base_view.session()``) registers ops - ``collect``,
+      ``export_json``, ``fold``, ``materialize`` - each returning a
+      ``Deferred<T>``, then ``execute()`` runs the one scan.
+
+      .. code-block:: cpp
+
+         ViewSession session = base_view.session();
+         auto counts = session.collect(predicate_a, group_by_a, agg_a);
+         auto stats  = session.fold<Stats>(predicate_b, accumulate, combine);
+         co_await session.execute();   // one scan, both branches resolved
+
+         counts->num_rows();           // read a Deferred after execute()
+
+   .. tab-item:: Python
+
+      ``TraceViewer.session()`` gives each branch the full builder API;
+      ``view()`` starts a branch and its terminal returns a ``Handle``.
+      Leaving the ``with`` block (or the first ``Handle.result()``) runs the
+      one scan.
+
+      .. code-block:: python
+
+         with base_view.session() as s:
+             counts = s.view().group_by("cat").agg("count").collect()
+             stats  = s.view().statistics()
+             hist   = s.view().plugin("dur_histogram.so")   # plugin/JIT fold
+             s.view().filter('cat == "POSIX"').export("posix.pfw")
+
+         counts_df = counts.result()   # resolved from the shared scan
+         stats_dict = stats.result()
+         hist_df = hist.result()
+
+Two ``collect`` branches that group the same way can be combined after the one
+scan, so a delta between two filtered aggregates still costs a single
+traversal. In Python ``session.join`` and ``session.compare`` do it directly;
+in C++ collect both branches, then combine the resulting DataFrames with
+``views::join_batches`` or ``comparator::CompareView::compare_batches`` (the
+same primitives the Python convenience methods wrap). See
+:doc:`../guides/analysis/aggregation` for the Python how-to and
+:doc:`../guides/analysis/views` for the C++ terminals.
 
 This is why a CLI invocation with multiple analytics, or a query that runs a
 compiled plugin alongside a built-in aggregation, does not multiply the I/O

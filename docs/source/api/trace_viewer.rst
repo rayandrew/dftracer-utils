@@ -181,3 +181,11 @@ How the viewer types relate and what they return:
 .. autoclass:: dftracer.utils.AggregatedTraceViewer
    :members:
    :undoc-members:
+
+.. autoclass:: dftracer.utils.Session
+   :members:
+   :undoc-members:
+
+.. autoclass:: dftracer.utils.SessionView
+   :members:
+   :undoc-members:

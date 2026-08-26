@@ -16,11 +16,25 @@ Cap and spill a view
 --------------------
 
 ``View::memory_budget(bytes)`` (in ``dftracer/utils/trace/views/view.h``,
-namespace ``dftracer::utils::trace::views``) caps each worker's in-memory group map at
-``bytes`` and spills the overflow to temporary runs. It bounds intermediate
-memory, not the returned result. ``0`` means pure in-memory (no spilling).
+namespace ``dftracer::utils::trace::views``) sets one ceiling that bounds two
+things during a run, both intermediate memory, never the returned result:
+
+- **Scan decode.** The bytes decompressed concurrently across worker slices are
+  always held under the ceiling, so a large trace cannot OOM the box. This bound
+  is always on: with no explicit budget it defaults to a RAM fraction (about one
+  third of detected, cgroup-aware memory), and a single unit larger than the
+  whole ceiling still runs once the scan is otherwise idle rather than
+  deadlocking. A scan that cannot make progress fails loudly instead of hanging.
+- **Group-map spill.** Set an explicit non-zero ``bytes`` and each worker's
+  aggregation group map spills to sorted temporary runs past that size. ``0``
+  (the default) keeps the group map purely in memory - no spilling - while the
+  scan-decode bound above still applies.
+
 ``auto_spill()`` is the convenience form: it caps at roughly one third of
-available memory. Both are chainable and available on the Python viewer too.
+available memory, enabling group-map spill at that size. Both are chainable and
+available on the Python viewer too. Pick an explicit ``memory_budget`` when an
+aggregation's distinct-group count is large enough to want spilling; leave it
+unset to rely on the always-on scan-decode default.
 
 .. tab-set::
 
