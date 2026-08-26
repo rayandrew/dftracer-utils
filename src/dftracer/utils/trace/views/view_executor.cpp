@@ -454,7 +454,8 @@ coro::CoroTask<bool> try_collect_bootstrap(const ViewPlan& plan,
         BloomFold bloom(intern);
         DictFold dict(intern);
         std::array<Fold*, 3> folds{&agg, &bloom, &dict};
-        IndexFoldDriver driver(intern, folds, f.file_path, f.index_path);
+        IndexFoldDriver driver(intern, folds, f.file_path, f.index_path,
+                               extra_capture_fields(plan));
 
         gzi::GzipBuildArtifacts arts;
         bool ok = false;
@@ -481,6 +482,7 @@ coro::CoroTask<bool> try_collect_bootstrap(const ViewPlan& plan,
             else
                 merged.emplace(k, std::move(a));
         }
+        apply_ranks(plan, agg.ranks());
     }
     co_return true;
 }
@@ -728,6 +730,7 @@ static coro::CoroTask<GroupMap> run_scan_aggregate(const ViewPlan& plan) {
         }
     }
 
+    apply_ranks(plan, agg.ranks());
     resolve_group_keys(merged, plan);
     co_return std::move(merged);
 }
@@ -1095,6 +1098,7 @@ coro::CoroTask<ExportStats> run_session(
 
     for (std::size_t i = 0; i < agg_b.size(); ++i) {
         GroupMap m = aggs[i]->finish_map();
+        apply_ranks(*agg_b[i]->agg_plan, aggs[i]->ranks());
         resolve_group_keys(m, *agg_b[i]->agg_plan);
         *agg_b[i]->br->agg->out = to_batch(m, *agg_b[i]->agg_plan);
     }

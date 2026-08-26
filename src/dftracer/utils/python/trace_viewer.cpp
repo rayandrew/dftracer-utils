@@ -112,6 +112,7 @@ struct ViewerPlan {
     std::vector<GroupKey> group_by;
     std::vector<AggSpec> agg;
     std::uint64_t time_bucket_us = 0;
+    std::uint64_t occ_cell_us = 0;
     std::optional<std::pair<double, double>> time_range;
     std::vector<std::string> select;
     std::uint64_t memory_budget = 0;
@@ -136,7 +137,7 @@ ViewerPlan* plan_of(TraceViewerObject* self) {
     return static_cast<ViewerPlan*>(self->plan_ptr);
 }
 
-// name | cat | pid | tid | fhash | hhash | io_cat | acc_pat | arg:<key>
+// name | cat | pid | tid | fhash | hhash | io_cat | acc_pat | rank | arg:<key>
 // "fn(key)" or "fn(key, 'a', 'b')" -> transform + inner key text; returns
 // false when `t` is not a call, leaving `t` to parse as a plain key.
 bool split_transform(const std::string& t, GroupKey::Transform& tf,
@@ -207,10 +208,16 @@ bool parse_group_key(const char* s, GroupKey& out) {
         out = GroupKey::file_name();
     } else if (t == "host_name") {
         out = GroupKey::host_name();
+    } else if (t == "rank") {
+        out = GroupKey::rank();
     } else if (t.rfind("arg:", 0) == 0) {
         out = GroupKey::of_arg(t.substr(4));
     } else {
-        return false;
+        // Schemaless fallback: any other name is a field. A bare name resolves
+        // top-level then args; a dotted/bracketed path (a.b, a[0], args.a.b)
+        // resolves that path from the event root, matching how filter resolves
+        // fields. No allowlist, so type/ph/id and any (nested) args key group.
+        out = GroupKey::field(t);
     }
     out.transform = tf;
     out.transform_args = std::move(targs);
@@ -306,6 +313,7 @@ View build_view_from_data(const std::vector<std::string>& file_paths,
     if (p.phase >= 0) v = v.phase(static_cast<Phase>(p.phase));
     if (p.time_scale != 1.0) v = v.time_scale(p.time_scale);
     if (p.time_bucket_us) v = v.time_bucket(p.time_bucket_us);
+    if (p.occ_cell_us) v = v.occ_cell(p.occ_cell_us);
     if (p.time_range)
         v = v.time_range(p.time_range->first, p.time_range->second);
     // The aggregation and everything that operates on the aggregated result;
@@ -545,6 +553,15 @@ PyObject* tv_time_bucket(TraceViewerObject* self, PyObject* arg) {
     TraceViewerObject* c = clone(self);
     if (!c) return nullptr;
     plan_of(c)->time_bucket_us = (std::uint64_t)us;
+    return (PyObject*)c;
+}
+
+PyObject* tv_occ_cell(TraceViewerObject* self, PyObject* arg) {
+    long long us = PyLong_AsLongLong(arg);
+    if (us < 0 && PyErr_Occurred()) return nullptr;
+    TraceViewerObject* c = clone(self);
+    if (!c) return nullptr;
+    plan_of(c)->occ_cell_us = (std::uint64_t)us;
     return (PyObject*)c;
 }
 
@@ -1459,6 +1476,9 @@ static PyMethodDef tv_methods[] = {
      "column joined by \\x1e)."},
     {"time_bucket", DFTU_PYCFUNCTION(tv_time_bucket), METH_O,
      "Bucket events into fixed intervals (microseconds)."},
+    {"occ_cell", DFTU_PYCFUNCTION(tv_occ_cell), METH_O,
+     "Occupancy cell size (busy quantum) in microseconds; 0 = default. Finer "
+     "resolves overlap on short events (honored with time_range)."},
     {"time_unit", DFTU_PYCFUNCTION(tv_time_unit), METH_O,
      "Normalize ts/dur to a target unit (ns/us/ms/sec); source read from the "
      "trace's CM time_metric. Higher-level helper over time_scale()."},

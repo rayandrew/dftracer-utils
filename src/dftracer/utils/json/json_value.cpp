@@ -8,26 +8,40 @@ JsonValue JsonValue::at(const char* path) const {
     if (!valid_ || !path) return JsonValue();
 
     JsonValue current = *this;
-    const char* start = path;
+    const char* p = path;
 
-    while (*start) {
-        const char* end = start;
-        while (*end && *end != '.') end++;
-
-        size_t key_len = end - start;
-        if (key_len == 0) {
-            start = (*end == '.') ? end + 1 : end;
+    while (*p) {
+        if (*p == '.') {
+            ++p;
+            continue;
+        }
+        // Bracket index: `a[0]`.
+        if (*p == '[') {
+            ++p;
+            std::size_t idx = 0;
+            bool any = false;
+            while (*p >= '0' && *p <= '9') {
+                idx = idx * 10 + static_cast<std::size_t>(*p - '0');
+                ++p;
+                any = true;
+            }
+            if (*p == ']') ++p;
+            if (!any) return JsonValue();
+            current = current[idx];
+            if (!current.exists()) return JsonValue();
             continue;
         }
 
-        std::string_view key_sv(start, key_len);
-        JsonValue next = current[key_sv];
+        const char* start = p;
+        while (*p && *p != '.' && *p != '[') ++p;
+        std::string_view key_sv(start, static_cast<std::size_t>(p - start));
 
+        JsonValue next = current[key_sv];
         // A numeric segment addresses an array element when the object-key
         // lookup found nothing and the current node is an array (e.g.
         // "tags.0.name").
         if (!next.exists() && current.is_array()) {
-            bool all_digits = true;
+            bool all_digits = !key_sv.empty();
             std::size_t idx = 0;
             for (char c : key_sv) {
                 if (c < '0' || c > '9') {
@@ -39,12 +53,7 @@ JsonValue JsonValue::at(const char* path) const {
             if (all_digits) next = current[idx];
         }
         current = next;
-
-        if (!current.exists()) {
-            return JsonValue();
-        }
-
-        start = (*end == '.') ? end + 1 : end;
+        if (!current.exists()) return JsonValue();
     }
 
     return current;

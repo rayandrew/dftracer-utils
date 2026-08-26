@@ -263,7 +263,8 @@ coro::AsyncGenerator<ViewScannerBatch> ViewScannerUtility::operator()(
                                 batch.fold_events.push_back(
                                     detail::extract_fold_event(
                                         root, *input.fold_intern,
-                                        input.fold_needs_args));
+                                        input.fold_needs_args,
+                                        input.fold_extra_fields));
                                 batch.events_matched++;
                             } else {
                                 // Non-hash metadata: string_view into chunk
@@ -286,7 +287,8 @@ coro::AsyncGenerator<ViewScannerBatch> ViewScannerUtility::operator()(
                                     batch.fold_events.push_back(
                                         detail::extract_fold_event(
                                             root, *input.fold_intern,
-                                            input.fold_needs_args));
+                                            input.fold_needs_args,
+                                            input.fold_extra_fields));
                                     if (input.fold_keep_raw)
                                         batch.events.emplace_back(line_start,
                                                                   line_len);

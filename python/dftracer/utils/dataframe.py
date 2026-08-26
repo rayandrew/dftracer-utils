@@ -19,6 +19,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Iterator,
     List,
     Literal,
     Mapping,
@@ -720,11 +721,37 @@ class _ViewerFilters:
     def collect(self) -> "DataFrame":
         return _wrap(self._native.collect())
 
+    def stream(
+        self,
+        batch_size: int = 65536,
+        workers: int = 0,
+        normalize: bool = False,
+        dict: bool = True,
+    ) -> "Iterator[object]":
+        """Iterate matching events as pyarrow record batches (parallel, bounded
+        memory). Yields raw ``pyarrow.RecordBatch`` objects, not wrapped
+        DataFrames. ``workers=0`` uses the runtime's worker count."""
+        return iter(
+            self._native.stream(
+                batch_size=batch_size,
+                workers=workers,
+                normalize=normalize,
+                dict=dict,
+            )
+        )
+
     def time_bucket(self: _ViewerT, interval_us: Union[int, float, str]) -> _ViewerT:
         """Bucket width; a bare number is microseconds, a string ("1ms") is
         converted."""
         us = int(round(coerce_duration(interval_us, 1e6, "interval_us")))
         return _wrap(self._native.time_bucket(us))
+
+    def occ_cell(self: _ViewerT, cell_us: Union[int, float, str]) -> _ViewerT:
+        """Occupancy cell size (busy quantum); a bare number is microseconds, a
+        string ("1ms") is converted. 0 = default. Finer resolves overlap on
+        short events; honored with time_range."""
+        us = int(round(coerce_duration(cell_us, 1e6, "cell_us")))
+        return _wrap(self._native.occ_cell(us))
 
     def memory_budget(self: _ViewerT, nbytes: Union[int, str]) -> _ViewerT:
         """Spill budget; accepts a byte count or a unit string ("512MB")."""
@@ -770,6 +797,35 @@ class _ViewerFilters:
         # individually-typed parameters is a known checker gap.
         self._native.export_trace(path, **kwargs)  # ty: ignore[invalid-argument-type]
 
+    def statistics(self) -> Dict[str, object]:
+        """One-row summary of the matching events: count, mean/stddev dur,
+        min/max ts."""
+        return self._native.statistics()
+
+    def aggregate_partial(self) -> bytes:
+        """A combinable aggregation partial (opaque bytes) for a distributed
+        merge; combine several with merge_partials_to_table."""
+        return self._native.aggregate_partial()
+
+    def merge_partials_to_table(self, partials: List[bytes]) -> "DataFrame":
+        """Merge aggregate_partial() bytes from several ranks into one
+        DataFrame."""
+        return _wrap(self._native.merge_partials_to_table(partials))
+
+    def mv_source(self) -> List[str]:
+        """The materialized-view trace file(s) that would serve this query, or an
+        empty list if a read would scan the base."""
+        return self._native.mv_source()
+
+    def materialize_dir(self) -> str:
+        """Distributed row-MV coordinator: create and return the shared MV dir
+        (call on a view over the full file set)."""
+        return self._native.materialize_dir()
+
+    def register_materialized(self, dir: str) -> None:
+        """Write the MV manifest at ``dir`` over this view's base set."""
+        self._native.register_materialized(dir)
+
 
 class AggregatedTraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
     """The aggregated form of a TraceViewer (after group_by/agg); terminals
@@ -804,6 +860,11 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
 
     def join(self, other: "TraceViewer", how: str = "inner") -> "DataFrame":
         return _wrap(self._native.join(_unwrap(other), how))
+
+    def compare(self, other: "TraceViewer") -> "DataFrame":
+        """Aggregate both viewers and compare on the shared group key, returning
+        the difference DataFrame."""
+        return _wrap(self._native.compare(_unwrap(other)))
 
     def collect_typed(
         self,

@@ -105,6 +105,23 @@ TEST_CASE("tokenize - dotted field names") {
     CHECK((*result)[0].text == "args.level");
 }
 
+TEST_CASE("tokenize - bracket-indexed field path") {
+    // A [digits] index abutting an identifier is part of the field path.
+    auto result = tokenize("args.tags[0] == \"x\"");
+    REQUIRE(result.has_value());
+    CHECK((*result)[0].kind == TokenKind::IDENT);
+    CHECK((*result)[0].text == "args.tags[0]");
+}
+
+TEST_CASE("tokenize - in-list bracket stays a delimiter") {
+    // The bracket after `in` is a list, not part of the field path.
+    auto result = tokenize("x in [1, 2]");
+    REQUIRE(result.has_value());
+    CHECK((*result)[0].text == "x");
+    CHECK((*result)[1].kind == TokenKind::KW_IN);
+    CHECK((*result)[2].kind == TokenKind::LBRACKET);
+}
+
 TEST_CASE("tokenize - error on unterminated string") {
     auto result = tokenize(R"(name == "hello)");
     REQUIRE_FALSE(result.has_value());

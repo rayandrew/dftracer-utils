@@ -62,6 +62,11 @@ class DomSource {
     }
 
     std::optional<double> number(std::string_view field) const {
+        if (is_nested_path(field)) {
+            bool ok = false;
+            auto e = resolve_json_path(root_, field, ok);
+            return ok ? as_number(e) : std::nullopt;
+        }
         auto [e, ok] = top(field);
         if (ok)
             if (auto n = as_number(e)) return n;
@@ -73,6 +78,11 @@ class DomSource {
 
     std::optional<dftracer::utils::dataframe::FieldNum> number_typed(
         std::string_view field) const {
+        if (is_nested_path(field)) {
+            bool ok = false;
+            auto e = resolve_json_path(root_, field, ok);
+            return ok ? as_typed_number(e) : std::nullopt;
+        }
         auto [e, ok] = top(field);
         if (ok)
             if (auto n = as_typed_number(e)) return n;
@@ -83,6 +93,12 @@ class DomSource {
     }
 
     void append_value(std::string& out, std::string_view field) const {
+        if (is_nested_path(field)) {
+            bool ok = false;
+            auto e = resolve_json_path(root_, field, ok);
+            if (ok) append_text(out, e);
+            return;
+        }
         auto [e, ok] = top(field);
         if (ok) {
             append_text(out, e);
@@ -213,7 +229,9 @@ class PodSource {
             return ev_.has_dur
                        ? std::optional<double>(static_cast<double>(ev_.dur))
                        : std::nullopt;
-        if (const auto* v = find_arg(field)) {
+        const auto* v =
+            is_schema_field(field) ? find_top(field) : find_arg(field);
+        if (v) {
             if (const auto* d = std::get_if<double>(v)) return *d;
             if (const auto* i = std::get_if<std::int64_t>(v))
                 return static_cast<double>(*i);
@@ -231,7 +249,9 @@ class PodSource {
         if (field == "dur")
             return ev_.has_dur ? std::optional<FieldNum>(FieldNum::of(ev_.dur))
                                : std::nullopt;
-        if (const auto* v = find_arg(field)) {
+        const auto* v =
+            is_schema_field(field) ? find_top(field) : find_arg(field);
+        if (v) {
             if (const auto* d = std::get_if<double>(v)) return FieldNum::of(*d);
             if (const auto* i = std::get_if<std::int64_t>(v))
                 return FieldNum::of(*i);
@@ -252,24 +272,21 @@ class PodSource {
             append_u64(out, ev_.ts);
         } else if (field == "dur") {
             if (ev_.has_dur) append_u64(out, ev_.dur);
+        } else if (is_schema_field(field)) {
+            // ph/id/type: the top-level value only, never a same-named arg.
+            if (const auto* v = find_top(field)) append_arg_value(out, *v);
         } else {
             append_arg(out, field);
         }
     }
 
     void append_arg(std::string& out, std::string_view key) const {
-        if (key == "fhash") {
+        if (key == "fhash")
             append_id(out, ev_.fhash_id);
-        } else if (key == "hhash") {
+        else if (key == "hhash")
             append_id(out, ev_.hhash_id);
-        } else if (const auto* v = find_arg(key)) {
-            if (const auto* id = std::get_if<std::uint32_t>(v))
-                out.append(intern_.resolve(*id));
-            else if (const auto* i = std::get_if<std::int64_t>(v))
-                append_i64(out, *i);
-            else
-                append_number(out, std::get<double>(*v));
-        }
+        else if (const auto* v = find_arg(key))
+            append_arg_value(out, *v);
     }
 
     std::string value(std::string_view field) const {
@@ -295,6 +312,24 @@ class PodSource {
         for (const auto& [key_id, v] : ev_.args)
             if (key_id == id) return &v;
         return nullptr;
+    }
+
+    const FoldEvent::ArgValue* find_top(std::string_view field) const {
+        const std::uint32_t id = intern_lookup(field);
+        if (id == dftracer::utils::StringIntern::NO_ID) return nullptr;
+        for (const auto& [key_id, v] : ev_.top_fields)
+            if (key_id == id) return &v;
+        return nullptr;
+    }
+
+    void append_arg_value(std::string& out,
+                          const FoldEvent::ArgValue& v) const {
+        if (const auto* id = std::get_if<std::uint32_t>(&v))
+            out.append(intern_.resolve(*id));
+        else if (const auto* i = std::get_if<std::int64_t>(&v))
+            append_i64(out, *i);
+        else
+            append_number(out, std::get<double>(v));
     }
 
     std::uint32_t intern_lookup(std::string_view field) const {

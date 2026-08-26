@@ -58,8 +58,13 @@ ViewDefinition make_vdef(const ViewPlan& plan, bool for_aggregation) {
     vdef.query = effective_query(plan);
     if (for_aggregation) {
         // Aggregation folds parsed events; ph="M" metadata records carry no
-        // aggregable fields, so drop them.
-        vdef.include_metadata = false;
+        // aggregable fields, so drop them - unless a rank group key needs the
+        // PR records to build its pid -> rank map in the same scan.
+        const bool wants_rank = std::any_of(
+            plan.group_by.begin(), plan.group_by.end(),
+            [](const GroupKey& g) { return g.kind == GroupKey::Kind::Rank; });
+        vdef.include_metadata = wants_rank;
+        vdef.emit_all_metadata = wants_rank;
     } else {
         vdef.include_metadata = plan.include_metadata;
         vdef.emit_all_metadata = plan.emit_all_metadata;

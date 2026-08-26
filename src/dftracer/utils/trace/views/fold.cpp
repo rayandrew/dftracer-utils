@@ -1,5 +1,6 @@
 #include <dftracer/utils/core/common/platform_compat.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/view_scanner_utility.h>
 
@@ -98,13 +99,43 @@ FoldEvent build_fold_event(const DFTracerEvent& scalars,
 
 FoldEvent extract_fold_event(simdjson::dom::element root,
                              dftracer::utils::StringIntern& intern,
-                             bool needs_args) {
+                             bool needs_args,
+                             const std::vector<std::string>* extra_fields) {
     DFTracerEvent scalars;
     simdjson::dom::element args;
     bool has_args = false;
     if (!DFTracerEvent::parse_scalars(root, scalars, args, has_args))
         return FoldEvent{};
-    return build_fold_event(scalars, args, has_args, intern, needs_args);
+    FoldEvent ev =
+        build_fold_event(scalars, args, has_args, intern, needs_args);
+    if (extra_fields)
+        for (const auto& name : *extra_fields)
+            capture_extra_field(ev, root, intern, name);
+    return ev;
+}
+
+std::vector<std::string> extra_capture_fields(const ViewPlan& plan) {
+    // Flat args come from needs_args; only top-level fields the POD does not
+    // carry (anything but the six scalars) and nested paths need capture.
+    auto is_pod_scalar = [](const std::string& f) {
+        return f == "name" || f == "cat" || f == "pid" || f == "tid" ||
+               f == "ts" || f == "dur";
+    };
+    std::vector<std::string> out;
+    auto add = [&](const std::string& f) {
+        if (f.empty()) return;
+        for (const auto& e : out)
+            if (e == f) return;
+        out.push_back(f);
+    };
+    for (const auto& gk : plan.group_by)
+        if (gk.kind == GroupKey::Kind::Field && !is_pod_scalar(gk.arg))
+            add(gk.arg);
+    for (const auto& spec : plan.agg) {
+        if (is_nested_path(spec.field)) add(spec.field);
+        if (spec.op == AggOp::ArgMax && is_nested_path(spec.by)) add(spec.by);
+    }
+    return out;
 }
 
 coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
@@ -137,6 +168,8 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
         else
             any_wants_fold_event = true;
     }
+
+    std::vector<std::string> extra_fields = extra_capture_fields(plan);
 
     // Coarse fan-out: one worker coroutine per runtime slot draining the shared
     // unit queue, so under the elastic runtime live threads grow toward the
@@ -179,6 +212,8 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
                     sin.fold_intern = any_wants_fold_event ? &intern : nullptr;
                     sin.fold_needs_args = any_needs_args;
                     sin.fold_keep_raw = any_wants_raw && any_wants_fold_event;
+                    if (!extra_fields.empty())
+                        sin.fold_extra_fields = &extra_fields;
                     ViewScannerUtility scanner;
                     auto gen = scanner(sin);
                     bool complete = true;

@@ -26,11 +26,13 @@ class IndexFoldDriver : public utilities::indexer::IndexVisitor {
    public:
     IndexFoldDriver(dftracer::utils::StringIntern& intern,
                     std::span<Fold* const> folds, std::string file_path,
-                    std::string index_path)
+                    std::string index_path,
+                    std::vector<std::string> extra_fields = {})
         : intern_(&intern),
           folds_(folds.begin(), folds.end()),
           file_path_(std::move(file_path)),
-          index_path_(std::move(index_path)) {
+          index_path_(std::move(index_path)),
+          extra_fields_(std::move(extra_fields)) {
         for (auto* f : folds_) needs_args_ |= f->needs_args();
     }
 
@@ -58,6 +60,9 @@ class IndexFoldDriver : public utilities::indexer::IndexVisitor {
             [&](const EventRecord& r) {
                 batch_.push_back(build_fold_event(r.ev, r.args_dom, r.has_args,
                                                   *intern_, needs_args_));
+                for (const auto& name : extra_fields_)
+                    capture_extra_field(batch_.back(), r.json.element(),
+                                        *intern_, name);
             });
         // A line straddling this chunk's end is carried into the next chunk, so
         // it is parsed once and attributed to the chunk where it completes.
@@ -97,6 +102,7 @@ class IndexFoldDriver : public utilities::indexer::IndexVisitor {
     std::size_t line_number_ = 0;
     std::string file_path_;
     std::string index_path_;
+    std::vector<std::string> extra_fields_;
     std::vector<FoldEvent> batch_;
 };
 

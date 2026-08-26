@@ -16,6 +16,12 @@ namespace dataframe = dftracer::utils::dataframe;
 
 namespace dftracer::utils::trace::views::detail {
 
+// Occupancy grid defaults: target cell (busy quantum) when the query sets no
+// occ_cell_us, and the per-window mask-cell cap that coarsens the cell on wide
+// windows so occ_buckets stays bounded.
+static constexpr std::uint64_t DEFAULT_OCC_CELL_US = 64;
+static constexpr std::uint64_t MAX_OCC_BUCKETS = 65536;
+
 std::optional<double> to_number(simdjson::dom::element e) {
     double d;
     if (e.get_double().get(d) == simdjson::SUCCESS) return d;
@@ -142,18 +148,26 @@ AggSchema make_agg_schema(const ViewPlan& plan) {
         if (fi >= 0 && s.field_sketch[fi] < 0)
             s.field_sketch[fi] = static_cast<int>(s.sketch_count++);
     }
-    // Occupancy bucket width: the query's time_bucket if set (finer buckets),
-    // else the whole requested window as one bucket, else a 1s fallback. A
-    // narrower bucket resolves intra-bucket overlap better.
+    // The cell (busy quantum) is occ_bucket_us/64, so size the grid off a fixed
+    // cell, not the output time_bucket - pinning it to the bucket rounds a
+    // short event up to bucket/64 and inflates busy. Global (shard OR-merge);
+    // per-window cap bounds mask cells; unknown window falls back to a 1s grid.
     if (s.want_occupancy) {
-        if (plan.time_bucket_us > 0)
-            s.occ_bucket_us = plan.time_bucket_us;
-        else if (plan.time_range &&
-                 plan.time_range->second > plan.time_range->first)
-            s.occ_bucket_us = static_cast<std::uint64_t>(
+        const std::uint64_t cell =
+            plan.occ_cell_us > 0 ? plan.occ_cell_us : DEFAULT_OCC_CELL_US;
+        std::uint64_t bucket = cell * OCC_SUB_SLOTS;
+        if (plan.time_range &&
+            plan.time_range->second > plan.time_range->first) {
+            const std::uint64_t window = static_cast<std::uint64_t>(
                 plan.time_range->second - plan.time_range->first);
-        else
-            s.occ_bucket_us = 1000000;
+            const std::uint64_t min_bucket =
+                (window + MAX_OCC_BUCKETS - 1) / MAX_OCC_BUCKETS;
+            if (bucket < min_bucket) bucket = min_bucket;
+        } else if (bucket < 1000000) {
+            bucket = 1000000;
+        }
+        if (bucket < OCC_SUB_SLOTS) bucket = OCC_SUB_SLOTS;
+        s.occ_bucket_us = bucket;
     }
     return s;
 }
@@ -197,9 +211,15 @@ static OccSummary occupancy_summary(const AggAccum& a) {
         slots += static_cast<std::uint64_t>(std::popcount(ob.mask));
         if (ob.active > o.active) o.active = ob.active;
     }
-    o.busy = slots * a.occ_bucket_us / 64;
     o.total = a.occ_total;
     o.span = a.occ_te > a.occ_ts ? a.occ_te - a.occ_ts : 0;
+    // Clamp to both exact bounds a coverage bitmap can only overshoot: the
+    // union never exceeds sum(dur) (so concurrency = total/busy >= 1) nor the
+    // makespan (so utilization = busy/span <= 1, by construction - the span
+    // term is load-bearing, do not drop it).
+    o.busy = slots * a.occ_bucket_us / OCC_SUB_SLOTS;
+    if (o.busy > o.total) o.busy = o.total;
+    if (o.span && o.busy > o.span) o.busy = o.span;
     return o;
 }
 
@@ -412,7 +432,8 @@ const GroupResolver* ensure_resolver(const ViewPlan& plan) {
     for (const auto& gk : plan.group_by)
         if (gk.kind == GroupKey::Kind::FilePath ||
             gk.kind == GroupKey::Kind::FileName ||
-            gk.kind == GroupKey::Kind::HostName) {
+            gk.kind == GroupKey::Kind::HostName ||
+            gk.kind == GroupKey::Kind::Rank) {
             needs = true;
             break;
         }
@@ -434,6 +455,16 @@ const GroupResolver* ensure_resolver(const ViewPlan& plan) {
     return plan.resolver.get();
 }
 
+void apply_ranks(const ViewPlan& plan,
+                 std::unordered_map<std::uint64_t, std::string>& ranks) {
+    if (ranks.empty()) return;
+    ensure_resolver(plan);  // Rank counts as a resolved key, so this builds it
+    if (!plan.resolver) return;
+    for (auto& [pid, rank] : ranks)
+        plan.resolver->set_rank(std::to_string(pid), std::move(rank));
+    ranks.clear();
+}
+
 std::string resolve_group_value(const GroupResolver& r, GroupKey::Kind kind,
                                 const std::string& hash) {
     if (kind == GroupKey::Kind::FilePath) return r.file_path(hash);
@@ -443,6 +474,7 @@ std::string resolve_group_value(const GroupResolver& r, GroupKey::Kind kind,
         return slash == std::string::npos ? p : p.substr(slash + 1);
     }
     if (kind == GroupKey::Kind::HostName) return r.host_name(hash);
+    if (kind == GroupKey::Kind::Rank) return r.rank(hash);
     return hash;
 }
 
@@ -530,7 +562,10 @@ std::string group_col_name(const GroupKey& gk) {
             return "file_name";
         case GroupKey::Kind::HostName:
             return "host_name";
+        case GroupKey::Kind::Rank:
+            return "rank";
         case GroupKey::Kind::Arg:
+        case GroupKey::Kind::Field:
             return gk.arg;
     }
     return {};
@@ -612,6 +647,16 @@ dataframe::DataFrame to_batch(const GroupMap& map, const ViewPlan& plan) {
         dyn_cols.assign(names.begin(), names.end());
         for (const auto& n : dyn_cols) value_cols.push_back(n);
     }
+    // Effective grid resolution, so a caller can tell a grid-derived busy from
+    // a clamped one (the cap can coarsen the cell on a wide window).
+    bool occ_cell_col = false;
+    for (const auto& spec : plan.agg)
+        if (spec.op == AggOp::Busy || spec.op == AggOp::Concurrency ||
+            spec.op == AggOp::Utilization) {
+            occ_cell_col = true;
+            break;
+        }
+    if (occ_cell_col) value_cols.push_back("busy_cell_us");
 
     const std::size_t ng = map.size();
     std::vector<std::vector<std::string>> gk(group_cols.size());
@@ -668,6 +713,9 @@ dataframe::DataFrame to_batch(const GroupMap& map, const ViewPlan& plan) {
                     ? it->second.sum / static_cast<double>(it->second.n)
                     : 0.0));
         }
+        if (occ_cell_col)
+            vcells[vc++].push_back(dftracer::utils::dataframe::FieldNum::of(
+                static_cast<std::int64_t>(sch.occ_bucket_us / OCC_SUB_SLOTS)));
     }
 
     dataframe::DataFrame batch;

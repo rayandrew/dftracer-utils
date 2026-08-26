@@ -41,6 +41,10 @@ struct ViewScannerInput {
     /// intern table is shared across workers for consistent ids.
     dftracer::utils::StringIntern* fold_intern = nullptr;
     bool fold_needs_args = false;
+    /// Top-level fields (type, ph, ...) to capture raw into each FoldEvent's
+    /// args, for schemaless Field group keys the POD does not natively carry.
+    /// Non-owning; the pointee outlives the scan. Null = capture nothing.
+    const std::vector<std::string>* fold_extra_fields = nullptr;
     /// In fold mode, also keep each matching event's raw line in `events` (for
     /// a raw fold that parses it itself). Ignored when fold_intern is null -
     /// the non-fold scan already yields raw lines in `events`.

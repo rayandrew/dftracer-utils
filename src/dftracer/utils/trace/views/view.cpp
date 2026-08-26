@@ -138,6 +138,12 @@ View View::time_bucket(std::uint64_t interval_us) const {
     return View(std::move(next));
 }
 
+View View::occ_cell(std::uint64_t cell_us) const {
+    auto next = clone(plan_);
+    next->occ_cell_us = cell_us;
+    return View(std::move(next));
+}
+
 View View::time_scale(double ns_ratio) const {
     auto next = clone(plan_);
     next->time_scale = ns_ratio;

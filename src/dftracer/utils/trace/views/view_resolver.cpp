@@ -33,4 +33,9 @@ const std::string& GroupResolver::host_name(const std::string& hhash) const {
     return it != host_.end() ? it->second : EMPTY;
 }
 
+const std::string& GroupResolver::rank(const std::string& pid) const {
+    auto it = rank_.find(pid);
+    return it != rank_.end() ? it->second : EMPTY;
+}
+
 }  // namespace dftracer::utils::trace::views::detail

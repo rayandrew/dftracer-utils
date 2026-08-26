@@ -61,7 +61,11 @@ class AggFold : public Fold {
           intern_(&intern),
           budget_(plan.memory_budget),
           phase_target_(phase_target(plan)),
-          apply_query_(apply_query && plan.query.has_value()) {}
+          apply_query_(apply_query && plan.query.has_value()),
+          want_ranks_(std::any_of(plan.group_by.begin(), plan.group_by.end(),
+                                  [](const GroupKey& g) {
+                                      return g.kind == GroupKey::Kind::Rank;
+                                  })) {}
 
     ~AggFold() override { remove_runs(); }
 
@@ -75,7 +79,10 @@ class AggFold : public Fold {
     bool needs_args() const override {
         if (plan_->auto_numeric_metrics) return true;
         for (const auto& gk : plan_->group_by)
-            if (gk.kind == GroupKey::Kind::Arg) return true;
+            if (gk.kind == GroupKey::Kind::Arg ||
+                gk.kind == GroupKey::Kind::Field ||
+                gk.kind == GroupKey::Kind::Rank)  // PR args carry the rank
+                return true;
         for (const auto& spec : plan_->agg) {
             if (!arg_free_field(spec.field)) return true;
             if (spec.op == AggOp::ArgMax && !arg_free_field(spec.by))
@@ -96,7 +103,10 @@ class AggFold : public Fold {
             // aggregation vdef, phase by the query), so this is a no-op there;
             // on the raw-gzip path the fold is fed every phase and this is what
             // keeps metadata and other phases out of the aggregation.
-            if (ev.phase == RecordPhase::METADATA) continue;
+            if (ev.phase == RecordPhase::METADATA) {
+                if (want_ranks_) harvest_rank(ev);
+                continue;
+            }
             if (phase_target_ != RecordPhase::UNKNOWN &&
                 ev.phase != phase_target_)
                 continue;
@@ -133,12 +143,19 @@ class AggFold : public Fold {
         o.runs_.clear();
         o.dirs_.clear();
         o.cur_dir_.clear();
+        for (auto& [p, r] : o.ranks_) ranks_.emplace(p, std::move(r));
+        o.ranks_.clear();
         maybe_spill();
     }
 
     coro::CoroTask<bool> finalize(const CoverageSet&) override {
         co_return true;
     }
+
+    /// pid -> rank harvested from PR metadata; moved into the resolver by the
+    /// caller before the post-aggregation re-key. Empty unless a Rank group key
+    /// asked for it.
+    std::unordered_map<std::uint64_t, std::string>& ranks() { return ranks_; }
 
     // The folded groups, spill merged in, before name resolution. The caller
     // may merge these with partials from another source before resolving.
@@ -197,6 +214,26 @@ class AggFold : public Fold {
     }
 
    private:
+    // A PR metadata record is {"name":"PR","pid":P,"args":{"name":"rank",
+    // "value":"N"}}; record pid -> N. args keys/values are interned string ids.
+    void harvest_rank(const FoldEvent& ev) {
+        if (ev.name_id == dftracer::utils::StringIntern::NO_ID ||
+            intern_->resolve(ev.name_id) != "PR")
+            return;
+        std::string_view rank;
+        bool is_rank = false;
+        for (const auto& [kid, v] : ev.args) {
+            const auto* sid = std::get_if<std::uint32_t>(&v);
+            if (!sid) continue;
+            const std::string_view key = intern_->resolve(kid);
+            if (key == "name")
+                is_rank = intern_->resolve(*sid) == "rank";
+            else if (key == "value")
+                rank = intern_->resolve(*sid);
+        }
+        if (is_rank && !rank.empty()) ranks_[ev.pid] = std::string(rank);
+    }
+
     // Fields the POD serves without capturing args.
     static bool arg_free_field(const std::string& f) {
         return f.empty() || f == "ts" || f == "dur" || f == "te" ||
@@ -252,9 +289,14 @@ class AggFold : public Fold {
     std::uint64_t budget_;
     RecordPhase phase_target_;
     bool apply_query_ = false;
+    bool want_ranks_ = false;
     GroupMap map_;
     std::string keybuf_;
     query::ValueMap qmap_;  // reused per-event predicate scratch
+    // pid -> rank, harvested from PR metadata during the scan (Rank group key).
+    // Cross-record pid->rank join cannot happen mid-fold (the map stays
+    // mergeable), so the resolver applies it post-merge, like host_name.
+    std::unordered_map<std::uint64_t, std::string> ranks_;
 
     static RecordPhase phase_target(const ViewPlan& plan) {
         if (plan.phase == Phase::Events) return RecordPhase::COMPLETE;

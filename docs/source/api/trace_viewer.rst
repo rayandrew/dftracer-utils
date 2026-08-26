@@ -76,7 +76,8 @@ through further builder calls).
 
 Group keys accept the raw event dimensions - ``name``, ``cat``, ``pid``,
 ``tid``, ``io_cat``, ``acc_pat``, ``fhash``, ``hhash``, ``file_path``,
-``file_name``, ``host_name`` - plus ``bucket(file_path, 'sub1', 'sub2', ...)``,
+``file_name``, ``host_name``, ``rank`` (pid resolved to MPI rank via ``PR``
+metadata) - plus ``bucket(file_path, 'sub1', 'sub2', ...)``,
 which folds a path to the first listed substring it contains (values matching
 none fold to an empty string).
 

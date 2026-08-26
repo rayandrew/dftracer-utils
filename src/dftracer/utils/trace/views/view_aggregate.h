@@ -81,6 +81,10 @@ struct AggAccum {
     std::uint64_t occ_te = 0;
 };
 
+// Sub-slots per occupancy bucket. Tied to the 64-bit `OccBucket::mask`, so it
+// is 64 by construction and cannot be raised without widening the mask.
+inline constexpr std::uint64_t OCC_SUB_SLOTS = 64;
+
 // Sub-slots of [bucket_start, bucket_start+w) that [ts, ts+dur) covers, as a
 // 64-bit mask: slot i is [bucket_start + i*w/64, bucket_start + (i+1)*w/64),
 // set when the interval touches any of it. busy for the bucket is popcount *
@@ -198,6 +202,12 @@ void resolve_group_keys(GroupMap& map, const ViewPlan& plan);
 // Lazily build (and cache on the plan) the index-backed name resolver; null
 // when the plan has no resolved-name group key.
 const GroupResolver* ensure_resolver(const ViewPlan& plan);
+
+// Feed pid -> rank harvested from PR metadata during the scan into the plan's
+// resolver, so the Rank group key relabels pid groups post-aggregation. Empties
+// `ranks`. No-op when it is empty.
+void apply_ranks(const ViewPlan& plan,
+                 std::unordered_map<std::uint64_t, std::string>& ranks);
 
 // Resolve one group value from its stored hash to the name for `kind`
 // (FilePath/FileName/HostName); returns `hash` unchanged for other kinds.

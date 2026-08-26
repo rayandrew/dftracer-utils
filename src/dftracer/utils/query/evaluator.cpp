@@ -113,7 +113,7 @@ JsonValue resolve_field(const JsonValue& event, const FieldNode& field) {
     // DFTracer nests domain fields (fhash, hhash, ret, level, ...) under
     // "args". Let a bare reference resolve there so nested fields are queryable
     // by bare name, matching the index dimension names and the ValueMap path.
-    if (field.path.find('.') == std::string::npos) {
+    if (field.path.find_first_of(".[") == std::string::npos) {
         return event.at("args." + field.path);
     }
     return v;

@@ -3,7 +3,9 @@
 Common test utilities for  Python bindings tests
 """
 
+import ctypes
 import gc
+import glob
 import gzip
 import os
 import shutil
@@ -12,6 +14,30 @@ import tempfile
 import pytest
 
 from dftracer.utils.dftracer_utils_ext import CheckpointIndexer as NativeIndexer
+
+
+def find_example_plugin(name: str, env_var: str, repo_root) -> str:
+    """Locate a built example plugin `.so`: env var override, else the first
+    one under any build tree that actually dlopens here. Trying to load it is
+    the honest validity check - it rules out a cross-arch object left by
+    another build (a Linux tree on a mac, x86_64 on arm64) that no header
+    guess would reliably catch. Empty string when none is found."""
+    env = os.environ.get(env_var)
+    if env and os.access(env, os.R_OK):
+        return env
+    candidates = []
+    for suffix in ("so", "dylib"):
+        candidates += glob.glob(
+            os.path.join(str(repo_root), "**", "examples", "plugins", f"{name}.{suffix}"),
+            recursive=True,
+        )
+    for path in candidates:
+        try:
+            ctypes.CDLL(path)
+            return path
+        except OSError:
+            continue
+    return candidates[0] if candidates else ""
 
 
 def valgrind_scale(n: int, divisor: int = 10) -> int:

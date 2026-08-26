@@ -63,7 +63,17 @@ struct GroupKey {
         FilePath,
         FileName,
         HostName,
-        Arg
+        /// Groups on the event's pid, then relabels each pid to the rank the
+        /// trace's PR metadata (`{"name":"PR","pid":P,"args":{"name":"rank",
+        /// "value":"N"}}`) gave it. rank is stable across runs where pid is
+        /// not.
+        Rank,
+        Arg,
+        /// Any field by name, resolved top-level-then-args (the schemaless
+        /// fallback). `arg` holds the field name. Unlike Arg (args-only) this
+        /// also sees top-level fields the POD does not natively carry (type,
+        /// ph, ...), which the scanner captures into the POD on request.
+        Field
     };
     /// Value transform applied to the resolved group value, before the
     /// merge key is built. Coarsens the grain (many values fold to one), so
@@ -88,8 +98,12 @@ struct GroupKey {
     static GroupKey file_path() { return {Kind::FilePath, {}}; }
     static GroupKey file_name() { return {Kind::FileName, {}}; }
     static GroupKey host_name() { return {Kind::HostName, {}}; }
+    static GroupKey rank() { return {Kind::Rank, {}}; }
     static GroupKey of_arg(std::string key) {
         return {Kind::Arg, std::move(key)};
+    }
+    static GroupKey field(std::string name) {
+        return {Kind::Field, std::move(name)};
     }
 };
 
@@ -387,6 +401,10 @@ class View {
     View phase(Phase p) const;
     View time_range(double begin, double end) const;
     View time_bucket(std::uint64_t interval_us) const;
+    /// Target occupancy cell size (busy quantum) in us; 0 = engine default.
+    /// Finer resolves overlap better on short events, at more mask buckets.
+    /// Honored only with a time_range (see ViewPlan::occ_cell_us).
+    View occ_cell(std::uint64_t cell_us) const;
     /// Normalize ts/dur/te by `ns_ratio` = source_ns_per_unit /
     /// target_ns_per_unit (1.0 = none), applied before time_bucket. Callers
     /// resolve the trace's native unit (read_time_metric) and the target.
@@ -644,6 +662,9 @@ class AggregatedView : public View {
     }
     AggregatedView time_bucket(std::uint64_t interval_us) const {
         return {View::time_bucket(interval_us)};
+    }
+    AggregatedView occ_cell(std::uint64_t cell_us) const {
+        return {View::occ_cell(cell_us)};
     }
     AggregatedView time_scale(double ns_ratio) const {
         return {View::time_scale(ns_ratio)};
