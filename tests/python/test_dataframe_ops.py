@@ -161,6 +161,15 @@ def test_compare_agg_delta_pct():
     assert _dict(base.compare_agg(variant, on=1)) == d
 
 
+def test_compare_agg_rejects_non_string_key():
+    # A non-string key column would make the native string_at() read a null
+    # offset buffer; it must raise, not crash.
+    base = _df({"k": [1, 2], "count": [10, 20]})
+    variant = _df({"k": [1, 2], "count": [15, 20]})
+    with pytest.raises(Exception, match="string"):
+        base.compare_agg(variant, on="k")
+
+
 def test_asof_backward():
     left = _df({"ts": [10, 20, 30], "ev": ["a", "b", "c"]})
     right = _df({"ts": [5, 25], "val": [100, 200]})
