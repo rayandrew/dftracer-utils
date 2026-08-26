@@ -203,9 +203,8 @@ void resolve_group_keys(GroupMap& map, const ViewPlan& plan);
 // when the plan has no resolved-name group key.
 const GroupResolver* ensure_resolver(const ViewPlan& plan);
 
-// Feed pid -> rank harvested from PR metadata during the scan into the plan's
-// resolver, so the Rank group key relabels pid groups post-aggregation. Empties
-// `ranks`. No-op when it is empty.
+// Feed pid -> rank harvested from PR metadata into the plan's resolver so the
+// Rank group key relabels pid groups post-aggregation. Empties `ranks`.
 void apply_ranks(const ViewPlan& plan,
                  std::unordered_map<std::uint64_t, std::string>& ranks);
 
@@ -241,10 +240,9 @@ dftracer::utils::dataframe::DataFrame to_batch(const GroupMap& map,
 void project_columns(dftracer::utils::dataframe::DataFrame& batch,
                      const std::vector<std::string>& select);
 
-// The whole post-aggregation finalize in one place: to_batch, then the plan's
-// sort_by/topk/offset+limit/select. Shared by View::collect() and every
-// ViewSession collect branch so the two surfaces cannot drift. Apply only at
-// the final result boundary (after all merges).
+// Post-aggregation finalize: to_batch, then the plan's sort_by/topk/
+// offset+limit/select. Apply only at the final result boundary, after all
+// merges. Shared by View::collect() and the ViewSession collect branches.
 dftracer::utils::dataframe::DataFrame finalize_collect_batch(
     const GroupMap& map, const ViewPlan& plan);
 

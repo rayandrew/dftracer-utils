@@ -15,7 +15,6 @@ JsonValue JsonValue::at(const char* path) const {
             ++p;
             continue;
         }
-        // Bracket index: `a[0]`.
         if (*p == '[') {
             ++p;
             std::size_t idx = 0;

@@ -58,8 +58,7 @@ class CompareView {
 
     /// FULL-join two aggregation results on their first `n_key` group-key
     /// columns and append `delta_<m>`/`pct_<m>` for each numeric `l_`/`r_`
-    /// metric pair. The batch core of collect(); the fused-session compare
-    /// reuses it.
+    /// metric pair.
     static dataframe::DataFrame compare_batches(
         const dataframe::DataFrame& base, const dataframe::DataFrame& variant,
         std::int64_t n_key) {

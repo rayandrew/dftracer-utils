@@ -192,8 +192,7 @@ std::string key_value(const AggKeyView& kv, const GroupKey& gk,
         case GroupKey::Kind::Arg:
         case GroupKey::Kind::Field:
             // Resolved from the key's extra_keys (e.g. PROFILE epoch/step);
-            // requires the key to have been parsed with want_extra_keys. Field
-            // never reaches here (answerable() keeps it off the tier path).
+            // requires the key to have been parsed with want_extra_keys.
             for (const auto& [k, v] : kv.extra_keys)
                 if (k == gk.arg) return std::string(v);
             return {};

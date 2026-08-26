@@ -17,8 +17,8 @@ class GroupResolver {
 
     const std::string& file_path(const std::string& fhash) const;
     const std::string& host_name(const std::string& hhash) const;
-    /// pid (as text) -> rank, harvested from the trace's PR metadata at query
-    /// time (not indexed), so it is populated separately from the constructor.
+    /// pid (as text) -> rank, harvested from PR metadata at query time (not
+    /// indexed), so it is populated separately from the constructor.
     const std::string& rank(const std::string& pid) const;
     void set_rank(const std::string& pid, std::string rank) const {
         rank_[pid] = std::move(rank);
@@ -28,8 +28,7 @@ class GroupResolver {
     static const std::string EMPTY;
     std::unordered_map<std::string, std::string> file_;
     std::unordered_map<std::string, std::string> host_;
-    // Harvested from PR metadata at query time (not from the index), after the
-    // resolver is constructed, so it is filled through a const handle.
+    // Filled after construction (query-time PR metadata), hence mutable.
     mutable std::unordered_map<std::string, std::string> rank_;
 };
 

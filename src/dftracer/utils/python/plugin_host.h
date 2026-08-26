@@ -22,9 +22,8 @@ namespace dftracer::utils::python {
 
 int init_plugin_host(PyObject *m);
 
-// Read a plugin host's named results as a {name: pyarrow|bytes} dict, after the
-// host was attached to a session (attach_to_session) and that session executed.
-// NULL with a Python error set on failure. `host` must be a PluginHostObject.
+// Read a PluginHostObject's named results as a {name: pyarrow|bytes} dict, once
+// its session has executed. NULL with a Python error set on failure.
 PyObject *plugin_host_results_dict(PyObject *host);
 
 }  // namespace dftracer::utils::python

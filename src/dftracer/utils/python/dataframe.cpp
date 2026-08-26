@@ -756,9 +756,6 @@ PyObject* DataFrame_join(PyObject* self, PyObject* args, PyObject* kwds) {
     });
 }
 
-// compare_agg(variant, n_key): FULL-join this baseline with `variant` on the
-// first n_key group-key columns and append delta_/pct_ per numeric metric, the
-// same result CompareView produces. For the fused-session compare.
 PyObject* DataFrame_compare_agg(PyObject* self, PyObject* args) {
     namespace comparator = dftracer::utils::trace::comparator;
     DataFrameObject* b = as_dataframe(self);

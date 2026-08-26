@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
@@ -111,7 +112,13 @@ coro::CoroTask<std::vector<ScanUnit>> gather_units(const ViewPlan& plan,
                             .with_checkpoint_size(ckpt)
                             .with_force_rebuild(false)
                             .with_index(index_path));
-                    if (!md.success) co_return;
+                    // Fail loudly: dropping the file would silently omit its
+                    // events from the result.
+                    if (!md.success)
+                        throw DFTUtilsException(
+                            ErrorCode::IO,
+                            "gather_units: metadata read failed for " +
+                                f.file_path);
                     uc_size = md.uncompressed_size;
                     n_ckpts = md.num_checkpoints;
                 }
@@ -128,7 +135,9 @@ coro::CoroTask<std::vector<ScanUnit>> gather_units(const ViewPlan& plan,
 
                 ViewPlannerUtility planner;
                 auto planned = co_await planner(pin);
-                if (!planned) co_return;
+                // A planner error must propagate; file_may_match == false is a
+                // legitimate prune, so that one stays a quiet skip.
+                if (!planned) throw DFTUtilsException(planned.error());
                 skip_v[fi] = planned->skipped_checkpoints;
                 if (!planned->file_may_match) co_return;
 

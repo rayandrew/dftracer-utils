@@ -129,25 +129,21 @@ class PluginHost:
         A result's type depends on what the plugin emitted:
 
         - An in-memory map (the default) -> our
-          :class:`~dftracer.utils.DataFrame`, imported zero-copy from the
-          plugin's Arrow output (``from_arrow`` wraps the buffers). Call
-          ``.to_arrow()`` / ``.to_pandas()`` for other shapes.
-        - A map with a nested value (list/struct columns our columnar engine
-          does not import yet) -> a ``pyarrow.Table`` fallback.
+          :class:`~dftracer.utils.DataFrame`, zero-copy from the plugin's Arrow
+          output. Call ``.to_arrow()`` / ``.to_pandas()`` for other shapes.
+        - A map with a nested value the columnar engine cannot import yet -> a
+          ``pyarrow.Table`` fallback.
         - A streamed map (``DFTRACER_PLUGIN_MAP_STREAM=1``, spilled to several
-          batches) -> a pull-based ``pyarrow.RecordBatchReader``, left lazy so
-          peak memory stays near one partition (converting would materialize it
-          all). Call ``.read_all()`` for a table.
-        - ``emit_result`` bytes -> ``bytes`` (an opaque scalar, not tabular).
+          batches) -> a pull-based ``pyarrow.RecordBatchReader``, left lazy.
+          Call ``.read_all()`` for a table.
+        - ``emit_result`` bytes -> ``bytes``.
         """
         raw = self._native.run(traces, index_dir, auto_index)
         return {name: self._shape(name, obj) for name, obj in raw.items()}
 
     def _shape(self, name: str, obj: object) -> "_RunResult":
-        """An in-memory tabular result -> our DataFrame (renaming jit v0..
-        columns to the declared field names). A streamed RecordBatchReader stays
-        lazy; emit_result bytes pass through; a nested Arrow type the columnar
-        engine cannot import yet falls back to the pyarrow Table."""
+        """Wrap an in-memory tabular result as a DataFrame, renaming jit v0..
+        columns to the declared field names. Readers and bytes pass through."""
         import pyarrow as pa
 
         if isinstance(obj, bytes) or isinstance(obj, pa.RecordBatchReader):

@@ -401,9 +401,8 @@ coro::CoroTask<ExportStats> PluginHost::run(const View& view) const {
 
 void PluginHost::attach_to_session(trace::views::ViewSession& session) const {
     namespace views = trace::views;
-    // Shared registry for the whole session run; captured by the factory
-    // closures (which the session owns through execute) so it outlives the
-    // scan.
+    // Captured by the factory closures (owned by the session through execute)
+    // so it outlives the scan.
     auto results = std::make_shared<SharedResultRegistry>();
     impl_->named_results.clear();
     NamedResultRegistry* named = &impl_->named_results;

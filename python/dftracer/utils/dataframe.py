@@ -989,12 +989,12 @@ class SessionView(_ViewerFilters):
 
     def group_by(self, *keys: str) -> "SessionView":
         v = self._rewrap(self._native.group_by(*keys))
-        v._n_group = len(keys)  # group_by sets the key set
+        v._n_group = len(keys)
         return v
 
     def time_bucket(self, interval_us: "Union[int, float, str]") -> "SessionView":
         v = super().time_bucket(interval_us)
-        v._n_bucket = 1  # adds a leading time_bucket column
+        v._n_bucket = 1
         return v
 
     def agg(self, *specs: "Union[str, Agg]") -> "SessionView":  # ty: ignore[invalid-method-override]

@@ -18,10 +18,9 @@ from dftracer.utils.dftracer_utils_ext import CheckpointIndexer as NativeIndexer
 
 def find_example_plugin(name: str, env_var: str, repo_root) -> str:
     """Locate a built example plugin `.so`: env var override, else the first
-    one under any build tree that actually dlopens here. Trying to load it is
-    the honest validity check - it rules out a cross-arch object left by
-    another build (a Linux tree on a mac, x86_64 on arm64) that no header
-    guess would reliably catch. Empty string when none is found."""
+    one under any build tree that dlopens here. The load is the validity check;
+    it rules out a cross-arch object left by another build that a header guess
+    would miss. Empty string when none is found."""
     env = os.environ.get(env_var)
     if env and os.access(env, os.R_OK):
         return env

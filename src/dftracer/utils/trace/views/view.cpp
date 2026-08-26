@@ -506,7 +506,6 @@ Deferred<ExportStats> ViewSession::export_json(Query predicate,
 Deferred<ExportStats> ViewSession::export_json(ExportSink& sink) {
     auto out = std::make_shared<ExportStats>();
     detail::BranchHooks h = detail::make_export_branch(sink, out);
-    // predicate left unset: stream every scanned event.
     detail::add_branch(*state_, std::move(h));
     return {out, executed_};
 }
@@ -523,8 +522,7 @@ Deferred<dataframe::DataFrame> ViewSession::collect_events(const View& branch) {
     auto out = std::make_shared<dataframe::DataFrame>();
     const std::size_t slots = num_slots_ ? num_slots_ : 1;
     // One Arrow row builder per worker slot (indexed, never moved). The JSON
-    // row builder is the only JSON -> columns path, so events cross Arrow once
-    // here and from_arrow converts into our native columns.
+    // row builder is the only JSON -> columns path, so events cross Arrow once.
     auto builders =
         std::make_shared<std::vector<arw::RecordBatchBuilder> >(slots);
     auto parsers = std::make_shared<std::vector<json::JsonParser> >(slots);

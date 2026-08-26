@@ -327,9 +327,8 @@ std::optional<GroupMap> find_subsuming_rollup(const rdb::RocksDatabase& db,
 
 std::string rollup_index_path(const ViewPlan& plan) {
     // A Rank group key resolves pid -> rank from PR metadata harvested during
-    // the scan; a rollup read-back never scans, so a rank plan must not persist
-    // to or be served from a rollup. Forcing an empty path keeps it on the
-    // scan.
+    // the scan; a rollup read-back never scans, so a rank plan cannot use a
+    // rollup. An empty path keeps it on the scan.
     for (const auto& gk : plan.group_by)
         if (gk.kind == GroupKey::Kind::Rank) return {};
     // A caller-set shared root anchors a cross-file rollup (dask sets it for a

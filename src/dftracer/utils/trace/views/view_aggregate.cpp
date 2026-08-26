@@ -148,10 +148,10 @@ AggSchema make_agg_schema(const ViewPlan& plan) {
         if (fi >= 0 && s.field_sketch[fi] < 0)
             s.field_sketch[fi] = static_cast<int>(s.sketch_count++);
     }
-    // The cell (busy quantum) is occ_bucket_us/64, so size the grid off a fixed
-    // cell, not the output time_bucket - pinning it to the bucket rounds a
-    // short event up to bucket/64 and inflates busy. Global (shard OR-merge);
-    // per-window cap bounds mask cells; unknown window falls back to a 1s grid.
+    // Size the grid off a fixed cell, not the output time_bucket - pinning the
+    // cell to the bucket rounds a short event up to bucket/64 and inflates
+    // busy. Per-window cap bounds the mask cells; unknown window falls back to
+    // 1s.
     if (s.want_occupancy) {
         const std::uint64_t cell =
             plan.occ_cell_us > 0 ? plan.occ_cell_us : DEFAULT_OCC_CELL_US;
@@ -213,10 +213,9 @@ static OccSummary occupancy_summary(const AggAccum& a) {
     }
     o.total = a.occ_total;
     o.span = a.occ_te > a.occ_ts ? a.occ_te - a.occ_ts : 0;
-    // Clamp to both exact bounds a coverage bitmap can only overshoot: the
-    // union never exceeds sum(dur) (so concurrency = total/busy >= 1) nor the
-    // makespan (so utilization = busy/span <= 1, by construction - the span
-    // term is load-bearing, do not drop it).
+    // A coverage bitmap can only overshoot: clamp busy to sum(dur) (keeps
+    // concurrency = total/busy >= 1) and to the makespan (keeps utilization =
+    // busy/span <= 1; the span clamp is load-bearing, do not drop it).
     o.busy = slots * a.occ_bucket_us / OCC_SUB_SLOTS;
     if (o.busy > o.total) o.busy = o.total;
     if (o.span && o.busy > o.span) o.busy = o.span;
@@ -648,7 +647,7 @@ dataframe::DataFrame to_batch(const GroupMap& map, const ViewPlan& plan) {
         for (const auto& n : dyn_cols) value_cols.push_back(n);
     }
     // Effective grid resolution, so a caller can tell a grid-derived busy from
-    // a clamped one (the cap can coarsen the cell on a wide window).
+    // a clamped one.
     bool occ_cell_col = false;
     for (const auto& spec : plan.agg)
         if (spec.op == AggOp::Busy || spec.op == AggOp::Concurrency ||

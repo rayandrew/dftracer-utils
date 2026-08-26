@@ -15,8 +15,8 @@
 
 namespace {
 
-// A minimal external Fold for the fold-factory seam: counts events over the
-// shared scan, publishing the total in finalize.
+// Minimal external Fold for the fold-factory seam: counts events over the
+// shared scan.
 struct CountFold : dftracer::utils::trace::views::detail::Fold {
     std::shared_ptr<std::atomic<std::uint64_t>> total;
     std::uint64_t local = 0;
@@ -1401,7 +1401,6 @@ TEST_SUITE("View") {
         CHECK(by_type["c_app"] == 2);
         CHECK(by_type["posix"] == 2);
 
-        // Nested object descent.
         auto by_host =
             counts("args.meta.host", GroupKey::field("args.meta.host"));
         CHECK(by_host["A"] == 2);
@@ -1414,7 +1413,6 @@ TEST_SUITE("View") {
             CHECK(by_tag["z"] == 2);
         }
 
-        // A nested numeric field aggregates.
         dataframe::DataFrame b =
             View::from_file(gz, idx)
                 .group_by({GroupKey::field("args.meta.host")})

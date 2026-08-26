@@ -47,12 +47,14 @@ class ReaderInflater {
         file_token_ = file_token;
     }
 
-    /// Start reading from `file_offset` (0 = start of file).
+    /// Start reading from `file_offset` (0 = start of file). `expected_out`
+    /// (0 = default) pre-sizes the decode buffer to a known uncompressed span.
     coro::CoroTask<bool> initialize(int fd, off_t& offset,
                                     std::uint64_t file_offset = 0,
-                                    int /*window_bits*/ = 0) {
+                                    int /*window_bits*/ = 0,
+                                    std::size_t expected_out = 0) {
         reset();
-        co_return co_await begin_at(fd, offset, file_offset);
+        co_return co_await begin_at(fd, offset, file_offset, expected_out);
     }
 
     /// Seek to a member for random access. A member header is a member
@@ -60,13 +62,14 @@ class ReaderInflater {
     coro::CoroTask<bool> seek_to_member(
         int fd, off_t& offset,
         const dftracer::utils::utilities::indexer::internal::GzipMemberRecord&
-            member) {
+            member,
+        std::size_t expected_out = 0) {
         DFTRACER_UTILS_LOG_DEBUG("Seeking to member %" PRIu64
                                  ": c_offset=%" PRIu64 ", uc_offset=%" PRIu64,
                                  member.member_idx, member.c_offset,
                                  member.uc_offset);
         reset();
-        co_return co_await begin_at(fd, offset, member.c_offset);
+        co_return co_await begin_at(fd, offset, member.c_offset, expected_out);
     }
 
     /// Fill up to `len` uncompressed bytes into `buf`. `bytes_out` is the
@@ -131,15 +134,20 @@ class ReaderInflater {
     static constexpr std::size_t INIT_OUT = 1u << 20;
 
     coro::CoroTask<bool> begin_at(int fd, off_t& offset,
-                                  std::uint64_t file_offset) {
+                                  std::uint64_t file_offset,
+                                  std::size_t expected_out = 0) {
         struct stat st;
         if (::fstat(fd, &st) != 0) co_return false;
         file_size_ = static_cast<std::uint64_t>(st.st_size);
         comp_off_ = file_offset;
         next_read_ = file_offset;
         offset = static_cast<off_t>(file_offset);
-        if (!cache_ && member_owned_.size() < INIT_OUT) {
-            member_owned_.resize(INIT_OUT);
+        // Pre-size to the known span so the first member does not grow the
+        // buffer by doubling.
+        if (!cache_) {
+            const std::size_t want =
+                std::max<std::size_t>(INIT_OUT, expected_out);
+            if (member_owned_.size() < want) member_owned_.resize(want);
         }
         co_return dec_.valid();
     }

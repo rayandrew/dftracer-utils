@@ -1,4 +1,6 @@
+#include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/platform_compat.h>
+#include <dftracer/utils/core/coro/async_semaphore.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/fold.h>
@@ -14,6 +16,15 @@
 namespace dftracer::utils::trace::views::detail {
 
 namespace {
+
+struct ScanPermit {
+    coro::CoroSemaphore& sem;
+    std::uint64_t bytes;
+    ScanPermit(coro::CoroSemaphore& s, std::uint64_t n) : sem(s), bytes(n) {}
+    ~ScanPermit() { sem.release(bytes); }
+    ScanPermit(const ScanPermit&) = delete;
+    ScanPermit& operator=(const ScanPermit&) = delete;
+};
 
 std::uint32_t intern_string(dftracer::utils::StringIntern& intern,
                             simdjson::dom::element val) {
@@ -176,6 +187,10 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
     // cap.
     const std::size_t nworkers =
         std::min<std::size_t>(units.size(), available_parallelism());
+    // Bound bytes decoded concurrently so a scan cannot OOM the box. Always on:
+    // an explicit memory_budget() or a RAM-fraction default. Workers park when
+    // full, so a generous budget never throttles.
+    coro::CoroSemaphore budget_sem(compute_memory_budget(plan.memory_budget));
     std::atomic<std::size_t> next_unit{0};
     std::vector<std::uint64_t> matched_v(nworkers, 0), scanned_v(nworkers, 0);
     std::vector<CoverageSet> covered_v(nworkers);
@@ -203,6 +218,13 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
                     if (covered && covered->covers(units[i].file_path,
                                                    units[i].checkpoint_idx))
                         continue;
+
+                    const std::uint64_t reserve =
+                        units[i].end_byte > units[i].start_byte
+                            ? units[i].end_byte - units[i].start_byte
+                            : 0;
+                    co_await budget_sem.acquire(reserve);
+                    ScanPermit permit{budget_sem, reserve};
 
                     ViewScannerInput sin =
                         make_scanner_input(units[i], vdef, vdef.query);

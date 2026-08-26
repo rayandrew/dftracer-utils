@@ -398,8 +398,8 @@ Series import_list(const ArrowSchema* schema, const ArrowArray* arr,
     return Series{col};
 }
 
-// STRUCT: validity + one child array per field. Mirrors export_struct; each
-// field column is imported recursively and aliases `arr` through `owner`.
+// Inverse of export_struct; each field column is imported recursively and
+// aliases `arr` through `owner`.
 Series import_struct(const ArrowSchema* schema, const ArrowArray* arr,
                      std::shared_ptr<void> owner) {
     if (schema->n_children != arr->n_children) return Series{};

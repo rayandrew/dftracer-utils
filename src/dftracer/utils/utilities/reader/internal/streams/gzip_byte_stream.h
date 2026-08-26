@@ -68,11 +68,14 @@ class GzipByteStream : public GzipStream {
             "bytes_read=%zu",
             result, bytes_read);
 
-        if (!result || bytes_read == 0) {
-            DFTRACER_UTILS_LOG_DEBUG("%s",
-                                     "GzipByteStream::read (zero-copy) - "
-                                     "marking as finished due to read "
-                                     "failure or 0 bytes");
+        // A decode failure must not pass for clean EOF (which would silently
+        // drop the rest of the file).
+        if (!result) {
+            throw ReaderError(ReaderError::COMPRESSION_ERROR,
+                              "gzip decode failed mid-stream at position " +
+                                  std::to_string(current_position_));
+        }
+        if (bytes_read == 0) {
             is_finished_ = true;
             co_return {};
         }

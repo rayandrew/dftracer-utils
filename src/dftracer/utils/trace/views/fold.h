@@ -102,8 +102,7 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
 
 /// Fields the scanner must capture into each event's args for this plan: the
 /// non-scalar Field group keys and nested agg fields the POD does not natively
-/// carry (type/ph, a.b, a[0]). Empty for a plain plan. Shared by the fused scan
-/// and the bootstrap index-build so both answer schemaless queries identically.
+/// carry (type/ph, a.b, a[0]). Empty for a plain plan.
 std::vector<std::string> extra_capture_fields(const ViewPlan& plan);
 
 }  // namespace dftracer::utils::trace::views::detail

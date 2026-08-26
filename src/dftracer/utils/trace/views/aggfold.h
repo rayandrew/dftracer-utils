@@ -152,9 +152,8 @@ class AggFold : public Fold {
         co_return true;
     }
 
-    /// pid -> rank harvested from PR metadata; moved into the resolver by the
-    /// caller before the post-aggregation re-key. Empty unless a Rank group key
-    /// asked for it.
+    /// pid -> rank harvested from PR metadata; the caller moves it into the
+    /// resolver before the post-aggregation re-key. Empty without a Rank key.
     std::unordered_map<std::uint64_t, std::string>& ranks() { return ranks_; }
 
     // The folded groups, spill merged in, before name resolution. The caller
@@ -215,7 +214,7 @@ class AggFold : public Fold {
 
    private:
     // A PR metadata record is {"name":"PR","pid":P,"args":{"name":"rank",
-    // "value":"N"}}; record pid -> N. args keys/values are interned string ids.
+    // "value":"N"}}; record pid -> N.
     void harvest_rank(const FoldEvent& ev) {
         if (ev.name_id == dftracer::utils::StringIntern::NO_ID ||
             intern_->resolve(ev.name_id) != "PR")
@@ -293,9 +292,9 @@ class AggFold : public Fold {
     GroupMap map_;
     std::string keybuf_;
     query::ValueMap qmap_;  // reused per-event predicate scratch
-    // pid -> rank, harvested from PR metadata during the scan (Rank group key).
-    // Cross-record pid->rank join cannot happen mid-fold (the map stays
-    // mergeable), so the resolver applies it post-merge, like host_name.
+    // pid -> rank harvested from PR metadata during the scan. The pid->rank
+    // join cannot happen mid-fold (the map stays mergeable), so the resolver
+    // applies it post-merge, like host_name.
     std::unordered_map<std::uint64_t, std::string> ranks_;
 
     static RecordPhase phase_target(const ViewPlan& plan) {

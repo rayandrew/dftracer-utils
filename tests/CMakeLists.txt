@@ -54,6 +54,7 @@ set(TEST_CPP_SOURCES
     coro/test_when_all_heterogeneous.cpp
     coro/test_when_any_heterogeneous.cpp
     coro/test_async_once.cpp
+    coro/test_async_semaphore.cpp
     # Async I/O tests
     io/test_async_io.cpp
     # Task Graph tests

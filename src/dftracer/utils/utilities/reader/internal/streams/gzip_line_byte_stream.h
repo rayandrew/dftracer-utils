@@ -174,7 +174,14 @@ class GzipLineByteStream : public GzipStream {
                                             buffer_.data() + partial_size),
                                         bytes_to_read, bytes_read);
 
-            if (!status || bytes_read == 0) {
+            // A decode failure must not pass for clean EOF (which would
+            // silently drop the rest of the file).
+            if (!status) {
+                throw ReaderError(ReaderError::COMPRESSION_ERROR,
+                                  "gzip decode failed mid-stream at position " +
+                                      std::to_string(current_position_));
+            }
+            if (bytes_read == 0) {
                 is_finished_ = true;
                 co_return 0;
             }

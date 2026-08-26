@@ -105,15 +105,14 @@ struct AggBranch {
     std::vector<GroupKey> group_by;
     std::vector<AggSpec> agg;
     std::shared_ptr<dataframe::DataFrame> out;
-    // The branch's full plan (collect(const View&)): used directly instead of
+    // The branch's full plan (collect(const View&)), used directly instead of
     // overlaying group_by/agg on the base. apply_query filters per event on the
-    // shared scan, which also keeps the branch off the no-scan rollup/tier
-    // path.
+    // shared scan, keeping the branch off the no-scan rollup/tier path.
     std::shared_ptr<const ViewPlan> plan;
     bool apply_query = false;
-    // When set, this branch emits the serialized (raw-keyed, unresolved)
-    // aggregate partial into `partial_out` for a distributed merge, instead of
-    // a DataFrame into `out`. Forces the scan (raw partial, no rollup relabel).
+    // When set, emits the serialized (raw-keyed) aggregate partial into
+    // `partial_out` for a distributed merge instead of a DataFrame into `out`.
+    // Forces a scan (raw partial, no rollup relabel).
     std::shared_ptr<std::string> partial_out;
 };
 
@@ -154,8 +153,7 @@ std::shared_ptr<ViewSessionState> make_view_session_state(
 void add_branch(ViewSessionState& state, BranchHooks hooks);
 
 // Attach an externally-built Fold to the session's shared scan: `make`
-// constructs it with the scan's intern, `finalize` runs after the merge. The
-// seam behind a plugin/JIT branch; the plugins layer supplies `make`.
+// constructs it with the scan's intern, `finalize` runs after the merge.
 void add_fold_factory(
     ViewSessionState& state,
     std::function<std::unique_ptr<Fold>(dftracer::utils::StringIntern&)> make,

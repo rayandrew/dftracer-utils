@@ -59,10 +59,9 @@ inline bool is_nested_path(std::string_view field) {
     return field.find_first_of(".[") != std::string_view::npos;
 }
 
-/// Resolve a dotted/bracketed path from `root` (`a.b[0].c`, `a.b.0`). A key
-/// segment descends an object; `[N]` or a bare numeric segment on an array
-/// indexes it. `ok` is false if any segment is missing. Rooted at `root` (no
-/// args fallback), matching the query evaluator's treatment of dotted paths.
+/// Resolve a dotted/bracketed path from `root` (`a.b[0].c`, `a.b.0`); `ok` is
+/// false if any segment is missing. Rooted at `root` with no args fallback,
+/// matching the query evaluator's treatment of dotted paths.
 inline simdjson::dom::element resolve_json_path(simdjson::dom::element root,
                                                 std::string_view path,
                                                 bool& ok) {
@@ -131,10 +130,9 @@ inline simdjson::dom::element resolve_json_path(simdjson::dom::element root,
 }
 
 /// Capture a field the POD does not natively carry (top-level type/ph/id, or a
-/// nested a.b/a[0]) with its JSON type preserved, so a Field group key or
-/// nested agg field reads the same bytes select/filter would. A bare schema
-/// field goes to `top_fields` (a same-named args key must not shadow it);
-/// everything else is an args entry. No-op when the path is absent.
+/// nested a.b/a[0]), JSON type preserved. A bare schema field goes to
+/// `top_fields` so a same-named args key cannot shadow it; everything else to
+/// `args`. No-op when the path is absent.
 inline void capture_extra_field(FoldEvent& ev, simdjson::dom::element root,
                                 dftracer::utils::StringIntern& intern,
                                 const std::string& name) {
@@ -174,9 +172,8 @@ FoldEvent build_fold_event(const DFTracerEvent& scalars,
 /// Parse a DOM object into an owned event. Every string is interned, so the
 /// result stays valid after the parser that produced `root` is reused. Args are
 /// captured only when `needs_args`. `extra_fields`, if given, names fields the
-/// POD does not natively carry (type/ph, a nested a.b/a[0]); each is captured
-/// via capture_extra_field so a Field group key or nested agg field resolves
-/// it.
+/// POD does not natively carry (type/ph, a nested a.b/a[0]) to capture into the
+/// event.
 FoldEvent extract_fold_event(
     simdjson::dom::element root, dftracer::utils::StringIntern& intern,
     bool needs_args, const std::vector<std::string>* extra_fields = nullptr);

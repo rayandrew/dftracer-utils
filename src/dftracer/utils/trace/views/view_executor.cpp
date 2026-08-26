@@ -849,10 +849,9 @@ coro::CoroTask<ExportStats> run_scan_batches(
     co_return stats;
 }
 
-// An externally-built Fold joined to the shared scan (the plugin/JIT seam):
+// An externally-built Fold joined to the shared scan (the plugin/JIT seam).
 // `make` builds it with the scan's intern so ids agree and per-worker slices
-// merge; `finalize` runs after the merge. The plugins layer supplies `make`, so
-// the views layer never names PluginFold.
+// merge; `finalize` runs after the merge.
 struct FoldFactory {
     std::function<std::unique_ptr<Fold>(dftracer::utils::StringIntern&)> make;
     std::function<void()> finalize;
@@ -1096,9 +1095,8 @@ coro::CoroTask<ExportStats> run_session(
         (sb.agg_plan ? agg_b : raw_b).push_back(&sb);
 
     // A lone aggregation with no raw branches: the full single-scan engine
-    // (agg_source coverage + rollup persist). A fold factory (plugin) must ride
-    // the shared fused scan, and a partial wants the raw map, so both
-    // disqualify this fast path.
+    // (agg_source coverage + rollup persist). A fold factory (plugin) rides the
+    // shared fused scan and a partial wants the raw map, so both disqualify it.
     if (agg_b.size() == 1 && raw_b.empty() && !has_factories &&
         !agg_b[0]->br->agg->partial_out) {
         GroupMap m = co_await run_scan_aggregate(*agg_b[0]->agg_plan);
@@ -1112,11 +1110,9 @@ coro::CoroTask<ExportStats> run_session(
     ViewPlan scan_plan = plan;
     if (auto mv = find_subsuming_view(plan)) scan_plan.files = std::move(*mv);
     ViewDefinition avdef = make_vdef(scan_plan, /*for_aggregation=*/true);
-    // The shared scan's vdef comes from the base plan, but a branch's own plan
-    // may need more than the base: a Rank group key harvests the PR metadata
-    // during the scan, so if any branch wants it the fused scan must keep
-    // metadata (make_vdef dropped it for the base). This is the metadata half
-    // of the per-branch scan-requirement union.
+    // A Rank group key harvests the PR metadata during the scan, but make_vdef
+    // dropped metadata for the base plan; if any branch wants Rank the fused
+    // scan must keep it.
     const bool any_wants_rank =
         std::any_of(agg_b.begin(), agg_b.end(), [](const ScanBranch* sb) {
             return std::any_of(sb->agg_plan->group_by.begin(),
@@ -1146,8 +1142,8 @@ coro::CoroTask<ExportStats> run_session(
     }
 
     // Externally-built folds (plugins), constructed with the shared intern so
-    // their ids agree with the rest and per-worker slices merge. A plugin needs
-    // metadata (its own hash lookups), so keep it on the shared scan.
+    // ids agree and per-worker slices merge. A plugin needs metadata (its own
+    // hash lookups), so keep it on the shared scan.
     std::vector<std::unique_ptr<Fold>> factory_folds;
     factory_folds.reserve(state->fold_factories.size());
     for (auto& ff : state->fold_factories)

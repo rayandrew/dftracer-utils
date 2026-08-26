@@ -217,10 +217,9 @@ bool parse_group_key(const char* s, GroupKey& out) {
     } else if (t.rfind("arg:", 0) == 0) {
         out = GroupKey::of_arg(t.substr(4));
     } else {
-        // Schemaless fallback: any other name is a field. A bare name resolves
-        // top-level then args; a dotted/bracketed path (a.b, a[0], args.a.b)
-        // resolves that path from the event root, matching how filter resolves
-        // fields. No allowlist, so type/ph/id and any (nested) args key group.
+        // Schemaless fallback: any other name is a field, resolved like a
+        // filter field (bare name = top-level then args; dotted/bracketed path
+        // = that path from the event root).
         out = GroupKey::field(t);
     }
     out.transform = tf;
@@ -772,8 +771,8 @@ PyObject* tv_collect(TraceViewerObject* self, PyObject*) {
 #endif
 }
 
-// A file-backed NDJSON sink for a session export branch. Lives for the whole
-// scan (owned in tv_session_run), closing its file on destruction.
+// A file-backed NDJSON sink for a session export branch; closes its file on
+// destruction.
 class SessionFileSink : public dftracer::utils::trace::views::ExportSink {
    public:
     explicit SessionFileSink(FILE* f) : f_(f) {}
@@ -790,10 +789,8 @@ class SessionFileSink : public dftracer::utils::trace::views::ExportSink {
 
 // One shared scan driving several ViewSession branches. `branches` is a list of
 // (kind:str, viewer:_TraceViewer, sink:str|None) tuples; each viewer carries
-// the branch's full plan (group_by/agg/time_bucket/filter/sort/...). kind is
-// "collect" (-> _DataFrame), "materialize" (-> None), or "export" (-> a stats
-// dict, writing NDJSON to `sink`). Results come back in the same order. The
-// base viewer's files/phase/time settings scope the shared scan.
+// the branch's full plan. Results come back in branch order. The base viewer's
+// files/phase/time settings scope the shared scan.
 PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
 #ifndef DFTRACER_UTILS_ENABLE_ARROW
     PyErr_SetString(PyExc_RuntimeError,
@@ -811,10 +808,10 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
         Kind kind = Kind::Collect;
         std::vector<std::string> files;
         std::string index_dir;
-        ViewerPlan plan;  // the branch viewer's full plan
+        ViewerPlan plan;
         std::string sink;
-        // Plugin branch: the C++ host (attached to the session before execute)
-        // and the Python host object (its named results are read after).
+        // Plugin branch only: the C++ host attached to the session, and its
+        // Python object whose named results are read after execute.
         dftracer::utils::plugins::PluginHost* host_cpp = nullptr;
         PyObject* host_obj = nullptr;  // borrowed; the branches list holds it
     };
@@ -853,8 +850,6 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
             return nullptr;
         }
 
-        // A plugin branch carries a PluginHost (not a viewer); the rest carry a
-        // branch TraceViewer whose full plan drives the branch.
         if (bdata[i].kind == Kind::Plugin) {
             if (!PyObject_TypeCheck(vobj, &PluginHostType)) {
                 PyErr_SetString(PyExc_TypeError,
@@ -967,8 +962,8 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                         break;
                     }
                     case Kind::Plugin:
-                        // C++-only (no Python), safe with the GIL released; the
-                        // named results are read back after execute below.
+                        // C++-only, safe with the GIL released; named results
+                        // are read back after execute.
                         bdata[i].host_cpp->attach_to_session(sess);
                         break;
                 }
@@ -1688,9 +1683,10 @@ PyObject* tv_stream(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
     std::string index_dir = extract_index_dir(self);
     ViewerPlan plan = *plan_of(self);
 
+    // 0 (unset) falls back to the RAM-fraction default.
     auto state = std::make_shared<dftracer::utils::python::StreamingState<
         dftracer::utils::utilities::common::arrow::ArrowExportResult>>(
-        dftracer::utils::compute_memory_budget(0));
+        dftracer::utils::compute_memory_budget(plan.memory_budget));
 
     auto* iter_obj =
         (dftracer::utils::python::ArrowStreamingIteratorObject*)
