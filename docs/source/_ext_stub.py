@@ -929,6 +929,14 @@ def install_extension_stub() -> None:
         def column_names(self) -> list[str]:
             return []
 
+        def join(self, other: "_DataFrame", how: str = "inner", on: int = 1) -> "_DataFrame":
+            """Equi-join on the leading ``on`` shared key columns."""
+            return _DataFrame()
+
+        def compare_agg(self, variant: "_DataFrame", n_key: int) -> "_DataFrame":
+            """Compare two aggregations on ``n_key`` group keys (delta_/pct_ columns)."""
+            return _DataFrame()
+
         def __arrow_c_stream__(self, requested_schema: object = None) -> object:
             return None
 

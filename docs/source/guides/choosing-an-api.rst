@@ -73,8 +73,8 @@ computing over a native columnar table.
 ``DataFrame``/``Series`` Python classes wrap the same C++ columnar engine. Pick
 based on where the rest of your code lives, not on features; anything one
 surface can do, the underlying engine can do from the other language too
-(with C++ exposing a few extra low-level escape hatches, like
-``ViewSession``, that have no Python binding).
+(with C++ exposing a few extra low-level escape hatches, like the
+``map_batches`` custom fold, that have no Python binding).
 
 **Plugin vs query DSL** is about where the logic runs. The query DSL and
 ``group_by``/``agg`` vocabulary (:doc:`core/query-dsl`, :doc:`analysis/aggregation`)

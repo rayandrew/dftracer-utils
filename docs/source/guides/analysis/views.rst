@@ -229,9 +229,9 @@ once; then call ``execute()`` to run every registered op together:
    small->n;        // Deferred<T>::get() (or operator*/->) after execute()
    posix->num_rows();
 
-Reading a ``Deferred`` handle before ``execute()`` resolves it throws.
-``ViewSession`` has no Python binding; it is a C++-only escape hatch for
-sharing a scan across otherwise-independent reads.
+Reading a ``Deferred`` handle before ``execute()`` resolves it throws. From
+Python the same fused scan is ``TraceViewer.session()``; see
+:doc:`aggregation` and :doc:`../../api/trace_viewer`.
 
 Materialized views
 -------------------

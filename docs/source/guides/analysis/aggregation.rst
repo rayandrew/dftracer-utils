@@ -397,6 +397,36 @@ This is a C++ / native surface; there is no Python equivalent. From Python, use
 the plugin host (see :doc:`../../plugins`) or aggregate with the built-in specs
 above.
 
+Sharing one scan across branches
+--------------------------------
+
+Each ``collect``/``export``/``materialize`` above runs its own scan of the
+trace. When several reads of the same files should share a single pass - a few
+unrelated aggregations at once, or an aggregate alongside an export - open a
+session with ``TraceViewer.session()``. Each ``session.view()`` starts an
+independent branch with the full builder API; its terminal registers the branch
+and returns a ``Handle``. ``execute()`` (or leaving the ``with`` block, or the
+first ``Handle.result()``) runs every branch over one decompression:
+
+.. code-block:: python
+
+   with tv.session() as s:
+       by_cat  = s.view().group_by("cat").agg("count", "mean:dur").collect()
+       by_rank = s.view().group_by("rank").agg("count").collect()
+       s.view().filter('cat == "POSIX"').export("posix.pfw")
+
+   cat_df  = by_cat.result()    # DataFrame, resolved after the shared scan
+   rank_df = by_rank.result()
+
+Reading a ``Handle`` before the session executes triggers the scan; adding a
+branch after it has executed raises. Two collect branches that group the same
+way can be combined after the one scan without a second read: ``s.join(a, b,
+how)`` is the same equi-join ``DataFrame.join`` gives, and ``s.compare(baseline,
+variant)`` produces the ``delta_``/``pct_`` result ``View.compare`` does. Both
+return a ``Combine`` whose ``result()`` runs the scan (if needed) and then the
+combine. This is the Python form of the C++ ``ViewSession``
+(:doc:`views`).
+
 See also
 --------
 
