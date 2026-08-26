@@ -368,6 +368,33 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
 
         return _wrap(_join(self._native, _unwrap(other), keys, how))
 
+    def compare_agg(
+        self, variant: "DataFrame", on: Union[int, str, Sequence[str]] = 1
+    ) -> "DataFrame":
+        """Compare two aggregation results: FULL-join on the shared leading key
+        columns, then append ``delta_<m>``/``pct_<m>`` for each numeric
+        ``l_``/``r_`` metric pair.
+
+        ``on`` is an int count of the leading key columns both frames share, or
+        the shared key column name(s). Output is [key columns, ``l_``/``r_`` per
+        metric, ``delta_``/``pct_`` per metric]. Both frames must group and
+        aggregate the same way."""
+        if isinstance(on, bool):
+            raise TypeError("compare_agg: 'on' must be a key name/list or an int count")
+        if isinstance(on, int):
+            names = list(self._native.column_names)
+            if on < 1 or on > len(names):
+                raise ValueError(
+                    f"compare_agg: 'on' count {on} is out of range for a {len(names)}-column frame"
+                )
+            n_key = on
+        else:
+            keys = _names(on)
+            if not keys:
+                raise ValueError("compare_agg: 'on' must name at least one key column")
+            n_key = len(keys)
+        return _wrap(self._native.compare_agg(_unwrap(variant), n_key))
+
     def asof(
         self,
         other: "DataFrame",
