@@ -650,6 +650,30 @@ bool IndexDatabase::schema_outdated() const {
     return get_schema_version() < SCHEMA_VERSION;
 }
 
+IndexDatabase::Freshness IndexDatabase::check_freshness(
+    const std::string& file_path) const {
+    // Stat-only by design: mtime + size are the only O(1) freshness signals,
+    // and this runs on every index open and every stale scan, so it must not
+    // read the file body. A same-size edit with a deliberately restored mtime
+    // is the one change this cannot see; that is accepted rather than pay a
+    // whole-file read on the hot path.
+    if (schema_outdated()) return Freshness::SchemaOutdated;
+
+    const auto logical = internal::get_logical_path(file_path);
+    if (get_file_info_id(logical) < 0) return Freshness::Stale;
+
+    auto stored = get_file_stat(logical);
+    if (!stored) return Freshness::Stale;  // record predates stat tracking
+
+    const auto current_mtime = static_cast<std::uint64_t>(
+        internal::get_file_modification_time(file_path));
+    const auto current_size = internal::file_size_bytes(file_path);
+    if (stored->mtime != current_mtime || stored->size != current_size) {
+        return Freshness::Stale;
+    }
+    return Freshness::Fresh;
+}
+
 IndexDatabase::StaleCheckResult IndexDatabase::find_stale_files(
     const std::vector<std::string>& current_paths) const {
     StaleCheckResult result;
@@ -660,19 +684,11 @@ IndexDatabase::StaleCheckResult IndexDatabase::find_stale_files(
     for (const auto& path : current_paths) {
         const auto logical = internal::get_logical_path(path);
         seen_logical.insert(logical);
-        auto stored = get_file_stat(logical);
-        if (!stored) {
-            if (get_file_info_id(logical) >= 0) {
-                result.changed.push_back(path);
-            } else {
-                result.added.push_back(path);
-            }
+        if (get_file_info_id(logical) < 0) {
+            result.added.push_back(path);
             continue;
         }
-        const auto current_mtime = static_cast<std::uint64_t>(
-            internal::get_file_modification_time(path));
-        const auto current_size = internal::file_size_bytes(path);
-        if (stored->mtime != current_mtime || stored->size != current_size) {
+        if (check_freshness(path) != Freshness::Fresh) {
             result.changed.push_back(path);
         }
     }

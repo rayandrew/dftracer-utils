@@ -44,6 +44,7 @@ coro::CoroTask<ResolverResult> resolve_and_build_index(
     resolve_input.require_checkpoints = input.require_checkpoints;
     resolve_input.require_bloom = input.require_bloom;
     resolve_input.require_aggregation = input.require_aggregation;
+    resolve_input.checkpoint_size = input.checkpoint_size;
     resolve_input.aggregation_config = input.aggregation_config;
 
     auto result = co_await resolver(resolve_input);

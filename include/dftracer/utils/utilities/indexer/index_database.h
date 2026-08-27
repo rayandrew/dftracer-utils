@@ -95,11 +95,29 @@ class IndexDatabase {
                    !removed.empty();
         }
     };
-    /// Stat-only (mtime + size) comparison of on-disk trace files against the
-    /// index. If the stored schema predates mtime/size, all inputs are reported
-    /// as `changed` and `schema_outdated` is set.
+    /// Compare on-disk trace files against the index. A file whose registry
+    /// record is missing goes in `added`, one present but no longer matching
+    /// (see check_freshness) in `changed`, and a registered path absent from
+    /// the inputs in `removed`. Sets `schema_outdated` when the stored schema
+    /// predates this build.
     StaleCheckResult find_stale_files(
         const std::vector<std::string>& current_paths) const;
+
+    /// Outcome of a freshness check for one trace file against this index.
+    enum class Freshness {
+        Fresh,  ///< Index is current for the file.
+        Stale,  ///< File is unregistered, or its mtime/size changed; rebuild.
+        SchemaOutdated  ///< Whole index predates this build; rebuild all.
+    };
+
+    /// Freshness predicate shared by the read path and the server stale scan.
+    /// Stat-only by design: it decides on schema version, registry presence,
+    /// stored-stat presence, and mtime/size, and never reads the file body,
+    /// since it runs on every index open and stale scan. A same-size edit with
+    /// a restored mtime is therefore not detected. Build-option changes
+    /// (checkpoint size, dimensions) are not a concern here; the index CLI
+    /// rebuilds for those.
+    Freshness check_freshness(const std::string& file_path) const;
 
     std::unordered_map<std::string, int> query_all_file_info_ids() const;
     std::unordered_map<std::string, FileRegistryEntry> query_all_file_registry()
