@@ -40,6 +40,7 @@ struct ResolveGroupInput {
     bool require_checkpoints;
     bool require_bloom;
     bool require_aggregation;
+    std::size_t checkpoint_size = 0;
     std::optional<aggregators::AggregationConfig> aggregation_config;
 };
 
@@ -172,6 +173,18 @@ ResolveGroupOutput resolve_group_sync(ResolveGroupInput input) {
                 continue;
             }
 
+            // A changed checkpoint size re-checkpoints the file. The build path
+            // stores the requested size verbatim, so an exact compare suffices
+            // (no file read). Zero on either side means "unspecified": skip.
+            if (input.require_checkpoints && input.checkpoint_size != 0) {
+                const auto stored_ckpt = db.get_checkpoint_size(reg.file_id);
+                if (stored_ckpt != 0 && stored_ckpt != input.checkpoint_size) {
+                    result.needs_checkpoint.push_back(FileWorkItem{
+                        f.file_index, std::move(f.file_path), reg.file_id});
+                    continue;
+                }
+            }
+
             if (input.require_bloom && !has_bloom) {
                 result.needs_bloom.push_back(FileWorkItem{
                     f.file_index, std::move(f.file_path), reg.file_id});
@@ -269,6 +282,7 @@ coro::CoroTask<ResolverResult> IndexResolverUtility::operator()(
             group_input.require_checkpoints = input.require_checkpoints;
             group_input.require_bloom = input.require_bloom;
             group_input.require_aggregation = input.require_aggregation;
+            group_input.checkpoint_size = input.checkpoint_size;
             group_input.aggregation_config = input.aggregation_config;
 
             futures.push_back(ctx.spawn(
@@ -289,6 +303,7 @@ coro::CoroTask<ResolverResult> IndexResolverUtility::operator()(
             group_input.require_checkpoints = input.require_checkpoints;
             group_input.require_bloom = input.require_bloom;
             group_input.require_aggregation = input.require_aggregation;
+            group_input.checkpoint_size = input.checkpoint_size;
             group_input.aggregation_config = input.aggregation_config;
 
             outputs.push_back(resolve_group_sync(std::move(group_input)));

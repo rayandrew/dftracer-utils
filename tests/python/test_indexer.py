@@ -70,6 +70,25 @@ class TestCheckpointIndexer:
                 assert isinstance(max_bytes, int) and max_bytes > 0
                 assert isinstance(num_lines, int) and num_lines > 0
 
+    def test_changed_checkpoint_size_triggers_rebuild(self):
+        """resolve() reports work when the requested checkpoint size differs."""
+        with Environment(lines=200) as env:
+            gz = env.create_test_gzip_file()
+            idx = env.temp_dir
+
+            with dftu_utils.Indexer(files=[gz], index_dir=idx, checkpoint_size="512KB") as ix:
+                ix.ensure_indexed()
+
+            # Same size: cached, no work.
+            with dftu_utils.Indexer(files=[gz], index_dir=idx, checkpoint_size="512KB") as ix:
+                assert ix.resolve().needs_work == []
+
+            # Different size: rebuild is required, then settles.
+            with dftu_utils.Indexer(files=[gz], index_dir=idx, checkpoint_size="1MB") as ix:
+                assert gz in ix.resolve().needs_work
+                ix.ensure_indexed()
+                assert ix.resolve().needs_work == []
+
 
 class TestNativeIndexerDirect:
     """Test native Indexer class directly for low-level operations"""

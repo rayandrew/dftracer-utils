@@ -421,4 +421,44 @@ TEST_SUITE("IndexDatabase staleness") {
         CHECK(result.schema_outdated);
         CHECK(result.stale());
     }
+
+    TEST_CASE("size or mtime change makes a file stale") {
+        auto root = dftu_utils_test::make_unique_test_path("fresh_stat");
+        fs::create_directories(root);
+        auto a = write_file(root / "a.pfw", "original");
+        auto b = write_file(root / "b.pfw", "same-size-content");
+
+        IndexDatabase db((root / ".dftindex").string());
+        db.init_schema();
+        db.register_files({a, b});
+
+        CHECK(db.check_freshness(a) == IndexDatabase::Freshness::Fresh);
+
+        write_file(root / "a.pfw", "original plus more");  // size change
+        CHECK(db.check_freshness(a) == IndexDatabase::Freshness::Stale);
+
+        auto bumped = fs::last_write_time(b) + std::chrono::hours(48);
+        fs::last_write_time(b, bumped);  // mtime change, same size
+        CHECK(db.check_freshness(b) == IndexDatabase::Freshness::Stale);
+    }
+
+    TEST_CASE("unregistered and schema-stale files are not fresh") {
+        auto root = dftu_utils_test::make_unique_test_path("fresh_negatives");
+        fs::create_directories(root);
+        auto a = write_file(root / "a.pfw", "aaa");
+        auto b = write_file(root / "b.pfw", "bbb");
+
+        IndexDatabase db((root / ".dftindex").string());
+        db.init_schema();
+        db.register_files({a});
+
+        // Registered file with no changes is fresh; unregistered is stale.
+        CHECK(db.check_freshness(a) == IndexDatabase::Freshness::Fresh);
+        CHECK(db.check_freshness(b) == IndexDatabase::Freshness::Stale);
+
+        db.db()->put("_schema_version",
+                     dftracer::utils::rocksdb::KeyCodec::encode_be32(1));
+        CHECK(db.check_freshness(a) ==
+              IndexDatabase::Freshness::SchemaOutdated);
+    }
 }

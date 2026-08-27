@@ -434,23 +434,17 @@ void TraceReader::probe_index() {
                                                       config_.index_dir);
     has_index_ = format_ == ArchiveFormat::GZIP && fs::exists(index_path_);
     // Do not trust an index whose source changed since it was built; fall back
-    // to a raw read rather than serving stale data. Records predating stat
-    // tracking have no stored stat and keep the prior trust-on-existence path.
+    // to a raw read rather than serving stale data. Uses the shared stat-based
+    // freshness predicate, so a record with no stored stat is treated as stale
+    // rather than trusted on existence alone.
     if (has_index_) {
         try {
             indexer::IndexDatabase db(
                 index_path_,
                 dftracer::utils::utilities::indexer::IndexOpenMode::ReadOnly);
-            auto stored = db.get_file_stat(
-                indexer::internal::get_logical_path(config_.file_path));
-            if (stored) {
-                auto mtime = static_cast<std::uint64_t>(
-                    indexer::internal::get_file_modification_time(
-                        config_.file_path));
-                auto size =
-                    indexer::internal::file_size_bytes(config_.file_path);
-                if (stored->mtime != mtime || stored->size != size)
-                    has_index_ = false;
+            if (db.check_freshness(config_.file_path) !=
+                indexer::IndexDatabase::Freshness::Fresh) {
+                has_index_ = false;
             }
         } catch (...) {
         }

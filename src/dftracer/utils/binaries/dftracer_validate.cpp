@@ -1,4 +1,5 @@
 #include <dftracer/utils/binaries/common_cli.h>
+#include <dftracer/utils/core/common/archive_format.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/logging.h>
@@ -8,8 +9,9 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/core/utils/string.h>
+#include <dftracer/utils/utilities/fileio/lines/sources/async_streaming_gz_line_generator.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
-#include <dftracer/utils/utilities/reader/trace_reader.h>
+#include <dftracer/utils/utilities/indexer/internal/indexer_factory.h>
 #include <simdjson.h>
 
 #include <chrono>
@@ -22,9 +24,9 @@
 
 using namespace dftracer::utils;
 using dftracer::utils::json_trim_and_validate;
-using dftracer::utils::utilities::reader::ReadConfig;
-using dftracer::utils::utilities::reader::TraceReader;
-using dftracer::utils::utilities::reader::TraceReaderConfig;
+using dftracer::utils::utilities::fileio::lines::sources::
+    async_streaming_gz_lines;
+using dftracer::utils::utilities::indexer::internal::IndexerFactory;
 
 class ValidateArgParse : public cli::ArgParse {
    public:
@@ -72,15 +74,21 @@ coro::CoroTask<std::vector<std::string>> collect_files(
 coro::CoroTask<void> validate_file(std::string path, FileValResult* result) {
     result->path = std::move(path);
     try {
-        TraceReaderConfig cfg;
-        cfg.file_path = result->path;
-        cfg.auto_build_index = false;
-        TraceReader reader(cfg);
+        // Stream the gzip directly, never through TraceReader: its indexed
+        // read path serves a byte range from a `.dftindex`, and a file whose
+        // entry is absent from a shared root index resolves to zero bytes, so
+        // validate would read no lines and still count the file as passing
+        // without ever decompressing it.
+        if (IndexerFactory::detect_format(result->path) !=
+            ArchiveFormat::GZIP) {
+            throw std::runtime_error(
+                "not a gzip trace (dftracer traces must be gzip-compressed)");
+        }
         // DOM (eager) parse: validates the whole line's JSON grammar. The
         // on-demand API is lazy and would accept malformed lines it never
         // navigates into.
         simdjson::dom::parser parser;
-        auto gen = reader.read_lines(ReadConfig{});
+        auto gen = async_streaming_gz_lines(result->path);
         while (auto line_opt = co_await gen.next()) {
             const auto& line = *line_opt;
             const char* start = nullptr;

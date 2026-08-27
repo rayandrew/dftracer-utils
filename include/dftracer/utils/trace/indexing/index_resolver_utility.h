@@ -38,6 +38,12 @@ struct ResolverInput {
     bool require_bloom = false;
     bool require_aggregation = false;
 
+    /// Checkpoint size the caller intends to build with. When non-zero, a file
+    /// whose stored checkpoint size differs is rebuilt, so a changed
+    /// `--checkpoint-size` (CLI) or `checkpoint_size=` (Python) takes effect
+    /// without `--force`. Zero means do not compare.
+    std::size_t checkpoint_size = 0;
+
     /// Full config for computing hash with stored time_interval
     std::optional<aggregators::AggregationConfig> aggregation_config;
 };

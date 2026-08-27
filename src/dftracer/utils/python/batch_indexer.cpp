@@ -252,6 +252,7 @@ static PyObject* Indexer_resolve(IndexerObject* self,
     input.require_checkpoints = self->require_checkpoint;
     input.require_bloom = self->require_bloom;
     input.require_aggregation = self->require_aggregation;
+    input.checkpoint_size = self->checkpoint_size;
     input.aggregation_config = build_aggregation_config(self);
 
     // Add files if provided
