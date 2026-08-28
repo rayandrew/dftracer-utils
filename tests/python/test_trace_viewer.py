@@ -1090,3 +1090,125 @@ class TestTraceViewer:
                 assert cols["busy"][i] <= cols["sum_dur"][i]
                 assert cols["concurrency"][i] >= 1.0 - 1e-9
                 assert cols["utilization"][i] <= 1.0 + 1e-9
+
+
+class TestTraceViewerSchema:
+    """columns() / schema() read the harvested column set from the index with
+    no trace scan, schemaless over arbitrarily nested args."""
+
+    def _rows(self):
+        return [
+            {
+                "ph": "X",
+                "name": "read",
+                "cat": "POSIX",
+                "pid": 1,
+                "tid": 2,
+                "ts": 100,
+                "dur": 5,
+                "args": {
+                    "hostname": "h1",
+                    "size": 1024,
+                    "rate": 3.5,
+                    "pos": {"x": 1, "y": 2},
+                    "tags": ["a", "b"],
+                    "fhash": "fh1",
+                    "hhash": "hh1",
+                },
+            },
+            # A second event name carries size as a float, so the type folds
+            # (int64 + float64 -> float64) across names.
+            {
+                "ph": "X",
+                "name": "write",
+                "cat": "POSIX",
+                "pid": 1,
+                "tid": 2,
+                "ts": 200,
+                "dur": 6,
+                "args": {"size": 2.5},
+            },
+        ]
+
+    def test_columns_lists_base_args_and_nested_leaves(self):
+        with Environment() as env:
+            path = _make_trace(env, "schema.pfw.gz", self._rows())
+            cols = set(TraceViewer(path).columns())
+            for c in [
+                "pid",
+                "tid",
+                "ts",
+                "dur",  # base axis
+                "name",
+                "cat",  # top-level
+                "hostname",
+                "size",
+                "rate",  # flat args
+                "pos.x",
+                "pos.y",
+                "tags.0",  # nested object + array leaf
+                "fhash",
+                "hhash",  # lifted hashes
+                "resolved.fpath",
+                "resolved.hostname",  # aliases
+            ]:
+                assert c in cols, c
+
+    def test_schema_reports_types(self):
+        with Environment() as env:
+            path = _make_trace(env, "schema.pfw.gz", self._rows())
+            sch = TraceViewer(path).schema()
+            assert sch["pid"] == "int64"
+            assert sch["ts"] == "int64"
+            assert sch["hostname"] == "string"
+            assert sch["rate"] == "float64"
+            assert sch["pos.x"] == "int64"
+            assert sch["tags.0"] == "string"
+            assert sch["size"] == "float64"  # int in read, float in write
+            assert sch["resolved.fpath"] == "string"
+
+
+class TestFlamegraphGroup:
+    """flamegraph(group=...) roots the tree by an arbitrary field over the raw
+    events (not just pid), distinct from the aggregation group_by."""
+
+    def _rows(self):
+        return [
+            {
+                "ph": "X",
+                "name": "read",
+                "cat": "POSIX",
+                "pid": 1,
+                "tid": 1,
+                "ts": 0,
+                "dur": 10,
+                "args": {},
+            },
+            {
+                "ph": "X",
+                "name": "write",
+                "cat": "STDIO",
+                "pid": 2,
+                "tid": 1,
+                "ts": 20,
+                "dur": 10,
+                "args": {},
+            },
+        ]
+
+    def test_group_by_cat_roots_by_cat(self):
+        with Environment() as env:
+            path = _make_trace(env, "fg.pfw.gz", self._rows())
+            fg = TraceViewer(path).flamegraph(group=["cat"]).to_pandas()
+            names = set(fg["name"])
+            # cat-valued root nodes appear...
+            assert "POSIX" in names
+            assert "STDIO" in names
+
+    def test_ungrouped_has_no_cat_nodes(self):
+        with Environment() as env:
+            path = _make_trace(env, "fg.pfw.gz", self._rows())
+            fg = TraceViewer(path).flamegraph().to_pandas()
+            names = set(fg["name"])
+            assert "POSIX" not in names  # no group rooting -> only call names
+            assert "read" in names and "write" in names

@@ -59,14 +59,16 @@ coro::CoroTask<dataframe::DataFrame> run_call_tree(
     std::string ts_field, std::string dur_field, std::string name_field);
 coro::CoroTask<dataframe::DataFrame> run_flamegraph(
     const ViewPlan& plan, std::vector<std::string> partition,
-    std::string ts_field, std::string dur_field, std::string name_field);
+    std::string ts_field, std::string dur_field, std::string name_field,
+    std::vector<std::string> group = {});
 coro::CoroTask<std::pair<dataframe::DataFrame, dataframe::DataFrame>>
 run_containment(const ViewPlan& plan, std::vector<std::string> partition,
                 std::string ts_field, std::string dur_field,
-                std::string name_field);
+                std::string name_field, std::vector<std::string> group = {});
 coro::CoroTask<std::string> run_flamegraph_partial(
     const ViewPlan& plan, std::vector<std::string> partition,
-    std::string ts_field, std::string dur_field, std::string name_field);
+    std::string ts_field, std::string dur_field, std::string name_field,
+    std::vector<std::string> group = {});
 
 // Run caller-owned `folds` as one fused scan of `plan`, sharing `intern` so
 // their ids agree and per-worker slices merge.

@@ -885,9 +885,12 @@ void IndexDatabaseWriterContext::insert_gzip_member(
 }
 
 void IndexDatabaseWriterContext::insert_column(int file_id,
-                                               std::string_view column) {
+                                               std::string_view column,
+                                               ColumnType type) {
     const auto key = make_column_key(file_id, column);
-    auto status = db_->put(batch_, cf::DIMENSIONS, key, "");
+    const char value = static_cast<char>(type);
+    auto status =
+        db_->put(batch_, cf::DIMENSIONS, key, std::string_view(&value, 1));
     if (!status.ok()) {
         throw_db_error("Failed to insert column", status);
     }

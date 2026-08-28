@@ -203,6 +203,17 @@ def install_extension_stub() -> None:
             """Derive the aggregation memory budget from available memory."""
             return self
 
+        def columns(self) -> list[str]:
+            """List the columns discoverable from the index (base axis fields,
+            harvested scalar leaves incl. nested args as dotted paths, and
+            resolved.* aliases). No trace scan."""
+            return []
+
+        def schema(self) -> dict[str, str]:
+            """Map each column to its type ('int64'/'float64'/'string'). Same
+            discovery as :meth:`columns`; no trace scan."""
+            return {}
+
         def collect(self) -> object:
             """Run the query and return a pyarrow Table."""
             return None
@@ -216,6 +227,52 @@ def install_extension_stub() -> None:
             """One-pass read of the aggregation index's three record families:
             ``{"regular", "aggregated", "counters"}`` as pyarrow Tables."""
             return None
+
+        def call_tree(
+            self,
+            partition: object = ("pid", "tid"),
+            ts: str = "ts",
+            dur: str = "dur",
+            name: str = "name",
+        ) -> object:
+            """Scan the view and return the events plus containment
+            ``level``/``parent_id`` per lane."""
+            return None
+
+        def flamegraph(
+            self,
+            partition: object = ("pid", "tid"),
+            ts: str = "ts",
+            dur: str = "dur",
+            name: str = "name",
+            group: object = (),
+        ) -> object:
+            """Scan the view and fold events by name path into the flamegraph
+            node DataFrame. ``group`` roots the tree by an arbitrary key."""
+            return None
+
+        def containment(
+            self,
+            partition: object = ("pid", "tid"),
+            ts: str = "ts",
+            dur: str = "dur",
+            name: str = "name",
+            group: object = (),
+        ) -> object:
+            """Both containment frames (call_tree, flamegraph) from one scan."""
+            return None
+
+        def flamegraph_partial(
+            self,
+            partition: object = ("pid", "tid"),
+            ts: str = "ts",
+            dur: str = "dur",
+            name: str = "name",
+            group: object = (),
+        ) -> bytes:
+            """Fold this view's files into a serialized flamegraph arena
+            partial, for a distributed merge."""
+            return b""
 
         def stream(self, batch_size: int = 0, **kwargs: object) -> object:
             """Stream Arrow batches for out-of-core reads."""
@@ -784,6 +841,11 @@ def install_extension_stub() -> None:
             """Add a per-batch Artifacts dict as returned by `build_sst_batch`."""
             return None
 
+    def merge_flamegraph_partials(partials: list[bytes]) -> object:
+        """Merge serialized flamegraph arena partials (from
+        ``TraceViewer.flamegraph_partial``) into the final node DataFrame."""
+        return None
+
     def get_default_runtime() -> Runtime:
         """Return the process-wide default runtime."""
         return Runtime()
@@ -1014,6 +1076,7 @@ def install_extension_stub() -> None:
         "get_log_level",
         "jit_run_op",
         "memory_budget_advice",
+        "merge_flamegraph_partials",
         "move_artifacts",
         "plan_lpt_partition",
         "plan_work_units",

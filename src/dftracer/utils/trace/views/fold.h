@@ -69,6 +69,12 @@ class Fold {
     /// keeps raw lines when any is present.
     virtual bool wants_raw() const { return false; }
 
+    /// A fold that reads FoldEvent::schema_leaves (every scalar leaf of the
+    /// record, arbitrarily nested) for schemaless column discovery. ORed across
+    /// folds; the scan enumerates leaves only when some fold asks, so the query
+    /// path pays nothing.
+    virtual bool wants_schema() const { return false; }
+
     /// Extra fields (top-level type/ph/id, or nested a.b/a[0]) this fold needs
     /// captured into each event beyond what the POD carries and beyond flat
     /// args (which needs_args() already covers). Merged with the plan's own

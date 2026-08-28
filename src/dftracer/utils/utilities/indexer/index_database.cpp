@@ -38,6 +38,30 @@ namespace cf = rocks::cf;
 
 using namespace internal;
 
+ColumnType merge_column_type(ColumnType a, ColumnType b) {
+    if (a == b) return a;
+    if (a == ColumnType::Unknown) return b;
+    if (b == ColumnType::Unknown) return a;
+    if ((a == ColumnType::Int64 && b == ColumnType::Float64) ||
+        (a == ColumnType::Float64 && b == ColumnType::Int64))
+        return ColumnType::Float64;
+    return ColumnType::String;
+}
+
+const char* column_type_name(ColumnType t) {
+    switch (t) {
+        case ColumnType::Int64:
+            return "int64";
+        case ColumnType::Float64:
+            return "float64";
+        case ColumnType::String:
+            return "string";
+        case ColumnType::Unknown:
+            return "";
+    }
+    return "";
+}
+
 namespace {
 
 using encoding::prefix_for_file;
@@ -854,6 +878,32 @@ std::vector<std::string> IndexDatabase::query_all_columns() const {
                 });
     std::vector<std::string> out(cols.begin(), cols.end());
     std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::pair<std::string, ColumnType>>
+IndexDatabase::query_all_column_types() const {
+    // As query_all_columns, but the record value carries the one-byte
+    // ColumnType (empty for a pre-v12 record). Fold the type across files.
+    constexpr std::size_t HEADER = 2 + sizeof(std::uint32_t);
+    ankerl::unordered_dense::map<std::string, ColumnType> cols;
+    scan_prefix(
+        *impl_->db_, cf::DIMENSIONS, "c|", [&](::rocksdb::Iterator& it) {
+            auto key = iterator_key(it);
+            if (key.size() <= HEADER) return;
+            auto value = iterator_value(it);
+            ColumnType t = value.empty()
+                               ? ColumnType::Unknown
+                               : static_cast<ColumnType>(
+                                     static_cast<std::uint8_t>(value[0]));
+            std::string name(key.substr(HEADER));
+            auto [pos, inserted] = cols.emplace(std::move(name), t);
+            if (!inserted) pos->second = merge_column_type(pos->second, t);
+        });
+    std::vector<std::pair<std::string, ColumnType>> out(cols.begin(),
+                                                        cols.end());
+    std::sort(out.begin(), out.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
     return out;
 }
 

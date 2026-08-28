@@ -45,6 +45,15 @@ struct FoldEvent {
     /// (type/ph/id), kept apart from `args` so a same-named args key cannot
     /// shadow the real top-level field. Same encoding as `args`.
     std::vector<std::pair<std::uint32_t, ArgValue>> top_fields;
+
+    /// Every scalar leaf of the record, arbitrarily nested, as (interned dotted
+    /// path id -> type tag). Filled only when the scan captures schema (the
+    /// index build); empty otherwise. Type tag values match
+    /// utilities::indexer::ColumnType (1=Int64, 2=Float64, 3=String) so the
+    /// index harvest maps them without a lookup. This is what keeps the engine
+    /// schemaless: a nested-object or array arg (which `args` drops) still
+    /// surfaces here as one leaf per scalar, so no field is silently lost.
+    std::vector<std::pair<std::uint32_t, std::uint8_t>> schema_leaves;
 };
 
 /// The fixed top-level fields of the trace schema. A bare reference to one of
@@ -106,6 +115,14 @@ inline void capture_extra_field(FoldEvent& ev, simdjson::dom::element root,
     }
 }
 
+/// Enumerate every scalar leaf of `root` (arbitrarily nested) into
+/// ev.schema_leaves for the index build's schemaless column harvest. Args
+/// children are bare paths (hostname, pos.x) and other top-level fields keep
+/// their name; the axis/structural keys (pid/tid/ts/dur/ph/id) are excluded.
+/// Type tags match utilities::indexer::ColumnType. See extract_fold_event.
+void capture_schema_leaves(FoldEvent& ev, simdjson::dom::element root,
+                           dftracer::utils::StringIntern& intern);
+
 /// Build an owned event from already-parsed scalars + the args element, for
 /// callers (like the index parse) that have run DFTracerEvent::parse_scalars
 /// already. Every string is interned, so the result outlives `args`'s parser.
@@ -118,10 +135,12 @@ FoldEvent build_fold_event(const DFTracerEvent& scalars,
 /// result stays valid after the parser that produced `root` is reused. Args are
 /// captured only when `needs_args`. `extra_fields`, if given, names fields the
 /// POD does not natively carry (type/ph, a nested a.b/a[0]) to capture into the
-/// event.
+/// event. When `capture_schema`, every scalar leaf (arbitrarily nested) is
+/// enumerated into `schema_leaves` for the index build's column harvest.
 FoldEvent extract_fold_event(
     simdjson::dom::element root, dftracer::utils::StringIntern& intern,
-    bool needs_args, const std::vector<std::string>* extra_fields = nullptr);
+    bool needs_args, const std::vector<std::string>* extra_fields = nullptr,
+    bool capture_schema = false);
 
 }  // namespace dftracer::utils::trace::views::detail
 

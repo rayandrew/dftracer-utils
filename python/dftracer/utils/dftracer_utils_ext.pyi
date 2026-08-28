@@ -776,6 +776,11 @@ def _dataframe_from_arrow(table: object) -> _DataFrame:
     """Import a pyarrow Table's columns into a native vec batch."""
     ...
 
+def merge_flamegraph_partials(partials: List[bytes]) -> _DataFrame:
+    """Merge serialized flamegraph arena partials (from
+    _TraceViewer.flamegraph_partial) into the final node DataFrame. No scan."""
+    ...
+
 def scan_files(
     directory: str,
     patterns: Optional[List[str]] = None,
@@ -930,6 +935,16 @@ class _TraceViewer:
         """
         ...
 
+    def columns(self) -> List[str]:
+        """Distinct columns discoverable from the index (base axis + harvested
+        scalar leaves + resolved.* aliases). No trace scan."""
+        ...
+
+    def schema(self) -> Dict[str, str]:
+        """Each column mapped to its type ("int64"/"float64"/"string"). No trace
+        scan."""
+        ...
+
     def stream(
         self,
         batch_size: int = ...,
@@ -953,6 +968,52 @@ class _TraceViewer:
         level: int = ...,
         part_size: int = ...,
     ) -> None: ...
+    def call_tree(
+        self,
+        partition: List[str] = ...,
+        ts: str = ...,
+        dur: str = ...,
+        name: str = ...,
+    ) -> "_DataFrame":
+        """Scan the view and return the events plus containment level/parent_id
+        per lane (rows sharing partition)."""
+        ...
+
+    def flamegraph(
+        self,
+        partition: List[str] = ...,
+        ts: str = ...,
+        dur: str = ...,
+        name: str = ...,
+        group: List[str] = ...,
+    ) -> "_DataFrame":
+        """Scan the view and fold events by name path into the flamegraph node
+        DataFrame (node_id, parent, name, level, total, self, count). `group`
+        roots the tree by an arbitrary key over the raw events."""
+        ...
+
+    def containment(
+        self,
+        partition: List[str] = ...,
+        ts: str = ...,
+        dur: str = ...,
+        name: str = ...,
+        group: List[str] = ...,
+    ) -> Tuple["_DataFrame", "_DataFrame"]:
+        """Both containment frames (call_tree, flamegraph) from one scan."""
+        ...
+
+    def flamegraph_partial(
+        self,
+        partition: List[str] = ...,
+        ts: str = ...,
+        dur: str = ...,
+        name: str = ...,
+        group: List[str] = ...,
+    ) -> bytes:
+        """Fold this view's files into a serialized flamegraph arena partial,
+        for a distributed merge (combine with merge_flamegraph_partials)."""
+        ...
 
 class _AggregatedTraceViewer(_TraceViewer):
     """A _TraceViewer with a group_by/agg set. Adds the materialized-view cache

@@ -26,6 +26,25 @@ class SstArtifactRegistry;
 /// the RocksDB layer.
 enum class IndexOpenMode { ReadOnly, ReadWrite };
 
+/// The value type harvested for a groupable column at index build, stored as a
+/// one-byte tag on each column record. Unknown marks a record from an index
+/// built before schema v12 (no type persisted).
+enum class ColumnType : std::uint8_t {
+    Unknown = 0,
+    Int64 = 1,
+    Float64 = 2,
+    String = 3,
+};
+
+/// Fold two observations of the same column's type into one: an Unknown yields
+/// to the other, Int64 and Float64 widen to Float64, and any mix with String
+/// widens to String. Commutative and associative, so it merges across files.
+ColumnType merge_column_type(ColumnType a, ColumnType b);
+
+/// Canonical lowercase name for a ColumnType ("int64"/"float64"/"string");
+/// empty string for Unknown.
+const char* column_type_name(ColumnType t);
+
 /// The index database: the read/query surface plus the write/ingest/schema
 /// surface over one on-disk `.dftindex`. The RocksDB engine and all mutable
 /// state live behind an opaque `Impl`, so the public ABI is stable against
@@ -80,7 +99,9 @@ class IndexDatabase {
     /// v10 -> v11 added the FieldStat numeric domain tag and exact integer
     /// sum/min/max to the serialized aggregation accumulator (persisted rollup
     /// records), so an older rollup lacks those bytes and would misparse.
-    static constexpr std::uint32_t SCHEMA_VERSION = 11;
+    /// v11 -> v12 gave each harvested column record a one-byte value type
+    /// (ColumnType), so an older index's columns read back with type Unknown.
+    static constexpr std::uint32_t SCHEMA_VERSION = 12;
 
     /// True if the stored schema predates the current build's layout.
     bool schema_outdated() const;
@@ -149,6 +170,13 @@ class IndexDatabase {
     /// (top-level scalar fields + args keys), harvested at index build. Empty
     /// for indexes built before column discovery existed.
     std::vector<std::string> query_all_columns() const;
+
+    /// As query_all_columns, but each name is paired with its harvested
+    /// ColumnType (folded across files: numeric widens to Float64, any mix
+    /// with a string widens to String). Type is Unknown for a record written
+    /// before schema v12. Sorted by name.
+    std::vector<std::pair<std::string, ColumnType>> query_all_column_types()
+        const;
 
     std::vector<ChunkStatisticsResult> query_chunk_statistics(
         int file_id) const;

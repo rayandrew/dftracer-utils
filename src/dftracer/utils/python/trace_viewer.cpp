@@ -923,10 +923,13 @@ PyObject* tv_flamegraph(TraceViewerObject* self, PyObject* args) {
     const char* ts = "ts";
     const char* dur = "dur";
     const char* name = "name";
-    if (!PyArg_ParseTuple(args, "O|sss", &part, &ts, &dur, &name))
+    PyObject* group_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O|sssO", &part, &ts, &dur, &name, &group_obj))
         return nullptr;
-    std::vector<std::string> partition;
+    std::vector<std::string> partition, group;
     if (!parse_partition(part, partition)) return nullptr;
+    if (group_obj && group_obj != Py_None && !parse_partition(group_obj, group))
+        return nullptr;
     Runtime* rt = resolve_runtime(self);
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
@@ -934,11 +937,63 @@ PyObject* tv_flamegraph(TraceViewerObject* self, PyObject* args) {
     DataFrame table;
     if (!run_blocking([&] {
             View v = build_view_from_data(files, index_dir, plan);
-            table = rt->submit(v.flamegraph(partition, ts, dur, name)).get();
+            table =
+                rt->submit(v.flamegraph(partition, ts, dur, name, group)).get();
         }))
         return nullptr;
     return dftracer::utils::python::wrap_dataframe(std::move(table));
 #endif
+}
+
+// columns() -> list[str]: the distinct columns discoverable from the index
+// (base axis + harvested scalar leaves + resolved.* aliases). No trace scan.
+PyObject* tv_columns(TraceViewerObject* self, PyObject*) {
+    auto files = extract_files(self);
+    auto index_dir = extract_index_dir(self);
+    ViewerPlan plan = *plan_of(self);
+    std::vector<std::string> cols;
+    if (!run_blocking([&] {
+            View v = build_view_from_data(files, index_dir, plan);
+            cols = v.columns();
+        }))
+        return nullptr;
+    PyObject* list = PyList_New(static_cast<Py_ssize_t>(cols.size()));
+    if (!list) return nullptr;
+    for (std::size_t i = 0; i < cols.size(); ++i) {
+        PyObject* s = PyUnicode_FromString(cols[i].c_str());
+        if (!s) {
+            Py_DECREF(list);
+            return nullptr;
+        }
+        PyList_SET_ITEM(list, static_cast<Py_ssize_t>(i), s);
+    }
+    return list;
+}
+
+// schema() -> dict[str, str]: each column mapped to its type ("int64" /
+// "float64" / "string"). Same discovery as columns(); no trace scan.
+PyObject* tv_schema(TraceViewerObject* self, PyObject*) {
+    auto files = extract_files(self);
+    auto index_dir = extract_index_dir(self);
+    ViewerPlan plan = *plan_of(self);
+    std::vector<View::ColumnInfo> sc;
+    if (!run_blocking([&] {
+            View v = build_view_from_data(files, index_dir, plan);
+            sc = v.schema();
+        }))
+        return nullptr;
+    PyObject* dict = PyDict_New();
+    if (!dict) return nullptr;
+    for (const auto& c : sc) {
+        PyObject* val = PyUnicode_FromString(c.type.c_str());
+        if (!val || PyDict_SetItemString(dict, c.name.c_str(), val) != 0) {
+            Py_XDECREF(val);
+            Py_DECREF(dict);
+            return nullptr;
+        }
+        Py_DECREF(val);
+    }
+    return dict;
 }
 
 // containment(partition, ts, dur, name) -> (call_tree_df, flamegraph_df) from
@@ -953,10 +1008,13 @@ PyObject* tv_containment(TraceViewerObject* self, PyObject* args) {
     const char* ts = "ts";
     const char* dur = "dur";
     const char* name = "name";
-    if (!PyArg_ParseTuple(args, "O|sss", &part, &ts, &dur, &name))
+    PyObject* group_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O|sssO", &part, &ts, &dur, &name, &group_obj))
         return nullptr;
-    std::vector<std::string> partition;
+    std::vector<std::string> partition, group;
     if (!parse_partition(part, partition)) return nullptr;
+    if (group_obj && group_obj != Py_None && !parse_partition(group_obj, group))
+        return nullptr;
     Runtime* rt = resolve_runtime(self);
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
@@ -964,7 +1022,8 @@ PyObject* tv_containment(TraceViewerObject* self, PyObject* args) {
     std::pair<DataFrame, DataFrame> pr;
     if (!run_blocking([&] {
             View v = build_view_from_data(files, index_dir, plan);
-            pr = rt->submit(v.containment(partition, ts, dur, name)).get();
+            pr = rt->submit(v.containment(partition, ts, dur, name, group))
+                     .get();
         }))
         return nullptr;
     PyObject* ct = dftracer::utils::python::wrap_dataframe(std::move(pr.first));
@@ -1627,10 +1686,13 @@ PyObject* tv_flamegraph_partial(TraceViewerObject* self, PyObject* args) {
     const char* ts = "ts";
     const char* dur = "dur";
     const char* name = "name";
-    if (!PyArg_ParseTuple(args, "O|sss", &part, &ts, &dur, &name))
+    PyObject* group_obj = nullptr;
+    if (!PyArg_ParseTuple(args, "O|sssO", &part, &ts, &dur, &name, &group_obj))
         return nullptr;
-    std::vector<std::string> partition;
+    std::vector<std::string> partition, group;
     if (!parse_partition(part, partition)) return nullptr;
+    if (group_obj && group_obj != Py_None && !parse_partition(group_obj, group))
+        return nullptr;
     Runtime* rt = resolve_runtime(self);
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
@@ -1638,7 +1700,8 @@ PyObject* tv_flamegraph_partial(TraceViewerObject* self, PyObject* args) {
     std::string out;
     if (!run_blocking([&] {
             View v = build_view_from_data(files, index_dir, plan);
-            out = rt->submit(v.flamegraph_partial(partition, ts, dur, name))
+            out = rt->submit(
+                        v.flamegraph_partial(partition, ts, dur, name, group))
                       .get();
         }))
         return nullptr;
@@ -2177,6 +2240,10 @@ static PyMethodDef tv_methods[] = {
     {"topk", DFTU_PYCFUNCTION(tv_topk), METH_VARARGS | METH_KEYWORDS,
      "topk(name, k, largest=True): keep the k best rows of the collect() "
      "result (same dataframe kernel as DataFrame.topk)."},
+    {"columns", DFTU_PYCFUNCTION(tv_columns), METH_NOARGS,
+     "List the columns discoverable from the index (no trace scan)."},
+    {"schema", DFTU_PYCFUNCTION(tv_schema), METH_NOARGS,
+     "Map each column to its type (no trace scan)."},
     {"collect", DFTU_PYCFUNCTION(tv_collect), METH_NOARGS,
      "Run group_by+agg; return a native DataFrame (call .to_arrow() for "
      "Arrow)."},

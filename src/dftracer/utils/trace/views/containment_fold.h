@@ -22,7 +22,8 @@ struct FieldRef {
     std::uint32_t key_id = 0xFFFFFFFF;
 };
 
-// The buffered per-event tuple: lane key + interval + label, nothing else.
+// The buffered per-event tuple: lane key + interval + label, plus the optional
+// flamegraph root-group value (interned; 0xFFFFFFFF when no group key is set).
 struct ContainmentRow {
     std::uint64_t lane;
     std::int64_t pid;
@@ -30,12 +31,17 @@ struct ContainmentRow {
     std::int64_t start;
     std::int64_t dur;
     std::uint32_t name_id;
+    std::uint32_t group_id = 0xFFFFFFFF;
 };
 
 // Field bindings resolved once against the shared intern; drives which fields
-// the scan must capture (flat args and nested paths).
+// the scan must capture (flat args and nested paths). `group_fields` roots the
+// flamegraph by an arbitrary key (over raw events, so it is not the aggregation
+// group_by): every event carries its group value and each lane folds under a
+// synthetic node named by it.
 struct ContainmentSpec {
     std::vector<FieldRef> lane_fields;
+    std::vector<FieldRef> group_fields;
     FieldRef start_ref;
     FieldRef dur_ref;
     FieldRef name_ref;
@@ -43,14 +49,17 @@ struct ContainmentSpec {
     std::vector<std::string> nested_captures;
 };
 
-ContainmentSpec make_containment_spec(dftracer::utils::StringIntern& intern,
-                                      const std::vector<std::string>& partition,
-                                      const std::string& start_field,
-                                      const std::string& dur_field,
-                                      const std::string& name_field);
+ContainmentSpec make_containment_spec(
+    dftracer::utils::StringIntern& intern,
+    const std::vector<std::string>& partition, const std::string& start_field,
+    const std::string& dur_field, const std::string& name_field,
+    const std::vector<std::string>& group = {});
 
 // Resolve one event into a row; returns false for a row with no interval.
+// `intern` is used to intern the combined group-key value when the spec sets a
+// group (thread-safe: the shared intern).
 bool containment_row(const FoldEvent& ev, const ContainmentSpec& spec,
+                     dftracer::utils::StringIntern& intern,
                      ContainmentRow& out);
 
 // Group rows into lanes (rows sharing the lane key), each sorted by start
@@ -93,7 +102,8 @@ class ContainmentFold : public Fold {
                     std::vector<std::string> partition,
                     std::string start_field = "ts",
                     std::string dur_field = "dur",
-                    std::string name_field = "name", double time_scale = 1.0);
+                    std::string name_field = "name", double time_scale = 1.0,
+                    std::vector<std::string> group = {});
 
     bool accepts(const ScanShape&) const override { return true; }
     bool needs_args() const override { return spec_.needs_args; }
@@ -127,7 +137,10 @@ class ContainmentFold : public Fold {
     }
 
    private:
-    const dftracer::utils::StringIntern* intern_;
+    // Non-const: the group-key harvest interns a combined value per event. The
+    // intern is shared across sliced folds and is thread-safe, like the parse
+    // path that also interns during the fused scan.
+    dftracer::utils::StringIntern* intern_;
     ContainmentSpec spec_;
     double time_scale_;
     std::vector<ContainmentRow> rows_;

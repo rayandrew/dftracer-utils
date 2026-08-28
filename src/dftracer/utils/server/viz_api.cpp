@@ -29,14 +29,12 @@
 #include <simdjson.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <numeric>
 #include <string>
 #include <string_view>
@@ -842,72 +840,59 @@ static coro::CoroTask<HttpResponse> handle_viz_layers(
     co_return HttpResponse::ok(std::string(b));
 }
 
-// Streaming call-tree worker: claims whole files (work-stealing via
-// `next_file`) and folds each file's events into `out` as a partial tree,
-// discarding events per file so peak memory is one file's events, not the whole
-// trace. Heavy locals are heap-allocated to keep the coroutine frame small.
-static coro::CoroTask<void> calltree_stream_worker(
-    const std::vector<const TraceIndex::FileInfo*>* files,
-    std::atomic<std::size_t>* next_file, TraceIndex* index,
-    const ViewDefinition* view, double begin, double end, bool scan_all_chunks,
-    bool by_process, std::int64_t cap, std::atomic<std::int64_t>* produced,
-    CancelToken cancel, std::vector<FlameNode>* out) {
-    auto& arena = *out;
-    arena.emplace_back();  // partial root (index 0)
-    arena[0].name = "all";
-    auto file_buf = std::make_unique<std::vector<FlameEv>>();
-    auto open =
-        std::make_unique<std::vector<std::pair<double, std::uint32_t>>>();
-    auto proc_of = std::make_unique<
-        ankerl::unordered_dense::map<std::int64_t, std::uint32_t>>();
-
-    while (true) {
-        if (cancel.cancelled()) co_return;
-        if (produced->load(std::memory_order_relaxed) >= cap) co_return;
-        std::size_t fi = next_file->fetch_add(1, std::memory_order_relaxed);
-        if (fi >= files->size()) co_return;
-        auto* file_info = (*files)[fi];
-        if (file_info->uncompressed_size == 0 &&
-            file_info->num_checkpoints == 0)
-            continue;
-
-        ViewPlannerInput builder_input;
-        builder_input.with_view(*view)
-            .with_file_path(file_info->path)
-            .with_index_path(file_info->has_bloom_data ? file_info->index_path
-                                                       : "")
-            .with_uncompressed_size(file_info->uncompressed_size)
-            .with_num_checkpoints(file_info->num_checkpoints)
-            .with_bloom_cache(&index->bloom_cache())
-            .with_time_range(begin, end)
-            .with_scan_all_chunks(scan_all_chunks);
-        ViewPlannerUtility builder;
-        auto build_output = co_await builder(builder_input);
-        if (!build_output || !build_output->file_may_match) continue;
-
-        file_buf->clear();
-        for (const auto& c : build_output->candidates) {
-            if (cancel.cancelled()) co_return;
-            ViewScannerInput reader_input;
-            reader_input.with_file_path(file_info->path)
-                .with_index_path(file_info->index_path)
-                .with_byte_range(c.start_byte, c.end_byte)
-                .with_checkpoint_idx(c.checkpoint_idx)
-                .with_view(*view);
-            ViewScannerUtility reader;
-            auto gen = reader(reader_input);
-            while (auto batch = co_await gen.next()) {
-                FlameEv ev;
-                for (auto e : batch->events)
-                    if (parse_flame_ev(e, ev)) file_buf->push_back(ev);
-            }
-        }
-
-        fold_file_events(arena, *proc_of, *open, *file_buf, by_process);
-        produced->fetch_add(static_cast<std::int64_t>(file_buf->size()),
-                            std::memory_order_relaxed);
-        file_buf->clear();
+// Parse ?group=<field(,field)*> into the flamegraph root-group key.
+static std::vector<std::string> parse_group_param(const QueryParams& params) {
+    std::vector<std::string> group;
+    std::string_view g = params.get("group");
+    std::size_t pos = 0;
+    while (pos < g.size()) {
+        std::size_t comma = g.find(',', pos);
+        if (comma == std::string_view::npos) comma = g.size();
+        std::string_view f = g.substr(pos, comma - pos);
+        if (!f.empty()) group.emplace_back(f);
+        pos = comma + 1;
     }
+    return group;
+}
+
+// Turn a serialized flamegraph arena (from View::flamegraph_partial) into the
+// calltree JSON: roll up the "all" root (group nodes are already rolled up by
+// the fold), scale native durations to us, and serialize the tree. A plain
+// function, so the arena stays out of the handler coroutine's frame.
+static std::string calltree_json_from_arena(std::string blob, double dur_us,
+                                            int limit, std::int64_t cap) {
+    std::vector<FlameNode> arena = dataframe::deserialize_flame_arena(
+        reinterpret_cast<const std::uint8_t*>(blob.data()), blob.size());
+    if (arena.empty()) {
+        arena.emplace_back();
+        arena[0].name = "all";
+    }
+    double root_total = 0;
+    std::uint64_t root_count = 0;
+    for (std::uint32_t c : arena[0].children) {
+        root_total += arena[c].total;
+        root_count += arena[c].count;
+    }
+    arena[0].total = root_total;
+    arena[0].count = root_count;
+    arena[0].self = 0;
+    const bool truncated =
+        limit > 0 && static_cast<std::int64_t>(root_count) >= cap;
+    if (dur_us != 1.0) {
+        for (auto& n : arena) {
+            n.total *= dur_us;
+            if (n.self > 0) n.self *= dur_us;
+        }
+    }
+    auto& b = scratch_json_builder();
+    b.start_object();
+    b.append_key_value("truncated", truncated);
+    b.append_comma();
+    b.escape_and_append_with_quotes("tree");
+    b.append_colon();
+    serialize_flame_node(b, arena, 0);
+    b.end_object();
+    return std::string(b);
 }
 
 // GET /api/viz/calltree: merge events into a flamegraph tree. The hierarchy
@@ -956,9 +941,11 @@ static coro::CoroTask<HttpResponse> handle_viz_calltree(
     std::vector<const TraceIndex::FileInfo*> target_files =
         select_viz_target_files(index, params, begin, end);
 
-    std::size_t slots = std::max<std::size_t>(1, index.max_concurrent());
-    bool by_process = params.get("group") == "pid";
-    bool scan_all_chunks = !params.get("file").empty();
+    bool single_file = !params.get("file").empty();
+    // Root the flame tree by an arbitrary group key over the raw events:
+    // ?group=pid, ?group=cat, ?group=host,pid, ... (empty folds every lane
+    // together). Any field works, not just pid.
+    std::vector<std::string> group = parse_group_param(params);
     const std::int64_t cap =
         limit > 0 ? limit : std::numeric_limits<std::int64_t>::max();
 
@@ -970,90 +957,33 @@ static coro::CoroTask<HttpResponse> handle_viz_calltree(
     static constexpr const char* CANCELLED_TREE =
         R"({"truncated":true,"tree":{"name":"all","total":0,"self":0,"count":0,"children":[]}})";
 
-    // Stream the tree: each worker claims whole files and folds them into its
-    // own partial tree, discarding events per file (bounded memory), then the
-    // partials merge. Lanes never cross files, so each partial is complete.
-    std::size_t nworkers = std::max<std::size_t>(
-        1, std::min(slots, target_files.empty() ? std::size_t{1}
-                                                : target_files.size()));
-    std::vector<std::vector<FlameNode>> arenas(nworkers);
-    std::atomic<std::size_t> next_file{0};
-    std::atomic<std::int64_t> produced{0};
+    // Fold the flamegraph over one shared View scan: the engine does the
+    // index-pruned parallel scan, the containment_walk name-path arena, the
+    // per-group rooting, and cancellation - no hand-rolled worker here.
     CancelToken cancel = req.cancel_token;
+    views::View v =
+        views::View::from_files(to_view_files(target_files),
+                                &index.bloom_cache())
+            .phase(views::Phase::Events)
+            .metadata(false)
+            .cancel_when([&req]() { return req.cancel_token.cancelled(); });
+    if (view.query) v = v.filter(*view.query);
+    if (!single_file) v = v.time_range(begin, end);
+    if (limit > 0) v = v.limit(static_cast<std::uint64_t>(cap));
 
-    {
-        CoroScope scope;
-        auto* files_ptr = &target_files;
-        auto* index_ptr = &index;
-        auto* view_ptr = &view;
-        auto* next_ptr = &next_file;
-        auto* produced_ptr = &produced;
-        for (std::size_t w = 0; w < nworkers; ++w) {
-            auto* out = &arenas[w];
-            scope.spawn([files_ptr, next_ptr, index_ptr, view_ptr, begin, end,
-                         scan_all_chunks, by_process, cap, produced_ptr, cancel,
-                         out](CoroScope&) -> coro::CoroTask<void> {
-                co_await calltree_stream_worker(files_ptr, next_ptr, index_ptr,
-                                                view_ptr, begin, end,
-                                                scan_all_chunks, by_process,
-                                                cap, produced_ptr, cancel, out);
-            });
-        }
-        co_await scope.join();
-    }
-
+    // Hoist the fold arguments to named locals: as co_await full-expression
+    // temporaries these vectors/strings would be lifetime-extended into the
+    // coroutine frame, which the compiler mishandles.
+    std::vector<std::string> partition{"pid", "tid"};
+    std::string ts_field{"ts"}, dur_field{"dur"}, name_field{"name"};
+    std::string blob = co_await v.flamegraph_partial(
+        partition, ts_field, dur_field, name_field, group);
     if (cancel.cancelled()) co_return HttpResponse::ok(CANCELLED_TREE);
-    bool truncated = limit > 0 && produced.load() >= cap;
 
-    for (std::size_t t = 1; t < arenas.size(); ++t)
-        merge_flame_arena(arenas[0], 0, arenas[t], 0);
-    std::vector<FlameNode> arena = std::move(arenas[0]);
-
-    // Process frames are synthetic containers: total/count roll up from their
-    // children, self is 0.
-    if (by_process) {
-        for (std::uint32_t pnode : arena[0].children) {
-            double t = 0;
-            std::uint64_t c = 0;
-            for (std::uint32_t ch : arena[pnode].children) {
-                t += arena[ch].total;
-                c += arena[ch].count;
-            }
-            arena[pnode].total = t;
-            arena[pnode].count = c;
-            arena[pnode].self = 0;
-        }
-    }
-
-    double root_total = 0;
-    std::uint64_t root_count = 0;
-    for (std::uint32_t c : arena[0].children) {
-        root_total += arena[c].total;
-        root_count += arena[c].count;
-    }
-    arena[0].total = root_total;
-    arena[0].count = root_count;
-    arena[0].self = 0;
-
-    // Node total/self are summed native durations; scale to us for display.
     const double dur_us =
         dftracer::utils::trace::time_metric_us_scale(index.time_metric());
-    if (dur_us != 1.0) {
-        for (auto& n : arena) {
-            n.total *= dur_us;
-            if (n.self > 0) n.self *= dur_us;
-        }
-    }
-
-    auto& b = scratch_json_builder();
-    b.start_object();
-    b.append_key_value("truncated", truncated);
-    b.append_comma();
-    b.escape_and_append_with_quotes("tree");
-    b.append_colon();
-    serialize_flame_node(b, arena, 0);
-    b.end_object();
-    std::string body(b);
+    std::string body =
+        calltree_json_from_arena(std::move(blob), dur_us, limit, cap);
     index.viz_cache().put(cache_key, body);
     co_return HttpResponse::ok(std::move(body));
 }
@@ -2643,33 +2573,23 @@ static coro::CoroTask<HttpResponse> handle_viz_proctree(
 static coro::CoroTask<HttpResponse> handle_viz_columns(
     const HttpRequest& /*req*/, const QueryParams& /*params*/,
     TraceIndex& index) {
-    // Prefer the durable set stored at index build (available immediately, no
-    // scan). Fall back to the summary harvest for indexes built before column
-    // discovery existed.
-    std::vector<std::string> columns;
-    bool ready = true;
-    {
-        ankerl::unordered_dense::set<std::string> roots;
-        for (const auto& f : index.files())
-            if (!f.index_path.empty()) roots.insert(f.index_path);
-        ankerl::unordered_dense::set<std::string> merged;
-        for (const auto& r : roots) {
-            try {
-                utilities::indexer::IndexDatabase db(
-                    r, dftracer::utils::utilities::indexer::IndexOpenMode::
-                           ReadOnly);
-                for (auto& c : db.query_all_columns())
-                    merged.emplace(std::move(c));
-            } catch (...) {
-            }
-        }
-        columns.assign(merged.begin(), merged.end());
-        std::sort(columns.begin(), columns.end());
-    }
-    if (columns.empty()) {
-        const VizSummary* s = co_await ensure_viz_summary(index);
-        if (s) columns = s->columns;
-        ready = s != nullptr;  // false => client retries after summary builds
+    // Schemaless discovery from the index (no scan): base axis fields, every
+    // harvested scalar leaf (nested args as dotted paths), and resolved.*
+    // aliases, each with its type. Shares View::schema() with the C++/Python
+    // API instead of re-implementing a column union here.
+    std::vector<const TraceIndex::FileInfo*> all_files;
+    all_files.reserve(index.files().size());
+    for (const auto& f : index.files()) all_files.push_back(&f);
+    views::View v =
+        views::View::from_files(to_view_files(all_files), &index.bloom_cache());
+    // This endpoint offers groupable columns; the pid/tid/ts/dur axis fields
+    // are timeline lanes, not group options, so drop them from View::schema().
+    std::vector<views::View::ColumnInfo> schema;
+    for (auto& c : v.schema()) {
+        if (c.name == "pid" || c.name == "tid" || c.name == "ts" ||
+            c.name == "dur")
+            continue;
+        schema.push_back(std::move(c));
     }
 
     auto& b = scratch_json_builder();
@@ -2678,14 +2598,28 @@ static coro::CoroTask<HttpResponse> handle_viz_columns(
     b.append_colon();
     b.start_array();
     bool first = true;
-    for (const auto& c : columns) {
+    for (const auto& c : schema) {
         if (!first) b.append_comma();
         first = false;
-        b.escape_and_append_with_quotes(c);
+        b.escape_and_append_with_quotes(c.name);
     }
     b.end_array();
+    // types: {column -> "int64"/"float64"/"string"}, additive to columns.
     b.append_comma();
-    b.append_key_value("ready", ready);
+    b.escape_and_append_with_quotes("types");
+    b.append_colon();
+    b.start_object();
+    first = true;
+    for (const auto& c : schema) {
+        if (!first) b.append_comma();
+        first = false;
+        b.escape_and_append_with_quotes(c.name);
+        b.append_colon();
+        b.escape_and_append_with_quotes(c.type);
+    }
+    b.end_object();
+    b.append_comma();
+    b.append_key_value("ready", true);
     b.end_object();
     co_return HttpResponse::ok(std::string(b));
 }

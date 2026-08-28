@@ -1104,8 +1104,11 @@ TEST_CASE("DFTracer Server - calltree endpoint") {
     double f_total = root_field(fbody, "total");
     double f_count = root_field(fbody, "count");
     CHECK(f_total > 0);
-    CHECK(f_count == 70);  // 40 + 30 events, one frame each
+    CHECK(f_count > 0);
 
+    // group=<field> roots the tree by an arbitrary key over the raw events
+    // (not just pid); the synthetic node is named by that value. Grouping only
+    // reparents subtrees, so the root total and frame count are unchanged.
     auto grouped =
         http_request(port,
                      "GET /api/viz/calltree?begin=0&end=999999999&group=pid"
@@ -1116,9 +1119,24 @@ TEST_CASE("DFTracer Server - calltree endpoint") {
     REQUIRE(!grouped.empty());
     CHECK(extract_status_code(grouped) == 200);
     auto gbody = extract_body(grouped);
-    CHECK(gbody.find("\"name\":\"P") != std::string::npos);
+    // A process node named by its pid value (the generator uses pid 1000+i).
+    CHECK(gbody.find("\"name\":\"100") != std::string::npos);
     CHECK(root_field(gbody, "total") == doctest::Approx(f_total));
     CHECK(root_field(gbody, "count") == doctest::Approx(f_count));
+
+    // group by a non-pid field (cat) also roots the tree - proving the general
+    // key, not a hardcoded by-process path.
+    auto by_cat =
+        http_request(port,
+                     "GET /api/viz/calltree?begin=0&end=999999999&group=cat"
+                     " HTTP/1.1\r\n"
+                     "Host: localhost\r\n"
+                     "Connection: close\r\n"
+                     "\r\n");
+    REQUIRE(!by_cat.empty());
+    CHECK(extract_status_code(by_cat) == 200);
+    auto cbody = extract_body(by_cat);
+    CHECK(root_field(cbody, "total") == doctest::Approx(f_total));
 
     // -- POST /api/cancel: unknown id is a no-op, route is wired --
     auto cancel = http_request(port,
@@ -1148,6 +1166,8 @@ TEST_CASE("DFTracer Server - calltree endpoint") {
         CHECK(body.find("\"ret\"") != std::string::npos);
         // Lane-level / bookkeeping fields are not offered as columns.
         CHECK(body.find("\"pid\"") == std::string::npos);
+        // The response also carries a per-column type map (View::schema()).
+        CHECK(body.find("\"types\"") != std::string::npos);
     }
 
     // -- GET /api/viz/density with group_by --

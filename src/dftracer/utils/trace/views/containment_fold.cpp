@@ -86,6 +86,25 @@ std::uint32_t field_str_id(const FoldEvent& ev, const FieldRef& f) {
     return 0xFFFFFFFFu;
 }
 
+// The interned combined group value for this event ("<v0> / <v1> / ..."), or
+// 0xFFFFFFFF when the spec has no group. A string-valued field contributes its
+// resolved value; any other field its integer value.
+std::uint32_t group_id_of(const FoldEvent& ev, const ContainmentSpec& spec,
+                          dftracer::utils::StringIntern& intern) {
+    if (spec.group_fields.empty()) return 0xFFFFFFFFu;
+    std::string key;
+    for (std::size_t i = 0; i < spec.group_fields.size(); ++i) {
+        if (i) key += " / ";
+        const FieldRef& f = spec.group_fields[i];
+        const std::uint32_t sid = field_str_id(ev, f);
+        if (sid != 0xFFFFFFFFu)
+            key.append(intern.resolve(sid));
+        else
+            key.append(std::to_string(field_i64(ev, f)));
+    }
+    return intern.get_or_insert(key);
+}
+
 }  // namespace
 
 std::vector<std::vector<std::int64_t>> sorted_lanes(
@@ -126,10 +145,14 @@ ContainmentSpec make_containment_spec(dftracer::utils::StringIntern& intern,
                                       const std::vector<std::string>& partition,
                                       const std::string& start_field,
                                       const std::string& dur_field,
-                                      const std::string& name_field) {
+                                      const std::string& name_field,
+                                      const std::vector<std::string>& group) {
     ContainmentSpec s;
     for (const std::string& f : partition)
         s.lane_fields.push_back(
+            classify(intern, f, s.needs_args, s.nested_captures));
+    for (const std::string& f : group)
+        s.group_fields.push_back(
             classify(intern, f, s.needs_args, s.nested_captures));
     s.start_ref =
         classify(intern, start_field, s.needs_args, s.nested_captures);
@@ -139,6 +162,7 @@ ContainmentSpec make_containment_spec(dftracer::utils::StringIntern& intern,
 }
 
 bool containment_row(const FoldEvent& ev, const ContainmentSpec& spec,
+                     dftracer::utils::StringIntern& intern,
                      ContainmentRow& out) {
     if (ev.phase == RecordPhase::METADATA || ev.phase == RecordPhase::UNKNOWN)
         return false;
@@ -151,17 +175,19 @@ bool containment_row(const FoldEvent& ev, const ContainmentSpec& spec,
                          static_cast<std::int64_t>(ev.tid),
                          field_i64(ev, spec.start_ref),
                          field_i64(ev, spec.dur_ref),
-                         field_str_id(ev, spec.name_ref)};
+                         field_str_id(ev, spec.name_ref),
+                         group_id_of(ev, spec, intern)};
     return true;
 }
 
 ContainmentFold::ContainmentFold(dftracer::utils::StringIntern& intern,
                                  std::vector<std::string> partition,
                                  std::string start_field, std::string dur_field,
-                                 std::string name_field, double time_scale)
+                                 std::string name_field, double time_scale,
+                                 std::vector<std::string> group)
     : intern_(&intern),
       spec_(make_containment_spec(intern, partition, start_field, dur_field,
-                                  name_field)),
+                                  name_field, group)),
       time_scale_(time_scale) {}
 
 std::unique_ptr<Fold> ContainmentFold::slice() const {
@@ -173,7 +199,7 @@ std::unique_ptr<Fold> ContainmentFold::slice() const {
 void ContainmentFold::step(const FoldBatch& batch) {
     ContainmentRow r;
     for (const FoldEvent& ev : batch.events)
-        if (containment_row(ev, spec_, r)) rows_.push_back(r);
+        if (containment_row(ev, spec_, *intern_, r)) rows_.push_back(r);
 }
 
 void ContainmentFold::merge(Fold& other) {
@@ -294,8 +320,42 @@ static std::vector<df::FlameNode> fold_flame_arena(
     std::vector<df::FlameNode> merged;
     merged.emplace_back();
     merged[0].name = "all";
-    for (std::vector<df::FlameNode>& a : arenas)
-        if (!a.empty()) df::merge_flame_arena(merged, 0, a, 0);
+    // A group key (any field(s), e.g. pid/cat/hostname) roots each lane under a
+    // synthetic node named by the lane's group value - it is lane-constant, so
+    // it is read from the lane's first row. With no group key every lane folds
+    // together by name path under the single "all" root.
+    ankerl::unordered_dense::map<std::uint32_t, std::uint32_t> group_of;
+    for (std::size_t li = 0; li < arenas.size(); ++li) {
+        std::vector<df::FlameNode>& a = arenas[li];
+        if (a.empty() || lanes[li].empty()) continue;
+        const std::uint32_t gid =
+            rows[static_cast<std::size_t>(lanes[li][0])].group_id;
+        std::uint32_t target = 0;
+        if (gid != 0xFFFFFFFFu) {
+            auto it = group_of.find(gid);
+            if (it == group_of.end()) {
+                target = static_cast<std::uint32_t>(merged.size());
+                merged.emplace_back();
+                merged[target].name.assign(intern.resolve(gid));
+                merged[0].children.push_back(target);
+                merged[0].kids.emplace(merged[target].name, target);
+                group_of.emplace(gid, target);
+            } else {
+                target = it->second;
+            }
+        }
+        df::merge_flame_arena(merged, target, a, 0);
+    }
+    // Roll up each synthetic group node's stats from its children (self stays
+    // 0: a group node holds no events of its own), so every consumer sees a
+    // consistent arena whether or not a group key was set.
+    for (std::uint32_t g : merged[0].children) {
+        if (merged[g].total != 0 || merged[g].children.empty()) continue;
+        for (std::uint32_t c : merged[g].children) {
+            merged[g].total += merged[c].total;
+            merged[g].count += merged[c].count;
+        }
+    }
     return merged;
 }
 

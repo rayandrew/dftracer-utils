@@ -113,12 +113,14 @@ native runtime thread count), ``assign_files_by_pid(file_pids, n_workers)``
 ``DaskAggregatedTraceViewer`` classes for querying across the cluster once the
 index exists.
 
-``DaskTraceViewer.flamegraph(partition=("pid", "tid"), ts, dur, name)`` builds a
-flamegraph across the cluster: each file shard folds a serialized arena partial
-(``TraceViewer.flamegraph_partial``), and the client tree-reduces them with
-``TraceViewer.merge_flamegraph_partials`` into the final node DataFrame, so a
-name folds across shards. Partition by ``pid`` so a lane lives on one shard. It
-composes with the branch's filter / phase / time like ``collect``.
+``DaskTraceViewer.flamegraph(partition=("pid", "tid"), ts, dur, name, group)``
+builds a flamegraph across the cluster: each file shard folds a serialized arena
+partial (``TraceViewer.flamegraph_partial``), and the client tree-reduces them
+with ``TraceViewer.merge_flamegraph_partials`` into the final node DataFrame, so
+a name folds across shards. Partition by ``pid`` so a lane lives on one shard.
+``group`` roots the tree by an arbitrary key (e.g. ``("cat",)``) over the raw
+events, as in ``TraceViewer.flamegraph``. It composes with the branch's filter /
+phase / time like ``collect``.
 
 Query a shard set
 -----------------

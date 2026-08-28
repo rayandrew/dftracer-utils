@@ -139,7 +139,32 @@ scan:
 
 Other terminals: ``stream(batch_size=...)`` yields Arrow batches for
 out-of-core reads; ``statistics()`` returns a summary dict; ``export_trace(path)``
-writes a filtered trace (optionally re-compressed and re-indexed).
+writes a filtered trace (optionally re-compressed and re-indexed);
+``columns()`` / ``schema()`` list the columns and their types from the index
+(no scan, see below).
+
+Inspecting the schema
+---------------------
+
+``columns()`` lists the columns discoverable from the index and ``schema()``
+maps each to its type (``"int64"`` / ``"float64"`` / ``"string"``). Both read
+index metadata only - no trace scan - so they are cheap and do not need the
+whole trace materialized the way ``collect().keys()`` does (which also only
+sees the columns present in the collected rows).
+
+.. code-block:: python
+
+   v = TraceViewer(files)
+   v.columns()   # ['cat', 'dur', 'hostname', 'name', 'pid', 'pos.x', ...]
+   v.schema()    # {'dur': 'int64', 'hostname': 'string', 'pos.x': 'int64', ...}
+
+The set is schemaless: the base axis fields (``pid`` / ``tid`` / ``ts`` /
+``dur``), every scalar leaf harvested at index build (top-level fields plus flat
+and nested args), and a ``resolved.*`` alias for each hash column present. A
+nested-object arg surfaces as its dotted leaf columns (``pos.x``, ``pos.y``) and
+an array as its first element (``tags.0``), so no field is silently dropped. The
+type is harvested once per event name and folded across names and files
+(numeric widens to ``float64``; any mix with a string widens to ``string``).
 
 Materialized views
 -------------------
@@ -178,6 +203,19 @@ lane (rows sharing ``partition``, ``("pid", "tid")`` by default; ``ts`` /
    c = TraceViewer("traces/").containment()
    tree = c.call_tree()          # events + level, parent_id
    flame = c.flamegraph()        # node_id, parent, name, level, total, self, count
+
+``flamegraph`` / ``containment`` / ``flamegraph_partial`` also take a ``group``
+key - any field(s) - that roots the tree by that value over the raw events, so
+each group gets its own top-level subtree named by its value. This is *not* the
+aggregation ``group_by`` (which would collapse the events the tree is built
+from); it is a per-event rooting. ``group=("pid",)`` gives a per-process
+flamegraph, ``group=("cat",)`` a per-category one, ``group=("host", "pid")`` a
+nested one:
+
+.. code-block:: python
+
+   flame = TraceViewer("traces/").flamegraph(group=("cat",))
+   # top-level nodes are "POSIX", "STDIO", ... each holding that layer's tree
 
 For a distributed flamegraph, ``flamegraph_partial(partition, ts, dur, name)``
 scans one rank's files into a serialized arena (``bytes``); partition by ``pid``

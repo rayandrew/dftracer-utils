@@ -2,6 +2,7 @@
 #include <dftracer/utils/core/common/platform_compat.h>
 #include <dftracer/utils/core/common/string_arena.h>
 #include <dftracer/utils/core/common/string_intern.h>
+#include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/json/parser.h>
@@ -16,6 +17,7 @@
 #include <dftracer/utils/trace/views/view_executor.h>
 #include <dftracer/utils/trace/views/view_plan.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
+#include <dftracer/utils/utilities/indexer/index_database.h>
 
 #include <algorithm>
 #include <functional>
@@ -108,6 +110,99 @@ std::vector<TraceConfig> View::config() const {
             pos = nl + 1;
         }
     }
+    return out;
+}
+
+namespace {
+
+namespace idx = dftracer::utils::utilities::indexer;
+
+using ColTypeMap = dftracer::utils::StringViewMap<idx::ColumnType>;
+
+void fold_col_map(ColTypeMap& into, const ColTypeMap& from) {
+    for (const auto& [name, t] : from) {
+        auto [pos, inserted] = into.emplace(name, t);
+        if (!inserted) pos->second = idx::merge_column_type(pos->second, t);
+    }
+}
+
+// Union the harvested column types across the view's distinct index roots,
+// reading each index's metadata in parallel. Seeds the base axis fields and
+// appends resolved.* aliases for present hash columns.
+ColTypeMap harvest_column_types(const std::vector<ViewFile>& files) {
+    // Distinct index roots (many files often share one index).
+    std::vector<std::string> roots;
+    for (const auto& f : files) {
+        if (f.index_path.empty()) continue;
+        if (std::find(roots.begin(), roots.end(), f.index_path) == roots.end())
+            roots.push_back(f.index_path);
+    }
+
+    ColTypeMap merged;
+    // Base axis fields are always present and not harvested as columns.
+    merged.emplace("pid", idx::ColumnType::Int64);
+    merged.emplace("tid", idx::ColumnType::Int64);
+    merged.emplace("ts", idx::ColumnType::Int64);
+    merged.emplace("dur", idx::ColumnType::Int64);
+
+    if (!roots.empty()) {
+        const auto n = static_cast<std::int64_t>(roots.size());
+        ColTypeMap harvested = default_runtime().parallel_reduce<ColTypeMap>(
+            n, 1, ColTypeMap{},
+            [&](std::int64_t begin, std::int64_t end) {
+                ColTypeMap local;
+                for (std::int64_t i = begin; i < end; ++i) {
+                    try {
+                        idx::IndexDatabase db(
+                            roots[static_cast<std::size_t>(i)],
+                            idx::IndexOpenMode::ReadOnly);
+                        for (auto& [name, t] : db.query_all_column_types())
+                            local.emplace(std::move(name), t);
+                    } catch (...) {
+                        // A missing or unreadable index contributes nothing.
+                    }
+                }
+                return local;
+            },
+            [](ColTypeMap a, ColTypeMap b) {
+                fold_col_map(a, b);
+                return a;
+            });
+        fold_col_map(merged, harvested);
+    }
+
+    // resolved.* virtual columns, present when their hash column is.
+    if (merged.count("fhash"))
+        merged.emplace("resolved.fpath", idx::ColumnType::String);
+    if (merged.count("hhash"))
+        merged.emplace("resolved.hostname", idx::ColumnType::String);
+    return merged;
+}
+
+}  // namespace
+
+std::vector<std::string> View::columns() const {
+    ColTypeMap m = harvest_column_types(plan_->files);
+    std::vector<std::string> out;
+    out.reserve(m.size());
+    for (auto& [name, t] : m) out.push_back(name);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<View::ColumnInfo> View::schema() const {
+    ColTypeMap m = harvest_column_types(plan_->files);
+    std::vector<ColumnInfo> out;
+    out.reserve(m.size());
+    for (auto& [name, t] : m) {
+        // A pre-v12 index stored no type; report it as a string.
+        const char* tn = idx::column_type_name(t);
+        out.push_back(ColumnInfo{name, tn[0] ? tn : "string"});
+    }
+    std::sort(out.begin(), out.end(),
+              [](const ColumnInfo& a, const ColumnInfo& b) {
+                  return a.name < b.name;
+              });
     return out;
 }
 
@@ -438,26 +533,27 @@ coro::CoroTask<dataframe::DataFrame> View::call_tree(
 
 coro::CoroTask<dataframe::DataFrame> View::flamegraph(
     std::vector<std::string> partition, std::string ts, std::string dur,
-    std::string name) const {
-    co_return co_await detail::run_flamegraph(*plan_, std::move(partition),
-                                              std::move(ts), std::move(dur),
-                                              std::move(name));
+    std::string name, std::vector<std::string> group) const {
+    co_return co_await detail::run_flamegraph(
+        *plan_, std::move(partition), std::move(ts), std::move(dur),
+        std::move(name), std::move(group));
 }
 
 coro::CoroTask<std::pair<dataframe::DataFrame, dataframe::DataFrame> >
 View::containment(std::vector<std::string> partition, std::string ts,
-                  std::string dur, std::string name) const {
-    co_return co_await detail::run_containment(*plan_, std::move(partition),
-                                               std::move(ts), std::move(dur),
-                                               std::move(name));
+                  std::string dur, std::string name,
+                  std::vector<std::string> group) const {
+    co_return co_await detail::run_containment(
+        *plan_, std::move(partition), std::move(ts), std::move(dur),
+        std::move(name), std::move(group));
 }
 
 coro::CoroTask<std::string> View::flamegraph_partial(
     std::vector<std::string> partition, std::string ts, std::string dur,
-    std::string name) const {
+    std::string name, std::vector<std::string> group) const {
     co_return co_await detail::run_flamegraph_partial(
         *plan_, std::move(partition), std::move(ts), std::move(dur),
-        std::move(name));
+        std::move(name), std::move(group));
 }
 
 dataframe::DataFrame View::merge_flamegraph_partials(
@@ -747,7 +843,8 @@ void ViewSession::add_containment_branch(
         detail::FoldEvent fe = detail::extract_fold_event(
             jv.element(), *intern, spec->needs_args, &spec->nested_captures);
         detail::ContainmentRow r;
-        if (detail::containment_row(fe, *spec, r)) (*bufs)[slot].push_back(r);
+        if (detail::containment_row(fe, *spec, *intern, r))
+            (*bufs)[slot].push_back(r);
     };
     auto finalize = [intern, bufs, slots, out_ct, out_fg, time_scale]() {
         std::vector<detail::ContainmentRow> all;

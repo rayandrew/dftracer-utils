@@ -875,12 +875,13 @@ coro::CoroTask<dataframe::DataFrame> run_call_tree(
 
 coro::CoroTask<dataframe::DataFrame> run_flamegraph(
     const ViewPlan& plan, std::vector<std::string> partition,
-    std::string ts_field, std::string dur_field, std::string name_field) {
+    std::string ts_field, std::string dur_field, std::string name_field,
+    std::vector<std::string> group) {
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
     dftracer::utils::StringIntern intern;
     ContainmentFold fold(intern, std::move(partition), std::move(ts_field),
                          std::move(dur_field), std::move(name_field),
-                         plan.time_scale);
+                         plan.time_scale, std::move(group));
     std::array<Fold*, 1> folds{&fold};
     co_await fuse(plan, vdef, folds, intern);
     co_return fold.flamegraph();
@@ -889,12 +890,12 @@ coro::CoroTask<dataframe::DataFrame> run_flamegraph(
 coro::CoroTask<std::pair<dataframe::DataFrame, dataframe::DataFrame>>
 run_containment(const ViewPlan& plan, std::vector<std::string> partition,
                 std::string ts_field, std::string dur_field,
-                std::string name_field) {
+                std::string name_field, std::vector<std::string> group) {
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
     dftracer::utils::StringIntern intern;
     ContainmentFold fold(intern, std::move(partition), std::move(ts_field),
                          std::move(dur_field), std::move(name_field),
-                         plan.time_scale);
+                         plan.time_scale, std::move(group));
     std::array<Fold*, 1> folds{&fold};
     co_await fuse(plan, vdef, folds, intern);
     co_return fold.containment();
@@ -902,12 +903,13 @@ run_containment(const ViewPlan& plan, std::vector<std::string> partition,
 
 coro::CoroTask<std::string> run_flamegraph_partial(
     const ViewPlan& plan, std::vector<std::string> partition,
-    std::string ts_field, std::string dur_field, std::string name_field) {
+    std::string ts_field, std::string dur_field, std::string name_field,
+    std::vector<std::string> group) {
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
     dftracer::utils::StringIntern intern;
     ContainmentFold fold(intern, std::move(partition), std::move(ts_field),
                          std::move(dur_field), std::move(name_field),
-                         plan.time_scale);
+                         plan.time_scale, std::move(group));
     std::array<Fold*, 1> folds{&fold};
     co_await fuse(plan, vdef, folds, intern);
     co_return fold.flamegraph_partial();

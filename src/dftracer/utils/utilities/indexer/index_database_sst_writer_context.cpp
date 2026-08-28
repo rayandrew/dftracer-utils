@@ -281,9 +281,10 @@ void IndexDatabaseSstWriterContext::insert_index_dimension(
 }
 
 void IndexDatabaseSstWriterContext::insert_column(int file_id,
-                                                  std::string_view column) {
+                                                  std::string_view column,
+                                                  ColumnType type) {
     dimensions_buf_.emplace_back(encoding::make_column_key(file_id, column),
-                                 std::string{});
+                                 std::string(1, static_cast<char>(type)));
 }
 
 void IndexDatabaseSstWriterContext::insert_chunk_dimension_stats(

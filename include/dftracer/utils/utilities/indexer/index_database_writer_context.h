@@ -103,7 +103,8 @@ class IndexDatabaseWriterContext : public IndexBatchSink {
 
     void insert_index_dimension(int file_id,
                                 std::string_view dimension) override;
-    void insert_column(int file_id, std::string_view column) override;
+    void insert_column(int file_id, std::string_view column,
+                       ColumnType type) override;
 
     /// Insert a hash table entry with bidirectional storage.
     /// Forward: [type][hash] -> name  (for output resolution)

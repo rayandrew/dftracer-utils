@@ -9,12 +9,14 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace dftracer::utils::utilities::indexer {
 class IndexBatchSink;
 class IndexDatabaseWriterContext;
+enum class ColumnType : std::uint8_t;
 }  // namespace dftracer::utils::utilities::indexer
 
 namespace dftracer::utils::trace::visitors {
@@ -115,7 +117,8 @@ class BloomCore {
         utilities::indexer::IndexBatchSink& sink, int file_id,
         const std::vector<ChunkState>& chunks, const ChunkIndexerConfig& config,
         const std::vector<std::string>& extra_dims,
-        const dftracer::utils::StringViewSet& columns);
+        const dftracer::utils::StringViewMap<utilities::indexer::ColumnType>&
+            columns);
 
     /// As persist_bloom_sink, plus the concrete-only ROOT_* summary refresh.
     /// Returns the accumulated file statistics.
@@ -123,7 +126,8 @@ class BloomCore {
         utilities::indexer::IndexDatabaseWriterContext& db, int file_id,
         const std::vector<ChunkState>& chunks, const ChunkIndexerConfig& config,
         const std::vector<std::string>& extra_dims,
-        const dftracer::utils::StringViewSet& columns,
+        const dftracer::utils::StringViewMap<utilities::indexer::ColumnType>&
+            columns,
         bool refresh_root_summaries = true);
 };
 

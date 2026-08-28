@@ -5,6 +5,7 @@
 #include <dftracer/utils/core/common/transparent_string_hash.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/visitors/bloom_core.h>
+#include <dftracer/utils/utilities/indexer/index_database.h>
 
 #include <cstdint>
 #include <map>
@@ -33,6 +34,9 @@ class BloomFold : public Fold {
         return !shape.filtered;
     }
     bool needs_args() const override { return true; }
+    /// Enumerate every scalar leaf (nested included) so the harvested column
+    /// set is schemaless: a nested-object arg surfaces as dotted leaf columns.
+    bool wants_schema() const override { return true; }
 
     std::unique_ptr<Fold> slice() const override {
         return std::make_unique<BloomFold>(*intern_, config_);
@@ -75,7 +79,9 @@ class BloomFold : public Fold {
     struct FileState {
         std::string index_path;
         std::map<std::uint64_t, ChunkState> chunks;
-        dftracer::utils::StringViewSet columns;
+        dftracer::utils::StringViewMap<
+            dftracer::utils::utilities::indexer::ColumnType>
+            columns;
         dftracer::utils::StringViewSet col_seen_names;
         visitors::BloomCore::PidTidCache pidtid;
     };

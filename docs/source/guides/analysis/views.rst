@@ -127,6 +127,27 @@ terminal that runs everything built so far is ``.collect()``:
 :doc:`../data/dataframe` and :doc:`../core/columnar-ops` for what to do with
 it next.
 
+Inspecting the schema
+---------------------
+
+``columns()`` returns the distinct columns discoverable from the view's index
+and ``schema()`` returns each with its type. Both read index metadata only (no
+trace scan) and read the per-index metadata in parallel:
+
+.. code-block:: cpp
+
+   View v = View::from_file("trace.pfw.gz");
+   std::vector<std::string> cols = v.columns();
+   for (const View::ColumnInfo& c : v.schema())
+       std::printf("%s: %s\n", c.name.c_str(), c.type.c_str());
+
+The set is schemaless: the base axis fields (``pid`` / ``tid`` / ``ts`` /
+``dur``), every scalar leaf harvested at index build (top-level fields plus flat
+and nested args as dotted paths, e.g. ``pos.x``), and a ``resolved.*`` alias for
+each hash column present. Types fold across event names and files. The harvest
+happens in the one index-building pass (``BloomFold``, ``wants_schema()``), so
+it costs no extra scan.
+
 Export
 ------
 
