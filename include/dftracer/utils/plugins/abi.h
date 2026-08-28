@@ -48,7 +48,13 @@ typedef enum {
     /** Float key components are bit-cast into the int64 key slot (exact bit
        equality) and materialize as float32/float64; F64 reuses its enumerator
        above for an f64 key. */
-    DFTU_T_F32
+    DFTU_T_F32,
+    /** A column handle carried by value: the compose value is a `dftu_series*`
+       pointer (size = sizeof(pointer)), passed zero-copy - only the handle
+       moves, never the column data. Ownership moves to the receiver unless the
+       op documents a borrow; the final owner frees with `dftu_series_free`.
+       DFTU_T_TABLE is the matching tag for a `dftu_dataframe*` handle. */
+    DFTU_T_SERIES
 } dftu_type;
 
 /** ABI-stable phase values; the host adapter maps these to the internal enum.

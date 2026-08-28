@@ -13,6 +13,7 @@
 
 #include <memory>
 // After plugin.h/fold_adapter.h so nanoarrow is already set up for arrow_abi.h.
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/compose.h>
 #include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/fold.h>
@@ -230,6 +231,30 @@ dftracer::utils::plugins::Task typed_pipe(dftracer::utils::plugins::Host h,
     int rc = -1;
     co_await dftracer::utils::plugins::run(a | b, in, out, rc);
     *result = (rc == 0) ? out : -1;
+}
+
+// A real column rides the pipe as a first-class DFTU_T_SERIES value: the source
+// [1,2,3,4] is doubled twice via a real SIMD add, so the output is [4,8,12,16].
+// Only the `dftu_series*` handle crosses each op (zero-copy); `a` borrows its
+// input (the caller keeps `src`), `b` consumes the intermediate.
+dftracer::utils::plugins::Task series_pipe(dftracer::utils::plugins::Host h,
+                                           dftu_series** result) {
+    using SOp = dftracer::utils::plugins::Op<dftu_series*, dftu_series*>;
+    std::int64_t vals[4] = {1, 2, 3, 4};
+    dftu_series* src = dftu_series_new_flat(DFTU_TYPE_INT64, vals, 4, nullptr);
+    SOp a = dftracer::utils::plugins::make_op<dftu_series*, dftu_series*>(
+        h, [](dftu_series* s) { return dftu_series_add(s, s); });
+    SOp b = dftracer::utils::plugins::make_op<dftu_series*, dftu_series*>(
+        h, [](dftu_series* s) {
+            dftu_series* r = dftu_series_add(s, s);
+            dftu_series_free(s);
+            return r;
+        });
+    dftu_series* out = nullptr;
+    int rc = -1;
+    co_await dftracer::utils::plugins::run(a | b, src, out, rc);
+    dftu_series_free(src);
+    *result = (rc == 0) ? out : nullptr;
 }
 
 // A registered host utility as a compose leaf: pipe fnv1a (bytes -> u64) into
@@ -565,6 +590,56 @@ TEST_CASE("plugin ABI: typed compose Op pipes real values") {
       }).wait();
     rt.shutdown();
     CHECK(result == 20);  // (5*2)+10, fully typed
+}
+
+TEST_CASE(
+    "plugin ABI: a column rides the compose pipe as a DFTU_T_SERIES value") {
+    static_assert(
+        dftracer::utils::plugins::type_tag<dftu_series*>() == DFTU_T_SERIES,
+        "a dftu_series* handle tags as DFTU_T_SERIES");
+    static_assert(
+        dftracer::utils::plugins::type_tag<dftu_dataframe*>() == DFTU_T_TABLE,
+        "a dftu_dataframe* handle tags as DFTU_T_TABLE");
+    FoldFixture<CountSlice> fx(nullptr);
+    dftu_host& host = fx.host();
+
+    Runtime rt(1);
+    dftu_series* out = nullptr;
+    rt.scope("caller", [&](CoroScope&) -> coro::CoroTask<void> {
+          ::dftu_task* d = dftracer::utils::plugins::detail::drive_coro<int>(
+              &host, series_pipe(dftracer::utils::plugins::Host{&host}, &out));
+          co_await *as_coro(d);
+      }).wait();
+    rt.shutdown();
+
+    REQUIRE(out != nullptr);
+    REQUIRE(dftu_series_length(out) == 4);
+    const std::int64_t* d =
+        static_cast<const std::int64_t*>(dftu_series_data(out));
+    CHECK(d[0] == 4);
+    CHECK(d[1] == 8);
+    CHECK(d[2] == 12);
+    CHECK(d[3] == 16);
+    dftu_series_free(out);
+}
+
+TEST_CASE(
+    "plugin ABI: DFTU_T_SERIES and DFTU_T_TABLE are distinct handle tags") {
+    FoldFixture<CountSlice> fx(nullptr);
+    dftracer::utils::plugins::Host h{&fx.host()};
+    const dftu_ext_compose* c = compose_ext(h);
+    void* hh = h.raw()->h;
+    // Both are 8-byte handle values; as opaque DFTU_T_BYTES they would have
+    // piped. A distinct tag makes a column-out reject a table-in, and accept a
+    // column-in. (Bodies never run; `then` only checks the type + size seam.)
+    ::dftu_op* col_out = c->make_op(hh, op_double, nullptr, nullptr, DFTU_T_I64,
+                                    8, DFTU_T_SERIES, 8);
+    ::dftu_op* tbl_in = c->make_op(hh, op_double, nullptr, nullptr,
+                                   DFTU_T_TABLE, 8, DFTU_T_I64, 8);
+    CHECK(c->then(hh, col_out, tbl_in) == nullptr);  // SERIES out != TABLE in
+    ::dftu_op* col_in = c->make_op(hh, op_double, nullptr, nullptr,
+                                   DFTU_T_SERIES, 8, DFTU_T_I64, 8);
+    CHECK(c->then(hh, col_out, col_in) != nullptr);  // SERIES out -> SERIES in
 }
 
 TEST_CASE("plugin ABI: compose util_op pipes two host utilities") {

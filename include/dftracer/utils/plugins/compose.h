@@ -11,6 +11,13 @@
 #include <utility>
 #include <vector>
 
+// The columnar handles (defined in dftracer/utils/dataframe/abi.h). Forward
+// declared so a column/table crosses a compose pipe as a first-class typed
+// value (DFTU_T_SERIES / DFTU_T_TABLE) without this header depending on the
+// dataframe ABI; the value is the handle pointer, so it is zero-copy.
+struct dftu_series;
+struct dftu_dataframe;
+
 // Ranges-style composition of already-spawned dftu_task handles, mirroring the
 // in-tree compose.h combinators but lowering to the host coro vtable
 // (dftu_ext_coro: when_all / when_any). This is the SDK sugar over the C ABI's
@@ -135,6 +142,10 @@ constexpr dftu_type type_tag() {
         return DFTU_T_U8;
     else if constexpr (std::is_same_v<T, float>)
         return DFTU_T_F32;
+    else if constexpr (std::is_same_v<T, dftu_series*>)
+        return DFTU_T_SERIES;
+    else if constexpr (std::is_same_v<T, dftu_dataframe*>)
+        return DFTU_T_TABLE;
     else
         return DFTU_T_BYTES;
 }
