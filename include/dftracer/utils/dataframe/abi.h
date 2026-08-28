@@ -721,6 +721,131 @@ DFTU_EXPORT dftu_dataframe* dftu_dataframe_group_by_dynamic(
     const dftu_dataframe* df, const char* time_col, int64_t every,
     int64_t period, const dftu_group_agg* aggs, int32_t n_aggs);
 
+/* ---- Op registry -------------------------------------------------------- */
+/* One name-keyed registry over the engine's ops so a built-in op and a user op
+ * are looked up and run the same way (the plugin-ABI foundation). Built-in ops
+ * carry a plain name (`add`); a user op should namespace with a module prefix
+ * (`mymod.zscore`) so it never shadows a built-in. */
+
+/** Coarse category, for filtering/listing (== dftu_op_kind_of(sig)). */
+typedef enum {
+    DFTU_OP_KIND_SERIES = 0, /**< column(s) -> column */
+    DFTU_OP_KIND_AGGREGATE,  /**< column -> scalar (a reducer) */
+    DFTU_OP_KIND_FRAME       /**< table(s) -> table */
+} dftu_op_kind;
+
+/** Operand/return tokens, one 4-bit field each. A signature packs a return
+ * token plus up to three operand tokens into one integer (DFTU_OP_SIG), the way
+ * a Linux ioctl number packs direction/type/nr/size. APPEND ONLY - a token's
+ * value is ABI-stable. */
+typedef enum {
+    DFTU_TOK_NONE = 0, /**< empty slot */
+    DFTU_TOK_SERIES,   /**< a column operand, or a column return */
+    DFTU_TOK_SCALAR,   /**< dftu_scalar operand, or a dftu_scalar return */
+    DFTU_TOK_I64,      /**< int64 operand, or an int64 return */
+    DFTU_TOK_BOOL,     /**< int32 0/1 return */
+    DFTU_TOK_CMP,      /**< dftu_cmp_op operand */
+    DFTU_TOK_PRIM,     /**< dftu_prim_op operand */
+    DFTU_TOK_LOGICAL,  /**< dftu_logical_op operand */
+    DFTU_TOK_DTYPE,    /**< dftu_dtype operand */
+    DFTU_TOK_REDUCE,   /**< dftu_reduce_op operand */
+    DFTU_TOK_STR,      /**< (const char*, int32 length) operand */
+    DFTU_TOK_CHAR      /**< char operand */
+} dftu_op_tok;
+
+/** Pack a signature from a return token and up to three operand tokens. Pass
+ * each token's suffix (e.g. SERIES for DFTU_TOK_SERIES; pad unused operand
+ * slots with NONE) - the suffix is pasted onto DFTU_TOK_. Compose new
+ * signatures from tokens rather than allocating opaque ordinals; decode with
+ * DFTU_OP_SIG_RET / DFTU_OP_SIG_ARG. */
+#define DFTU_OP_SIG(ret, o0, o1, o2)                   \
+    ((int)DFTU_TOK_##ret | ((int)DFTU_TOK_##o0 << 4) | \
+     ((int)DFTU_TOK_##o1 << 8) | ((int)DFTU_TOK_##o2 << 12))
+/** The return token of a signature. */
+#define DFTU_OP_SIG_RET(sig) ((dftu_op_tok)((int)(sig) & 0xF))
+/** Operand token `i` in [0,3); DFTU_TOK_NONE past the last operand. */
+#define DFTU_OP_SIG_ARG(sig, i) \
+    ((dftu_op_tok)(((int)(sig) >> (4 + 4 * (i))) & 0xF))
+
+/** A packed op signature: build it with DFTU_OP_SIG(ret, o0, o1, o2) at the
+ * registration site, and use the same expression as a runner switch-case label
+ * (a constant), the way a driver composes and switches on ioctl numbers. There
+ * is deliberately no enum of named signatures: an op of an existing shape adds
+ * only a registry line, and only a brand-new shape adds a runner case. */
+typedef int32_t dftu_op_sig;
+
+/** A registry record. `sig` is authoritative: it packs the whole signature, so
+ * it selects the fn cast, the operands read, and (via dftu_op_kind_of) the
+ * category. `name` is borrowed and must outlive the registration (a literal for
+ * built-ins; dftu_op_register copies the record, not the name). */
+typedef struct dftu_op_desc {
+    const char* name; /**< registry key, e.g. "add" or "mymod.zscore" */
+    dftu_op_sig sig;  /**< the packed signature the runner dispatches on */
+    const void* fn;   /**< the engine function pointer */
+} dftu_op_desc;
+
+/** The coarse category of a signature (decoded from its return token). */
+DFTU_EXPORT dftu_op_kind dftu_op_kind_of(dftu_op_sig sig);
+
+/** Number of leading `series` column operands a signature takes (its column
+ * arity). */
+DFTU_EXPORT uint32_t dftu_op_arity(dftu_op_sig sig);
+
+/** A human-readable spelling of `sig`, e.g. "(series, scalar) -> series",
+ * decoded from its tokens, for listing/discovery. Static storage; never NULL.
+ */
+DFTU_EXPORT const char* dftu_op_signature(dftu_op_sig sig);
+
+/** The registered op named `name` (built-in or user), or NULL if none. */
+DFTU_EXPORT const dftu_op_desc* dftu_op_find(const char* name);
+
+/** Number of registered ops (built-ins + user), for discovery/listing. */
+DFTU_EXPORT uint32_t dftu_op_count(void);
+
+/** The op at index `i` in [0, dftu_op_count()), or NULL if out of range. The
+ * ordering is unspecified and may change as user ops are registered. */
+DFTU_EXPORT const dftu_op_desc* dftu_op_at(uint32_t i);
+
+/** Register a user op. The record is copied (the string/fn pointers it holds
+ * are borrowed, not copied). Returns 0 on success, non-zero if `desc`/its name
+ * is NULL or the name is already registered (no silent shadowing). */
+DFTU_EXPORT int dftu_op_register(const dftu_op_desc* desc);
+
+/** The non-column operands an op consumes, matching the non-SERIES tokens of
+ * its signature in order. Only the fields a given op needs are read (pass NULL
+ * when it needs none). One `op_code` field carries whichever enum token the
+ * signature has (CMP / PRIM / LOGICAL / REDUCE / DTYPE), since a signature has
+ * at most one. */
+typedef struct dftu_op_arg {
+    dftu_scalar scalar; /**< the SCALAR token */
+    int32_t op_code;    /**< the CMP / PRIM / LOGICAL / REDUCE / DTYPE token */
+    const char* s0;     /**< the first STR token (bytes) */
+    int32_t s0_len;     /**< length of s0 */
+    const char* s1;     /**< the second STR token */
+    int32_t s1_len;     /**< length of s1 */
+    int64_t i0;         /**< the first I64 token */
+    int64_t i1;         /**< the second I64 token */
+    char ch;            /**< the CHAR token */
+} dftu_op_arg;
+
+/** Run a column op (a signature whose return token is SERIES): `in` are `n`
+ * borrowed input columns (n must equal dftu_op_arity(op->sig)), `arg` supplies
+ * the remaining operands the signature names (NULL when there are none).
+ * Returns a new owned column (free with dftu_series_free), or NULL on a
+ * NULL/kind/arity/shape mismatch. */
+DFTU_EXPORT dftu_series* dftu_op_run(const dftu_op_desc* op,
+                                     const dftu_series* const* in, uint32_t n,
+                                     const dftu_op_arg* arg);
+
+/** Run a reducer (a signature whose return token is SCALAR/I64/BOOL) on one
+ * column, returning its reduction as a dftu_scalar (an i64/bool return is
+ * widened into the I64 domain). `arg` is read only by a signature with an
+ * operand token (e.g. REDUCE). On a NULL/kind/shape mismatch sets *ok to 0
+ * (when ok != NULL) and returns a zero scalar; otherwise sets *ok to 1. */
+DFTU_EXPORT dftu_scalar dftu_op_run_aggregate(const dftu_op_desc* op,
+                                              const dftu_series* v,
+                                              const dftu_op_arg* arg, int* ok);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

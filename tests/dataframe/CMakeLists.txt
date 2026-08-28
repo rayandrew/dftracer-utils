@@ -3,7 +3,7 @@
 # ##############################################################################
 
 set(DATAFRAME_TEST_SOURCES test_mask.cpp test_series.cpp test_result_batch.cpp test_methods.cpp
-                           test_arrow.cpp test_field.cpp)
+                           test_arrow.cpp test_field.cpp test_op_registry.cpp)
 
 foreach(test_file ${DATAFRAME_TEST_SOURCES})
   string(REPLACE ".cpp" "" bin_exec ${test_file})

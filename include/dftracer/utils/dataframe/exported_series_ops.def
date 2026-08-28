@@ -1,0 +1,91 @@
+/* Built-in dataframe column ops seeded into the op registry, one per line.
+ * APPEND ONLY - a name is a stable public key; never rename or repurpose one.
+ *
+ *   DFTU_SERIES_OP(name, fn, ret, o0, o1, o2)
+ *     name        - registry key (lower_snake), unprefixed for a built-in.
+ *     fn          - the dftu_* C ABI function implementing it.
+ *     ret,o0..o2  - the signature tokens (DFTU_TOK_* suffixes): the return
+ *                   token then up to three operand tokens, packed by
+ *                   DFTU_OP_SIG. Pad unused operand slots with NONE.
+ *
+ * This is the whole column-op surface (every dftu_series_* op). Frame ops
+ * (dftu_dataframe_*: join / group_by / pivot / select / ...) are a separate
+ * family (a different handle and string-keyed config) and join once the frame
+ * runner and its tokens land.
+ */
+
+#ifndef DFTU_SERIES_OP
+#define DFTU_SERIES_OP(name, fn, ret, o0, o1, o2)
+#endif
+
+/* Elementwise arithmetic (column op column). */
+DFTU_SERIES_OP(add, dftu_series_add, SERIES, SERIES, SERIES, NONE)
+DFTU_SERIES_OP(sub, dftu_series_sub, SERIES, SERIES, SERIES, NONE)
+DFTU_SERIES_OP(mul, dftu_series_mul, SERIES, SERIES, SERIES, NONE)
+DFTU_SERIES_OP(div, dftu_series_div, SERIES, SERIES, SERIES, NONE)
+
+/* Broadcast a scalar across a column. */
+DFTU_SERIES_OP(add_scalar, dftu_series_add_scalar, SERIES, SERIES, SCALAR, NONE)
+DFTU_SERIES_OP(sub_scalar, dftu_series_sub_scalar, SERIES, SERIES, SCALAR, NONE)
+DFTU_SERIES_OP(mul_scalar, dftu_series_mul_scalar, SERIES, SERIES, SCALAR, NONE)
+DFTU_SERIES_OP(div_scalar, dftu_series_div_scalar, SERIES, SERIES, SCALAR, NONE)
+
+/* Compare / filter / cast / numeric prim. */
+DFTU_SERIES_OP(compare, dftu_series_compare, SERIES, SERIES, CMP, SCALAR)
+DFTU_SERIES_OP(filter_gt, dftu_series_filter_gt, SERIES, SERIES, SCALAR, NONE)
+DFTU_SERIES_OP(filter, dftu_series_filter, SERIES, SERIES, SERIES, NONE)
+DFTU_SERIES_OP(cast, dftu_series_cast, SERIES, SERIES, DTYPE, NONE)
+DFTU_SERIES_OP(prim, dftu_series_prim, SERIES, SERIES, PRIM, NONE)
+
+/* Boolean ops on Bool columns. */
+DFTU_SERIES_OP(logical, dftu_series_logical, SERIES, SERIES, SERIES, LOGICAL)
+DFTU_SERIES_OP(logical_not, dftu_series_logical_not, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(dictionary_encode, dftu_series_dictionary_encode, SERIES, SERIES,
+               NONE, NONE)
+
+/* String predicates (column, literal -> Bool). */
+DFTU_SERIES_OP(str_eq, dftu_series_str_eq, SERIES, SERIES, STR, NONE)
+DFTU_SERIES_OP(str_contains, dftu_series_str_contains, SERIES, SERIES, STR, NONE)
+DFTU_SERIES_OP(str_starts_with, dftu_series_str_starts_with, SERIES, SERIES, STR,
+               NONE)
+DFTU_SERIES_OP(str_ends_with, dftu_series_str_ends_with, SERIES, SERIES, STR,
+               NONE)
+DFTU_SERIES_OP(str_matches, dftu_series_str_matches, SERIES, SERIES, STR, NONE)
+DFTU_SERIES_OP(str_like, dftu_series_str_like, SERIES, SERIES, STR, NONE)
+DFTU_SERIES_OP(str_find, dftu_series_str_find, SERIES, SERIES, STR, NONE)
+
+/* String lengths / case / trim. */
+DFTU_SERIES_OP(str_len_bytes, dftu_series_str_len_bytes, SERIES, SERIES, NONE,
+               NONE)
+DFTU_SERIES_OP(str_len_chars, dftu_series_str_len_chars, SERIES, SERIES, NONE,
+               NONE)
+DFTU_SERIES_OP(to_lowercase, dftu_series_to_lowercase, SERIES, SERIES, NONE,
+               NONE)
+DFTU_SERIES_OP(to_uppercase, dftu_series_to_uppercase, SERIES, SERIES, NONE,
+               NONE)
+DFTU_SERIES_OP(str_strip, dftu_series_str_strip, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(str_lstrip, dftu_series_str_lstrip, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(str_rstrip, dftu_series_str_rstrip, SERIES, SERIES, NONE, NONE)
+
+/* String edits (column + literal args). */
+DFTU_SERIES_OP(str_replace, dftu_series_str_replace, SERIES, SERIES, STR, STR)
+DFTU_SERIES_OP(str_replace_all, dftu_series_str_replace_all, SERIES, SERIES, STR,
+               STR)
+DFTU_SERIES_OP(str_slice, dftu_series_str_slice, SERIES, SERIES, I64, I64)
+DFTU_SERIES_OP(str_pad_start, dftu_series_str_pad_start, SERIES, SERIES, I64,
+               CHAR)
+DFTU_SERIES_OP(str_pad_end, dftu_series_str_pad_end, SERIES, SERIES, I64, CHAR)
+DFTU_SERIES_OP(str_zfill, dftu_series_str_zfill, SERIES, SERIES, I64, NONE)
+DFTU_SERIES_OP(str_split, dftu_series_str_split, SERIES, SERIES, STR, NONE)
+
+/* Reducers (column -> scalar). */
+DFTU_SERIES_OP(reduce, dftu_series_reduce, SCALAR, SERIES, REDUCE, NONE)
+DFTU_SERIES_OP(count, dftu_series_count, I64, SERIES, NONE, NONE)
+DFTU_SERIES_OP(product, dftu_series_product, SCALAR, SERIES, NONE, NONE)
+DFTU_SERIES_OP(all, dftu_series_all, BOOL, SERIES, NONE, NONE)
+DFTU_SERIES_OP(any, dftu_series_any, BOOL, SERIES, NONE, NONE)
+DFTU_SERIES_OP(arg_min, dftu_series_arg_min, I64, SERIES, NONE, NONE)
+DFTU_SERIES_OP(arg_max, dftu_series_arg_max, I64, SERIES, NONE, NONE)
+DFTU_SERIES_OP(mode, dftu_series_mode, SCALAR, SERIES, NONE, NONE)
+
+#undef DFTU_SERIES_OP
