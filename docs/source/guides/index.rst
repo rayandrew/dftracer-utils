@@ -122,7 +122,6 @@ Serve the index over HTTP and reach for the standalone analysis tools.
    serving/http-server
    serving/viz-api
    ../server
-   tools/call-tree
    tools/dlio-config
    tools/replay
    tools/logging

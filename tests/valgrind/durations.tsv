@@ -56,7 +56,6 @@ trace/views/test_fold	21.2
 trace/views/test_dict_fold	21.1
 utilities/reader/test_sub_chunk_skip	20.6
 utilities/reader/test_member_cache_integration	20.5
-binaries/test_dftracer_call_tree	20.1
 pipeline/test_pipeline	18.9
 trace/aggregators/test_event_aggregator_utility	17.6
 utilities/indexer/test_index_database	15.2
@@ -115,8 +114,6 @@ trace/views/test_event_source	6.2
 trace/indexing/test_shard_manifest	6.2
 utilities/plugins/test_map_join_arrow	6.1
 utilities/fileio/lines/sources/test_async_streaming_gz_line_generator	6.1
-utilities/call_tree/test_flamegraph	5.9
-utilities/call_tree/test_call_tree_internal	5.9
 server/test_cancel	5.9
 utilities/indexer/test_scan_prefix	5.8
 utilities/common/statistics/test_timestamp_histogram	5.8
@@ -129,7 +126,6 @@ trace/indexing/test_bloom_filter	5.4
 dataframe/test_result_batch	5.4
 utilities/compression/test_libdeflate_gzip	5.3
 utilities/common/arrow/test_arrow_column_builder	5.3
-utilities/call_tree/test_critical_path	5.3
 trace/test_chunk_extractor	5.3
 utilities/common/statistics/test_log2_histogram	5.2
 trace/statistics/test_statistics_query	5.2

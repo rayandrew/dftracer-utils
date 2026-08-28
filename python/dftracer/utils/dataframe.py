@@ -28,6 +28,7 @@ from typing import (
     Tuple,
     TypeVar,
     Union,
+    cast,
     overload,
 )
 
@@ -59,6 +60,11 @@ _WINDOW_VALUE_ONLY = (
     "last_value",
 )
 _WINDOW_FRAME = ("frame_sum", "frame_min", "frame_max", "frame_count", "frame_mean")
+
+# Finite value sets for the viewer builder args (kept as reusable aliases so the
+# wrappers, the dask plan, and the stub share one definition).
+PhaseArg = Literal["events", "counters", "aggregated", "metadata", "any"]
+TimeUnitArg = Literal["ns", "us", "ms", "sec", "s"]
 
 # One window spec per appended output column; the func literal selects the shape.
 RankSpec = Tuple[Literal["row_number", "rank", "dense_rank"], str]
@@ -217,6 +223,11 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
         """This frame as a ``pyarrow.Table`` (zero-copy via the C Data Interface
         stream)."""
         return _require_pyarrow().table(self._native)
+
+    def to_ipc(self) -> bytes:
+        """This frame serialized as an Arrow IPC stream (schema + one record
+        batch + EOS) - bytes any Arrow IPC reader opens, no pyarrow needed."""
+        return self._native.to_ipc()
 
     def to_pandas(self) -> "pd.DataFrame":
         """This frame as a pandas DataFrame."""
@@ -546,8 +557,13 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
     def topk(self, name: str, k: int, largest: bool = True) -> "DataFrame":
         return _wrap(self._native.topk(_unwrap(name), _unwrap(k), _unwrap(largest)))
 
-    def concat(self, *others: "DataFrame") -> "DataFrame":
-        return _wrap(self._native.concat(*[_unwrap(x) for x in others]))
+    def concat(
+        self, *others: "DataFrame", how: Literal["vertical", "diagonal"] = "vertical"
+    ) -> "DataFrame":
+        """Vertically concatenate with ``others`` (UNION ALL). ``how='vertical'``
+        requires a shared schema; ``how='diagonal'`` unions columns, null-filling
+        those absent from a part and promoting a mixed-numeric column to float."""
+        return _wrap(self._native.concat(*[_unwrap(x) for x in others], how=how))
 
     def unpivot(self, id_vars: "str | list[str]", value_vars: "str | list[str]") -> "DataFrame":
         return _wrap(self._native.unpivot(_unwrap(id_vars), _unwrap(value_vars)))
@@ -561,7 +577,15 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
     def to_dummies(self, column: str) -> "DataFrame":
         return _wrap(self._native.to_dummies(_unwrap(column)))
 
-    def pivot(self, index: str, columns: str, values: str, agg: str = "first") -> "DataFrame":
+    def pivot(
+        self,
+        index: str,
+        columns: str,
+        values: str,
+        agg: Literal[
+            "first", "last", "sum", "min", "max", "mean", "count", "var", "std", "skew", "kurt"
+        ] = "first",
+    ) -> "DataFrame":
         return _wrap(
             self._native.pivot(_unwrap(index), _unwrap(columns), _unwrap(values), _unwrap(agg))
         )
@@ -572,12 +596,13 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
         every: int,
         period: "int | None" = None,
         aggs: "list[str] | None" = None,
+        origin: "int | Literal['min'] | None" = None,
     ) -> "DataFrame":
-        return _wrap(
-            self._native.group_by_dynamic(
-                _unwrap(time_col), _unwrap(every), _unwrap(period), _unwrap(aggs)
-            )
-        )
+        """Tumbling/sliding time-window aggregation. ``origin`` anchors the
+        window grid at ``origin + k*every`` (default: the classic ts-floored
+        grid); pass a window's begin, or ``"min"`` to align buckets to the
+        minimum timestamp (the frame-native ``time_bucket("min")``)."""
+        return _wrap(self._native.group_by_dynamic(time_col, every, period, aggs, origin))
 
     def query(
         self,
@@ -647,25 +672,32 @@ def _viewer_agg(
 ) -> "_ext._TraceViewer":
     """Apply the aggregates to `native`. Accepts legacy spec strings and unified
     ``Agg`` expressions (``F.dur.sum()``, ``F.any.mean()``) side by side. ``F.any``
-    (mean) maps to the numeric-args path; other ``F.any`` reductions raise."""
+    reductions map to the numeric-args path (mean alone keeps the legacy bare
+    column, others emit ``<op>_<arg>`` columns)."""
     from .columnar import Agg, _Wildcard
 
+    # Wildcard reductions the numeric-args path supports (mean is handled apart
+    # so mean-alone keeps its legacy bare column name).
+    dyn_ops = {"sum", "min", "max", "var", "std", "skew", "kurt"}
     str_specs = []
+    wildcard_ops = []
     wildcard_mean = False
     for s in specs:
         if isinstance(s, str):
             str_specs.append(s)
         elif isinstance(s, Agg):
             if isinstance(s.value, _Wildcard):
-                if s.op == "mean":
-                    wildcard_mean = True
-                elif s.op == "count":
+                if s.op == "count":
                     str_specs.append("count")
+                elif s.op == "mean":
+                    wildcard_mean = True
+                elif s.op in dyn_ops:
+                    wildcard_ops.append(s.op)
                 else:
                     raise ValueError(
-                        "F.any supports only .mean() (per numeric arg) and "
-                        ".count(); name a field for other reductions, e.g. "
-                        "F('args.level').sum()"
+                        "F.any supports .count()/.mean()/.sum()/.min()/.max()/"
+                        ".var()/.std()/.skew()/.kurt(); name a field for argmax "
+                        "or percentile, e.g. F('args.level').pct(0.9)"
                     )
             else:
                 str_specs.append(_agg_spec_string(s))
@@ -677,7 +709,11 @@ def _viewer_agg(
     result = native
     if str_specs:
         result = result.agg(*str_specs)
-    if wildcard_mean:
+    if wildcard_ops:
+        if wildcard_mean:
+            wildcard_ops.append("mean")
+        result = result.agg_numeric_args(*wildcard_ops)
+    elif wildcard_mean:
         result = result.agg_numeric_args()
     return result
 
@@ -712,13 +748,13 @@ class _ViewerFilters:
 
     # Builder ops forwarded to the native viewer, wrapped back. Self-typed ones
     # preserve the concrete viewer (plain or aggregated) through the chain.
-    def phase(self: _ViewerT, phase: str) -> _ViewerT:
+    def phase(self: _ViewerT, phase: PhaseArg) -> _ViewerT:
         return self._rewrap(self._native.phase(phase))
 
     def time_range(self: _ViewerT, begin: float, end: float) -> _ViewerT:
         return self._rewrap(self._native.time_range(begin, end))
 
-    def time_unit(self: _ViewerT, unit: str) -> _ViewerT:
+    def time_unit(self: _ViewerT, unit: TimeUnitArg) -> _ViewerT:
         return self._rewrap(self._native.time_unit(unit))
 
     def time_scale(self: _ViewerT, ns_ratio: float) -> _ViewerT:
@@ -748,8 +784,10 @@ class _ViewerFilters:
     def topk(self: _ViewerT, name: str, k: int, largest: bool = True) -> _ViewerT:
         return self._rewrap(self._native.topk(name, k, largest))
 
-    def agg_numeric_args(self) -> "AggregatedTraceViewer":
-        return self._rewrap(self._native.agg_numeric_args())
+    def agg_numeric_args(self, *reductions: str) -> "AggregatedTraceViewer":
+        # No reductions -> one bare-named per-arg mean (legacy). Op names
+        # (sum/min/max/mean/var/std/skew/kurt) emit one <op>_<arg> column each.
+        return self._rewrap(self._native.agg_numeric_args(*reductions))
 
     def collect(self) -> "DataFrame":
         return _wrap(self._native.collect())
@@ -760,12 +798,14 @@ class _ViewerFilters:
         workers: int = 0,
         normalize: bool = False,
         dict: bool = True,
-    ) -> "Iterator[object]":
-        """Iterate matching events as pyarrow record batches (parallel, bounded
-        memory). Yields raw ``pyarrow.RecordBatch`` objects, not wrapped
-        DataFrames. ``workers=0`` uses the runtime's worker count."""
-        return iter(
-            self._native.stream(
+    ) -> "Iterator[DataFrame]":
+        """Iterate matching events as native DataFrame chunks (parallel, bounded
+        memory) - the streaming form of collect(). Each chunk carries its own
+        schema; call .to_arrow() on a chunk at the edge. ``workers=0`` uses the
+        runtime's worker count."""
+        return (
+            _wrap(chunk)
+            for chunk in self._native.stream(
                 batch_size=batch_size,
                 workers=workers,
                 normalize=normalize,
@@ -773,11 +813,18 @@ class _ViewerFilters:
             )
         )
 
-    def time_bucket(self: _ViewerT, interval_us: Union[int, float, str]) -> _ViewerT:
+    def time_bucket(
+        self: _ViewerT,
+        interval_us: Union[int, float, str],
+        normalize_to: Union[int, Literal["min"], None] = None,
+    ) -> _ViewerT:
         """Bucket width; a bare number is microseconds, a string ("1ms") is
-        converted."""
+        converted. ``normalize_to`` aligns bucket boundaries: an int origin, or
+        ``"min"`` to align to the trace's minimum timestamp (read from the index,
+        no scan) - best for a viewport whose trace starts at an arbitrary
+        absolute time; ``None`` aligns to 0."""
         us = int(round(coerce_duration(interval_us, 1e6, "interval_us")))
-        return self._rewrap(self._native.time_bucket(us))
+        return self._rewrap(self._native.time_bucket(us, normalize_to))
 
     def occ_cell(self: _ViewerT, cell_us: Union[int, float, str]) -> _ViewerT:
         """Occupancy cell size (busy quantum); a bare number is microseconds, a
@@ -891,7 +938,11 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
     def group_by(self, *keys: str) -> "AggregatedTraceViewer":
         return _wrap(self._native.group_by(*keys))
 
-    def join(self, other: "TraceViewer", how: str = "inner") -> "DataFrame":
+    def join(
+        self,
+        other: "TraceViewer",
+        how: Literal["inner", "left", "right", "full", "semi", "anti"] = "inner",
+    ) -> "DataFrame":
         return _wrap(self._native.join(_unwrap(other), how))
 
     def compare(self, other: "TraceViewer") -> "DataFrame":
@@ -907,6 +958,70 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
     ) -> Dict[str, DataFrame]:
         result = self._native.collect_typed(shard_begin, shard_end, progress)
         return {k: _wrap(v) for k, v in result.items()}
+
+    def call_tree(
+        self,
+        partition: Sequence[str] = ("pid", "tid"),
+        ts: str = "ts",
+        dur: str = "dur",
+        name: str = "name",
+    ) -> "DataFrame":
+        """Scan the view, then assign containment ``level``/``parent_id`` per
+        lane (rows sharing ``partition``) over the ``[ts, ts+dur)`` intervals.
+        Any field works as a lane/interval/name key; a POD scalar reads
+        natively, an arg or nested ``a.b`` field is captured. Returns the events
+        plus the two columns."""
+        return _wrap(self._native.call_tree(list(partition), ts, dur, name))
+
+    def flamegraph(
+        self,
+        partition: Sequence[str] = ("pid", "tid"),
+        ts: str = "ts",
+        dur: str = "dur",
+        name: str = "name",
+    ) -> "DataFrame":
+        """Scan the view, then fold events by root-to-node ``name`` path into a
+        flamegraph. Returns one row per node: ``node_id``, ``parent``,
+        ``name``, ``level``, ``total`` (inclusive), ``self`` (exclusive),
+        ``count``."""
+        return _wrap(self._native.flamegraph(list(partition), ts, dur, name))
+
+    def containment(
+        self,
+        partition: Sequence[str] = ("pid", "tid"),
+        ts: str = "ts",
+        dur: str = "dur",
+        name: str = "name",
+    ) -> "Containment":
+        """Scan once and buffer one fold, then get both containment outputs:
+        ``.call_tree()`` and ``.flamegraph()`` (see those methods). Cheaper than
+        calling both separately when you want both."""
+
+        def resolve() -> "Tuple[DataFrame, DataFrame]":
+            ct, fg = self._native.containment(list(partition), ts, dur, name)
+            return _wrap(ct), _wrap(fg)
+
+        return Containment(resolve)
+
+    def flamegraph_partial(
+        self,
+        partition: Sequence[str] = ("pid", "tid"),
+        ts: str = "ts",
+        dur: str = "dur",
+        name: str = "name",
+    ) -> bytes:
+        """Scan this rank's files into a serialized flamegraph arena (bytes).
+        Partition by pid so each lane lives on one rank; gather the partials
+        (MPI all_gather / Dask) and combine with :meth:`merge_flamegraph_partials`."""
+        return self._native.flamegraph_partial(list(partition), ts, dur, name)
+
+    @staticmethod
+    def merge_flamegraph_partials(partials: "Sequence[bytes]") -> "DataFrame":
+        """Merge flamegraph_partial() bytes from every rank into the final node
+        DataFrame. A pure reduce - no scan and no viewer needed, so it is a
+        static method (call it as ``TraceViewer.merge_flamegraph_partials(...)``
+        on rank 0 or a Dask reducer)."""
+        return _wrap(_ext.merge_flamegraph_partials(list(partials)))
 
     def session(self) -> "Session":
         """Open a Session that fuses several branch views over one shared scan of
@@ -929,6 +1044,32 @@ def _stats_to_dict(df: "DataFrame") -> Dict[str, object]:
         "min_timestamp_us": row.get("min_ts", 0),
         "max_timestamp_us": row.get("max_ts", 0),
     }
+
+
+class Containment:
+    """Both containment outputs from one buffered fold. ``call_tree()`` and
+    ``flamegraph()`` return the two DataFrames; the underlying scan/buffer runs
+    once and is shared between them. Returned by ``TraceViewer.containment`` and
+    ``SessionView.containment``."""
+
+    __slots__ = ("_resolve", "_pair")
+
+    def __init__(self, resolve: "Callable[[], Tuple[DataFrame, DataFrame]]") -> None:
+        self._resolve = resolve
+        self._pair: "Optional[Tuple[DataFrame, DataFrame]]" = None
+
+    def _both(self) -> "Tuple[DataFrame, DataFrame]":
+        if self._pair is None:
+            self._pair = self._resolve()
+        return self._pair
+
+    def call_tree(self) -> "DataFrame":
+        """The events plus level/parent_id."""
+        return self._both()[0]
+
+    def flamegraph(self) -> "DataFrame":
+        """The folded node frame."""
+        return self._both()[1]
 
 
 class Handle:
@@ -983,8 +1124,8 @@ class SessionView(_ViewerFilters):
     def agg(self, *specs: "Union[str, Agg]") -> "SessionView":  # ty: ignore[invalid-method-override]
         return self._rewrap(_viewer_agg(self._native, specs))
 
-    def agg_numeric_args(self) -> "SessionView":  # ty: ignore[invalid-method-override]
-        return self._rewrap(self._native.agg_numeric_args())
+    def agg_numeric_args(self, *reductions: str) -> "SessionView":  # ty: ignore[invalid-method-override]
+        return self._rewrap(self._native.agg_numeric_args(*reductions))
 
     def collect(self) -> Handle:  # ty: ignore[invalid-method-override]
         """Register an aggregation branch; ``result()`` is a DataFrame."""
@@ -1031,6 +1172,48 @@ class SessionView(_ViewerFilters):
         opaque serialized partial (bytes) over the shared scan, for a distributed
         merge (combine several with ``DataFrame.merge_partials_to_table``)."""
         return self._session._register("partial", self, None)
+
+    def call_tree(
+        self,
+        partition: Sequence[str] = ("pid", "tid"),
+        ts: str = "ts",
+        dur: str = "dur",
+        name: str = "name",
+    ) -> Handle:
+        """Register a containment branch over the shared scan; ``result()`` is the
+        events DataFrame plus level/parent_id (see :meth:`TraceViewer.call_tree`)."""
+        cfg = "\x1f".join([",".join(partition), ts, dur, name])
+        return self._session._register("call_tree", self, cfg)
+
+    def flamegraph(
+        self,
+        partition: Sequence[str] = ("pid", "tid"),
+        ts: str = "ts",
+        dur: str = "dur",
+        name: str = "name",
+    ) -> Handle:
+        """Register a flamegraph branch over the shared scan; ``result()`` is the
+        folded node DataFrame (see :meth:`TraceViewer.flamegraph`)."""
+        cfg = "\x1f".join([",".join(partition), ts, dur, name])
+        return self._session._register("flamegraph", self, cfg)
+
+    def containment(
+        self,
+        partition: Sequence[str] = ("pid", "tid"),
+        ts: str = "ts",
+        dur: str = "dur",
+        name: str = "name",
+    ) -> "Containment":
+        """Register ONE containment branch over the shared scan and get both
+        outputs from one buffered fold: ``.call_tree()`` and ``.flamegraph()``."""
+        cfg = "\x1f".join([",".join(partition), ts, dur, name])
+        handle = self._session._register("containment", self, cfg)
+
+        def resolve() -> "Tuple[DataFrame, DataFrame]":
+            pair = cast("Tuple[Any, Any]", handle.result())
+            return _wrap(pair[0]), _wrap(pair[1])
+
+        return Containment(resolve)
 
     def plugin(
         self, plugin: "Union[str, type]", config: "Optional[Dict[str, Any]]" = None

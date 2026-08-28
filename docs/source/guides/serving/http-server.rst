@@ -198,4 +198,5 @@ See also
 - :doc:`../../trace-viewer` - the web UI the server hosts.
 - :doc:`../core/query-dsl` - the predicate language accepted by the ``query``
   viz params.
-- :doc:`../tools/call-tree` - build call trees offline instead of over HTTP.
+- :doc:`../../cli` - ``dftracer_view --call-tree`` / ``--flamegraph`` build
+  containment trees offline instead of over HTTP.

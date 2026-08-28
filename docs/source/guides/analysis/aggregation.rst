@@ -99,10 +99,14 @@ top-level and ``args.*`` alike (``F("args.level").mean()``).
 
 The reductions are ``sum`` / ``min`` / ``max`` / ``mean`` / ``var`` / ``std`` /
 ``skew`` / ``kurt`` / ``count`` (C++ adds ``F("name").argmax_by("dur")``). The
-``F.any`` wildcard aggregates every numeric ``args.*`` field: ``F.any.mean()`` is
-the scan-time numeric-args path (see below) and ``F.any.count()`` is the group
-count. Because that path computes only the mean, any other ``F.any.<op>()`` is
-rejected - name a field for those (``F("args.level").sum()``).
+``F.any`` wildcard applies a reduction to every numeric ``args.*`` field at scan
+time: ``F.any.mean()`` alone keeps the legacy bare-named per-arg mean column, and
+``F.any.<op>()`` for ``sum`` / ``min`` / ``max`` / ``var`` / ``std`` / ``skew`` /
+``kurt`` emits one ``<op>_<arg>`` column per arg (``F.any.count()`` is the group
+count). Per-arg percentiles come from the viewer form
+``TraceViewer(...).agg_numeric_args("p90", "mean")`` (or ``pct:<field>:<q>``),
+which additionally collects a per-arg sketch; ``argmax`` / ``hist`` still need a
+named field.
 
 Group keys
 ----------
@@ -156,8 +160,11 @@ fields. A bare name that is not one of the named keys becomes a field group key
 (``GroupKey::field("type")`` in C++), so ``"type"``, ``"ph"``, or any args key
 groups with no prefix. A dotted or bracketed path descends into nested args:
 ``"args.meta.host"``, ``"args.tags[0]"`` and ``"args.tags.0"`` (the bracket and
-dot-numeric forms both index an array). The same path syntax works for an
-aggregate field (``mean:args.n.v``) and in the :doc:`../core/query-dsl`.
+dot-numeric forms both index an array). An arg key whose name itself contains
+dots (e.g. ``"cqe.raw_ns"``) is a single flat member, not a nested object, and
+resolves by that flat name whether written bare or prefixed
+(``"args.cqe.raw_ns"``). The same path syntax works for an aggregate field
+(``mean:args.n.v``) and in the :doc:`../core/query-dsl`.
 
 A bare name resolves to the top-level schema field when there is one
 (``name``, ``cat``, ``pid``, ``tid``, ``ts``, ``dur``, ``ph``, ``id``,
@@ -353,8 +360,12 @@ Counters without naming the fields
 ----------------------------------
 
 For counter traces where the numeric fields are not known up front,
-``agg_numeric_args`` aggregates every numeric ``args.*`` field as a per-group
-mean, one value column per discovered field.
+``agg_numeric_args`` aggregates every numeric ``args.*`` field per group. With no
+argument it emits one bare-named per-arg mean column. Passing reduction names
+applies each to every discovered arg, one ``<op>_<arg>`` column per (arg,
+reduction): the ``FieldStat`` ones - ``sum`` / ``min`` / ``max`` / ``mean`` /
+``var`` / ``std`` / ``skew`` / ``kurt`` - plus percentiles (``p90`` shorthand or
+``pct:<field>:<q>``), which additionally collect a per-arg sketch.
 
 .. tab-set::
 
@@ -374,8 +385,16 @@ mean, one value column per discovered field.
 
          df = TraceViewer("counters.pfw.gz").group_by("cat").agg_numeric_args().collect()
 
-``F.any.mean()`` in an ``agg`` call is the same thing (``.agg(F.any.mean())`` ==
-``.agg_numeric_args()``), so it composes with named aggregates in one call.
+         # sum + p90 per numeric counter arg (sum_<arg>, p90_<arg>):
+         bands = (TraceViewer("counters.pfw.gz")
+                  .group_by("cat")
+                  .agg_numeric_args("sum", "p90")
+                  .collect())
+
+``F.any.mean()`` in an ``agg`` call is the same as the no-argument form
+(``.agg(F.any.mean())`` == ``.agg_numeric_args()``), and ``F.any.<op>()`` for the
+other ``FieldStat`` reductions matches ``agg_numeric_args("<op>")``, so wildcard
+reductions compose with named aggregates in one call.
 
 Custom metrics (C++)
 --------------------

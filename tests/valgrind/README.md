@@ -34,7 +34,7 @@ make valgrind-clean    # remove build/venv/log artifacts
 |-----------------|-----------------------------------------------------------------------|
 | `valgrind-cpp`  | Every doctest unit binary (single-command ctest tests), full leak check. |
 | `valgrind-py`   | Native-binding-focused pytest files (see below).                      |
-| `valgrind-mpi`  | `test_dftracer_call_tree_mpi`, `test_dftracer_view_mpi`.     |
+| `valgrind-mpi`  | `test_dftracer_view_mpi`.     |
 
 
 `test_reader_robustness` and `test_reader_formats` are **excluded by default**: they're slow-and-redundant for leak detection (no new alloc/free *path*, just scale/repetition).

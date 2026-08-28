@@ -123,6 +123,10 @@ std::string phase_tag(const ViewPlan& plan) {
             return "__ph-E";
         case Phase::Counters:
             return "__ph-C";
+        case Phase::Aggregated:
+            return "__ph-A";
+        case Phase::Metadata:
+            return "__ph-M";
         case Phase::Any:
             return {};
     }

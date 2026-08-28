@@ -36,6 +36,37 @@ def _col(df, name):
     return df.to_arrow().column(name).to_pylist()
 
 
+def test_group_by_dynamic_origin():
+    # ts start at 5000; every=700 does not divide 5000 so alignment matters.
+    df = _df({"ts": [5000 + 100 * i for i in range(20)], "v": list(range(20))})
+
+    def first(**kw):
+        out = _dict(df.group_by_dynamic("ts", 700, aggs=["count"], **kw))
+        return min(out["ts"])
+
+    assert first() == 4900  # floor(5000/700)*700, the classic grid
+    assert first(origin=5000) == 5000  # explicit origin
+    assert first(origin="min") == 5000  # aligned to the min timestamp
+
+
+def test_to_ipc_roundtrips_via_arrow_reader():
+    import io
+
+    import pyarrow.ipc as ipc
+
+    t = pa.table(
+        {
+            "a": pa.array([1, 2, 3], pa.int64()),
+            "b": pa.array([1.5, 2.5, 3.5], pa.float64()),
+            "c": pa.array(["x", "y", "z"]),
+        }
+    )
+    raw = DataFrame.from_arrow(t).to_ipc()
+    assert isinstance(raw, bytes) and len(raw) > 0
+    back = ipc.open_stream(io.BytesIO(raw)).read_all()
+    assert back.equals(t)
+
+
 def test_window_row_number_running_sum_lag():
     df = _df({"pid": [1, 1, 1, 2], "ts": [10, 20, 30, 5], "dur": [1, 2, 3, 4]})
     out = df.window(
@@ -239,6 +270,18 @@ def test_melt_concat_union_distinct_sample_topk_sort():
     b = _df({"k": [2, 3]})
     assert sorted(_col(a.concat(b), "k")) == [1, 2, 2, 3]
     assert sorted(_col(a.union(b), "k")) == [1, 2, 3]
+
+    # Diagonal concat unions columns; the absent one is null-filled.
+    da = _df({"k": [1, 2], "n": [10, 20]})
+    db = _df({"k": [3], "r": [1.5]})
+    dg = da.concat(db, how="diagonal")
+    d = _dict(dg)
+    assert set(d) == {"k", "n", "r"}
+    assert d["k"] == [1, 2, 3]
+    assert d["n"] == [10, 20, None]  # absent in db
+    assert d["r"] == [None, None, 1.5]  # absent in da
+    with pytest.raises(ValueError):
+        da.concat(db, how="sideways")
 
     dup = _df({"k": [1, 1, 2]})
     assert sorted(_col(dup.distinct(), "k")) == [1, 2]

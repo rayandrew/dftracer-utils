@@ -144,13 +144,18 @@ the engine - each is a C++ ``dataframe`` primitive (in ``batch_ops`` / the kerne
 the same ops back the Python API and a future C++ distributed engine. Arrow is
 never in the loop; ``to_arrow()`` / ``to_pandas()`` / ``to_polars()`` convert
 only at the edge (and ``DataFrame`` is picklable and zero-copy Arrow-importable
-via ``__arrow_c_stream__``).
+via ``__arrow_c_stream__``). ``to_ipc()`` serializes the frame to an Arrow IPC
+stream (``bytes`` any Arrow IPC reader opens, no pyarrow needed) for transport.
 
 The full op catalog is below; each operation links to its Python reference (the
 C++ ``dataframe`` methods mirror them one-to-one, see :doc:`cpp_api/dataframe`).
 ``hash_partition`` plus ``concat`` are the distributed shuffle/merge pair: split
 with ``hash_partition`` (equal keys co-locate), run ``group_by`` / ``join``
-locally, then re-aggregate the ``concat``-ed partials.
+locally, then re-aggregate the ``concat``-ed partials. ``concat`` is UNION ALL:
+``how="vertical"`` (default) requires a shared schema, while
+``how="diagonal"`` does a schema-union concat - it unions the columns,
+null-filling those absent from a part and promoting a mixed-numeric column to
+float.
 
 .. list-table:: DataFrame operations
    :header-rows: 1
@@ -177,7 +182,7 @@ locally, then re-aggregate the ``concat``-ed partials.
    * - Expressions
      - :py:meth:`~dftracer.utils.DataFrame.apply`
    * - Interop
-     - :py:meth:`~dftracer.utils.DataFrame.from_arrow`, :py:meth:`~dftracer.utils.DataFrame.from_pandas`, :py:meth:`~dftracer.utils.DataFrame.from_polars`, :py:meth:`~dftracer.utils.DataFrame.from_parquet`, :py:meth:`~dftracer.utils.DataFrame.from_dict`, :py:meth:`~dftracer.utils.DataFrame.from_numpy`, :py:meth:`~dftracer.utils.DataFrame.to_arrow`, :py:meth:`~dftracer.utils.DataFrame.to_pandas`, :py:meth:`~dftracer.utils.DataFrame.to_polars`
+     - :py:meth:`~dftracer.utils.DataFrame.from_arrow`, :py:meth:`~dftracer.utils.DataFrame.from_pandas`, :py:meth:`~dftracer.utils.DataFrame.from_polars`, :py:meth:`~dftracer.utils.DataFrame.from_parquet`, :py:meth:`~dftracer.utils.DataFrame.from_dict`, :py:meth:`~dftracer.utils.DataFrame.from_numpy`, :py:meth:`~dftracer.utils.DataFrame.to_arrow`, :py:meth:`~dftracer.utils.DataFrame.to_pandas`, :py:meth:`~dftracer.utils.DataFrame.to_polars`, :py:meth:`~dftracer.utils.DataFrame.to_ipc`
 
 .. list-table:: Series operations
    :header-rows: 1
@@ -205,6 +210,12 @@ locally, then re-aggregate the ``concat``-ed partials.
      - :py:meth:`~dftracer.utils.Series.drop_nulls`, :py:meth:`~dftracer.utils.Series.fillna`, :py:meth:`~dftracer.utils.Series.cast`, :py:meth:`~dftracer.utils.Series.dictionary_encode`, :py:meth:`~dftracer.utils.Series.materialize`, :py:meth:`~dftracer.utils.Series.share`, :py:meth:`~dftracer.utils.Series.child`, :py:meth:`~dftracer.utils.Series.num_children`
    * - Interop
      - :py:meth:`~dftracer.utils.Series.from_arrow`, :py:meth:`~dftracer.utils.Series.from_pandas`, :py:meth:`~dftracer.utils.Series.from_polars`, :py:meth:`~dftracer.utils.Series.from_numpy`, :py:meth:`~dftracer.utils.Series.from_list`, :py:meth:`~dftracer.utils.Series.to_arrow`, :py:meth:`~dftracer.utils.Series.to_pandas`, :py:meth:`~dftracer.utils.Series.to_numpy`, :py:meth:`~dftracer.utils.Series.to_polars`
+
+``group_by`` (and ``group_by_dynamic`` / ``pivot``) take per-group aggregates
+named ``sum`` / ``min`` / ``max`` / ``count`` / ``mean`` / ``var`` / ``std`` /
+``skew`` / ``kurt`` plus ``first`` / ``last`` (the group's first / last non-null
+value in row order). ``first`` / ``last`` merge order-independently, so the
+parallel and distributed path is exact.
 
 The moment statistics (``variance``/``stddev``/``skewness``/``kurtosis``) reduce
 their values with a Highway SIMD pass; ``abs``/``clip``/``round`` are Highway

@@ -2,6 +2,7 @@
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/constants.h>
 #include <dftracer/utils/core/common/error.h>
+#include <dftracer/utils/core/common/field_ref.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/hash/fnv1a.h>
 #include <dftracer/utils/core/common/logging.h>
@@ -2247,8 +2248,7 @@ int PluginFold::match_query(const Query& q, const dftu_event& e) {
         } else if (f == "dur") {
             if (e.has_dur) match_qmap_[f] = static_cast<double>(e.dur);
         } else {
-            std::string_view key = f;
-            if (key.substr(0, 5) == "args.") key.remove_prefix(5);
+            std::string_view key = strip_args_prefix(f);
             for (std::uint32_t i = 0; i < e.arg_count; ++i) {
                 const dftu_arg& a = e.args[i];
                 if (a.key == DFTU_STR_NONE || intern_->resolve(a.key) != key)

@@ -60,6 +60,10 @@ struct AggAccum {
     // (which maps into these). Sorted set = deterministic joined output.
     std::vector<std::set<std::string>> sets;
     std::map<std::string, FieldStat> dyn;  // sorted for a stable column union
+    // Per-arg quantile sketch, keyed like `dyn`; populated only when a dyn Pct
+    // reduction is requested (AggSchema.dyn_sketch), so the common counter path
+    // pays nothing for it.
+    std::map<std::string, utilities::common::statistics::DDSketch> dyn_sketches;
     // Occupancy (the time-window reduction). Time is discretized into buckets
     // of width occ_bucket_us; per bucket, `mask` is a 64-bit coverage of
     // sub-slots of width occ_bucket_us/64 (an event ORs in every sub-slot its
@@ -121,6 +125,10 @@ struct AggSchema {
     std::size_t set_count = 0;
     bool want_occupancy = false;      // any busy/concurrency/utilization spec
     std::uint64_t occ_bucket_us = 0;  // occupancy bucket width (see below)
+    // A per-arg DDSketch is collected only when a numeric_arg_aggs reduction
+    // needs quantiles (Pct); otherwise the dyn FieldStat alone serves the
+    // reductions and no sketch is allocated.
+    bool dyn_sketch = false;
 };
 
 // Build the fold schema; ensure_schema memoizes it on the plan. Call

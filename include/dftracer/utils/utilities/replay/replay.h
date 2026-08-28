@@ -1,7 +1,6 @@
 #ifndef DFTRACER_UTILS_UTILITIES_REPLAY_REPLAY_H
 #define DFTRACER_UTILS_UTILITIES_REPLAY_REPLAY_H
 
-#include <dftracer/utils/call_tree/call_tree.h>
 #include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
@@ -340,25 +339,10 @@ class ReplayEngine {
      * Get file path for replay (handles output directory override)
      */
     /**
-     * Replay from call tree structure (hierarchical replay)
+     * Replay one already-parsed event (statistics, filters, timing, execute).
+     * Shared by the call-tree hierarchical and linear replay paths.
      */
-    void replay_from_call_tree(dftracer::utils::call_tree::CallTree& tree,
-                               ReplayResult& result);
-
-    /**
-     * Replay a single call tree node recursively
-     */
-    void replay_call_tree_node_recursive(
-        const dftracer::utils::call_tree::CallTreeNodeInfo& node,
-        dftracer::utils::call_tree::CallTree& call_tree, ReplayResult& result,
-        int depth);
-
-    /**
-     * Replay a single node from call tree
-     */
-    void replay_call_tree_node(
-        const dftracer::utils::call_tree::CallTreeNodeInfo& node,
-        ReplayResult& result);
+    void replay_one_trace(const Trace& trace, ReplayResult& result);
 };
 
 }  // namespace dftracer::utils::utilities::replay

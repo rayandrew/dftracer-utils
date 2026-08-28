@@ -173,7 +173,7 @@ COMPONENT_GROUPS = [
     ("plugins", ["dftracer::utils::plugins::"], "Plugins"),
     (
         "trace",
-        ["dftracer::utils::trace::", "dftracer::utils::call_tree::"],
+        ["dftracer::utils::trace::"],
         "Trace Domain",
     ),
     ("reader", ["dftracer::utils::utilities::reader::"], "Trace Reader"),

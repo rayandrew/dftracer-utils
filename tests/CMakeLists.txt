@@ -250,14 +250,12 @@ set(TEST_BINARY_SOURCES
     binaries/test_dftracer_view.cpp
     binaries/test_dftracer_replay.cpp
     binaries/test_dftracer_comparator.cpp
-    binaries/test_dftracer_call_tree.cpp
     binaries/test_dftracer_run.cpp
     )
 
 if(DFTRACER_UTILS_ENABLE_MPI)
   list(APPEND TEST_BINARY_SOURCES
-    binaries/test_dftracer_view_mpi.cpp
-    binaries/test_dftracer_call_tree_mpi.cpp)
+    binaries/test_dftracer_view_mpi.cpp)
 endif()
 
 foreach(test_file ${TEST_BINARY_SOURCES})
@@ -300,8 +298,7 @@ foreach(test_file ${TEST_BINARY_SOURCES})
   # MPI tests spawn mpiexec several times per test case and each child runs
   # under ASan, which is ~10x slower than release. The default 120s is not
   # enough.
-  if(bin_exec STREQUAL "binaries/test_dftracer_view_mpi" OR
-     bin_exec STREQUAL "binaries/test_dftracer_call_tree_mpi")
+  if(bin_exec STREQUAL "binaries/test_dftracer_view_mpi")
     set(integration_test_timeout 600)
   endif()
   set_tests_properties(${bin_exec} PROPERTIES TIMEOUT ${integration_test_timeout})
@@ -343,15 +340,9 @@ foreach(test_file ${TEST_BINARY_SOURCES})
   elseif(bin_exec STREQUAL "binaries/test_dftracer_comparator")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_COMPARATOR_PATH=$<TARGET_FILE:dftracer_comparator>")
-  elseif(bin_exec STREQUAL "binaries/test_dftracer_call_tree")
-    set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
-      "DFTRACER_CALL_TREE_PATH=$<TARGET_FILE:dftracer_call_tree>")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_run")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_RUN_PATH=$<TARGET_FILE:dftracer_run>;DFTRACER_EVENT_COUNTER_PLUGIN_PATH=$<TARGET_FILE:event_counter_plugin>;DFTRACER_DURATION_HISTOGRAM_PLUGIN_PATH=$<TARGET_FILE:duration_histogram_plugin>;DFTRACER_QUERY_FILTER_PLUGIN_PATH=$<TARGET_FILE:query_filter_plugin>;DFTRACER_TAG_PROVIDER_PLUGIN_PATH=$<TARGET_FILE:tag_provider_plugin>;DFTRACER_TAG_CONSUMER_PLUGIN_PATH=$<TARGET_FILE:tag_consumer_plugin>;DFTRACER_PERBATCH_PRODUCER_PLUGIN_PATH=$<TARGET_FILE:perbatch_producer_plugin>;DFTRACER_PERBATCH_CONSUMER_PLUGIN_PATH=$<TARGET_FILE:perbatch_consumer_plugin>;DFTRACER_DUR_STATS_PRODUCER_PLUGIN_PATH=$<TARGET_FILE:dur_stats_producer_plugin>;DFTRACER_DUR_STATS_CONSUMER_PLUGIN_PATH=$<TARGET_FILE:dur_stats_consumer_plugin>")
-  elseif(bin_exec STREQUAL "binaries/test_dftracer_call_tree_mpi")
-    set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
-      "DFTRACER_CALL_TREE_PATH=$<TARGET_FILE:dftracer_call_tree>;DFTRACER_CALL_TREE_MPI_PATH=$<TARGET_FILE:dftracer_call_tree_mpi>;MPIEXEC_EXECUTABLE=${MPIEXEC_EXECUTABLE};ASAN_OPTIONS=detect_leaks=0;LSAN_OPTIONS=detect_leaks=0")
   elseif(bin_exec STREQUAL "binaries/test_dftracer_view_mpi")
     set_tests_properties(${bin_exec} PROPERTIES ENVIRONMENT
       "DFTRACER_VIEW_PATH=$<TARGET_FILE:dftracer_view>;MPIEXEC_EXECUTABLE=${MPIEXEC_EXECUTABLE};ASAN_OPTIONS=detect_leaks=0;LSAN_OPTIONS=detect_leaks=0")

@@ -2,6 +2,7 @@
 #include <dftracer/utils/dataframe/field_stat.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_i64/u64/f64
 #include <dftracer/utils/dataframe/parallel.h>              // parallel_for
+#include <dftracer/utils/dataframe/sketch.h>  // DDSketch, sketch_bucket_keys
 
 #include <bit>
 #include <cstdint>
@@ -30,6 +31,30 @@ FieldStatDomain col_domain(TypeId t) {
             return FieldStatDomain::F64;
         default:
             return FieldStatDomain::I64;
+    }
+}
+
+// Raw value bits for a fixed-width cell, reinterpreted on finalize by the
+// column's domain. Keeps first/last exact for every numeric type.
+std::uint64_t read_bits(const Series& c, std::int64_t i, FieldStatDomain d) {
+    switch (d) {
+        case FieldStatDomain::F64:
+            return std::bit_cast<std::uint64_t>(read_f64(c, i));
+        case FieldStatDomain::U64:
+            return read_u64(c, i);
+        default:
+            return std::bit_cast<std::uint64_t>(read_i64(c, i));
+    }
+}
+
+double read_as_double(const Series& c, std::int64_t i, FieldStatDomain d) {
+    switch (d) {
+        case FieldStatDomain::F64:
+            return read_f64(c, i);
+        case FieldStatDomain::U64:
+            return static_cast<double>(read_u64(c, i));
+        default:
+            return static_cast<double>(read_i64(c, i));
     }
 }
 
@@ -67,6 +92,28 @@ class AggState {
     std::vector<std::uint64_t> counts;  // per group: rows seen
     std::vector<FieldStat> fstats;      // groups * nf
 
+    // First/Last state, allocated (groups * nf) only when `has_fl`. First/Last
+    // are order-independent: each keeps the value at the smallest / largest
+    // global row index seen for the group, so parallel-chunk merge order does
+    // not matter. `fl_*_idx == -1` means no non-null value yet.
+    bool has_fl = false;
+    std::vector<char> field_is_str;       // field -> value column is String
+    std::vector<std::uint64_t> fl_first;  // fixed-width raw bits
+    std::vector<std::uint64_t> fl_last;
+    std::vector<std::string> fl_first_s;  // string values
+    std::vector<std::string> fl_last_s;
+    std::vector<std::int64_t> fl_first_idx;
+    std::vector<std::int64_t> fl_last_idx;
+
+    // Per-group DDSketch state for Pct, allocated (groups * n_sketch) only when
+    // `has_sketch`. All Pct specs on one field share a single sketch slot (the
+    // quantiles read the same sketch); `field_sketch[field] == -1` marks a
+    // field with no sketch.
+    bool has_sketch = false;
+    std::size_t n_sketch = 0;
+    std::vector<int> field_sketch;
+    std::vector<DDSketch> sketches;
+
     std::size_t nspecs() const { return specs.size(); }
     std::int64_t ngroups() const {
         return static_cast<std::int64_t>(key_string ? skeys.size()
@@ -92,11 +139,37 @@ class AggState {
             }
         }
         nf = field_vc.size();
+        has_fl = false;
+        for (const AggSpec& sp : specs)
+            if (sp.op == AggOp::First || sp.op == AggOp::Last) has_fl = true;
+
+        // One shared sketch slot per field that any Pct or Hist spec
+        // references (all quantiles and the histogram read the same sketch).
+        field_sketch.assign(nf, -1);
+        n_sketch = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].op != AggOp::Pct && specs[s].op != AggOp::Hist)
+                continue;
+            const int fi = spec_field[s];
+            if (fi >= 0 && field_sketch[static_cast<std::size_t>(fi)] < 0)
+                field_sketch[static_cast<std::size_t>(fi)] =
+                    static_cast<int>(n_sketch++);
+        }
+        has_sketch = n_sketch > 0;
     }
 
     void grow_group() {
         counts.push_back(0);
         fstats.resize(fstats.size() + nf);
+        if (has_fl) {
+            fl_first.resize(fl_first.size() + nf, 0);
+            fl_last.resize(fl_last.size() + nf, 0);
+            fl_first_s.resize(fl_first_s.size() + nf);
+            fl_last_s.resize(fl_last_s.size() + nf);
+            fl_first_idx.resize(fl_first_idx.size() + nf, -1);
+            fl_last_idx.resize(fl_last_idx.size() + nf, -1);
+        }
+        if (has_sketch) sketches.resize(sketches.size() + n_sketch);
     }
     std::int64_t group_of_i64(std::int64_t k) {
         auto it = imap.find(k);
@@ -133,12 +206,42 @@ void agg_accumulate(AggState& st, const Series& key,
     if (!st.inited) {
         st.key_string = key.type() == TypeId::String;
         st.field_domain.resize(st.nf);
-        for (std::size_t fj = 0; fj < st.nf; ++fj)
-            st.field_domain[fj] = col_domain(
-                values[static_cast<std::size_t>(st.field_vc[fj])]->type());
+        st.field_is_str.resize(st.nf);
+        for (std::size_t fj = 0; fj < st.nf; ++fj) {
+            const Series* vc =
+                values[static_cast<std::size_t>(st.field_vc[fj])];
+            st.field_domain[fj] = col_domain(vc->type());
+            st.field_is_str[fj] = vc->type() == TypeId::String ? 1 : 0;
+        }
         st.inited = true;
     }
     if (end < 0) end = key.length();
+    const std::int64_t clen = end - begin;
+
+    // Precompute DDSketch bucket keys for each sketch field in one SIMD pass
+    // over the chunk (the logarithm is the costly step); the per-group scatter
+    // below just increments a bin. Null rows get a garbage key that the scatter
+    // skips.
+    std::vector<std::vector<std::int32_t>> chunk_keys;
+    if (st.has_sketch && clen > 0) {
+        const double lg = DDSketch{}.log_gamma();
+        std::vector<double> tmp(static_cast<std::size_t>(clen));
+        chunk_keys.assign(st.n_sketch, {});
+        for (std::size_t fj = 0; fj < st.nf; ++fj) {
+            const int sk = st.field_sketch[fj];
+            if (sk < 0) continue;
+            const Series* vc =
+                values[static_cast<std::size_t>(st.field_vc[fj])];
+            for (std::int64_t r = 0; r < clen; ++r)
+                tmp[static_cast<std::size_t>(r)] =
+                    read_as_double(*vc, begin + r, st.field_domain[fj]);
+            chunk_keys[static_cast<std::size_t>(sk)].resize(
+                static_cast<std::size_t>(clen));
+            sketch_bucket_keys(tmp.data(), clen, lg,
+                               chunk_keys[static_cast<std::size_t>(sk)].data());
+        }
+    }
+
     for (std::int64_t i = begin; i < end; ++i) {
         std::int64_t g = st.key_string
                              ? st.group_of_str(std::string(key.string_at(i)))
@@ -149,7 +252,33 @@ void agg_accumulate(AggState& st, const Series& key,
             const Series* vc =
                 values[static_cast<std::size_t>(st.field_vc[fj])];
             if (vc->is_null(i)) continue;
-            fs_add(st.fstats[base + fj], *vc, i, st.field_domain[fj]);
+            if (!st.field_is_str[fj])
+                fs_add(st.fstats[base + fj], *vc, i, st.field_domain[fj]);
+            if (st.has_sketch && st.field_sketch[fj] >= 0) {
+                const std::size_t sk =
+                    static_cast<std::size_t>(st.field_sketch[fj]);
+                st.sketches[static_cast<std::size_t>(g) * st.n_sketch + sk]
+                    .add_key(
+                        chunk_keys[sk][static_cast<std::size_t>(i - begin)]);
+            }
+            if (st.has_fl) {
+                const std::size_t sl = base + fj;
+                if (st.fl_first_idx[sl] < 0 || i < st.fl_first_idx[sl]) {
+                    st.fl_first_idx[sl] = i;
+                    if (st.field_is_str[fj])
+                        st.fl_first_s[sl] = std::string(vc->string_at(i));
+                    else
+                        st.fl_first[sl] =
+                            read_bits(*vc, i, st.field_domain[fj]);
+                }
+                if (i > st.fl_last_idx[sl]) {
+                    st.fl_last_idx[sl] = i;
+                    if (st.field_is_str[fj])
+                        st.fl_last_s[sl] = std::string(vc->string_at(i));
+                    else
+                        st.fl_last[sl] = read_bits(*vc, i, st.field_domain[fj]);
+                }
+            }
         }
     }
 }
@@ -161,7 +290,12 @@ void agg_merge(AggState& into, const AggState& other) {
         into.spec_field = other.spec_field;
         into.field_vc = other.field_vc;
         into.field_domain = other.field_domain;
+        into.field_is_str = other.field_is_str;
         into.nf = other.nf;
+        into.has_fl = other.has_fl;
+        into.has_sketch = other.has_sketch;
+        into.n_sketch = other.n_sketch;
+        into.field_sketch = other.field_sketch;
         into.key_string = other.key_string;
         into.inited = true;
     }
@@ -177,6 +311,30 @@ void agg_merge(AggState& into, const AggState& other) {
         const std::size_t sb = static_cast<std::size_t>(j) * into.nf;
         for (std::size_t fj = 0; fj < into.nf; ++fj)
             into.fstats[db + fj].merge(other.fstats[sb + fj]);
+        if (into.has_fl) {
+            for (std::size_t fj = 0; fj < into.nf; ++fj) {
+                const std::size_t d = db + fj, s = sb + fj;
+                const std::int64_t ofi = other.fl_first_idx[s];
+                if (ofi >= 0 &&
+                    (into.fl_first_idx[d] < 0 || ofi < into.fl_first_idx[d])) {
+                    into.fl_first_idx[d] = ofi;
+                    into.fl_first[d] = other.fl_first[s];
+                    into.fl_first_s[d] = other.fl_first_s[s];
+                }
+                const std::int64_t oli = other.fl_last_idx[s];
+                if (oli > into.fl_last_idx[d]) {
+                    into.fl_last_idx[d] = oli;
+                    into.fl_last[d] = other.fl_last[s];
+                    into.fl_last_s[d] = other.fl_last_s[s];
+                }
+            }
+        }
+        if (into.has_sketch) {
+            const std::size_t ds = static_cast<std::size_t>(g) * into.n_sketch;
+            const std::size_t ss = static_cast<std::size_t>(j) * into.n_sketch;
+            for (std::size_t sk = 0; sk < into.n_sketch; ++sk)
+                into.sketches[ds + sk].merge(other.sketches[ss + sk]);
+        }
     }
 }
 
@@ -202,7 +360,82 @@ DataFrame agg_finalize(const AggState& st, const std::string& key_name) {
             fi >= 0 ? st.field_domain[static_cast<std::size_t>(fi)]
                     : FieldStatDomain::I64;
 
-        if (sp.op == AggOp::Count) {
+        if (sp.op == AggOp::Pct) {
+            const int sk =
+                fi >= 0 ? st.field_sketch[static_cast<std::size_t>(fi)] : -1;
+            std::vector<double> v(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g)
+                v[static_cast<std::size_t>(g)] =
+                    sk >= 0 ? st.sketches[static_cast<std::size_t>(g) *
+                                              st.n_sketch +
+                                          static_cast<std::size_t>(sk)]
+                                  .quantile(sp.param)
+                            : 0.0;
+            out.columns.push_back(Series::flat_f64(v.data(), ng));
+        } else if (sp.op == AggOp::Hist) {
+            // One list<struct{lo,hi,count}> row per group, from the shared
+            // sketch's occupied bins (same shape the View emits).
+            const int sk =
+                fi >= 0 ? st.field_sketch[static_cast<std::size_t>(fi)] : -1;
+            std::vector<std::int32_t> off{0};
+            std::vector<double> lo, hi;
+            std::vector<std::uint64_t> cnt;
+            for (std::int64_t g = 0; g < ng; ++g) {
+                if (sk >= 0) {
+                    for (const auto& bn :
+                         st.sketches[static_cast<std::size_t>(g) * st.n_sketch +
+                                     static_cast<std::size_t>(sk)]
+                             .bins()) {
+                        lo.push_back(bn.lower);
+                        hi.push_back(bn.upper);
+                        cnt.push_back(bn.count);
+                    }
+                }
+                off.push_back(static_cast<std::int32_t>(lo.size()));
+            }
+            const std::int64_t nb = static_cast<std::int64_t>(lo.size());
+            std::vector<Series> fields;
+            fields.push_back(Series::flat(TypeId::Float64, lo.data(), nb));
+            fields.push_back(Series::flat(TypeId::Float64, hi.data(), nb));
+            fields.push_back(Series::flat(TypeId::Uint64, cnt.data(), nb));
+            out.columns.push_back(Series::list(
+                off,
+                Series::structs({"lo", "hi", "count"}, std::move(fields))));
+        } else if (sp.op == AggOp::First || sp.op == AggOp::Last) {
+            const bool first = sp.op == AggOp::First;
+            const std::vector<std::uint64_t>& bits =
+                first ? st.fl_first : st.fl_last;
+            const std::vector<std::string>& strs =
+                first ? st.fl_first_s : st.fl_last_s;
+            auto slot = [&](std::int64_t g) {
+                return static_cast<std::size_t>(g) * st.nf +
+                       static_cast<std::size_t>(fi);
+            };
+            if (fi >= 0 && st.field_is_str[static_cast<std::size_t>(fi)]) {
+                std::vector<std::string> v(static_cast<std::size_t>(ng));
+                for (std::int64_t g = 0; g < ng; ++g)
+                    v[static_cast<std::size_t>(g)] = strs[slot(g)];
+                out.columns.push_back(Series::strings(v));
+            } else if (dom == FieldStatDomain::F64) {
+                std::vector<double> v(static_cast<std::size_t>(ng));
+                for (std::int64_t g = 0; g < ng; ++g)
+                    v[static_cast<std::size_t>(g)] =
+                        std::bit_cast<double>(bits[slot(g)]);
+                out.columns.push_back(Series::flat_f64(v.data(), ng));
+            } else if (dom == FieldStatDomain::U64) {
+                std::vector<std::uint64_t> v(static_cast<std::size_t>(ng));
+                for (std::int64_t g = 0; g < ng; ++g)
+                    v[static_cast<std::size_t>(g)] = bits[slot(g)];
+                out.columns.push_back(
+                    Series::flat(TypeId::Uint64, v.data(), ng));
+            } else {
+                std::vector<std::int64_t> v(static_cast<std::size_t>(ng));
+                for (std::int64_t g = 0; g < ng; ++g)
+                    v[static_cast<std::size_t>(g)] =
+                        std::bit_cast<std::int64_t>(bits[slot(g)]);
+                out.columns.push_back(Series::flat_i64(v.data(), ng));
+            }
+        } else if (sp.op == AggOp::Count) {
             std::vector<std::int64_t> v(static_cast<std::size_t>(ng));
             for (std::int64_t g = 0; g < ng; ++g)
                 v[static_cast<std::size_t>(g)] = static_cast<std::int64_t>(
@@ -306,10 +539,16 @@ std::string agg_serialize(const AggState& st) {
         put(s, static_cast<std::int32_t>(sp.op));
         put(s, sp.value_col);
         put_bytes(s, sp.out);
+        put(s, sp.param);
     }
     put(s, static_cast<std::uint32_t>(st.nf));
     for (FieldStatDomain d : st.field_domain)
         put(s, static_cast<std::uint8_t>(d));
+    put(s, static_cast<std::uint8_t>(st.has_fl ? 1 : 0));
+    if (st.has_fl)
+        for (std::size_t fj = 0; fj < st.nf; ++fj)
+            put(s, static_cast<std::uint8_t>(
+                       fj < st.field_is_str.size() ? st.field_is_str[fj] : 0));
     const std::int64_t ng = st.ngroups();
     put(s, ng);
     if (st.key_string)
@@ -318,6 +557,22 @@ std::string agg_serialize(const AggState& st) {
         for (std::int64_t k : st.ikeys) put(s, k);
     for (std::uint64_t c : st.counts) put(s, c);
     for (const FieldStat& f : st.fstats) put(s, f);
+    if (st.has_fl) {
+        for (std::uint64_t b : st.fl_first) put(s, b);
+        for (std::uint64_t b : st.fl_last) put(s, b);
+        for (std::int64_t x : st.fl_first_idx) put(s, x);
+        for (std::int64_t x : st.fl_last_idx) put(s, x);
+        for (const std::string& v : st.fl_first_s) put_bytes(s, v);
+        for (const std::string& v : st.fl_last_s) put_bytes(s, v);
+    }
+    if (st.has_sketch) {
+        std::vector<std::uint8_t> blob;
+        for (const DDSketch& sk : st.sketches) {
+            sk.serialize_into(blob);
+            put(s, static_cast<std::uint32_t>(blob.size()));
+            s.append(reinterpret_cast<const char*>(blob.data()), blob.size());
+        }
+    }
     return s;
 }
 
@@ -331,6 +586,7 @@ AggStatePtr agg_deserialize(const std::string& blob) {
         st->specs[i].op = static_cast<AggOp>(r.get<std::int32_t>());
         st->specs[i].value_col = r.get<std::int32_t>();
         st->specs[i].out = r.get_bytes();
+        st->specs[i].param = r.get<double>();
     }
     st->init_layout();
     const std::uint32_t nf = r.get<std::uint32_t>();
@@ -338,6 +594,12 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     for (std::uint32_t i = 0; i < nf; ++i)
         st->field_domain[i] =
             static_cast<FieldStatDomain>(r.get<std::uint8_t>());
+    st->has_fl = r.get<std::uint8_t>() != 0;
+    if (st->has_fl) {
+        st->field_is_str.resize(nf);
+        for (std::uint32_t i = 0; i < nf; ++i)
+            st->field_is_str[i] = static_cast<char>(r.get<std::uint8_t>());
+    }
     const std::int64_t ng = r.get<std::int64_t>();
     if (st->key_string) {
         st->skeys.resize(static_cast<std::size_t>(ng));
@@ -358,6 +620,35 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     st->fstats.resize(static_cast<std::size_t>(ng) * nf);
     for (std::size_t i = 0; i < st->fstats.size(); ++i)
         st->fstats[i] = r.get<FieldStat>();
+    if (st->has_fl) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * nf;
+        st->fl_first.resize(sz);
+        st->fl_last.resize(sz);
+        st->fl_first_idx.resize(sz);
+        st->fl_last_idx.resize(sz);
+        st->fl_first_s.resize(sz);
+        st->fl_last_s.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i)
+            st->fl_first[i] = r.get<std::uint64_t>();
+        for (std::size_t i = 0; i < sz; ++i)
+            st->fl_last[i] = r.get<std::uint64_t>();
+        for (std::size_t i = 0; i < sz; ++i)
+            st->fl_first_idx[i] = r.get<std::int64_t>();
+        for (std::size_t i = 0; i < sz; ++i)
+            st->fl_last_idx[i] = r.get<std::int64_t>();
+        for (std::size_t i = 0; i < sz; ++i) st->fl_first_s[i] = r.get_bytes();
+        for (std::size_t i = 0; i < sz; ++i) st->fl_last_s[i] = r.get_bytes();
+    }
+    if (st->has_sketch) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_sketch;
+        st->sketches.reserve(sz);
+        for (std::size_t i = 0; i < sz; ++i) {
+            const std::uint32_t blen = r.get<std::uint32_t>();
+            st->sketches.push_back(DDSketch::deserialize(
+                reinterpret_cast<const std::uint8_t*>(r.p), blen));
+            r.p += blen;
+        }
+    }
     st->inited = true;
     return st;
 }

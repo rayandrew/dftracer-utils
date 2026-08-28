@@ -41,6 +41,33 @@ coro::CoroTask<ExportStats> run_export_trace_indexed(
 
 coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan);
 
+/// True for a row query (no group_by / agg / numeric-args): collect() returns
+/// the matching events, not an aggregate.
+bool is_row_query(const ViewPlan& plan);
+
+/// Row-query collect: scan the matching events into one native DataFrame (via
+/// NativeRowFold), applying select/sort/topk/offset/limit. Assumes
+/// is_row_query(plan).
+coro::CoroTask<dataframe::DataFrame> run_collect_rows(const ViewPlan& plan);
+
+/// Scan, buffer the lean containment tuples in a ContainmentFold, then build
+/// the call-tree / flamegraph frame. `partition` names the lane keys;
+/// ts/dur/name name the interval and label fields (any field, POD scalar or
+/// arg/nested).
+coro::CoroTask<dataframe::DataFrame> run_call_tree(
+    const ViewPlan& plan, std::vector<std::string> partition,
+    std::string ts_field, std::string dur_field, std::string name_field);
+coro::CoroTask<dataframe::DataFrame> run_flamegraph(
+    const ViewPlan& plan, std::vector<std::string> partition,
+    std::string ts_field, std::string dur_field, std::string name_field);
+coro::CoroTask<std::pair<dataframe::DataFrame, dataframe::DataFrame>>
+run_containment(const ViewPlan& plan, std::vector<std::string> partition,
+                std::string ts_field, std::string dur_field,
+                std::string name_field);
+coro::CoroTask<std::string> run_flamegraph_partial(
+    const ViewPlan& plan, std::vector<std::string> partition,
+    std::string ts_field, std::string dur_field, std::string name_field);
+
 // Run caller-owned `folds` as one fused scan of `plan`, sharing `intern` so
 // their ids agree and per-worker slices merge.
 coro::CoroTask<ExportStats> run_folds(const ViewPlan& plan,

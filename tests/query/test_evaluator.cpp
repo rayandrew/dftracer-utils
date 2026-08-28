@@ -71,6 +71,19 @@ TEST_CASE("evaluate - dotted field path") {
         eval(R"(args.level == "INFO")", R"({"args":{"level":"DEBUG"}})"));
 }
 
+TEST_CASE("evaluate - flat arg key that itself contains dots") {
+    // "cqe.raw_ns" is one flat arg member, not a nested {cqe:{raw_ns}}. It
+    // resolves both bare and with the explicit args. prefix.
+    const char* json = R"({"args":{"cqe.raw_ns":42,"mlx5.op":"SEND"}})";
+    CHECK(eval("cqe.raw_ns == 42", json));
+    CHECK(eval("args.cqe.raw_ns == 42", json));
+    CHECK(eval(R"(mlx5.op == "SEND")", json));
+    CHECK(eval(R"(args.mlx5.op == "SEND")", json));
+    CHECK_FALSE(eval("cqe.raw_ns == 7", json));
+    // A genuinely nested arg still resolves segment by segment.
+    CHECK(eval("a.b == 5", R"({"args":{"a":{"b":5}}})"));
+}
+
 TEST_CASE("evaluate - missing field returns false") {
     CHECK_FALSE(eval(R"(missing == "x")", R"({"cat":"POSIX"})"));
     CHECK_FALSE(eval("missing > 0", R"({"cat":"POSIX"})"));

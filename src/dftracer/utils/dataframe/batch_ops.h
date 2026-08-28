@@ -50,10 +50,22 @@ DataFrame sort_by(const DataFrame& b, const std::string& name, bool descending);
 DataFrame topk(const DataFrame& b, const std::string& name, std::int64_t k,
                bool largest);
 
-/// Vertically concatenate batches sharing a schema (same column names/types, in
-/// order) into one DataFrame. Throws std::invalid_argument on a schema
-/// mismatch; an empty input yields an empty DataFrame.
-DataFrame concat(const std::vector<const DataFrame*>& parts);
+/// How concat aligns the parts' columns.
+enum class ConcatHow {
+    Vertical,  ///< Parts must share a schema (same names/types/order); throws
+               ///< std::invalid_argument on a mismatch.
+    Diagonal   ///< Union the parts' columns: a column absent from a part is
+               ///< null-filled, and a column whose type differs across parts is
+               ///< promoted (mixed numeric -> Float64). A numeric/String or
+               ///< Bool/other-type clash throws.
+};
+
+/// Vertically concatenate batches into one DataFrame. `how` picks strict
+/// (Vertical) or schema-union (Diagonal) column alignment. An empty input
+/// yields an empty DataFrame. Column order follows first appearance across the
+/// parts.
+DataFrame concat(const std::vector<const DataFrame*>& parts,
+                 ConcatHow how = ConcatHow::Vertical);
 
 /// Vertically concatenate columns of the same type into one FLAT column.
 Series concat_columns(const std::vector<const Series*>& parts);
@@ -173,9 +185,14 @@ DataFrame pivot(const DataFrame& b, const std::string& index_name,
 /// column per aggregate (the same sum|min|max|count|mean vocabulary as
 /// group_by), named by GroupAgg.out. Throws std::invalid_argument if `every <=
 /// 0` or `time_col` is not Int64; std::out_of_range on an unknown column/op.
+/// `origin` anchors the window grid at `origin + k*every` (default 0 = the
+/// classic ts-floored grid); pass a window's begin to align buckets to it.
+/// `origin_min` overrides `origin` with the minimum time value (buckets begin
+/// exactly at min ts), the frame-native analogue of time_bucket("min").
 DataFrame group_by_dynamic(const DataFrame& b, const std::string& time_col,
                            std::int64_t every, std::int64_t period,
-                           const std::vector<GroupAgg>& aggs);
+                           const std::vector<GroupAgg>& aggs,
+                           std::int64_t origin = 0, bool origin_min = false);
 
 }  // namespace dftracer::utils::dataframe
 

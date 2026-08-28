@@ -30,6 +30,12 @@ bool all_bits(const dftu_series& v);
 /// may differ from a strict left fold in the last ULP due to reassociation.
 bool product_simd(const dftu_series& v, dftu_scalar& out);
 
+/// SIMD arg_min / arg_max over a FLAT, no-null numeric column: writes the
+/// earliest index of the extreme value to `out_idx` and returns true. Returns
+/// false (leaving the scalar path to handle it) for null-bearing or
+/// non-fixed-width columns.
+bool arg_extreme_simd(const dftu_series& v, bool is_min, std::int64_t& out_idx);
+
 }  // namespace dftracer::utils::dataframe
 
 #endif  // DFTRACER_UTILS_DATAFRAME_INTERNAL_REDUCE_SIMD_H

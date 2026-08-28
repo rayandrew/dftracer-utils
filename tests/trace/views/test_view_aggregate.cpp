@@ -316,12 +316,39 @@ TEST_SUITE("View") {
         CHECK(level["posix"] == doctest::Approx(4.5));    // mean 0..9
         CHECK(level["stdio"] == doctest::Approx(101.5));  // mean 100..103
 
-        // F.any with an unsupported reduction is rejected, not silently meaned.
+        // F.any.sum() applies a sum to every numeric arg (one sum_<arg>).
+        auto anysum = View::from_file(gz, idx)
+                          .group_by({GroupKey::cat()})
+                          .agg(F.any.sum())
+                          .collect()
+                          .get();
+        REQUIRE(bhas(anysum, "sum_level"));
+        std::map<std::string, double> slevel;
+        for (std::int64_t i = 0; i < anysum.num_rows(); ++i)
+            slevel[bstr(anysum, i, "cat")] = bnum(anysum, i, "sum_level");
+        CHECK(slevel["posix"] == doctest::Approx(45));   // sum 0..9
+        CHECK(slevel["stdio"] == doctest::Approx(406));  // sum 100..103
+
+        // A per-arg percentile collects a per-arg sketch (p90 of posix level
+        // 0..9 is ~9; DDSketch is approximate, so allow a small band).
+        auto anypct =
+            View::from_file(gz, idx)
+                .group_by({GroupKey::cat()})
+                .agg_numeric_args({AggSpec(AggOp::Pct, "", "p90", "", 0.9)})
+                .collect()
+                .get();
+        REQUIRE(bhas(anypct, "p90_level"));
+        std::map<std::string, double> plevel;
+        for (std::int64_t i = 0; i < anypct.num_rows(); ++i)
+            plevel[bstr(anypct, i, "cat")] = bnum(anypct, i, "p90_level");
+        CHECK(plevel["posix"] >= 7.0);
+        CHECK(plevel["posix"] <= 9.0);
+
+        // An op with no per-arg support (Hist) is still rejected on the dyn
+        // path (only FieldStat/sketch-derivable reductions are allowed).
         CHECK_THROWS_AS(View::from_file(gz, idx)
                             .group_by({GroupKey::cat()})
-                            .agg(F.any.sum())
-                            .collect()
-                            .get(),
+                            .agg_numeric_args({AggSpec(AggOp::Hist, "level")}),
                         DFTUtilsException);
     }
 
@@ -431,8 +458,10 @@ TEST_SUITE("View") {
     TEST_CASE("View - Var/Std match closed-form and survive spill") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
-        // 200 POSIX events, dur = 10..209 (one cat group). Population variance
-        // of 200 consecutive ints is (200^2 - 1)/12 = 3333.25; mean 109.5.
+        // 200 POSIX events, dur = 10..209 (one cat group). Var/Std are the
+        // SAMPLE convention (matches the dataframe engine and pandas): sample
+        // variance of 200 consecutive ints is n(n+1)/12 = 200*201/12 = 3350;
+        // mean 109.5.
         std::string gz = create_mixed_trace(env, 200, 0);
         std::string idx = determine_index_path(gz, "");
 
@@ -455,8 +484,8 @@ TEST_SUITE("View") {
 
         auto in_mem = row(0);
         CHECK(in_mem[0] == doctest::Approx(109.5));
-        CHECK(in_mem[1] == doctest::Approx(3333.25));
-        CHECK(in_mem[2] == doctest::Approx(57.7343));
+        CHECK(in_mem[1] == doctest::Approx(3350.0));    // sample variance
+        CHECK(in_mem[2] == doctest::Approx(57.87918));  // sqrt(3350)
         // 200 consecutive ints: symmetric (skew 0), platykurtic (excess ~
         // -1.2).
         CHECK(in_mem[3] == doctest::Approx(0.0).epsilon(1e-6));
@@ -971,6 +1000,38 @@ TEST_SUITE("View") {
             total += bnum(table, i, "n");
         CHECK(total == doctest::Approx(30));
         CHECK(table.num_rows() >= 3);
+    }
+
+    TEST_CASE("View - time_bucket origin/min alignment shifts boundaries") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // POSIX ts = 1000,1100,..,3900; trace min ts = 1000. Width 700 does not
+        // divide 1000, so absolute vs min alignment land the first bucket
+        // differently.
+        std::string gz = create_mixed_trace(env, 30, 0);
+        std::string idx = determine_index_path(gz, "");
+
+        auto first_bucket = [&](AggregatedView v) {
+            auto t = v.agg({{AggOp::Count, "", "n"}}).collect().get();
+            std::int64_t lo = std::numeric_limits<std::int64_t>::max();
+            for (std::int64_t i = 0; i < t.num_rows(); ++i)
+                lo = std::min<std::int64_t>(
+                    lo, std::stoll(bstr(t, i, "time_bucket")));
+            return lo;
+        };
+
+        // Absolute (aligned to 0): floor(1000/700)*700 = 700.
+        CHECK(first_bucket(View::from_file(gz, idx)
+                               .group_by({GroupKey::cat()})
+                               .time_bucket(700)) == 700);
+        // Min-aligned: first bucket starts at the trace min ts (1000).
+        CHECK(first_bucket(View::from_file(gz, idx)
+                               .group_by({GroupKey::cat()})
+                               .time_bucket_min(700)) == 1000);
+        // Explicit origin 500: floor((1000-500)/700)*700 + 500 = 500.
+        CHECK(first_bucket(View::from_file(gz, idx)
+                               .group_by({GroupKey::cat()})
+                               .time_bucket(700, 500)) == 500);
     }
 
     TEST_CASE("View - collect with no group_by folds whole set into one row") {

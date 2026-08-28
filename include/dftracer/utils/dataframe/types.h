@@ -81,6 +81,25 @@ enum class PrimOp : std::int32_t {
     Mix64 = 5,
 };
 
+/// Unary numeric op codes for the expression engine (elementwise, one column
+/// operand). Log/Sqrt/Exp widen to Float64; Abs/Round/Floor/Ceil/Trunc/Sign/
+/// Negate keep the input's numeric type; IsNan/IsFinite/IsInfinite yield Bool.
+enum class UnaryOp : std::int32_t {
+    Abs = 0,
+    Round = 1,
+    Floor = 2,
+    Ceil = 3,
+    Log = 4,
+    Sqrt = 5,
+    Exp = 6,
+    Sign = 7,
+    Negate = 8,
+    Trunc = 9,
+    IsNan = 10,
+    IsFinite = 11,
+    IsInfinite = 12,
+};
+
 /// Mirrors dftu_scalar_tag: the domain a dftu_scalar carries.
 enum class ScalarTag : std::int32_t {
     I64 = 0,

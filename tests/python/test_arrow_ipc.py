@@ -1,12 +1,6 @@
 """Tests for Arrow IPC file output and readback via pyarrow."""
 
-import os
-import shutil
-import subprocess
-import tempfile
-
 import pyarrow as pa
-import pyarrow.ipc as ipc
 
 import dftracer.utils as dftu_utils
 
@@ -15,56 +9,6 @@ from .common import Environment
 
 class TestArrowIpcReadback:
     """Verify Arrow output is readable by pyarrow."""
-
-    def test_view_cli_arrow_output(self):
-        """dftracer_view --format arrow produces a valid IPC file."""
-        binary = shutil.which("dftracer_view")
-        if binary is None:
-            return  # CLI not installed
-
-        with Environment(lines=20) as env:
-            env.create_test_gzip_file()
-            directory = env.temp_dir
-
-            with tempfile.NamedTemporaryFile(suffix=".arrows", delete=False) as f:
-                output_path = f.name
-
-            try:
-                subprocess.run(
-                    [
-                        binary,
-                        "--directory",
-                        directory,
-                        "--group-by",
-                        "name",
-                        "--agg",
-                        "mean:dur",
-                        "--format",
-                        "arrow",
-                        "--output",
-                        output_path,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    check=True,
-                )
-
-                assert os.path.exists(output_path)
-                assert os.path.getsize(output_path) > 0
-
-                reader = ipc.open_file(output_path)
-                table = reader.read_all()
-
-                assert table.num_rows > 0
-                # View aggregate table: group columns + aggregated value columns.
-                col_names = set(table.column_names)
-                assert "name" in col_names
-                assert "mean_dur" in col_names
-
-            finally:
-                if os.path.exists(output_path):
-                    os.unlink(output_path)
 
     def test_trace_viewer_stream_roundtrip(self):
         """TraceViewer.stream Arrow output is readable by pyarrow."""

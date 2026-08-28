@@ -38,6 +38,12 @@ AggExprSpec agg_skew(Expr value, std::string out) {
 AggExprSpec agg_kurt(Expr value, std::string out) {
     return {AggOp::Kurt, std::move(value), std::move(out)};
 }
+AggExprSpec agg_pct(Expr value, double q, std::string out) {
+    return {AggOp::Pct, std::move(value), std::move(out), q};
+}
+AggExprSpec agg_hist(Expr value, std::string out) {
+    return {AggOp::Hist, std::move(value), std::move(out)};
+}
 
 DataFrame group_agg_expr(const Expr& key, const std::vector<AggExprSpec>& specs,
                          const std::vector<const Series*>& inputs,
@@ -53,6 +59,7 @@ DataFrame group_agg_expr(const Expr& key, const std::vector<AggExprSpec>& specs,
         AggSpec cs;
         cs.op = sp.op;
         cs.out = sp.out;
+        cs.param = sp.param;
         if (sp.op == AggOp::Count || !sp.value.valid()) {
             cs.value_col = -1;
         } else {
@@ -86,8 +93,9 @@ DataFrame group_agg_expr(const Expr& key, const std::vector<AggExprSpec>& specs,
 }  // namespace dftracer::utils::dataframe
 
 namespace {
-dftu_agg_spec make_spec(int32_t op, const dftu_expr* value, const char* out) {
-    return {op, value, out};
+dftu_agg_spec make_spec(int32_t op, const dftu_expr* value, const char* out,
+                        double param = 0.0) {
+    return {op, value, out, param};
 }
 }  // namespace
 
@@ -120,6 +128,18 @@ dftu_agg_spec dftu_agg_skew(const dftu_expr* value, const char* out) {
 dftu_agg_spec dftu_agg_kurt(const dftu_expr* value, const char* out) {
     return make_spec(DFTU_AGG_KURT, value, out);
 }
+dftu_agg_spec dftu_agg_first(const dftu_expr* value, const char* out) {
+    return make_spec(DFTU_AGG_FIRST, value, out);
+}
+dftu_agg_spec dftu_agg_last(const dftu_expr* value, const char* out) {
+    return make_spec(DFTU_AGG_LAST, value, out);
+}
+dftu_agg_spec dftu_agg_pct(const dftu_expr* value, double q, const char* out) {
+    return make_spec(DFTU_AGG_PCT, value, out, q);
+}
+dftu_agg_spec dftu_agg_hist(const dftu_expr* value, const char* out) {
+    return make_spec(DFTU_AGG_HIST, value, out);
+}
 
 int32_t dftu_dataframe_group_agg_expr(const dftu_expr* key,
                                       const dftu_agg_spec* specs,
@@ -136,6 +156,7 @@ int32_t dftu_dataframe_group_agg_expr(const dftu_expr* key,
         if (specs[i].value)
             s.value = dataframe::expr_handle_unwrap(specs[i].value);
         s.out = specs[i].out ? specs[i].out : "";
+        s.param = specs[i].param;
         cxx.push_back(std::move(s));
     }
     std::vector<dataframe::Series> owned;

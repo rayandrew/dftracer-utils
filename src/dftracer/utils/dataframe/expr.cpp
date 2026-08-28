@@ -20,6 +20,9 @@ enum class ExprKind {
     Col,
     Binary,
     Prim,
+    Unary,
+    Clip,
+    Fillna,
     Cmp,
     Logical,
     Not,
@@ -28,9 +31,10 @@ enum class ExprKind {
 
 struct ExprNode {
     ExprKind kind;
-    std::int32_t i = 0;  // col index / prim / cmp op / logical op / cast type /
-                         // binary op
-    dftu_scalar scalar{};               // literal value or cmp rhs
+    std::int32_t i = 0;     // col index / prim / unary / cmp op / logical op /
+                            // cast type / binary op
+    dftu_scalar scalar{};   // literal value / cmp rhs / clip lo
+    dftu_scalar scalar2{};  // clip hi
     std::shared_ptr<const ExprNode> a;  // first child
     std::shared_ptr<const ExprNode> b;  // second child
 };
@@ -77,6 +81,20 @@ Expr expr_binary(BinaryOp op, const Expr& a, const Expr& b) {
 Expr expr_prim(std::int32_t prim, const Expr& a) {
     return make(ExprKind::Prim, prim, {}, a.node(), nullptr);
 }
+Expr expr_unary(std::int32_t op, const Expr& a) {
+    return make(ExprKind::Unary, op, {}, a.node(), nullptr);
+}
+Expr expr_clip(const Expr& a, dftu_scalar lo, dftu_scalar hi) {
+    auto n = std::make_shared<ExprNode>();
+    n->kind = ExprKind::Clip;
+    n->scalar = lo;
+    n->scalar2 = hi;
+    n->a = a.node();
+    return Expr{std::move(n)};
+}
+Expr expr_fillna(const Expr& a, dftu_scalar fill) {
+    return make(ExprKind::Fillna, 0, fill, a.node(), nullptr);
+}
 Expr expr_cmp(std::int32_t cmp, const Expr& a, dftu_scalar rhs) {
     return make(ExprKind::Cmp, cmp, rhs, a.node(), nullptr);
 }
@@ -107,6 +125,9 @@ enum {
     OP_MULS,
     OP_DIVS,
     OP_PRIM,
+    OP_UNARY,
+    OP_CLIP,
+    OP_FILLNA,
     OP_CMP,
     OP_LOGICAL,
     OP_NOT,
@@ -119,6 +140,7 @@ struct SlotOp {
     int b = -1;
     std::int32_t param = 0;
     dftu_scalar scalar{};
+    dftu_scalar scalar2{};  // clip hi
 };
 
 const int COL_OP[4] = {OP_ADD, OP_SUB, OP_MUL, OP_DIV};
@@ -181,6 +203,44 @@ class Compiler {
                 return {false,
                         emit(OP_PRIM, a.slot, -1, n->i, {}),
                         TypeId::Int64,
+                        {}};
+            }
+            case ExprKind::Unary: {
+                Val a = as_col(compile(n->a.get()), "unary");
+                // is_nan/is_finite/is_infinite yield a Bool mask; log/sqrt/exp
+                // widen to Float64; the rest keep the input type (integer
+                // floor/ceil/round/trunc are identities).
+                const auto op = static_cast<UnaryOp>(n->i);
+                TypeId t;
+                switch (op) {
+                    case UnaryOp::IsNan:
+                    case UnaryOp::IsFinite:
+                    case UnaryOp::IsInfinite:
+                        t = TypeId::Bool;
+                        break;
+                    case UnaryOp::Log:
+                    case UnaryOp::Sqrt:
+                    case UnaryOp::Exp:
+                        t = TypeId::Float64;
+                        break;
+                    default:
+                        t = a.type;
+                        break;
+                }
+                return {false, emit(OP_UNARY, a.slot, -1, n->i, {}), t, {}};
+            }
+            case ExprKind::Clip: {
+                Val a = as_col(compile(n->a.get()), "clip");
+                return {false,
+                        emit(OP_CLIP, a.slot, -1, 0, n->scalar, n->scalar2),
+                        a.type,
+                        {}};
+            }
+            case ExprKind::Fillna: {
+                Val a = as_col(compile(n->a.get()), "fillna");
+                return {false,
+                        emit(OP_FILLNA, a.slot, -1, 0, n->scalar),
+                        a.type,
                         {}};
             }
             case ExprKind::Cmp: {
@@ -299,22 +359,27 @@ class Compiler {
 
     // Emit an op, hash-consing structurally identical ops to the same slot
     // (common-subexpression elimination).
-    int emit(int opcode, int a, int b, std::int32_t param, dftu_scalar s) {
-        std::int64_t bits = s.kind == DFTU_SCALAR_TAG_F64
-                                ? std::bit_cast<std::int64_t>(s.value.d)
-                                : s.value.i;
+    int emit(int opcode, int a, int b, std::int32_t param, dftu_scalar s,
+             dftu_scalar s2 = {}) {
+        auto bits = [](dftu_scalar x) {
+            return x.kind == DFTU_SCALAR_TAG_F64
+                       ? std::bit_cast<std::int64_t>(x.value.d)
+                       : x.value.i;
+        };
         auto key = std::make_tuple(opcode, a, b, static_cast<int>(param),
-                                   static_cast<int>(s.kind), bits);
+                                   static_cast<int>(s.kind), bits(s), bits(s2));
         auto it = memo_.find(key);
         if (it != memo_.end()) return it->second;
         int slot = static_cast<int>(program.size());
-        program.push_back({opcode, a, b, param, s});
+        program.push_back({opcode, a, b, param, s, s2});
         memo_.emplace(key, slot);
         return slot;
     }
 
     const std::vector<const Series*>& inputs_;
-    std::map<std::tuple<int, int, int, int, int, std::int64_t>, int> memo_;
+    std::map<std::tuple<int, int, int, int, int, std::int64_t, std::int64_t>,
+             int>
+        memo_;
 };
 
 // Evaluate the slot program over rows [offset, offset+len) and extract one
@@ -361,6 +426,58 @@ std::vector<Series> eval_chunk(const std::vector<SlotOp>& prog,
             case OP_PRIM:
                 s[k] = Series{
                     dftu_series_prim(A(), static_cast<dftu_prim_op>(op.param))};
+                break;
+            case OP_UNARY: {
+                dftu_series* r = nullptr;
+                switch (static_cast<UnaryOp>(op.param)) {
+                    case UnaryOp::Abs:
+                        r = dftu_series_abs(A());
+                        break;
+                    case UnaryOp::Round:
+                        r = dftu_series_round(A());
+                        break;
+                    case UnaryOp::Floor:
+                        r = dftu_series_floor(A());
+                        break;
+                    case UnaryOp::Ceil:
+                        r = dftu_series_ceil(A());
+                        break;
+                    case UnaryOp::Log:
+                        r = dftu_series_log(A());
+                        break;
+                    case UnaryOp::Sqrt:
+                        r = dftu_series_sqrt(A());
+                        break;
+                    case UnaryOp::Exp:
+                        r = dftu_series_exp(A());
+                        break;
+                    case UnaryOp::Sign:
+                        r = dftu_series_sign(A());
+                        break;
+                    case UnaryOp::Negate:
+                        r = dftu_series_negate(A());
+                        break;
+                    case UnaryOp::Trunc:
+                        r = dftu_series_trunc(A());
+                        break;
+                    case UnaryOp::IsNan:
+                        r = dftu_series_is_nan(A());
+                        break;
+                    case UnaryOp::IsFinite:
+                        r = dftu_series_is_finite(A());
+                        break;
+                    case UnaryOp::IsInfinite:
+                        r = dftu_series_is_infinite(A());
+                        break;
+                }
+                s[k] = Series{r};
+                break;
+            }
+            case OP_CLIP:
+                s[k] = Series{dftu_series_clip(A(), op.scalar, op.scalar2)};
+                break;
+            case OP_FILLNA:
+                s[k] = Series{dftu_series_fillna(A(), op.scalar)};
                 break;
             case OP_CMP:
                 s[k] = Series{dftu_series_compare(
@@ -486,6 +603,12 @@ dftu_expr* dftu_expr_binary(int32_t op, const dftu_expr* a,
 }
 dftu_expr* dftu_expr_prim(int32_t prim, const dftu_expr* a) {
     return wrap(dataframe::expr_prim(prim, unwrap(a)));
+}
+dftu_expr* dftu_expr_unary(int32_t op, const dftu_expr* a) {
+    return wrap(dataframe::expr_unary(op, unwrap(a)));
+}
+dftu_expr* dftu_expr_clip(const dftu_expr* a, dftu_scalar lo, dftu_scalar hi) {
+    return wrap(dataframe::expr_clip(unwrap(a), lo, hi));
 }
 dftu_expr* dftu_expr_cmp(int32_t cmp, const dftu_expr* a, dftu_scalar rhs) {
     return wrap(dataframe::expr_cmp(cmp, unwrap(a), rhs));

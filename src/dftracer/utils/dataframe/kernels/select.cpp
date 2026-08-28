@@ -7,6 +7,7 @@
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>
+#include <dftracer/utils/dataframe/internal/compare_simd.h>  // pack_flags
 #include <dftracer/utils/dataframe/kernels/sort.h>
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/plugins/prims.h>
@@ -31,10 +32,7 @@ Series borrow(const dftu_series* v) {
 Series bool_from_flags(const std::vector<char>& flags) {
     const std::int64_t n = static_cast<std::int64_t>(flags.size());
     std::vector<std::uint8_t> packed(static_cast<std::size_t>((n + 7) / 8), 0);
-    for (std::int64_t i = 0; i < n; ++i)
-        if (flags[static_cast<std::size_t>(i)])
-            packed[static_cast<std::size_t>(i >> 3)] |=
-                static_cast<std::uint8_t>(1u << (i & 7));
+    pack_flags(flags.data(), n, packed.data());
     return Series::flat(TypeId::Bool, packed.data(), n);
 }
 

@@ -1,10 +1,12 @@
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
+#include <dftracer/utils/dataframe/containment.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_u64
 #include <dftracer/utils/dataframe/kernels/filter.h>
 #include <dftracer/utils/dataframe/kernels/group_by.h>
 #include <dftracer/utils/dataframe/kernels/sort.h>
+#include <dftracer/utils/dataframe/parallel.h>
 #include <dftracer/utils/plugins/prims.h>  // dftu_mix64
 
 #include <algorithm>
@@ -38,6 +40,10 @@ AggOp agg_op_of(const std::string& op) {
     if (op == "std") return AggOp::Std;
     if (op == "skew") return AggOp::Skew;
     if (op == "kurt") return AggOp::Kurt;
+    if (op == "first") return AggOp::First;
+    if (op == "last") return AggOp::Last;
+    if (op == "pct") return AggOp::Pct;
+    if (op == "hist") return AggOp::Hist;
     throw std::out_of_range("group_by: unknown aggregate op " + op);
 }
 
@@ -67,6 +73,10 @@ const char* to_string(Agg agg) noexcept {
             return "first";
         case Agg::Last:
             return "last";
+        case Agg::Pct:
+            return "pct";
+        case Agg::Hist:
+            return "hist";
     }
     return "count";
 }
@@ -83,6 +93,8 @@ Agg agg_from_string(std::string_view name) {
     if (name == "kurt") return Agg::Kurt;
     if (name == "first") return Agg::First;
     if (name == "last") return Agg::Last;
+    if (name == "pct") return Agg::Pct;
+    if (name == "hist") return Agg::Hist;
     throw std::out_of_range("agg_from_string: unknown aggregate op " +
                             std::string(name));
 }
@@ -275,6 +287,7 @@ DataFrame group_by(const DataFrame& b, const std::string& key,
         AggSpec sp;
         sp.op = agg_op_of(to_string(a.op));
         sp.out = a.out;
+        sp.param = a.param;
         if (sp.op == AggOp::Count) {
             sp.value_col = -1;
         } else {
@@ -367,9 +380,86 @@ std::vector<DataFrame> hash_partition(const DataFrame& b,
     return parts;
 }
 
-DataFrame concat(const std::vector<const DataFrame*>& parts) {
+namespace {
+
+// The type the same-named column takes across parts. Same type stays; a mix of
+// numeric types widens to Float64; a numeric/String or Bool/other clash has no
+// common type and throws.
+TypeId promote_type(TypeId a, TypeId b, const std::string& name) {
+    if (a == b) return a;
+    auto numeric = [](TypeId t) {
+        return t != TypeId::String && t != TypeId::Binary &&
+               t != TypeId::Bool && t != TypeId::List && t != TypeId::Struct;
+    };
+    if (numeric(a) && numeric(b)) return TypeId::Float64;
+    throw std::invalid_argument("concat(diagonal): column '" + name +
+                                "' has incompatible types across parts");
+}
+
+DataFrame concat_diagonal(const std::vector<const DataFrame*>& parts) {
+    // Column order = first appearance; track each column's promoted type.
+    std::vector<std::string> names;
+    std::vector<TypeId> types;
+    std::unordered_map<std::string, std::size_t> idx;
+    for (const DataFrame* p : parts)
+        for (std::size_t c = 0; c < p->names.size(); ++c) {
+            const std::string& nm = p->names[c];
+            const TypeId t = p->columns[c].type();
+            auto it = idx.find(nm);
+            if (it == idx.end()) {
+                idx.emplace(nm, names.size());
+                names.push_back(nm);
+                types.push_back(t);
+            } else {
+                types[it->second] = promote_type(types[it->second], t, nm);
+            }
+        }
+
+    DataFrame out;
+    out.names = names;
+    out.columns.reserve(names.size());
+    for (std::size_t c = 0; c < names.size(); ++c) {
+        const TypeId target = types[c];
+        // Hold cast/null-filled parts alive while concat_columns reads them.
+        std::vector<Series> owned;
+        owned.reserve(parts.size());
+        std::vector<const Series*> cols;
+        cols.reserve(parts.size());
+        for (const DataFrame* p : parts) {
+            std::int64_t at = -1;
+            for (std::size_t j = 0; j < p->names.size(); ++j)
+                if (p->names[j] == names[c]) {
+                    at = static_cast<std::int64_t>(j);
+                    break;
+                }
+            if (at < 0) {
+                owned.push_back(Series::nulls(target, p->num_rows()));
+            } else {
+                const Series& src = p->columns[static_cast<std::size_t>(at)];
+                owned.push_back(src.type() == target ? src.share()
+                                                     : src.cast(target));
+            }
+            cols.push_back(&owned.back());
+        }
+        out.columns.push_back(concat_columns(cols));
+    }
+    return out;
+}
+
+}  // namespace
+
+DataFrame concat(const std::vector<const DataFrame*>& parts, ConcatHow how) {
     DataFrame out;
     if (parts.empty()) return out;
+    // A single part is the identity: share its columns zero-copy, no merge.
+    if (parts.size() == 1) {
+        out.names = parts.front()->names;
+        out.columns.reserve(parts.front()->columns.size());
+        for (const Series& c : parts.front()->columns)
+            out.columns.push_back(c.share());
+        return out;
+    }
+    if (how == ConcatHow::Diagonal) return concat_diagonal(parts);
     const DataFrame& first = *parts.front();
     out.names = first.names;
     const std::size_t ncols = first.names.size();
@@ -1038,7 +1128,8 @@ DataFrame pivot(const DataFrame& b, const std::string& index_name,
 
 DataFrame group_by_dynamic(const DataFrame& b, const std::string& time_col,
                            std::int64_t every, std::int64_t period,
-                           const std::vector<GroupAgg>& aggs) {
+                           const std::vector<GroupAgg>& aggs,
+                           std::int64_t origin, bool origin_min) {
     if (every <= 0)
         throw std::invalid_argument("group_by_dynamic: every must be > 0");
     if (period <= 0) period = every;
@@ -1054,12 +1145,25 @@ DataFrame group_by_dynamic(const DataFrame& b, const std::string& time_col,
     const std::int64_t n = tcol.length();
     const std::int64_t* t = tcol.data<std::int64_t>();
 
-    // The first non-null time anchors the window grid.
+    // `origin_min` aligns the grid to the minimum time value (buckets begin
+    // exactly at min ts), the frame-native analogue of time_bucket("min").
+    if (origin_min) {
+        bool seen = false;
+        for (std::int64_t i = 0; i < n; ++i)
+            if (!tcol.is_null(i)) {
+                if (!seen || t[i] < origin) origin = t[i];
+                seen = true;
+            }
+        if (!seen) origin = 0;
+    }
+
+    // The window grid is `origin + k*every`; the first non-null time picks the
+    // first window (origin defaults to 0 = the classic ts-floored grid).
     std::int64_t start0 = 0;
     bool have_anchor = false;
     for (std::int64_t i = 0; i < n; ++i)
         if (!tcol.is_null(i)) {
-            start0 = floor_to_multiple(t[i], every);
+            start0 = origin + floor_to_multiple(t[i] - origin, every);
             have_anchor = true;
             break;
         }
@@ -1095,6 +1199,7 @@ DataFrame group_by_dynamic(const DataFrame& b, const std::string& time_col,
         AggSpec sp;
         sp.op = agg_op_of(to_string(a.op));
         sp.out = a.out;
+        sp.param = a.param;
         if (sp.op == AggOp::Count) {
             sp.value_col = -1;
         } else {

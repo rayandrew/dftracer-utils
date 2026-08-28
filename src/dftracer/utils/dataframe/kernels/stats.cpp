@@ -1,5 +1,7 @@
+#include <dftracer/utils/dataframe/abi.h>                   // dftu_series_data
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_f64
 #include <dftracer/utils/dataframe/internal/moments_simd.h>  // sum_f64, central_moments
+#include <dftracer/utils/dataframe/kernels/cast.h>           // cast_simd
 #include <dftracer/utils/dataframe/kernels/filter.h>  // take
 #include <dftracer/utils/dataframe/kernels/sort.h>    // argsort
 #include <dftracer/utils/dataframe/kernels/stats.h>
@@ -8,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <string_view>
 #include <vector>
@@ -16,9 +19,29 @@ namespace dftracer::utils::dataframe {
 
 namespace {
 
-// Non-null values as doubles (moment/quantile stats are numeric).
+// Non-null values as doubles (moment/quantile stats are numeric). The dense
+// (no-null, FLAT) case is a straight widen-to-double over a contiguous buffer,
+// so it goes through the SIMD cast fast path (memcpy for Float64, one
+// Convert/Promote for Float32/Int32/Int64); only the null-skipping compaction
+// path stays scalar.
 std::vector<double> nonnull_values(const Series& v) {
     const std::int64_t n = v.length();
+    if (n > 0 && v.null_count() == 0 && v.encoding() == Encoding::Flat) {
+        const void* src = dftu_series_data(v.handle());
+        if (src) {
+            std::vector<double> out(static_cast<std::size_t>(n));
+            if (v.type() == TypeId::Float64) {
+                std::memcpy(out.data(), src,
+                            static_cast<std::size_t>(n) * sizeof(double));
+            } else if (!cast_simd(static_cast<std::int32_t>(v.type()),
+                                  static_cast<std::int32_t>(TypeId::Float64),
+                                  src, out.data(),
+                                  static_cast<std::size_t>(n))) {
+                for (std::int64_t i = 0; i < n; ++i) out[i] = read_f64(v, i);
+            }
+            return out;
+        }
+    }
     const bool has_nulls = v.null_count() > 0;
     std::vector<double> out;
     out.reserve(static_cast<std::size_t>(n));

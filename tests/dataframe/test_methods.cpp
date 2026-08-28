@@ -1,10 +1,14 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
+#include <dftracer/utils/dataframe/sketch.h>
 #include <dftracer/utils/query/query.h>
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -97,6 +101,250 @@ TEST_CASE("DataFrame group_by aggregates") {
     CHECK(n[1] == 2);
 }
 
+TEST_CASE("SIMD sketch_bucket_keys matches scalar DDSketch::add") {
+    namespace df = dftracer::utils::dataframe;
+    std::vector<double> vals;
+    vals.reserve(1000);
+    for (int i = 0; i < 1000; ++i)
+        vals.push_back(i % 7 == 0 ? 0.0
+                                  : static_cast<double>((i * 13) % 997) + 0.5);
+
+    df::DDSketch a;  // scalar path
+    for (double v : vals) a.add(v);
+
+    df::DDSketch b;  // SIMD bulk-key path
+    std::vector<std::int32_t> keys(vals.size());
+    df::sketch_bucket_keys(vals.data(), static_cast<std::int64_t>(vals.size()),
+                           b.log_gamma(), keys.data());
+    for (std::int32_t k : keys) b.add_key(k);
+
+    CHECK(a.count() == b.count());
+    for (double q : {0.1, 0.25, 0.5, 0.75, 0.9, 0.99}) {
+        CHECK(a.quantile(q) == doctest::Approx(b.quantile(q)));
+    }
+}
+
+TEST_CASE("DataFrame group_by pct (DDSketch quantile) is close to exact") {
+    namespace df = dftracer::utils::dataframe;
+    // Two keys, each with a known distribution; the sketch p50/p90 should land
+    // within the sketch's relative accuracy of the true quantile.
+    const std::int64_t per = 4000;
+    std::vector<std::int64_t> k, v;
+    k.reserve(static_cast<std::size_t>(2 * per));
+    v.reserve(static_cast<std::size_t>(2 * per));
+    for (std::int64_t i = 0; i < per; ++i) {
+        k.push_back(0);
+        v.push_back(i + 1);         // key 0: 1..per uniform
+        k.push_back(1);
+        v.push_back(10 * (i + 1));  // key 1: 10..10*per
+    }
+    DataFrame b;
+    b.names = {"k", "v"};
+    b.columns.push_back(Series::flat_i64(k.data(), 2 * per));
+    b.columns.push_back(Series::flat_i64(v.data(), 2 * per));
+    DataFrame g = b.group_by("k", {GroupAgg{df::Agg::Pct, "v", "p50", 0.5},
+                                   GroupAgg{df::Agg::Pct, "v", "p90", 0.9}});
+    REQUIRE(g.num_rows() == 2);
+    const std::int64_t* key = g.column("k").data<std::int64_t>();
+    const double* p50 = g.column("p50").data<double>();
+    const double* p90 = g.column("p90").data<double>();
+    for (std::int64_t r = 0; r < 2; ++r) {
+        const double scale = key[r] == 0 ? 1.0 : 10.0;
+        CHECK(p50[r] == doctest::Approx(scale * per * 0.5).epsilon(0.03));
+        CHECK(p90[r] == doctest::Approx(scale * per * 0.9).epsilon(0.03));
+    }
+}
+
+TEST_CASE("group_agg pct partials serialize / merge round-trip") {
+    namespace df = dftracer::utils::dataframe;
+    std::vector<std::int64_t> k(2000), v(2000);
+    for (std::int64_t i = 0; i < 2000; ++i) {
+        k[static_cast<std::size_t>(i)] = i % 2;
+        v[static_cast<std::size_t>(i)] = i;
+    }
+    Series key = Series::flat_i64(k.data(), 2000);
+    Series val = Series::flat_i64(v.data(), 2000);
+    std::vector<const Series*> vals{&val};
+
+    auto st = df::agg_new({df::AggSpec{df::AggOp::Pct, 0, "p90", 0.9}});
+    df::agg_accumulate(*st, key, vals, 0, 1000);
+    auto st2 = df::agg_new({df::AggSpec{df::AggOp::Pct, 0, "p90", 0.9}});
+    df::agg_accumulate(*st2, key, vals, 1000, 2000);
+
+    // Round-trip the second partial through serialize before merging.
+    std::string blob = df::agg_serialize(*st2);
+    auto st2b = df::agg_deserialize(blob);
+    df::agg_merge(*st, *st2b);
+
+    DataFrame direct;
+    {
+        auto full = df::agg_new({df::AggSpec{df::AggOp::Pct, 0, "p90", 0.9}});
+        df::agg_accumulate(*full, key, vals);
+        direct = df::agg_finalize(*full, "k");
+    }
+    DataFrame merged = df::agg_finalize(*st, "k");
+    REQUIRE(merged.num_rows() == direct.num_rows());
+    for (std::int64_t r = 0; r < merged.num_rows(); ++r)
+        CHECK(merged.column("p90").data<double>()[r] ==
+              doctest::Approx(direct.column("p90").data<double>()[r]));
+}
+
+TEST_CASE("SIMD arg_min/arg_max: earliest tie, matches scalar, null fallback") {
+    namespace df = dftracer::utils::dataframe;
+    // 200 f64 values; a unique max in the SIMD region and a tied min so the
+    // earliest-index tie-break is exercised.
+    std::vector<double> dv(200);
+    for (int i = 0; i < 200; ++i) dv[static_cast<std::size_t>(i)] = 5.0;
+    dv[137] = 99.0;           // unique max
+    dv[3] = -1.0;             // first min
+    dv[150] = -1.0;           // tied min, later
+    Series s = df::Series::flat_f64(dv.data(), 200);
+    CHECK(s.arg_max() == 137);
+    CHECK(s.arg_min() == 3);  // earliest of the tied minima
+
+    // Int16 (narrow) exercises the same generic two-pass path.
+    std::vector<std::int16_t> iv(100);
+    for (int i = 0; i < 100; ++i)
+        iv[static_cast<std::size_t>(i)] =
+            static_cast<std::int16_t>((i * 7) % 50);
+    Series si = df::Series::flat(df::TypeId::Int16, iv.data(), 100);
+    // Brute-force reference.
+    int ref_max = 0, ref_min = 0;
+    for (int i = 1; i < 100; ++i) {
+        if (iv[static_cast<std::size_t>(i)] >
+            iv[static_cast<std::size_t>(ref_max)])
+            ref_max = i;
+        if (iv[static_cast<std::size_t>(i)] <
+            iv[static_cast<std::size_t>(ref_min)])
+            ref_min = i;
+    }
+    CHECK(si.arg_max() == ref_max);
+    CHECK(si.arg_min() == ref_min);
+
+    // A null-bearing column takes the scalar fallback (skips nulls) - still ok.
+    Series n = i64_nullable({7, 0, 3, 0, 9}, {1, 0, 1, 0, 1});
+    CHECK(n.arg_max() == 4);
+    CHECK(n.arg_min() == 2);
+}
+
+TEST_CASE("SIMD compare covers narrow integer types (Int16/Uint8)") {
+    namespace df = dftracer::utils::dataframe;
+    // 100 values so the 64-at-a-time SIMD block plus a scalar tail both run.
+    std::vector<std::int16_t> sv(100);
+    for (int i = 0; i < 100; ++i)
+        sv[static_cast<std::size_t>(i)] = static_cast<std::int16_t>(i - 40);
+    Series s = df::Series::flat(df::TypeId::Int16, sv.data(), 100);
+    Series mask = s.gt(std::int64_t(0));  // > 0
+    Series kept = s.filter(mask).materialize();
+    REQUIRE(kept.length() == 59);  // 1..59 (values i-40 > 0 for i in 41..99)
+    CHECK(kept.data<std::int16_t>()[0] == 1);
+
+    std::vector<std::uint8_t> uv(100);
+    for (int i = 0; i < 100; ++i)
+        uv[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(i);
+    Series u = df::Series::flat(df::TypeId::Uint8, uv.data(), 100);
+    Series um = u.le(std::int64_t(9));  // <= 9 -> first 10
+    CHECK(u.filter(um).materialize().length() == 10);
+}
+
+TEST_CASE("SIMD cast fast paths match static_cast semantics") {
+    namespace df = dftracer::utils::dataframe;
+    // Values chosen to exercise truncation-toward-zero and sign.
+    std::vector<double> dv{-3.9, -0.5, 0.0, 1.5, 2.9, 1000.25};
+    Series f64 = df::Series::flat_f64(dv.data(), 6);
+
+    // f64 -> i64 (ConvertTo): truncates toward zero like static_cast.
+    Series i = f64.cast(df::TypeId::Int64);
+    const std::int64_t exp_i[] = {-3, 0, 0, 1, 2, 1000};
+    for (int k = 0; k < 6; ++k) CHECK(i.data<std::int64_t>()[k] == exp_i[k]);
+
+    // i64 -> f64 round-trips the integer values exactly.
+    Series back = i.cast(df::TypeId::Float64);
+    for (int k = 0; k < 6; ++k)
+        CHECK(back.data<double>()[k] == doctest::Approx((double)exp_i[k]));
+
+    // f64 -> f32 -> f64 (Demote/Promote).
+    Series f32 = f64.cast(df::TypeId::Float32);
+    CHECK(f32.type() == df::TypeId::Float32);
+    Series wide = f32.cast(df::TypeId::Float64);
+    CHECK(wide.data<double>()[5] == doctest::Approx(1000.25));
+
+    // A width-changing integer pair takes the scalar fallback; still correct.
+    std::vector<std::int64_t> lv{1, 2, 300, -5};
+    Series i64 = df::Series::flat_i64(lv.data(), 4);
+    Series i8 = i64.cast(df::TypeId::Int8);
+    CHECK(i8.data<std::int8_t>()[1] == 2);
+    CHECK(i8.data<std::int8_t>()[2] == static_cast<std::int8_t>(300));
+}
+
+TEST_CASE("DataFrame group_by hist emits a list<struct> per group") {
+    namespace df = dftracer::utils::dataframe;
+    std::vector<std::int64_t> k, v;
+    for (std::int64_t i = 0; i < 1000; ++i) {
+        k.push_back(i % 2);
+        v.push_back((i % 2 == 0) ? 1 + i % 10 : 100 + i % 10);
+    }
+    DataFrame b;
+    b.names = {"k", "v"};
+    b.columns.push_back(Series::flat_i64(k.data(), 1000));
+    b.columns.push_back(Series::flat_i64(v.data(), 1000));
+    DataFrame g = b.group_by("k", {GroupAgg{df::Agg::Hist, "v", "h"}});
+    REQUIRE(g.num_rows() == 2);
+    const Series& h = g.column("h");
+    CHECK(h.type() == df::TypeId::List);
+    // The list values are struct{lo,hi,count} bins; assert the child is a
+    // 3-field struct with at least one bin.
+    const Series child = h.child(0);
+    CHECK(child.type() == df::TypeId::Struct);
+    CHECK(dftu_series_num_children(child.handle()) == 3);
+    CHECK(child.length() > 0);
+}
+
+TEST_CASE("DataFrame group_by first / last") {
+    DataFrame df;
+    df.names = {"k", "v"};
+    df.columns.push_back(i64({1, 2, 1, 2, 1}));
+    df.columns.push_back(i64({10, 5, 20, 7, 30}));
+    DataFrame g = df.group_by(
+        "k", {GroupAgg{Agg::First, "v", "f"}, GroupAgg{Agg::Last, "v", "l"}});
+    REQUIRE(g.num_rows() == 2);
+    const std::int64_t* f = g.column("f").data<std::int64_t>();
+    const std::int64_t* l = g.column("l").data<std::int64_t>();
+    CHECK(f[0] == 10);  // key 1: first 10, last 30
+    CHECK(l[0] == 30);
+    CHECK(f[1] == 5);   // key 2: first 5, last 7
+    CHECK(l[1] == 7);
+}
+
+TEST_CASE("group_agg first/last is exact across the parallel-chunk merge") {
+    namespace df = dftracer::utils::dataframe;
+    // > AGG_GRAIN (1<<16) rows so the parallel driver splits into chunks; the
+    // per-chunk partials merge in an unspecified order, yet first/last must
+    // still be the globally first / last value per key.
+    const std::int64_t n = (1 << 16) + 5000;
+    std::vector<std::int64_t> k(static_cast<std::size_t>(n));
+    std::vector<std::int64_t> v(static_cast<std::size_t>(n));
+    for (std::int64_t i = 0; i < n; ++i) {
+        k[static_cast<std::size_t>(i)] = i % 3;
+        v[static_cast<std::size_t>(i)] = i;  // strictly increasing
+    }
+    DataFrame b;
+    b.names = {"k", "v"};
+    b.columns.push_back(Series::flat_i64(k.data(), n));
+    b.columns.push_back(Series::flat_i64(v.data(), n));
+    DataFrame g = b.group_by("k", {GroupAgg{df::Agg::First, "v", "f"},
+                                   GroupAgg{df::Agg::Last, "v", "l"}});
+    REQUIRE(g.num_rows() == 3);
+    const std::int64_t* key = g.column("k").data<std::int64_t>();
+    const std::int64_t* f = g.column("f").data<std::int64_t>();
+    const std::int64_t* l = g.column("l").data<std::int64_t>();
+    for (std::int64_t r = 0; r < 3; ++r) {
+        const std::int64_t kk = key[r];
+        CHECK(f[r] == kk);  // first v with v%3==kk is kk
+        CHECK(l[r] == kk + 3 * ((n - 1 - kk) / 3));  // largest such v < n
+    }
+}
+
 TEST_CASE("dftu_dataframe opaque C ABI: build, inspect, frame ops") {
     Series id = i64({1, 2, 3, 4});
     Series val = i64({40, 10, 30, 20});
@@ -146,6 +394,119 @@ TEST_CASE("Expr operators build and evaluate a fused expression") {
     Series m = df::eval(mask, {&a});
     CHECK(((m.data<std::uint8_t>()[0] >> 0) & 1) == 0);  // 1 > 2 = false
     CHECK(((m.data<std::uint8_t>()[0] >> 3) & 1) == 1);  // 4 > 2 = true
+}
+
+TEST_CASE("Expr unary math / clip / cast evaluate") {
+    namespace df = dftracer::utils::dataframe;
+    std::vector<double> xv{-3.2, 4.7, -1.5, 9.9};
+    Series x = df::Series::flat_f64(xv.data(), 4);
+
+    Series fl =
+        df::eval(df::expr_unary(static_cast<std::int32_t>(df::UnaryOp::Floor),
+                                df::col(0)),
+                 {&x});
+    CHECK(fl.data<double>()[0] == doctest::Approx(-4.0));
+    CHECK(fl.data<double>()[3] == doctest::Approx(9.0));
+
+    Series cl =
+        df::eval(df::expr_clip(df::col(0), df::detail::expr_scalar_d(-2.0),
+                               df::detail::expr_scalar_d(5.0)),
+                 {&x});
+    CHECK(cl.data<double>()[0] == doctest::Approx(-2.0));
+    CHECK(cl.data<double>()[3] == doctest::Approx(5.0));
+
+    Series n = i64({1, 2, 3, 4});
+    Series cf = df::eval(df::expr_cast(df::TypeId::Float64, df::col(0)), {&n});
+    CHECK(cf.type() == df::TypeId::Float64);
+    CHECK(cf.data<double>()[2] == doctest::Approx(3.0));
+
+    auto unary = [&](df::UnaryOp op, Series& in) {
+        return df::eval(
+            df::expr_unary(static_cast<std::int32_t>(op), df::col(0)), {&in});
+    };
+
+    std::vector<double> pv{1.0, 4.0, 9.0, 16.0};
+    Series p = df::Series::flat_f64(pv.data(), 4);
+    Series sq = unary(df::UnaryOp::Sqrt, p);
+    CHECK(sq.data<double>()[1] == doctest::Approx(2.0));
+    CHECK(sq.data<double>()[3] == doctest::Approx(4.0));
+
+    Series sg = unary(df::UnaryOp::Sign, x);
+    CHECK(sg.data<double>()[0] == doctest::Approx(-1.0));
+    CHECK(sg.data<double>()[1] == doctest::Approx(1.0));
+
+    Series ng = unary(df::UnaryOp::Negate, x);
+    CHECK(ng.data<double>()[0] == doctest::Approx(3.2));
+
+    Series tr = unary(df::UnaryOp::Trunc, x);
+    CHECK(tr.data<double>()[0] == doctest::Approx(-3.0));
+    CHECK(tr.data<double>()[3] == doctest::Approx(9.0));
+
+    // is_nan / is_finite yield a Bool mask over float NaN/inf values.
+    const double inf = std::numeric_limits<double>::infinity();
+    std::vector<double> nv{1.0, std::nan(""), inf, 4.0};
+    Series nan_col = df::Series::flat_f64(nv.data(), 4);
+    Series isn = unary(df::UnaryOp::IsNan, nan_col);
+    CHECK(isn.type() == df::TypeId::Bool);
+    CHECK(((isn.data<std::uint8_t>()[0] >> 0) & 1) == 0);
+    CHECK(((isn.data<std::uint8_t>()[0] >> 1) & 1) == 1);
+
+    Series isf = unary(df::UnaryOp::IsFinite, nan_col);
+    CHECK(isf.type() == df::TypeId::Bool);
+    CHECK(((isf.data<std::uint8_t>()[0] >> 0) & 1) == 1);  // 1.0 finite
+    CHECK(((isf.data<std::uint8_t>()[0] >> 2) & 1) == 0);  // inf not finite
+}
+
+TEST_CASE("slice carries the validity bitmap (aligned and non-aligned)") {
+    // 12 rows; nulls at indices 1, 4, 7, 10.
+    Series c = i64_nullable({0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+                            {1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1});
+    CHECK(c.null_count() == 4);
+
+    // Non-byte-aligned offset (3): the bitmap is re-packed to bit 0. Rows
+    // 3..8 map to original 3,4,5,6,7,8 -> nulls at local 1 and 4.
+    Series s = c.slice(3, 6);
+    REQUIRE(s.length() == 6);
+    CHECK(s.null_count() == 2);
+    CHECK(s.data<std::int64_t>()[0] == 3);
+    CHECK(s.data<std::int64_t>()[5] == 8);
+
+    // fillna over the sliced view closes exactly those two nulls.
+    Series f = s.fillna(dftracer::utils::dataframe::detail::expr_scalar_i(-1));
+    CHECK(f.null_count() == 0);
+    CHECK(f.data<std::int64_t>()[1] == -1);
+    CHECK(f.data<std::int64_t>()[4] == -1);
+    CHECK(f.data<std::int64_t>()[0] == 3);
+}
+
+TEST_CASE("Expr engine is null-aware: fillna and null-preserving ops") {
+    namespace df = dftracer::utils::dataframe;
+    // A nullable column reaches the expr engine (the chunk slice now carries
+    // its validity bitmap), so fillna sees the nulls.
+    Series nul = i64_nullable({5, 0, 7, 0}, {1, 0, 1, 0});
+    Series filled = df::eval(
+        df::expr_fillna(df::col(0), df::detail::expr_scalar_i(-7)), {&nul});
+    CHECK(filled.data<std::int64_t>()[0] == 5);
+    CHECK(filled.data<std::int64_t>()[1] == -7);
+    CHECK(filled.data<std::int64_t>()[2] == 7);
+    CHECK(filled.data<std::int64_t>()[3] == -7);
+    CHECK(filled.null_count() == 0);
+
+    // A math op over a nullable column preserves the null positions.
+    Series abs_nul = df::eval(
+        df::expr_unary(static_cast<std::int32_t>(df::UnaryOp::Abs), df::col(0)),
+        {&nul});
+    CHECK(abs_nul.null_count() == 2);
+
+    // fillna after abs closes the nulls.
+    Series both =
+        df::eval(df::expr_fillna(
+                     df::expr_unary(static_cast<std::int32_t>(df::UnaryOp::Abs),
+                                    df::col(0)),
+                     df::detail::expr_scalar_i(0)),
+                 {&nul});
+    CHECK(both.null_count() == 0);
+    CHECK(both.data<std::int64_t>()[1] == 0);
 }
 
 TEST_CASE("DataFrame tail / reverse / with_row_index / sample") {

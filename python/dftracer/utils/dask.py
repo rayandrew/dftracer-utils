@@ -11,6 +11,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Sequence,
     Set,
     Tuple,
     TypedDict,
@@ -52,7 +53,12 @@ from dftracer.utils import (
     set_default_runtime,
 )
 from dftracer.utils._units import coerce_bytes, coerce_duration
-from dftracer.utils.dataframe import AggregatedTraceViewer, TraceViewer
+from dftracer.utils.dataframe import (
+    AggregatedTraceViewer,
+    PhaseArg,
+    TimeUnitArg,
+    TraceViewer,
+)
 
 # A per-shard viewer is either the plain or the aggregated wrapper (group_by/agg
 # promotes one to the other); the two are sibling wrappers, not a subtype pair.
@@ -330,11 +336,12 @@ class _Plan:
     dataclasses.replace, so field names are checked, not string dict keys."""
 
     filters: Tuple[str, ...] = ()
-    phase: Optional[str] = None
+    phase: Optional[PhaseArg] = None
     time_range: Optional[Tuple[float, float]] = None
-    time_unit: Optional[str] = None
+    time_unit: Optional[TimeUnitArg] = None
     time_scale: Optional[float] = None
     time_bucket: Optional[int] = None
+    time_bucket_normalize: Union[int, Literal["min"], None] = None
     occ_cell: Optional[int] = None
     group_by: Tuple[str, ...] = ()
     agg: Tuple[str, ...] = ()
@@ -362,7 +369,7 @@ def _apply_plan(tv: "_AnyViewer", plan: _Plan) -> "_AnyViewer":
     if plan.time_scale is not None:
         tv = tv.time_scale(plan.time_scale)
     if plan.time_bucket is not None:
-        tv = tv.time_bucket(plan.time_bucket)
+        tv = tv.time_bucket(plan.time_bucket, plan.time_bucket_normalize)
     if plan.occ_cell is not None:
         tv = tv.occ_cell(plan.occ_cell)
     if plan.group_by:
@@ -397,6 +404,19 @@ def _dv_partial_task(files: List[str], index_dir: str, plan: _Plan) -> bytes:
     return _make_viewer(files, index_dir, plan).aggregate_partial()
 
 
+def _dv_flamegraph_partial_task(
+    files: List[str],
+    index_dir: str,
+    plan: _Plan,
+    partition: Sequence[str],
+    ts: str,
+    dur: str,
+    name: str,
+) -> bytes:
+    """Worker: serialized flamegraph arena partial for this shard (bytes)."""
+    return _make_viewer(files, index_dir, plan).flamegraph_partial(list(partition), ts, dur, name)
+
+
 def _dv_events_task(
     files: List[str],
     index_dir: str,
@@ -405,16 +425,17 @@ def _dv_events_task(
     page_size: int,
 ) -> "Optional[pa.Table]":
     """Worker: this shard's matching events at ts >= cursor, up to page_size."""
-    import pyarrow as pa
-
     tv = _make_viewer(files, index_dir, plan)
     if cursor is not None:
         # Per-event predicate (time_range only prunes chunks, so it would leak
         # earlier events sharing a boundary chunk); chunk ts-stats still prune.
         tv = tv.filter(f"ts >= {int(cursor)}")
     tv = tv.limit(page_size)
-    batches = [pa.record_batch(c) for c in tv.stream()]
-    return pa.Table.from_batches(batches) if batches else None
+    chunks = list(tv.stream())
+    if not chunks:
+        return None
+    df = chunks[0] if len(chunks) == 1 else chunks[0].concat(*chunks[1:], how="diagonal")
+    return df.to_arrow()
 
 
 def _dv_write_task(
@@ -568,21 +589,27 @@ class DaskTraceViewer:
     def query(self, dsl: str) -> "DaskTraceViewer":
         return self.filter(dsl)
 
-    def phase(self, phase: str) -> "DaskTraceViewer":
+    def phase(self, phase: PhaseArg) -> "DaskTraceViewer":
         return self._clone(replace(self._plan, phase=phase))
 
     def time_range(self, begin: float, end: float) -> "DaskTraceViewer":
         return self._clone(replace(self._plan, time_range=(begin, end)))
 
-    def time_unit(self, unit: str) -> "DaskTraceViewer":
+    def time_unit(self, unit: TimeUnitArg) -> "DaskTraceViewer":
         return self._clone(replace(self._plan, time_unit=unit))
 
     def time_scale(self, ns_ratio: float) -> "DaskTraceViewer":
         return self._clone(replace(self._plan, time_scale=float(ns_ratio)))
 
-    def time_bucket(self, interval_us: Union[int, float, str]) -> "DaskTraceViewer":
+    def time_bucket(
+        self,
+        interval_us: Union[int, float, str],
+        normalize_to: Union[int, Literal["min"], None] = None,
+    ) -> "DaskTraceViewer":
         bucket = int(round(coerce_duration(interval_us, 1e6, "interval_us")))
-        return self._clone(replace(self._plan, time_bucket=bucket))
+        return self._clone(
+            replace(self._plan, time_bucket=bucket, time_bucket_normalize=normalize_to)
+        )
 
     def occ_cell(self, cell_us: Union[int, float, str]) -> "DaskTraceViewer":
         cell = int(round(coerce_duration(cell_us, 1e6, "cell_us")))
@@ -628,7 +655,7 @@ class DaskTraceViewer:
         return self._client or get_client()  # pyright: ignore[reportOptionalCall]  # ty: ignore[call-non-callable]
 
     def collect(self):
-        """Distributed group_by+agg -> one pyarrow Table.
+        """Distributed group_by+agg -> one native DataFrame.
 
         Each file shard returns a combinable partial (aggregate_partial),
         merged on the client via merge_partials_to_table so mean/std/percentiles are
@@ -638,6 +665,37 @@ class DaskTraceViewer:
         partials = self._gather_partials(client)
         merger = _make_viewer(self._files, self._index_dir, self._plan)
         return merger.merge_partials_to_table(partials)
+
+    def flamegraph(
+        self,
+        partition: Sequence[str] = ("pid", "tid"),
+        ts: str = "ts",
+        dur: str = "dur",
+        name: str = "name",
+    ):
+        """Distributed flamegraph -> folded node DataFrame.
+
+        Each file shard folds a serialized arena partial (flamegraph_partial);
+        the client tree-reduces them via TraceViewer.merge_flamegraph_partials,
+        so a name folds across shards. Partition by pid so a lane lives on one
+        shard. Composes with the branch's filter/phase/time like collect."""
+        client = self._resolve_client()
+        futures = [
+            client.submit(
+                _dv_flamegraph_partial_task,
+                s,
+                self._index_dir,
+                self._plan,
+                tuple(partition),
+                ts,
+                dur,
+                name,
+                pure=False,
+            )
+            for s in self._shards()
+        ]
+        partials = [p for p in client.gather(futures) if p]
+        return TraceViewer.merge_flamegraph_partials(partials)
 
     def collect_typed(self):
         """Distributed one-pass typed read -> {regular, aggregated, counters}
@@ -862,7 +920,7 @@ class DaskAggregatedTraceViewer(DaskTraceViewer):
         return self
 
     def reconstruct_if_cached(self):
-        """The materialized aggregation as a pyarrow.Table, or None on a miss."""
+        """The materialized aggregation as a native DataFrame, or None on a miss."""
         return self._coordinator().reconstruct_if_cached()
 
 

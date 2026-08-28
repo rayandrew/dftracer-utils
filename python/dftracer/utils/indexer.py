@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Literal, Optional, Set, Tuple, Union
 
 from ._units import coerce_bytes, coerce_duration
 from .dftracer_utils_ext import CheckpointIndexer as _NativeCheckpointIndexer
@@ -216,7 +216,7 @@ class Indexer:
         """
         return self._native.get_checkpoint_indexer(file_path)
 
-    def get_hash_table(self, hash_type: str) -> dict:
+    def get_hash_table(self, hash_type: Literal["file", "host", "string", "proc"]) -> dict:
         """Query hash table mappings.
 
         Returns a dictionary mapping hash values to resolved names for the

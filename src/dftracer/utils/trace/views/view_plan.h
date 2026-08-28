@@ -46,6 +46,13 @@ struct ViewPlan {
     bool emit_all_metadata = false;  // harvest every hash-metadata record
 
     std::uint64_t time_bucket_us = 0;
+    /// Bucket alignment origin (in the post-time_scale unit): bucket i spans
+    /// [origin + i*width, origin + (i+1)*width). 0 = absolute (aligned to 0).
+    std::uint64_t bucket_origin_us = 0;
+    /// When set, align buckets to the trace's minimum timestamp (read cheaply
+    /// from the index zone maps, no scan) instead of 0 or a fixed origin; the
+    /// executor resolves it into bucket_origin_us before the fold.
+    bool bucket_origin_min = false;
     /// Target occupancy cell size (busy quantum), microseconds; 0 = engine
     /// default. The per-bucket coverage mask has 64 sub-slots, so this sets
     /// occ_bucket_us = occ_cell_us * 64. Only honored when a time_range bounds
@@ -57,11 +64,19 @@ struct ViewPlan {
     double time_scale = 1.0;
     std::vector<GroupKey> group_by;
     std::vector<AggSpec> agg;
-    /// Aggregate every numeric args.* field as a dynamic per-group mean metric
-    /// (skipping metadata/pre-aggregated args). Adds one value column per
-    /// discovered arg. This is how ph="C" counters aggregate without naming the
-    /// fields up front.
+    /// Aggregate every numeric args.* field as a dynamic per-group metric
+    /// (skipping metadata/pre-aggregated args). This is how ph="C" counters
+    /// aggregate without naming the fields up front. With `numeric_arg_aggs`
+    /// empty it emits one bare-named per-arg mean column (legacy). With
+    /// reductions listed, it emits one `<op>_<arg>` column per (arg,
+    /// reduction).
     bool auto_numeric_metrics = false;
+    /// Reductions applied to every discovered numeric arg (op + q; the AggSpec
+    /// field is ignored, the reduction runs on each arg key). Empty = the
+    /// legacy bare-mean column. Only FieldStat-derivable ops
+    /// (Count/Sum/Min/Max/SumSq/ Mean/Var/Std/Skew/Kurt) are supported here;
+    /// Pct needs a per-arg sketch.
+    std::vector<AggSpec> numeric_arg_aggs;
     /// Out-of-core aggregation budget shared by collect / export_counters /
     /// aggregate_partial: when a worker's in-memory group map grows past this
     /// many bytes it spills to a sorted temp run; the runs are k-way merged at

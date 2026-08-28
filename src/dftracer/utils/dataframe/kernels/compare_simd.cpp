@@ -116,6 +116,51 @@ void CompareF32(const void* p, std::int64_t n, dftu_scalar r, std::int32_t op,
     compare_bits<float>(static_cast<const float*>(p), n, scalar_as<float>(r),
                         op, out);
 }
+void CompareI16(const void* p, std::int64_t n, dftu_scalar r, std::int32_t op,
+                std::uint8_t* out) {
+    compare_bits<std::int16_t>(static_cast<const std::int16_t*>(p), n,
+                               scalar_as<std::int16_t>(r), op, out);
+}
+void CompareU16(const void* p, std::int64_t n, dftu_scalar r, std::int32_t op,
+                std::uint8_t* out) {
+    compare_bits<std::uint16_t>(static_cast<const std::uint16_t*>(p), n,
+                                scalar_as<std::uint16_t>(r), op, out);
+}
+void CompareI8(const void* p, std::int64_t n, dftu_scalar r, std::int32_t op,
+               std::uint8_t* out) {
+    compare_bits<std::int8_t>(static_cast<const std::int8_t*>(p), n,
+                              scalar_as<std::int8_t>(r), op, out);
+}
+
+// Pack per-row byte flags (nonzero = set) into a bit-packed bitmap, 64 bits at
+// a time so each block store is byte-aligned; the tail is packed scalar.
+void PackFlags(const char* flags, std::int64_t n, std::uint8_t* out) {
+    const std::uint8_t* f = reinterpret_cast<const std::uint8_t*>(flags);
+    const hn::ScalableTag<std::uint8_t> d;
+    const std::size_t lanes = hn::Lanes(d);
+    const auto zero = hn::Zero(d);
+    const std::uint64_t lane_mask =
+        lanes >= 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << lanes) - 1);
+    std::int64_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        std::uint64_t bits = 0;
+        for (std::size_t c = 0; c < 64; c += lanes) {
+            const auto m = hn::Ne(
+                hn::LoadU(d, f + i + static_cast<std::int64_t>(c)), zero);
+            std::uint64_t cb = 0;
+            hn::StoreMaskBits(d, m, reinterpret_cast<std::uint8_t*>(&cb));
+            bits |= (cb & lane_mask) << c;
+        }
+        std::memcpy(out + (i >> 3), &bits, 8);
+    }
+    for (; i < n; ++i)
+        if (f[i]) out[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+}
+void CompareU8(const void* p, std::int64_t n, dftu_scalar r, std::int32_t op,
+               std::uint8_t* out) {
+    compare_bits<std::uint8_t>(static_cast<const std::uint8_t*>(p), n,
+                               scalar_as<std::uint8_t>(r), op, out);
+}
 
 }  // namespace HWY_NAMESPACE
 }  // namespace dftracer::utils::dataframe
@@ -130,6 +175,15 @@ HWY_EXPORT(CompareF64);
 HWY_EXPORT(CompareI32);
 HWY_EXPORT(CompareU32);
 HWY_EXPORT(CompareF32);
+HWY_EXPORT(CompareI16);
+HWY_EXPORT(CompareU16);
+HWY_EXPORT(CompareI8);
+HWY_EXPORT(CompareU8);
+HWY_EXPORT(PackFlags);
+
+void pack_flags(const char* flags, std::int64_t n, std::uint8_t* out) {
+    if (n > 0) HWY_DYNAMIC_DISPATCH(PackFlags)(flags, n, out);
+}
 
 bool compare(const dftu_series& v, std::int32_t op, dftu_scalar rhs,
              std::uint8_t* out) {
@@ -154,8 +208,20 @@ bool compare(const dftu_series& v, std::int32_t op, dftu_scalar rhs,
         case TypeId::Float32:
             HWY_DYNAMIC_DISPATCH(CompareF32)(p, n, rhs, op, out);
             return true;
+        case TypeId::Int16:
+            HWY_DYNAMIC_DISPATCH(CompareI16)(p, n, rhs, op, out);
+            return true;
+        case TypeId::Uint16:
+            HWY_DYNAMIC_DISPATCH(CompareU16)(p, n, rhs, op, out);
+            return true;
+        case TypeId::Int8:
+            HWY_DYNAMIC_DISPATCH(CompareI8)(p, n, rhs, op, out);
+            return true;
+        case TypeId::Uint8:
+            HWY_DYNAMIC_DISPATCH(CompareU8)(p, n, rhs, op, out);
+            return true;
         default:
-            return false;  // 1/2-byte or non-numeric: scalar path
+            return false;  // non-numeric: scalar path
     }
 }
 

@@ -1,11 +1,11 @@
-#include <dftracer/utils/utilities/common/statistics/ddsketch.h>
+#include <dftracer/utils/dataframe/sketch.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 
-namespace dftracer::utils::utilities::common::statistics {
+namespace dftracer::utils::dataframe {
 
 DDSketch::DDSketch(double relative_accuracy)
     : gamma_((1.0 + relative_accuracy) / (1.0 - relative_accuracy)),
@@ -15,10 +15,6 @@ DDSketch::DDSketch(double relative_accuracy)
       count_(0),
       zero_count_(0) {
     store_.fill(0);
-}
-
-int DDSketch::bin_index(double value) const {
-    return static_cast<int>(std::ceil(std::log(value) / log_gamma_));
 }
 
 double DDSketch::bin_lower_bound(int index) const {
@@ -202,8 +198,18 @@ void DDSketch::add(double value, double weight) {
     }
 
     double abs_value = std::abs(value);
-    int idx = bin_index(abs_value);
+    int idx = static_cast<int>(std::ceil(std::log(abs_value) / log_gamma_));
     add_to_bin(idx, w);
+}
+
+void DDSketch::add_key(std::int32_t key, std::uint16_t weight) {
+    if (weight == 0) weight = 1;
+    count_ += weight;
+    if (key == SKETCH_ZERO_KEY) {
+        zero_count_ += weight;
+        return;
+    }
+    add_to_bin(static_cast<int>(key), weight);
 }
 
 void DDSketch::merge(const DDSketch& other) {
@@ -405,4 +411,4 @@ DDSketch DDSketch::deserialize(const std::uint8_t* data, std::size_t len) {
     return s;
 }
 
-}  // namespace dftracer::utils::utilities::common::statistics
+}  // namespace dftracer::utils::dataframe

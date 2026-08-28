@@ -37,6 +37,9 @@ enum {
     AST_LOGICAL = 6,
     AST_NOT = 7,
     AST_CAST = 8,
+    AST_UNARY = 9,
+    AST_CLIP = 10,
+    AST_FILLNA = 11,
 };
 
 bool py_to_scalar(PyObject* v, dftu_scalar* out) {
@@ -122,6 +125,27 @@ bool build_expr(PyObject* ast, dataframe::Expr* out) {
                 dataframe::Expr a = pop();
                 stack.push_back(dataframe::expr_cast(
                     static_cast<dataframe::TypeId>(PyLong_AsLong(arg(1))), a));
+                break;
+            }
+            case AST_UNARY: {
+                dataframe::Expr a = pop();
+                stack.push_back(dataframe::expr_unary(
+                    static_cast<std::int32_t>(PyLong_AsLong(arg(1))), a));
+                break;
+            }
+            case AST_CLIP: {
+                dftu_scalar lo{}, hi{};
+                if (!py_to_scalar(arg(1), &lo) || !py_to_scalar(arg(2), &hi))
+                    return false;
+                dataframe::Expr a = pop();
+                stack.push_back(dataframe::expr_clip(a, lo, hi));
+                break;
+            }
+            case AST_FILLNA: {
+                dftu_scalar fill{};
+                if (!py_to_scalar(arg(1), &fill)) return false;
+                dataframe::Expr a = pop();
+                stack.push_back(dataframe::expr_fillna(a, fill));
                 break;
             }
             default:

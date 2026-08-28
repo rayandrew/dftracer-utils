@@ -10,10 +10,6 @@
 # +++++++++++++++++++++++++++++++++++++++++
 
 set(UTILITIES_TEST_SOURCES
-    # Call Tree
-    call_tree/test_call_tree_internal.cpp
-    call_tree/test_critical_path.cpp
-    call_tree/test_flamegraph.cpp
 
     # Statistics
     common/statistics/test_log2_histogram.cpp

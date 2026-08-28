@@ -9,6 +9,7 @@
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_spill.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -96,16 +97,22 @@ class AggFold : public Fold {
     }
 
     void step(const FoldBatch& batch) override {
+        // Batch DDSketch updates only when the plan has sketches (Pct/Hist):
+        // one SIMD sketch_bucket_keys pass replaces the per-event scalar log.
+        SketchBatch* sb = (plan_->schema && plan_->schema->sketch_count > 0)
+                              ? &sketch_batch_
+                              : nullptr;
         for (const auto& ev : batch.events) {
-            // Aggregations never fold ph="M" metadata (it carries no aggregable
-            // event), and Events/Counters plans fold only their phase. The
-            // indexed scanner already applies both (metadata dropped by the
-            // aggregation vdef, phase by the query), so this is a no-op there;
-            // on the raw-gzip path the fold is fed every phase and this is what
-            // keeps metadata and other phases out of the aggregation.
+            // Aggregations skip ph="M" metadata (it carries no aggregable
+            // event) unless the plan explicitly selects phase("metadata"), and
+            // Events/Counters/Aggregated plans fold only their phase. The
+            // indexed scanner already applies both (metadata delivered only
+            // when requested, phase by the query), so this is a no-op there; on
+            // the raw-gzip path the fold is fed every phase and this is what
+            // keeps unwanted phases out of the aggregation.
             if (ev.phase == RecordPhase::METADATA) {
                 if (want_ranks_) harvest_rank(ev);
-                continue;
+                if (phase_target_ != RecordPhase::METADATA) continue;
             }
             if (phase_target_ != RecordPhase::UNKNOWN &&
                 ev.phase != phase_target_)
@@ -116,8 +123,9 @@ class AggFold : public Fold {
             // the flag is off there. Only POD-evaluable fields reach this path
             // (query_evaluable_by_fold gates the bootstrap).
             if (apply_query_ && !passes_query(src)) continue;
-            fold_event_over(map_, src, *plan_, keybuf_);
+            fold_event_over(map_, src, *plan_, keybuf_, sb);
         }
+        if (sb) flush_sketch_batch(map_, *sb);
         maybe_spill();
     }
 
@@ -263,10 +271,22 @@ class AggFold : public Fold {
     void spill_map() {
         if (map_.empty()) return;
         if (cur_dir_.empty()) {
+            // hostname + PID + counter keeps the spill dir unique across
+            // concurrent processes sharing a tmp root - MPI ranks on different
+            // nodes of a shared FS (same PID, different host), and parallel
+            // test runners on one host - where a bare per-process counter would
+            // collide at dftaggfold_0.
+            static const std::string node = [] {
+                char host[256] = {0};
+                if (::gethostname(host, sizeof(host) - 1) != 0) host[0] = '\0';
+                return std::string(host);
+            }();
             static std::atomic<std::uint64_t> seq{0};
-            cur_dir_ = (fs::temp_directory_path() /
-                        ("dftaggfold_" + std::to_string(seq.fetch_add(1))))
-                           .string();
+            cur_dir_ =
+                (fs::temp_directory_path() /
+                 ("dftaggfold_" + node + "_" + std::to_string(::getpid()) +
+                  "_" + std::to_string(seq.fetch_add(1))))
+                    .string();
             fs::create_directories(cur_dir_);
             dirs_.push_back(cur_dir_);
         }
@@ -291,7 +311,8 @@ class AggFold : public Fold {
     bool want_ranks_ = false;
     GroupMap map_;
     std::string keybuf_;
-    query::ValueMap qmap_;  // reused per-event predicate scratch
+    SketchBatch sketch_batch_;  // per-batch deferred sketch updates (reused)
+    query::ValueMap qmap_;      // reused per-event predicate scratch
     // pid -> rank harvested from PR metadata during the scan. The pid->rank
     // join cannot happen mid-fold (the map stays mergeable), so the resolver
     // applies it post-merge, like host_name.
@@ -300,6 +321,8 @@ class AggFold : public Fold {
     static RecordPhase phase_target(const ViewPlan& plan) {
         if (plan.phase == Phase::Events) return RecordPhase::COMPLETE;
         if (plan.phase == Phase::Counters) return RecordPhase::COUNTER;
+        if (plan.phase == Phase::Aggregated) return RecordPhase::AGGREGATED;
+        if (plan.phase == Phase::Metadata) return RecordPhase::METADATA;
         return RecordPhase::UNKNOWN;  // Any: aggregate every phase, no filter
     }
     std::vector<std::string> runs_;   // sorted spill runs, own + adopted

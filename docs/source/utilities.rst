@@ -16,7 +16,6 @@ dftracer-utils provides a collection of composable utilities for trace file proc
    utilities/indexer
    utilities/reader
    utilities/dlio
-   call-tree
 
 Overview
 --------

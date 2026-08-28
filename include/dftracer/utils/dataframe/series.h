@@ -140,6 +140,42 @@ class Series {
             data.data(), static_cast<std::int64_t>(values.size()), nullptr)};
     }
 
+    /// Build a FLAT String column with a validity bitmap (Arrow layout, 1 =
+    /// valid). A null slot contributes no bytes (its offset repeats the prior).
+    static Series strings(std::span<const std::string_view> values,
+                          const std::uint8_t* validity) {
+        std::vector<std::int32_t> offsets(values.size() + 1, 0);
+        std::size_t total = 0;
+        for (const auto& v : values) total += v.size();
+        std::string data;
+        data.reserve(total);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            data.append(values[i].data(), values[i].size());
+            offsets[i + 1] = static_cast<std::int32_t>(data.size());
+        }
+        return Series{dftu_series_new_string(
+            static_cast<dftu_dtype>(TypeId::String), offsets.data(),
+            data.data(), static_cast<std::int64_t>(values.size()), validity)};
+    }
+
+    /// An all-null column of `type` and length `n` (validity all-zero). Used to
+    /// fill a column absent from one part of a schema-union concat.
+    static Series nulls(TypeId type, std::int64_t n) {
+        if (n < 0) n = 0;
+        std::vector<std::uint8_t> validity(
+            static_cast<std::size_t>((n + 7) / 8), 0);  // every row null
+        if (type == TypeId::String || type == TypeId::Binary) {
+            std::vector<std::int32_t> offsets(static_cast<std::size_t>(n) + 1,
+                                              0);
+            return Series{dftu_series_new_string(static_cast<dftu_dtype>(type),
+                                                 offsets.data(), "", n,
+                                                 validity.data())};
+        }
+        std::vector<std::uint8_t> data(buffer_bytes(type, n), 0);
+        return Series{dftu_series_new_flat(static_cast<dftu_dtype>(type),
+                                           data.data(), n, validity.data())};
+    }
+
     /// Build a STRUCT column from field `names` and `columns` (each the same
     /// length, aligned to names); takes ownership of the field columns. The
     /// columns are move-only, so pass them in a vector built by move.
@@ -225,8 +261,9 @@ class Series {
     /// bump, no data copy).
     Series share() const noexcept { return Series{dftu_series_share(handle_)}; }
 
-    /// A zero-copy view of the FLAT rows [offset, offset+len); invalid unless
-    /// FLAT, fixed-width, and no-null.
+    /// A view of the FLAT rows [offset, offset+len); invalid unless FLAT and
+    /// fixed-width. Zero-copy for the values; a null bitmap is shared when the
+    /// offset is byte-aligned and re-packed to bit 0 otherwise.
     Series slice(std::int64_t offset, std::int64_t len) const noexcept {
         return Series{dftu_series_slice(handle_, offset, len)};
     }

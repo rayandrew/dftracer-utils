@@ -310,6 +310,30 @@ TEST_SUITE("View") {
         CHECK(bnum(table, posix, "mean_dur") == doctest::Approx(24.5));  // mean
     }
 
+    TEST_CASE("View - collect with no group_by returns the matching events") {
+        const auto& s = shared_trace();  // 30 POSIX + 20 STDIO = 50 events
+        auto table =
+            View::from_file(s.gz, s.idx).metadata(false).collect().get();
+        REQUIRE(table.num_rows() == 50);
+        // Every event row carries the top-level columns.
+        for (const char* c : {"name", "cat", "pid", "tid", "ts", "dur", "ph"})
+            CHECK(bhas(table, c));
+        // Not an aggregate: there is no synthesized count column.
+        CHECK_FALSE(bhas(table, "count"));
+
+        // A filter narrows the event rows; select projects columns.
+        auto posix = View::from_file(s.gz, s.idx)
+                         .metadata(false)
+                         .query(R"(cat == "POSIX")")
+                         .select({"name", "dur"})
+                         .collect()
+                         .get();
+        CHECK(posix.num_rows() == 30);
+        REQUIRE(posix.num_columns() == 2);
+        CHECK(bhas(posix, "name"));
+        CHECK(bhas(posix, "dur"));
+    }
+
     TEST_CASE(
         "View - agg_numeric_args aggregates every numeric arg as a mean") {
         TestEnvironment env(200);
@@ -338,6 +362,34 @@ TEST_SUITE("View") {
               doctest::Approx(40));                            // mean (60,20)
         CHECK(bnum(table, 0, "user_pct") ==
               doctest::Approx(60));                            // mean (40,80)
+    }
+
+    TEST_CASE(
+        "View - agg_numeric_args applies a set of reductions per numeric arg") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_trace_with_counters(env);
+        std::string idx = determine_index_path(gz, "");
+
+        // ph="C" cpu counters: user_pct=(40,80), idle_pct=(60,20).
+        auto table =
+            View::from_file(gz, idx)
+                .phase(Phase::Counters)
+                .group_by({GroupKey::name()})
+                .agg_numeric_args({AggSpec(AggOp::Sum), AggSpec(AggOp::Max),
+                                   AggSpec(AggOp::Mean)})
+                .collect()
+                .get();
+
+        REQUIRE(table.num_rows() == 1);
+        // Each arg emits one <op>_<arg> column; the legacy bare name is gone.
+        CHECK_FALSE(bhas(table, "user_pct"));
+        CHECK(bnum(table, 0, "sum_user_pct") == doctest::Approx(120));  // 40+80
+        CHECK(bnum(table, 0, "max_user_pct") == doctest::Approx(80));
+        CHECK(bnum(table, 0, "mean_user_pct") == doctest::Approx(60));
+        CHECK(bnum(table, 0, "sum_idle_pct") == doctest::Approx(80));   // 60+20
+        CHECK(bnum(table, 0, "max_idle_pct") == doctest::Approx(60));
+        CHECK(bnum(table, 0, "mean_idle_pct") == doctest::Approx(40));
     }
 
     TEST_CASE("View - export_counters emits a ph=C event per group") {

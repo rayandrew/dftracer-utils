@@ -197,6 +197,50 @@ class TestDaskTraceViewer:
                 client.close()
                 cluster.close()
 
+    def test_flamegraph_matches_single_node(self, tmp_path):
+        import gzip
+        import json
+
+        from dask.distributed import Client, LocalCluster
+
+        from dftracer.utils import TraceViewer
+        from dftracer.utils.dask import DaskTraceViewer
+
+        # One file per pid so each (pid,tid) lane lives entirely on one shard.
+        files = []
+        for pid in (1, 2):
+            p = str(tmp_path / f"p{pid}.pfw.gz")
+            rows = [
+                {"ph": "X", "name": n, "cat": "c", "pid": pid, "tid": 1, "ts": t, "dur": d}
+                for n, t, d in [("A", 0, 100), ("B", 10, 30), ("C", 15, 10)]
+            ]
+            with gzip.open(p, "wt") as f:
+                f.write("\n".join(json.dumps(r) for r in rows) + "\n")
+            files.append(p)
+        with dftu_utils.Indexer(files=files, index_dir=str(tmp_path)) as ix:
+            ix.ensure_indexed()
+
+        cluster = LocalCluster(processes=False, n_workers=2, threads_per_worker=2)
+        client = Client(cluster)
+        try:
+            dist = (
+                DaskTraceViewer(files, str(tmp_path), client=client)
+                .flamegraph()
+                .to_arrow()
+                .to_pydict()
+            )
+            whole = TraceViewer(files, index_path=str(tmp_path)).flamegraph().to_arrow().to_pydict()
+
+            def totals(d):
+                return {n: d["total"][i] for i, n in enumerate(d["name"])}
+
+            assert totals(dist) == totals(whole)
+            # A folds across both pid lanes: 100 + 100.
+            assert totals(dist)["A"] == 200
+        finally:
+            client.close()
+            cluster.close()
+
     def test_materialize_row_view_distributed(self, tmp_path):
         import pyarrow as pa
         from dask.distributed import Client, LocalCluster

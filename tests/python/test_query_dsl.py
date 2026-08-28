@@ -49,6 +49,13 @@ def test_nested_field_path():
     assert str(Field("args.level") == "DEBUG") == 'args.level == "DEBUG"'
 
 
+def test_flat_dotted_arg_key_serializes():
+    # A flat arg key that itself contains dots ("cqe.raw_ns") serializes as
+    # written, bare or with the explicit args. prefix.
+    assert str(Field("cqe.raw_ns") > 100) == "cqe.raw_ns > 100"
+    assert str(Field("args.cqe.raw_ns") > 100) == "args.cqe.raw_ns > 100"
+
+
 def _write_trace(path):
     with gzip.open(path, "wt") as f:
         for i in range(20):
@@ -58,6 +65,55 @@ def _write_trace(path):
                 '{"ph":"X","name":"%s","cat":"%s","pid":1,"tid":1,'
                 '"ts":%d,"dur":%d,"args":{}}\n' % (name, cat, 1000 + i, 5 + i)
             )
+
+
+def _write_dotted_arg_trace(path):
+    # Half the events carry a large cqe.raw_ns; op distinguishes the two groups.
+    # Both arg keys are flat members whose names contain dots.
+    with gzip.open(path, "wt") as f:
+        for i in range(20):
+            op = "SEND" if i % 2 == 0 else "RECV"
+            raw = 100 if i % 2 == 0 else 200
+            f.write(
+                '{"ph":"X","name":"rdma","cat":"ib","pid":1,"tid":1,'
+                '"ts":%d,"dur":5,"args":{"cqe.raw_ns":%d,"mlx5.op":"%s"}}\n' % (1000 + i, raw, op)
+            )
+
+
+def test_flat_dotted_arg_key_resolves_at_runtime(tmp_path):
+    """A flat arg key that contains dots resolves through the native query and
+    group-by paths, bare or args.-prefixed, identically."""
+    pa = pytest.importorskip("pyarrow")
+    from dftracer.utils import AggregationConfig, Indexer, TraceViewer
+
+    trace = os.path.join(tmp_path, "t.pfw.gz")
+    _write_dotted_arg_trace(trace)
+    idx = os.path.join(tmp_path, "idx")
+    with Indexer(
+        directory=str(tmp_path),
+        index_dir=idx,
+        require_aggregation=AggregationConfig(time_interval_ms=100000),
+    ) as ix:
+        ix.ensure_indexed()
+
+    def count(pred):
+        tbl = (
+            TraceViewer(str(tmp_path), index_path=idx)
+            .phase("events")
+            .filter(pred)
+            .group_by("mlx5.op")
+            .agg("count")
+            .collect()
+        )
+        df = pa.table(tbl).to_pandas()
+        return int(df["count"].sum())
+
+    # Group-by a flat dotted key returns both groups.
+    all_ops = count(Field("cat") == "ib")
+    assert all_ops == 20
+    # Filter on the flat dotted key, bare and prefixed, agree and select half.
+    assert count(Field("cqe.raw_ns") > 150) == 10
+    assert count(Field("args.cqe.raw_ns") > 150) == 10
 
 
 def test_traceviewer_filter_accepts_expr(tmp_path):

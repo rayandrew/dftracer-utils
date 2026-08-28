@@ -38,6 +38,10 @@ std::optional<query::Query> effective_query(const ViewPlan& plan) {
         rp = RecordPhase::COMPLETE;
     } else if (plan.phase == Phase::Counters) {
         rp = RecordPhase::COUNTER;
+    } else if (plan.phase == Phase::Aggregated) {
+        rp = RecordPhase::AGGREGATED;
+    } else if (plan.phase == Phase::Metadata) {
+        rp = RecordPhase::METADATA;
     } else {
         return plan.query;
     }
@@ -60,12 +64,14 @@ ViewDefinition make_vdef(const ViewPlan& plan, bool for_aggregation) {
     if (for_aggregation) {
         // Aggregation folds parsed events; ph="M" metadata records carry no
         // aggregable fields, so drop them - unless a rank group key needs the
-        // PR records to build its pid -> rank map in the same scan.
+        // PR records to build its pid -> rank map in the same scan, or the plan
+        // explicitly selects phase("metadata") to aggregate the records.
         const bool wants_rank = std::any_of(
             plan.group_by.begin(), plan.group_by.end(),
             [](const GroupKey& g) { return g.kind == GroupKey::Kind::Rank; });
-        vdef.include_metadata = wants_rank;
-        vdef.emit_all_metadata = wants_rank;
+        const bool wants_metadata = plan.phase == Phase::Metadata;
+        vdef.include_metadata = wants_rank || wants_metadata;
+        vdef.emit_all_metadata = wants_rank || wants_metadata;
     } else {
         vdef.include_metadata = plan.include_metadata;
         vdef.emit_all_metadata = plan.emit_all_metadata;

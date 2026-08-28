@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/field_ref.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/to_chars.h>
 #include <dftracer/utils/core/common/transparent_string_hash.h>
@@ -1608,8 +1609,7 @@ static std::string canonicalize_group_col(
     std::string col,
     std::optional<utilities::indexer::IndexDatabase::HashType>& rt) {
     using HashType = utilities::indexer::IndexDatabase::HashType;
-    if (col.rfind("args.", 0) == 0 && col.find('.', 5) == std::string::npos)
-        col = col.substr(5);
+    col = std::string(strip_args_prefix(col));
     auto is = [&](std::string_view a) { return col == a; };
     if (is("resolved.fpath") || is("r.fpath"))
         col = "fhash";

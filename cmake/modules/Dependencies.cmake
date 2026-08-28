@@ -928,11 +928,15 @@ function(_try_zlib_ng OUT_VAR)
     "SKIP_INSTALL_ALL ON")
 
   if(NOT zlib-ng_ADDED)
-    # CPM reports ADDED=NO when the package was already added by an earlier
-    # need_zlib() call (e.g. src/ adds it, then tests/ asks again). That is not
-    # a failure: the targets already exist globally. Re-expose the dirs and
-    # report success, but skip the one-time target/alias/install setup below
-    # (re-running it would error on duplicate ALIAS / EXPORT definitions).
+    # CPM reports ADDED=NO when zlib-ng was already added earlier (src/ adds it,
+    # then tests/ asks again) OR on a reconfigure of an existing build dir. Not a
+    # failure: the zlib-ng targets are still defined. Re-expose the dirs and
+    # report success, and ensure the dftracer_zlib_* aliases exist here too -
+    # the one-time property/install setup below is skipped, but the aliases must
+    # be (re)created idempotently because on a reconfigure the first (src/) call
+    # also takes this branch, so nothing else creates them and link_zlib() would
+    # otherwise find no zlib. add_library(ALIAS) name-collides globally, so the
+    # NOT TARGET guard makes each a no-op once it exists.
     if(TARGET zlib-ng OR TARGET zlib-ng-static)
       set(ZLIB_SOURCE_DIR
           ${zlib-ng_SOURCE_DIR}
@@ -940,6 +944,33 @@ function(_try_zlib_ng OUT_VAR)
       set(ZLIB_BINARY_DIR
           ${zlib-ng_BINARY_DIR}
           PARENT_SCOPE)
+      if(DFTRACER_UTILS_BUILD_SHARED
+         AND TARGET zlib-ng
+         AND NOT TARGET dftracer_zlib_shared)
+        get_target_property(_zng_a zlib-ng ALIASED_TARGET)
+        if(NOT _zng_a)
+          set(_zng_a zlib-ng)
+        endif()
+        add_library(dftracer_zlib_shared ALIAS ${_zng_a})
+        if(NOT TARGET dftracer::zlib)
+          add_library(dftracer::zlib ALIAS ${_zng_a})
+        endif()
+      endif()
+      if(DFTRACER_UTILS_BUILD_STATIC
+         AND TARGET zlib-ng-static
+         AND NOT TARGET dftracer_zlib_static)
+        get_target_property(_zngs_a zlib-ng-static ALIASED_TARGET)
+        if(NOT _zngs_a)
+          set(_zngs_a zlib-ng-static)
+        endif()
+        add_library(dftracer_zlib_static ALIAS ${_zngs_a})
+        if(NOT TARGET dftracer::zlibstatic)
+          add_library(dftracer::zlibstatic ALIAS ${_zngs_a})
+        endif()
+        if(NOT TARGET dftracer::zlib)
+          add_library(dftracer::zlib ALIAS ${_zngs_a})
+        endif()
+      endif()
       set(${OUT_VAR}
           TRUE
           PARENT_SCOPE)

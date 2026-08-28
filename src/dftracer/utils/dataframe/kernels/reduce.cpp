@@ -247,6 +247,7 @@ int64_t dftu_series_arg_min(const dftu_series* v) {
         v->type == TypeId::Binary)
         return -1;
     std::int64_t idx = -1;
+    if (dftracer::utils::dataframe::arg_extreme_simd(*v, true, idx)) return idx;
     DF_NUMERIC_DISPATCH(v->type, argextreme_one, *v, true, idx)
     return idx;
 }
@@ -258,6 +259,8 @@ int64_t dftu_series_arg_max(const dftu_series* v) {
         v->type == TypeId::Binary)
         return -1;
     std::int64_t idx = -1;
+    if (dftracer::utils::dataframe::arg_extreme_simd(*v, false, idx))
+        return idx;
     DF_NUMERIC_DISPATCH(v->type, argextreme_one, *v, false, idx)
     return idx;
 }

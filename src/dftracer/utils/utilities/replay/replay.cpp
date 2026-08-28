@@ -1,8 +1,8 @@
-#include <dftracer/utils/call_tree/call_tree.h>
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/coro/when_all.h>
+#include <dftracer/utils/dataframe/containment.h>
 #include <dftracer/utils/json/parser.h>
 #include <dftracer/utils/trace/event.h>
 #include <dftracer/utils/trace/internal/utils.h>
@@ -10,9 +10,15 @@
 #include <dftracer/utils/utilities/reader/trace_reader.h>
 #include <dftracer/utils/utilities/replay/replay.h>
 
+#include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <functional>
+#include <map>
 #include <random>
 #include <thread>
+#include <unordered_set>
+#include <utility>
 
 namespace dftracer::utils::utilities::replay {
 
@@ -521,194 +527,36 @@ TraceExecutor* ReplayEngine::find_executor(const Trace& trace) {
 }
 
 // =============================================================================
-// Call Tree Replay Implementation
+// Call Tree Replay: containment (level/parent) computed locally over the
+// events, so replay keeps every Trace field and needs no separate call-tree
+// subsystem.
 // =============================================================================
 
-ReplayResult ReplayEngine::replay_with_call_tree(
-    const std::string& trace_directory, const std::string& pattern) {
-    ReplayResult result;
-
-    DFTRACER_UTILS_LOG_DEBUG("Starting call tree replay from directory: %s",
-                             trace_directory.c_str());
-
-    auto start_time = std::chrono::steady_clock::now();
-
-    try {
-        // Create CallTree instance using public API
-        dftracer::utils::call_tree::CallTree call_tree;
-
-        // Load trace files into call tree
-        DFTRACER_UTILS_LOG_DEBUG("Loading trace files into call tree...");
-        if (!call_tree.load_from_directory(trace_directory, pattern)) {
-            result.error_messages.push_back(
-                "Failed to load trace files from directory: " +
-                trace_directory);
-            return result;
-        }
-
-        // Generate the call tree structure
-        DFTRACER_UTILS_LOG_DEBUG("Generating call tree structure...");
-        if (!call_tree.generate()) {
-            result.error_messages.push_back(
-                "Failed to generate call tree structure");
-            return result;
-        }
-
-        // Get statistics before replay
-        auto stats = call_tree.get_statistics();
-        result.total_nodes = stats.total_nodes;
-        result.tree_depth = static_cast<std::size_t>(stats.max_depth);
-        result.unique_processes = stats.unique_processes;
-
-        DFTRACER_UTILS_LOG_DEBUG(
-            "Call tree loaded: %zu nodes, depth %d, %zu processes",
-            result.total_nodes, stats.max_depth, result.unique_processes);
-
-        // Replay from the call tree
-        if (config_.hierarchical_replay) {
-            DFTRACER_UTILS_LOG_DEBUG("Performing hierarchical replay...");
-            replay_from_call_tree(call_tree, result);
-        } else {
-            DFTRACER_UTILS_LOG_DEBUG(
-                "Performing linear replay with call tree filtering...");
-            auto nodes = call_tree.get_all_nodes();
-            for (const auto& node : nodes) {
-                replay_call_tree_node(node, result);
-            }
-        }
-
-    } catch (const std::exception& e) {
-        result.error_messages.push_back("Exception during call tree replay: " +
-                                        std::string(e.what()));
+namespace {
+// Files under `dir` whose name ends with `pattern`'s suffix (e.g. "*.pfw.gz").
+std::vector<std::string> glob_trace_files(const std::string& dir,
+                                          const std::string& pattern) {
+    std::string suffix = pattern;
+    if (auto star = suffix.find('*'); star != std::string::npos)
+        suffix = suffix.substr(star + 1);
+    std::vector<std::string> out;
+    std::error_code ec;
+    std::filesystem::recursive_directory_iterator it(dir, ec), end;
+    for (; !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file()) continue;
+        const std::string s = it->path().string();
+        if (suffix.empty() ||
+            (s.size() >= suffix.size() &&
+             s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0))
+            out.push_back(s);
     }
-
-    auto end_time = std::chrono::steady_clock::now();
-    result.total_duration =
-        std::chrono::duration_cast<std::chrono::microseconds>(end_time -
-                                                              start_time);
-
-    DFTRACER_UTILS_LOG_DEBUG(
-        "Call tree replay completed. Total nodes: %zu, Executed: %zu, Failed: "
-        "%zu",
-        result.total_nodes, result.executed_events, result.failed_events);
-
-    return result;
+    std::sort(out.begin(), out.end());
+    return out;
 }
+}  // namespace
 
-void ReplayEngine::replay_from_call_tree(
-    dftracer::utils::call_tree::CallTree& call_tree, ReplayResult& result) {
-    // Get root nodes for each process
-    auto processes = call_tree.get_process_ids();
-
-    for (std::uint32_t pid : processes) {
-        auto threads = call_tree.get_thread_ids(pid);
-
-        for (std::uint32_t tid : threads) {
-            auto root_nodes = call_tree.get_root_nodes(pid, tid);
-
-            DFTRACER_UTILS_LOG_DEBUG(
-                "Processing process %u, thread %u: %zu root nodes", pid, tid,
-                root_nodes.size());
-
-            for (const auto& root_node : root_nodes) {
-                replay_call_tree_node_recursive(root_node, call_tree, result,
-                                                0);
-            }
-        }
-    }
-}
-
-void ReplayEngine::replay_call_tree_node_recursive(
-    const dftracer::utils::call_tree::CallTreeNodeInfo& node,
-    dftracer::utils::call_tree::CallTree& call_tree, ReplayResult& result,
-    int depth) {
-    // Apply depth limits if configured
-    if (config_.max_level >= 0 && depth > config_.max_level) {
-        result.filtered_events++;
-        return;
-    }
-    if (config_.min_level >= 0 && depth < config_.min_level) {
-        result.filtered_events++;
-        return;
-    }
-
-    // Replay the current node
-    replay_call_tree_node(node, result);
-
-    // If respecting call hierarchy, replay children
-    if (config_.respect_call_hierarchy) {
-        for (std::uint64_t child_id : node.children_ids) {
-            auto child_node = call_tree.get_node_by_id(child_id);
-            if (child_node.id != 0) {
-                replay_call_tree_node_recursive(child_node, call_tree, result,
-                                                depth + 1);
-            }
-        }
-    }
-}
-
-void ReplayEngine::replay_call_tree_node(
-    const dftracer::utils::call_tree::CallTreeNodeInfo& node,
-    ReplayResult& result) {
-    // Convert CallTreeNodeInfo to Trace structure
-    Trace trace;
-    trace.func_name = intern_sv(node.name);
-    trace.cat = intern_sv(node.category);
-    trace.time_start = node.start_time_us;
-    trace.duration = static_cast<double>(node.duration_us);
-    trace.time_end = trace.time_start + node.duration_us;
-    trace.type = TraceType::Regular;
-    trace.is_valid = true;
-
-    // Extract args from node
-    const auto& args = node.args;
-
-    auto pid_it = args.find("pid");
-    if (pid_it != args.end()) {
-        try {
-            trace.pid = std::stoull(pid_it->second);
-        } catch (...) {
-            trace.pid = 0;
-        }
-    }
-
-    auto tid_it = args.find("tid");
-    if (tid_it != args.end()) {
-        try {
-            trace.tid = std::stoull(tid_it->second);
-        } catch (...) {
-            trace.tid = 0;
-        }
-    }
-
-    auto fhash_it = args.find("fhash");
-    if (fhash_it != args.end() && !fhash_it->second.empty()) {
-        trace.fhash = intern_sv(fhash_it->second);
-    }
-
-    auto hhash_it = args.find("hhash");
-    if (hhash_it != args.end() && !hhash_it->second.empty()) {
-        trace.hhash = intern_sv(hhash_it->second);
-    }
-
-    auto size_it = args.find("size");
-    if (size_it != args.end()) {
-        try {
-            trace.size = std::stoll(size_it->second);
-        } catch (...) {
-            trace.size = -1;
-        }
-    }
-
-    auto offset_it = args.find("offset");
-    if (offset_it != args.end()) {
-        try {
-            trace.offset = std::stoll(offset_it->second);
-        } catch (...) {
-            trace.offset = -1;
-        }
-    }
-
+// Replay one already-parsed event: statistics, filters, timing, and execution.
+void ReplayEngine::replay_one_trace(const Trace& trace, ReplayResult& result) {
     // Update result statistics
     result.total_events++;
     result.function_counts[trace.func_name]++;
@@ -784,6 +632,134 @@ void ReplayEngine::replay_call_tree_node(
             static_cast<int>(trace.func_name.size()), trace.func_name.data(),
             static_cast<int>(trace.cat.size()), trace.cat.data());
     }
+}
+
+ReplayResult ReplayEngine::replay_with_call_tree(
+    const std::string& trace_directory, const std::string& pattern) {
+    ReplayResult result;
+    auto start_time = std::chrono::steady_clock::now();
+    try {
+        std::vector<std::string> files =
+            glob_trace_files(trace_directory, pattern);
+        if (files.empty()) {
+            result.error_messages.push_back("No trace files in directory: " +
+                                            trace_directory);
+            return result;
+        }
+
+        // Read every event once.
+        std::vector<Trace> events;
+        [&]() -> coro::CoroTask<void> {
+            auto gen = stream_traces(files);
+            while (auto opt = co_await gen.next())
+                events.push_back(std::move(*opt));
+            co_return;
+        }()
+                     .get();
+
+        const std::int64_t n = static_cast<std::int64_t>(events.size());
+        auto start = [&](std::int64_t i) {
+            return static_cast<std::int64_t>(
+                events[static_cast<std::size_t>(i)].time_start);
+        };
+        auto end = [&](std::int64_t i) {
+            const Trace& t = events[static_cast<std::size_t>(i)];
+            return static_cast<std::int64_t>(t.time_start + t.duration);
+        };
+
+        // Lanes by (pid,tid); each is an independent nesting stack.
+        // containment_ walk assigns level (depth) and parent (enclosing event's
+        // index).
+        std::map<std::pair<std::uint64_t, std::uint64_t>,
+                 std::vector<std::int64_t>>
+            lane_map;
+        for (std::int64_t i = 0; i < n; ++i)
+            lane_map[{events[static_cast<std::size_t>(i)].pid,
+                      events[static_cast<std::size_t>(i)].tid}]
+                .push_back(i);
+        std::vector<std::int64_t> level(static_cast<std::size_t>(n), 0);
+        std::vector<std::int64_t> parent(static_cast<std::size_t>(n), -1);
+        for (auto& [key, lane] : lane_map) {
+            (void)key;
+            std::stable_sort(lane.begin(), lane.end(),
+                             [&](std::int64_t a, std::int64_t b) {
+                                 if (start(a) != start(b))
+                                     return start(a) < start(b);
+                                 return end(a) > end(b);
+                             });
+            std::vector<std::pair<std::int64_t, std::int64_t>> stack;
+            dataframe::containment_walk(
+                static_cast<std::int64_t>(lane.size()),
+                [&](std::int64_t k) { return start(lane[k]); },
+                [&](std::int64_t k) { return end(lane[k]); }, std::int64_t(-1),
+                [&](std::int64_t k, std::int64_t lv,
+                    std::int64_t par) -> std::int64_t {
+                    const std::int64_t r = lane[k];
+                    level[static_cast<std::size_t>(r)] = lv;
+                    parent[static_cast<std::size_t>(r)] = par;
+                    return r;
+                },
+                stack);
+        }
+
+        result.total_nodes = static_cast<std::size_t>(n);
+        std::int64_t max_level = 0;
+        std::unordered_set<std::uint64_t> pids;
+        for (std::int64_t i = 0; i < n; ++i) {
+            max_level = std::max(max_level, level[static_cast<std::size_t>(i)]);
+            pids.insert(events[static_cast<std::size_t>(i)].pid);
+        }
+        result.tree_depth = static_cast<std::size_t>(max_level);
+        result.unique_processes = pids.size();
+
+        if (config_.hierarchical_replay) {
+            std::vector<std::vector<std::int64_t>> children(
+                static_cast<std::size_t>(n));
+            std::vector<std::int64_t> roots;
+            for (std::int64_t i = 0; i < n; ++i) {
+                if (parent[static_cast<std::size_t>(i)] < 0)
+                    roots.push_back(i);
+                else
+                    children[static_cast<std::size_t>(
+                                 parent[static_cast<std::size_t>(i)])]
+                        .push_back(i);
+            }
+            auto by_start = [&](std::int64_t a, std::int64_t b) {
+                return start(a) < start(b);
+            };
+            std::stable_sort(roots.begin(), roots.end(), by_start);
+            for (auto& ch : children)
+                std::stable_sort(ch.begin(), ch.end(), by_start);
+            std::function<void(std::int64_t, int)> dfs = [&](std::int64_t idx,
+                                                             int depth) {
+                if (config_.max_level >= 0 && depth > config_.max_level) {
+                    result.filtered_events++;
+                    return;
+                }
+                if (config_.min_level >= 0 && depth < config_.min_level) {
+                    result.filtered_events++;
+                    return;
+                }
+                replay_one_trace(events[static_cast<std::size_t>(idx)], result);
+                if (config_.respect_call_hierarchy)
+                    for (std::int64_t c :
+                         children[static_cast<std::size_t>(idx)])
+                        dfs(c, depth + 1);
+            };
+            for (std::int64_t r : roots) dfs(r, 0);
+        } else {
+            for (std::int64_t i = 0; i < n; ++i)
+                replay_one_trace(events[static_cast<std::size_t>(i)], result);
+        }
+    } catch (const std::exception& e) {
+        result.error_messages.push_back("Exception during call tree replay: " +
+                                        std::string(e.what()));
+    }
+    auto end_time = std::chrono::steady_clock::now();
+    result.total_duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(end_time -
+                                                              start_time);
+    return result;
 }
 
 }  // namespace dftracer::utils::utilities::replay
