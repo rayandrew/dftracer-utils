@@ -90,7 +90,10 @@ dftu_series* dftu_series_cast(const dftu_series* v, dftu_dtype target) {
     const void* sv = v->data->data();
     void* dv = out->data->data();
     std::size_t n = static_cast<std::size_t>(v->length);
-    DF_NUMERIC_DISPATCH(src, dftracer::utils::dataframe::cast_from, sv, target,
-                        dv, n)
+    if (!dftracer::utils::dataframe::cast_simd(static_cast<std::int32_t>(src),
+                                               static_cast<std::int32_t>(dst),
+                                               sv, dv, n))
+        DF_NUMERIC_DISPATCH(src, dftracer::utils::dataframe::cast_from, sv,
+                            target, dv, n)
     return out;
 }

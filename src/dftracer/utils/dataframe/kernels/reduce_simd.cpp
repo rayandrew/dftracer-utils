@@ -65,6 +65,56 @@ void SumF64(const void* p, std::int64_t n, dftu_scalar* out) {
     out->value.d = sum_f64(static_cast<const double*>(p), n);
 }
 
+// First index whose value equals `target`, scanned SIMD (FindFirstTrue gives
+// the earliest set lane in a block), so arg_min/arg_max resolve ties to the
+// earliest index. Two-pass with `minmax`: find the extreme, then its first
+// position.
+template <class T>
+std::int64_t find_first_eq(const T* p, std::int64_t n, T target) {
+    const hn::ScalableTag<T> d;
+    const std::int64_t lanes = static_cast<std::int64_t>(hn::Lanes(d));
+    const auto vt = hn::Set(d, target);
+    std::int64_t i = 0;
+    for (; i + lanes <= n; i += lanes) {
+        const intptr_t lane =
+            hn::FindFirstTrue(d, hn::Eq(hn::LoadU(d, p + i), vt));
+        if (lane >= 0) return i + static_cast<std::int64_t>(lane);
+    }
+    for (; i < n; ++i)
+        if (p[i] == target) return i;
+    return -1;
+}
+
+template <class T>
+std::int64_t arg_extreme(const T* p, std::int64_t n, bool is_min) {
+    if (n <= 0) return -1;
+    const T target = is_min ? minmax<T, false>(p, n) : minmax<T, true>(p, n);
+    return find_first_eq<T>(p, n, target);
+}
+
+void ArgExtI64(const void* p, std::int64_t n, bool is_min, std::int64_t* out) {
+    *out = arg_extreme<std::int64_t>(static_cast<const std::int64_t*>(p), n,
+                                     is_min);
+}
+void ArgExtU64(const void* p, std::int64_t n, bool is_min, std::int64_t* out) {
+    *out = arg_extreme<std::uint64_t>(static_cast<const std::uint64_t*>(p), n,
+                                      is_min);
+}
+void ArgExtF64(const void* p, std::int64_t n, bool is_min, std::int64_t* out) {
+    *out = arg_extreme<double>(static_cast<const double*>(p), n, is_min);
+}
+void ArgExtI32(const void* p, std::int64_t n, bool is_min, std::int64_t* out) {
+    *out = arg_extreme<std::int32_t>(static_cast<const std::int32_t*>(p), n,
+                                     is_min);
+}
+void ArgExtU32(const void* p, std::int64_t n, bool is_min, std::int64_t* out) {
+    *out = arg_extreme<std::uint32_t>(static_cast<const std::uint32_t*>(p), n,
+                                      is_min);
+}
+void ArgExtF32(const void* p, std::int64_t n, bool is_min, std::int64_t* out) {
+    *out = arg_extreme<float>(static_cast<const float*>(p), n, is_min);
+}
+
 template <class T>
 void store_minmax(const void* p, std::int64_t n, bool is_max,
                   dftu_scalar* out) {
@@ -99,6 +149,18 @@ void MinMaxU32(const void* p, std::int64_t n, bool m, dftu_scalar* o) {
 }
 void MinMaxF32(const void* p, std::int64_t n, bool m, dftu_scalar* o) {
     store_minmax<float>(p, n, m, o);
+}
+void MinMaxI16(const void* p, std::int64_t n, bool m, dftu_scalar* o) {
+    store_minmax<std::int16_t>(p, n, m, o);
+}
+void MinMaxU16(const void* p, std::int64_t n, bool m, dftu_scalar* o) {
+    store_minmax<std::uint16_t>(p, n, m, o);
+}
+void MinMaxI8(const void* p, std::int64_t n, bool m, dftu_scalar* o) {
+    store_minmax<std::int8_t>(p, n, m, o);
+}
+void MinMaxU8(const void* p, std::int64_t n, bool m, dftu_scalar* o) {
+    store_minmax<std::uint8_t>(p, n, m, o);
 }
 
 // OR-reduce `(complement ? ~data : data) & (valid ? valid : 0xFF)` over `nfull`
@@ -175,6 +237,16 @@ HWY_EXPORT(MinMaxF64);
 HWY_EXPORT(MinMaxI32);
 HWY_EXPORT(MinMaxU32);
 HWY_EXPORT(MinMaxF32);
+HWY_EXPORT(MinMaxI16);
+HWY_EXPORT(MinMaxU16);
+HWY_EXPORT(MinMaxI8);
+HWY_EXPORT(MinMaxU8);
+HWY_EXPORT(ArgExtI64);
+HWY_EXPORT(ArgExtU64);
+HWY_EXPORT(ArgExtF64);
+HWY_EXPORT(ArgExtI32);
+HWY_EXPORT(ArgExtU32);
+HWY_EXPORT(ArgExtF32);
 HWY_EXPORT(OrMaskBytes);
 HWY_EXPORT(ProdI64);
 HWY_EXPORT(ProdU64);
@@ -215,6 +287,48 @@ bool reduce(const dftu_series& v, std::int32_t op, dftu_scalar& out) {
             return true;
         case TypeId::Float32:
             HWY_DYNAMIC_DISPATCH(MinMaxF32)(p, n, is_max, &out);
+            return true;
+        case TypeId::Int16:
+            HWY_DYNAMIC_DISPATCH(MinMaxI16)(p, n, is_max, &out);
+            return true;
+        case TypeId::Uint16:
+            HWY_DYNAMIC_DISPATCH(MinMaxU16)(p, n, is_max, &out);
+            return true;
+        case TypeId::Int8:
+            HWY_DYNAMIC_DISPATCH(MinMaxI8)(p, n, is_max, &out);
+            return true;
+        case TypeId::Uint8:
+            HWY_DYNAMIC_DISPATCH(MinMaxU8)(p, n, is_max, &out);
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool arg_extreme_simd(const dftu_series& v, bool is_min,
+                      std::int64_t& out_idx) {
+    if (v.encoding != Encoding::Flat || v.validity != nullptr || v.length == 0)
+        return false;
+    const void* p = v.data->data();
+    const std::int64_t n = v.length;
+    switch (v.type) {
+        case TypeId::Int64:
+            HWY_DYNAMIC_DISPATCH(ArgExtI64)(p, n, is_min, &out_idx);
+            return true;
+        case TypeId::Uint64:
+            HWY_DYNAMIC_DISPATCH(ArgExtU64)(p, n, is_min, &out_idx);
+            return true;
+        case TypeId::Float64:
+            HWY_DYNAMIC_DISPATCH(ArgExtF64)(p, n, is_min, &out_idx);
+            return true;
+        case TypeId::Int32:
+            HWY_DYNAMIC_DISPATCH(ArgExtI32)(p, n, is_min, &out_idx);
+            return true;
+        case TypeId::Uint32:
+            HWY_DYNAMIC_DISPATCH(ArgExtU32)(p, n, is_min, &out_idx);
+            return true;
+        case TypeId::Float32:
+            HWY_DYNAMIC_DISPATCH(ArgExtF32)(p, n, is_min, &out_idx);
             return true;
         default:
             return false;

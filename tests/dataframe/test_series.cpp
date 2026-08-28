@@ -1505,6 +1505,61 @@ TEST_SUITE("vec") {
         CHECK(m.columns[1].data<std::int64_t>()[2] == 3);
     }
 
+    TEST_CASE("concat diagonal unions columns, null-fills, promotes numeric") {
+        // Part a: {k(str), n(i64)}; part b: {k(str), r(f64)} - disjoint n/r,
+        // plus a shared numeric column m that is i64 in a and f64 in b.
+        DataFrame a;
+        a.names = {"k", "n", "m"};
+        a.columns.push_back(Series::strings({"x", "y"}));
+        std::vector<std::int64_t> an{1, 2};
+        a.columns.push_back(Series::flat_i64(an.data(), 2));
+        std::vector<std::int64_t> am{10, 20};
+        a.columns.push_back(Series::flat_i64(am.data(), 2));
+        DataFrame b;
+        b.names = {"k", "r", "m"};
+        b.columns.push_back(Series::strings({"z"}));
+        std::vector<double> br{2.5};
+        b.columns.push_back(Series::flat_f64(br.data(), 1));
+        std::vector<double> bm{30.5};
+        b.columns.push_back(Series::flat_f64(bm.data(), 1));
+
+        DataFrame m = dv::concat({&a, &b}, dv::ConcatHow::Diagonal);
+        REQUIRE(m.num_rows() == 3);
+        // Column order = first appearance: k, n, m, r.
+        REQUIRE(m.names == std::vector<std::string>{"k", "n", "m", "r"});
+
+        const std::int64_t ki = m.column_index("k");
+        const std::int64_t ni = m.column_index("n");
+        const std::int64_t mi = m.column_index("m");
+        const std::int64_t ri = m.column_index("r");
+
+        // k present in both.
+        CHECK(m.columns[ki].string_at(2) == "z");
+        // n only in a -> b's row is null.
+        CHECK(m.columns[ni].data<std::int64_t>()[0] == 1);
+        CHECK(m.columns[ni].is_null(2));
+        // r only in b -> a's rows are null.
+        CHECK(m.columns[ri].is_null(0));
+        CHECK(m.columns[ri].data<double>()[2] == doctest::Approx(2.5));
+        // m promoted i64+f64 -> Float64 for all rows.
+        CHECK(m.columns[mi].type() ==
+              dftracer::utils::dataframe::TypeId::Float64);
+        CHECK(m.columns[mi].data<double>()[0] == doctest::Approx(10));
+        CHECK(m.columns[mi].data<double>()[2] == doctest::Approx(30.5));
+    }
+
+    TEST_CASE("concat diagonal throws on an incompatible type clash") {
+        DataFrame a;
+        a.names = {"v"};
+        a.columns.push_back(Series::strings({"s"}));
+        DataFrame b;
+        b.names = {"v"};
+        std::vector<std::int64_t> bn{1};
+        b.columns.push_back(Series::flat_i64(bn.data(), 1));
+        CHECK_THROWS_AS(dv::concat({&a, &b}, dv::ConcatHow::Diagonal),
+                        std::invalid_argument);
+    }
+
     TEST_CASE("elementwise: abs/clip/round/fillna/cumsum") {
         std::vector<std::int64_t> v{-3, 5, -7, 2};
         Series ab = dv::abs(Series::flat_i64(v.data(), 4));

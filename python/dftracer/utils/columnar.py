@@ -22,7 +22,16 @@ string/bool comparisons have no in-memory form; they are filter-only.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Dict, List, NamedTuple, Sequence, Union
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    NamedTuple,
+    Sequence,
+    Union,
+)
 
 from . import dftracer_utils_ext as _ext
 from .dataframe import DataFrame
@@ -64,7 +73,11 @@ _INT64 = 4
 _UINT64 = 8
 _FLOAT32 = 9
 _FLOAT64 = 10
+_BOOL = 0
 _FLOAT_TYPES = (_FLOAT32, _FLOAT64)
+
+# TypeId codes the .cast() method accepts.
+_CAST_CODES = {"int64": _INT64, "uint64": _UINT64, "float64": _FLOAT64, "bool": _BOOL}
 
 # vec::Prim codes (kernels/prims.h). Exposed as methods, e.g. F.dur.ilog2().
 _PRIM_CODES = {
@@ -90,6 +103,29 @@ _RESOLVED_FIELDS = frozenset({"fpath", "cwd", "hostname", "host", "exec", "cmd"}
 # inference, CSE, and lowering, so C/C++ consumers get the same engine.
 _AST_COL, _AST_LIT_I, _AST_LIT_F, _AST_BIN = 0, 1, 2, 3
 _AST_PRIM, _AST_CMP, _AST_LOGICAL, _AST_NOT, _AST_CAST = 4, 5, 6, 7, 8
+_AST_UNARY, _AST_CLIP, _AST_FILLNA = 9, 10, 11
+
+# UnaryOp codes (dataframe/types.h). Exposed as F.dur.floor() etc. The is_*
+# predicates yield a Bool mask; log/sqrt/exp widen to float.
+_UNARY_CODES = {
+    "abs": 0,
+    "round": 1,
+    "floor": 2,
+    "ceil": 3,
+    "log": 4,
+    "sqrt": 5,
+    "exp": 6,
+    "sign": 7,
+    "negate": 8,
+    "trunc": 9,
+    "is_nan": 10,
+    "is_finite": 11,
+    "is_infinite": 12,
+}
+# Unary ops whose result is a Bool mask (not the input's numeric type).
+_UNARY_BOOL = frozenset({"is_nan", "is_finite", "is_infinite"})
+# Unary ops that widen to float.
+_UNARY_FLOAT = frozenset({"log", "sqrt", "exp"})
 # BinaryOp codes (vec::BinaryOp).
 _BIN_OP_CODE = {"+": 0, "-": 1, "*": 2, "/": 3}
 
@@ -104,6 +140,10 @@ _AGG_CODE = {
     "std": 6,
     "skew": 7,
     "kurt": 8,
+    "first": 9,
+    "last": 10,
+    "pct": 11,
+    "hist": 12,
 }
 
 _NOT_PUSHABLE = (
@@ -216,15 +256,60 @@ class Expr:
     def __str__(self) -> str:
         return self._dsl()
 
+    def clip(self, lo: Union[int, float], hi: Union[int, float]) -> "Expr":
+        """Clamp each value to ``[lo, hi]`` (elementwise, SIMD)."""
+        return _Clip(self, lo, hi)
+
+    def cast(self, dtype: "Literal['int64', 'uint64', 'float64', 'bool']") -> "Expr":
+        """Cast each value to ``dtype``."""
+        return _Cast(_CAST_CODES[dtype], self)
+
+    def fillna(self, fill: Union[int, float]) -> "Expr":
+        """Replace nulls with ``fill`` (elementwise)."""
+        return _Fillna(self, fill)
+
+    def is_between(self, lo: Union[int, float], hi: Union[int, float]) -> "Expr":
+        """Bool mask of ``lo <= x <= hi`` (desugars to two compares)."""
+        return (self >= lo) & (self <= hi)
+
+    def quantile(self, q: float) -> "Agg":
+        """A DDSketch quantile at level ``q`` in [0, 1], per group (an
+        :class:`Agg`). Mergeable, so the parallel/distributed path is exact to
+        the sketch's relative accuracy."""
+        return Agg("pct", self, param=q)
+
+    def percentile(self, p: float) -> "Agg":
+        """A percentile ``p`` in [0, 100], per group (numpy-style);
+        ``F.dur.percentile(99)`` is ``F.dur.quantile(0.99)``."""
+        return Agg("pct", self, param=p / 100.0)
+
+    def hist(self) -> "Agg":
+        """The DDSketch histogram per group: a ``list<struct{lo, hi, count}>``
+        column (mergeable, relative-error buckets)."""
+        return Agg("hist", self)
+
     if TYPE_CHECKING:
-        # Prims (dispatched via __getattr__) and aggs (installed by setattr
-        # below), declared so consumers get precise types instead of Any.
+        # Prims/unary math (dispatched via __getattr__) and aggs (installed by
+        # setattr below), declared so consumers get precise types not Any.
         def ilog2(self) -> "Expr": ...
         def bit_width(self) -> "Expr": ...
         def popcount(self) -> "Expr": ...
         def clz(self) -> "Expr": ...
         def ctz(self) -> "Expr": ...
         def mix64(self) -> "Expr": ...
+        def abs(self) -> "Expr": ...
+        def round(self) -> "Expr": ...
+        def floor(self) -> "Expr": ...
+        def ceil(self) -> "Expr": ...
+        def log(self) -> "Expr": ...
+        def sqrt(self) -> "Expr": ...
+        def exp(self) -> "Expr": ...
+        def sign(self) -> "Expr": ...
+        def negate(self) -> "Expr": ...
+        def trunc(self) -> "Expr": ...
+        def is_nan(self) -> "Expr": ...
+        def is_finite(self) -> "Expr": ...
+        def is_infinite(self) -> "Expr": ...
         def sum(self) -> "Agg": ...
         def min(self) -> "Agg": ...
         def max(self) -> "Agg": ...
@@ -233,15 +318,20 @@ class Expr:
         def std(self) -> "Agg": ...
         def skew(self) -> "Agg": ...
         def kurt(self) -> "Agg": ...
+        def first(self) -> "Agg": ...
+        def last(self) -> "Agg": ...
 
     # Runtime prim-method seam; hidden from the checker so unknown attributes
     # are type errors, not Any (the real methods are declared above).
     if not TYPE_CHECKING:
 
         def __getattr__(self, name):
-            # F.dur.ilog2(), F.hhash.mix64(), ... - a unary primitive as a method.
+            # F.dur.ilog2()/F.hhash.mix64() - int bit primitive; F.dur.floor()/
+            # .log()/... - FP unary math. Both are unary methods.
             if name in _PRIM_CODES:
                 return lambda: _Prim(name, self)
+            if name in _UNARY_CODES:
+                return lambda: _Unary(name, self)
             raise AttributeError(name)
 
 
@@ -314,6 +404,31 @@ class _Prim(Expr):
         self.arg = arg
 
 
+class _Unary(Expr):
+    def __init__(self, name: str, arg: Expr) -> None:
+        self.name = name
+        self.arg = arg
+
+
+class _Clip(Expr):
+    def __init__(self, arg: Expr, lo: "Union[int, float]", hi: "Union[int, float]") -> None:
+        self.arg = arg
+        self.lo = lo
+        self.hi = hi
+
+
+class _Cast(Expr):
+    def __init__(self, type_id: int, arg: Expr) -> None:
+        self.type_id = type_id
+        self.arg = arg
+
+
+class _Fillna(Expr):
+    def __init__(self, arg: Expr, fill: "Union[int, float]") -> None:
+        self.arg = arg
+        self.fill = fill
+
+
 class _Cmp(Expr):
     def __init__(self, op: str, left: Expr, rhs: object) -> None:
         if isinstance(rhs, _Lit):
@@ -374,11 +489,11 @@ class _In(Expr):
     def __init__(self, field: str, values: Sequence[Value], negate: bool) -> None:
         self.field = field
         self.values = list(values)
-        self.negate = negate
+        self.negated = negate
 
     def _dsl(self) -> str:
         items = ", ".join(_format_value(v) for v in self.values)
-        kw = "not in" if self.negate else "in"
+        kw = "not in" if self.negated else "in"
         return f"{self.field} {kw} [{items}]"
 
 
@@ -553,8 +668,6 @@ def _import_vec_columns(names: List[str], source: _Source) -> Dict[str, "_ext._S
         arr = source.column(name)
         if isinstance(arr, pa.ChunkedArray):
             arr = arr.combine_chunks()
-        if arr.null_count:
-            raise ValueError(f"columnar column '{name}' has nulls (unsupported)")
         cols[name] = _ext._series_from_arrow(arr)
     return cols
 
@@ -615,6 +728,18 @@ def _emit_ast(expr: Expr, resolve: Callable[[str], int], ast: List[tuple]) -> No
     elif isinstance(expr, _Prim):
         _emit_ast(expr.arg, resolve, ast)
         ast.append((_AST_PRIM, _PRIM_CODES[expr.name]))
+    elif isinstance(expr, _Unary):
+        _emit_ast(expr.arg, resolve, ast)
+        ast.append((_AST_UNARY, _UNARY_CODES[expr.name]))
+    elif isinstance(expr, _Clip):
+        _emit_ast(expr.arg, resolve, ast)
+        ast.append((_AST_CLIP, expr.lo, expr.hi))
+    elif isinstance(expr, _Cast):
+        _emit_ast(expr.arg, resolve, ast)
+        ast.append((_AST_CAST, expr.type_id))
+    elif isinstance(expr, _Fillna):
+        _emit_ast(expr.arg, resolve, ast)
+        ast.append((_AST_FILLNA, expr.fill))
     elif isinstance(expr, _Cmp):
         if isinstance(expr.rhs, bool) or not isinstance(expr.rhs, (int, float)):
             raise TypeError(
@@ -641,13 +766,20 @@ class Agg:
     ``(F.a + F.b).sum()``, ``count()``. Rename the output with ``.alias(name)``.
     Feed to ``DataFrame.group_by(...).agg(...)``."""
 
-    def __init__(self, op: str, value: "Expr | None", out: "str | None" = None) -> None:
+    def __init__(
+        self,
+        op: str,
+        value: "Expr | None",
+        out: "str | None" = None,
+        param: float = 0.0,
+    ) -> None:
         self.op = op
         self.value = value
         self._out = out
+        self.param = param
 
     def alias(self, name: str) -> "Agg":
-        return Agg(self.op, self.value, name)
+        return Agg(self.op, self.value, name, self.param)
 
     @property
     def out(self) -> str:
@@ -656,16 +788,18 @@ class Agg:
         if self.value is None:
             return "count"
         if isinstance(self.value, _Col):
+            if self.op == "pct":
+                return f"p{int(round(self.param * 100))}_{self.value.name}"
             return f"{self.op}_{self.value.name}"
         return self.op
 
     def _spec(self, names: List[str]) -> tuple:
         code = _AGG_CODE[self.op]
         if self.value is None:
-            return (code, None, self.out)
+            return (code, None, self.out, self.param)
         ast: List[tuple] = []
         _emit_ast(self.value, names.index, ast)
-        return (code, ast, self.out)
+        return (code, ast, self.out, self.param)
 
 
 def count() -> Agg:
@@ -682,7 +816,7 @@ def _make_agg_method(op: str) -> "Callable[[Expr], Agg]":
     return method
 
 
-for _op in ("sum", "min", "max", "mean", "var", "std", "skew", "kurt"):
+for _op in ("sum", "min", "max", "mean", "var", "std", "skew", "kurt", "first", "last"):
     setattr(Expr, _op, _make_agg_method(_op))
 
 
@@ -725,7 +859,7 @@ def _collect_columns(expr: Expr) -> List[str]:
         elif isinstance(e, _Bin):
             walk(e.left)
             walk(e.right)
-        elif isinstance(e, _Prim):
+        elif isinstance(e, (_Prim, _Unary, _Clip, _Cast, _Fillna)):
             walk(e.arg)
         elif isinstance(e, _Cmp):
             walk(e.left)
@@ -749,6 +883,15 @@ def _is_float(expr: Expr, cols: Dict[str, "_ext._Series"]) -> bool:
         if expr.op == "/":
             return True
         return _is_float(expr.left, cols) or _is_float(expr.right, cols)
+    if isinstance(expr, _Unary):
+        # log/sqrt/exp widen to float; is_* yield bool; the rest keep the input.
+        if expr.name in _UNARY_BOOL:
+            return False
+        return expr.name in _UNARY_FLOAT or _is_float(expr.arg, cols)
+    if isinstance(expr, (_Clip, _Fillna)):
+        return _is_float(expr.arg, cols)
+    if isinstance(expr, _Cast):
+        return expr.type_id in _FLOAT_TYPES
     if isinstance(expr, (_Prim, _Cmp, _Logical)):
         return False  # primitives -> int64; comparisons/logical -> bool
     raise TypeError(f"unsupported column expression node {type(expr).__name__}")

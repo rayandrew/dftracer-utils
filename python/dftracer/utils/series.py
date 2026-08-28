@@ -18,6 +18,7 @@ from typing import (
     Callable,
     Generic,
     List,
+    Literal,
     Optional,
     Sequence,
     Tuple,
@@ -419,10 +420,14 @@ class Series(_Wrapper["_ext._Series"]):
     def log(self) -> "Series":
         return _wrap(self._native.log())
 
-    def rank(self, method: str = "average", descending: bool = False) -> "Series":
+    def rank(
+        self,
+        method: Literal["average", "min", "dense", "ordinal"] = "average",
+        descending: bool = False,
+    ) -> "Series":
         return _wrap(self._native.rank(_unwrap(method), _unwrap(descending)))
 
-    def rolling(self, window: int, op: str = "sum") -> "Series":
+    def rolling(self, window: int, op: Literal["sum", "mean", "min", "max"] = "sum") -> "Series":
         return _wrap(self._native.rolling(_unwrap(window), _unwrap(op)))
 
     def rolling_var(self, window: int) -> "Series":

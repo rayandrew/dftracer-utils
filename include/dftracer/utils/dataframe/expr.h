@@ -50,6 +50,13 @@ Expr expr_lit(std::int64_t value);
 Expr expr_lit(double value);
 Expr expr_binary(BinaryOp op, const Expr& a, const Expr& b);
 Expr expr_prim(std::int32_t prim, const Expr& a);
+/// Unary numeric op (UnaryOp: abs/round/floor/ceil/log/sqrt/exp/sign/negate/
+/// trunc/is_nan/is_finite/is_infinite).
+Expr expr_unary(std::int32_t op, const Expr& a);
+/// Clamp each value to [lo, hi].
+Expr expr_clip(const Expr& a, dftu_scalar lo, dftu_scalar hi);
+/// Replace nulls (validity bitmap) with a fill value.
+Expr expr_fillna(const Expr& a, dftu_scalar fill);
 Expr expr_cmp(std::int32_t cmp, const Expr& a, dftu_scalar rhs);
 Expr expr_logical(std::int32_t op, const Expr& a, const Expr& b);
 Expr expr_not(const Expr& a);
@@ -151,6 +158,9 @@ DFTU_EXPORT dftu_expr* dftu_expr_lit_f64(double value);
 DFTU_EXPORT dftu_expr* dftu_expr_binary(int32_t op, const dftu_expr* a,
                                         const dftu_expr* b);
 DFTU_EXPORT dftu_expr* dftu_expr_prim(int32_t prim, const dftu_expr* a);
+DFTU_EXPORT dftu_expr* dftu_expr_unary(int32_t op, const dftu_expr* a);
+DFTU_EXPORT dftu_expr* dftu_expr_clip(const dftu_expr* a, dftu_scalar lo,
+                                      dftu_scalar hi);
 DFTU_EXPORT dftu_expr* dftu_expr_cmp(int32_t cmp, const dftu_expr* a,
                                      dftu_scalar rhs);
 DFTU_EXPORT dftu_expr* dftu_expr_logical(int32_t op, const dftu_expr* a,

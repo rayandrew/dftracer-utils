@@ -203,8 +203,7 @@ dftu_series* dftu_series_share(const dftu_series* col) {
 
 dftu_series* dftu_series_slice(const dftu_series* col, int64_t offset,
                                int64_t len) {
-    if (!col || col->encoding != Encoding::Flat || col->validity)
-        return nullptr;
+    if (!col || col->encoding != Encoding::Flat) return nullptr;
     const std::size_t w = byte_width(col->type);
     if (w == 0 || !col->data) return nullptr;  // variable-width unsupported
     if (offset < 0) offset = 0;
@@ -219,5 +218,35 @@ dftu_series* dftu_series_slice(const dftu_series* col, int64_t offset,
     std::uint8_t* base = parent->data() + static_cast<std::size_t>(offset) * w;
     out->data = Buffer::wrap(base, static_cast<std::size_t>(len) * w,
                              [parent](void*) { /* view: parent owns it */ });
+
+    // Carry the validity bitmap so nulls survive into the expression engine.
+    // The bitmap is indexed from bit 0, so a byte-aligned offset can share the
+    // parent buffer at a shifted base; otherwise re-pack the [offset, offset+
+    // len) bits down to bit 0.
+    if (col->validity && len > 0) {
+        const std::uint8_t* src = col->validity->data();
+        std::shared_ptr<Buffer> vbuf;
+        if ((offset & 7) == 0) {
+            auto vparent = col->validity;
+            std::uint8_t* vbase =
+                vparent->data() + static_cast<std::size_t>(offset >> 3);
+            vbuf = Buffer::wrap(vbase, static_cast<std::size_t>((len + 7) / 8),
+                                [vparent](void*) { /* view */ });
+        } else {
+            const std::size_t nbytes = static_cast<std::size_t>((len + 7) / 8);
+            vbuf = Buffer::allocate(nbytes);
+            std::memset(vbuf->data(), 0, nbytes);
+            std::uint8_t* dst = vbuf->data();
+            for (int64_t i = 0; i < len; ++i) {
+                const int64_t p = offset + i;
+                if ((src[p >> 3] >> (p & 7)) & 1u)
+                    dst[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+            }
+        }
+        // Recount nulls in the slice; the parent's count spans the whole
+        // column.
+        out->null_count = count_nulls(vbuf->data(), len);
+        out->validity = std::move(vbuf);
+    }
     return out;
 }

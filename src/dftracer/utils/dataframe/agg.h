@@ -23,10 +23,14 @@ enum class AggOp {
     Min = 2,
     Max = 3,
     Mean = 4,
-    Var = 5,   ///< sample variance
-    Std = 6,   ///< sample standard deviation
-    Skew = 7,  ///< population skewness
-    Kurt = 8   ///< excess (population) kurtosis
+    Var = 5,    ///< sample variance
+    Std = 6,    ///< sample standard deviation
+    Skew = 7,   ///< population skewness
+    Kurt = 8,   ///< excess (population) kurtosis
+    First = 9,  ///< first non-null value in row order (order-independent merge)
+    Last = 10,  ///< last non-null value in row order
+    Pct = 11,   ///< a DDSketch quantile (level in AggSpec::param), mergeable
+    Hist = 12   ///< the DDSketch histogram, a list<struct{lo,hi,count}> column
 };
 
 /// One aggregate: `op` over the value column at index `value_col` in the values
@@ -35,6 +39,7 @@ struct AggSpec {
     AggOp op;
     std::int32_t value_col = -1;
     std::string out;
+    double param = 0.0;  ///< Pct: the quantile level q in [0, 1]
 };
 
 class AggState;  // opaque, mergeable partial group state (defined in agg.cpp)

@@ -38,6 +38,60 @@ def _type(vc):
     return vc.to_arrow().type
 
 
+def test_columnar_unary_math_ops():
+    t = pa.table(
+        {
+            "x": pa.array([-3.2, 4.7, -1.5, 9.9], pa.float64()),
+            "n": pa.array([1, 2, 3, 4], pa.int64()),
+        }
+    )
+    assert _list(F.x.floor().apply(t)) == [-4.0, 4.0, -2.0, 9.0]
+    assert _list(F.x.ceil().apply(t)) == [-3.0, 5.0, -1.0, 10.0]
+    assert _list(F.x.round().apply(t)) == [-3.0, 5.0, -2.0, 10.0]
+    assert _list(F.x.abs().apply(t)) == [3.2, 4.7, 1.5, 9.9]
+    assert _list(F.x.clip(-2.0, 5.0).apply(t)) == [-2.0, 4.7, -1.5, 5.0]
+    # log widens to float; cast changes the column type.
+    assert [round(v, 3) for v in _list(F.n.cast("float64").log().apply(t))] == [
+        0.0,
+        0.693,
+        1.099,
+        1.386,
+    ]
+    assert _list(F.n.cast("float64").apply(t)) == [1.0, 2.0, 3.0, 4.0]
+    # The unary ops fuse into a single evaluated pass with arithmetic.
+    assert _list((F.x.floor() + F.n).apply(t)) == [-3.0, 6.0, 1.0, 13.0]
+    # trunc / sign / negate keep the input type.
+    assert _list(F.x.trunc().apply(t)) == [-3.0, 4.0, -1.0, 9.0]
+    assert _list(F.x.sign().apply(t)) == [-1.0, 1.0, -1.0, 1.0]
+    assert _list(F.x.negate().apply(t)) == [3.2, -4.7, 1.5, -9.9]
+    # sqrt / exp widen to float.
+    p = pa.table({"p": pa.array([1.0, 4.0, 9.0, 16.0], pa.float64())})
+    assert _list(F.p.sqrt().apply(p)) == [1.0, 2.0, 3.0, 4.0]
+    assert [round(v, 3) for v in _list(F.p.cast("float64").exp().apply(p))][0] == round(
+        2.718281828, 3
+    )
+    # is_between desugars to two compares -> Bool mask.
+    assert _list(F.n.is_between(2, 3).apply(t)) == [False, True, True, False]
+
+
+def test_columnar_is_nan_is_finite():
+    inf = float("inf")
+    t = pa.table({"x": pa.array([1.0, float("nan"), inf, 4.0], pa.float64())})
+    assert _list(F.x.is_nan().apply(t)) == [False, True, False, False]
+    assert _list(F.x.is_finite().apply(t)) == [True, False, False, True]
+    assert _list(F.x.is_infinite().apply(t)) == [False, False, True, False]
+
+
+def test_columnar_fillna_null_aware():
+    # A nullable column reaches the engine and fillna closes the nulls.
+    t = pa.table({"v": pa.array([5, None, 7, None], pa.int64())})
+    assert _list(F.v.fillna(-7).apply(t)) == [5, -7, 7, -7]
+    # A math op over the nullable column preserves the null positions.
+    assert _list(F.v.abs().apply(t)) == [5, None, 7, None]
+    # fillna after the op closes them.
+    assert _list(F.v.abs().fillna(0).apply(t)) == [5, 0, 7, 0]
+
+
 def test_columnar_integer_arithmetic():
     out = columnar(F.dur + F.cnt).apply(_table())
     assert _list(out) == [1001, 2002, 3003, 4004]
@@ -660,6 +714,96 @@ def test_vecbatch_group_by_moment_aggs():
         assert abs(row["kurt_dur"] - kurt_p) < 1e-6
 
 
+def test_group_by_first_last():
+    # first/last take the group's first / last value in row order; the merge is
+    # order-independent (min/max global row index), so the parallel path is
+    # exact. Cover both the string-spec form and the F-expression form.
+    from dftracer.utils.columnar import F
+
+    tbl = pa.table(
+        {
+            "cat": ["x", "y", "x", "y", "x"],
+            "v": pa.array([10, 5, 20, 7, 30], pa.int64()),
+        }
+    )
+    batch = _dataframe_from_arrow(tbl)
+
+    got = batch.group_by("cat", "first:v", "last:v").to_pandas().set_index("cat")
+    assert got.loc["x", "first_v"] == 10
+    assert got.loc["x", "last_v"] == 30
+    assert got.loc["y", "first_v"] == 5
+    assert got.loc["y", "last_v"] == 7
+
+    # F-expression form via the two-step .agg().
+    out = (
+        batch.group_by("cat")
+        .agg(F.v.first().alias("f"), F.v.last().alias("l"))
+        .to_pandas()
+        .set_index("cat")
+    )
+    assert out.loc["x", "f"] == 10
+    assert out.loc["x", "l"] == 30
+
+
+def test_group_by_quantile_percentile():
+    # Per-group DDSketch quantiles: F.x.quantile(q) and F.x.percentile(p) land
+    # within the sketch's relative accuracy of the true value. Both the string
+    # spec and the F-expression forms are covered.
+    import numpy as np
+
+    from dftracer.utils.columnar import F
+
+    n = 5000
+    cats = np.array([0, 1] * (n // 2))
+    dur = np.where(cats == 0, np.arange(n) + 1.0, 10.0 * (np.arange(n) + 1.0))
+    tbl = pa.table({"cat": pa.array(cats), "dur": pa.array(dur)})
+    batch = _dataframe_from_arrow(tbl)
+
+    out = (
+        batch.group_by("cat")
+        .agg(F.dur.quantile(0.5).alias("p50"), F.dur.percentile(90).alias("p90"))
+        .to_pandas()
+        .set_index("cat")
+        .sort_index()
+    )
+    for c in (0, 1):
+        s = np.sort(dur[cats == c])
+        true_p50 = s[int(0.5 * len(s))]
+        true_p90 = s[int(0.9 * len(s))]
+        assert out.loc[c, "p50"] == pytest.approx(true_p50, rel=0.03)
+        assert out.loc[c, "p90"] == pytest.approx(true_p90, rel=0.03)
+
+    # percentile(p) == quantile(p/100).
+    a = batch.group_by("cat").agg(F.dur.percentile(99).alias("x")).to_pandas()
+    b = batch.group_by("cat").agg(F.dur.quantile(0.99).alias("x")).to_pandas()
+    assert a["x"].to_list() == pytest.approx(b["x"].to_list())
+
+
+def test_group_by_hist():
+    # F.x.hist() emits a per-group DDSketch histogram as a list<struct> column;
+    # each group's bin counts sum to its row count.
+    from dftracer.utils.columnar import F
+
+    tbl = pa.table(
+        {
+            "cat": ["x"] * 300 + ["y"] * 200,
+            "dur": pa.array(
+                [float(1 + i % 50) for i in range(300)]
+                + [float(1000 + i % 50) for i in range(200)],
+                pa.float64(),
+            ),
+        }
+    )
+    batch = _dataframe_from_arrow(tbl)
+    out = batch.group_by("cat").agg(F.dur.hist().alias("h")).to_arrow()
+    rows = {r["cat"]: r["h"] for r in out.to_pylist()}
+    assert set(rows) == {"x", "y"}
+    for cat, bins in rows.items():
+        assert len(bins) > 0
+        assert set(bins[0].keys()) == {"lo", "hi", "count"}
+        assert sum(b["count"] for b in bins) == (300 if cat == "x" else 200)
+
+
 def test_group_by_agg_expressions():
     # Aggregate over expressions (Polars-style), both the two-step .agg() and the
     # one-shot form, plus legacy strings - all through the CSE group_agg_expr.
@@ -940,10 +1084,12 @@ def test_columnar_rejects_string_literal():
         F.dur + "x"
 
 
-def test_columnar_rejects_nulls():
+def test_columnar_null_aware():
+    # A null-bearing column flows through the engine; the op preserves the null
+    # position, and fillna can close it.
     tbl = pa.table({"dur": pa.array([1, None, 3], pa.int64())})
-    with pytest.raises(ValueError, match="nulls"):
-        columnar(F.dur + lit(1)).apply(tbl)
+    assert _list(columnar(F.dur + lit(1)).apply(tbl)) == [2, None, 4]
+    assert _list(columnar((F.dur + lit(1)).fillna(0)).apply(tbl)) == [2, 0, 4]
 
 
 def test_dataframe_tail_reverse_row_index_sample():

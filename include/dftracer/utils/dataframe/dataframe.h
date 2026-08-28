@@ -25,8 +25,8 @@ class OwnedArrow;
 #endif
 
 /// Aggregate function selector for group_by / group_by_dynamic / pivot. First
-/// and Last are only valid as a pivot collision reducer; the group_by family
-/// rejects them.
+/// and Last take the group's first / last non-null value in row order (an
+/// order-independent merge, so the parallel/distributed path is exact).
 enum class Agg {
     Sum,
     Min,
@@ -38,7 +38,9 @@ enum class Agg {
     Skew,
     Kurt,
     First,
-    Last
+    Last,
+    Pct,
+    Hist
 };
 
 /// Canonical lowercase name of `agg` (the string the C ABI accepts).
@@ -55,6 +57,7 @@ struct GroupAgg {
     Agg op = Agg::Count;
     std::string column;
     std::string out;
+    double param = 0.0;  ///< Pct: the quantile level q in [0, 1]
 };
 
 /// A named ordered set of columns (the RecordBatch / DataChunk analogue). The
@@ -163,7 +166,9 @@ struct DataFrame {
     /// Int64 `time_col` window-start column plus each aggregate.
     DataFrame group_by_dynamic(const std::string& time_col, std::int64_t every,
                                std::int64_t period,
-                               const std::vector<GroupAgg>& aggs) const;
+                               const std::vector<GroupAgg>& aggs,
+                               std::int64_t origin = 0,
+                               bool origin_min = false) const;
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
     /// Export this frame through the Arrow C Data Interface as a struct array
@@ -172,6 +177,13 @@ struct DataFrame {
     /// Include <dftracer/utils/dataframe/arrow.h> for the OwnedArrow
     /// definition.
     OwnedArrow to_arrow() const;
+
+#ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
+    /// Serialize this frame to an Arrow IPC stream (schema message + one record
+    /// batch + EOS) as bytes any Arrow IPC reader can open - no pyarrow. Throws
+    /// std::runtime_error on an encode failure.
+    std::vector<std::uint8_t> to_ipc() const;
+#endif
 
     /// Import a STRUCT Arrow array (viewed through `schema`) as a DataFrame:
     /// one column per struct child, named by its child schema, wrapped zero

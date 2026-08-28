@@ -111,8 +111,11 @@ DataFrame DataFrame::pivot(const std::string& index, const std::string& on,
 }
 DataFrame DataFrame::group_by_dynamic(const std::string& time_col,
                                       std::int64_t every, std::int64_t period,
-                                      const std::vector<GroupAgg>& aggs) const {
-    return dfops::group_by_dynamic(*this, time_col, every, period, aggs);
+                                      const std::vector<GroupAgg>& aggs,
+                                      std::int64_t origin,
+                                      bool origin_min) const {
+    return dfops::group_by_dynamic(*this, time_col, every, period, aggs, origin,
+                                   origin_min);
 }
 
 }  // namespace dftracer::utils::dataframe
