@@ -19,6 +19,14 @@ def _indexed(env):
     return gz
 
 
+def _concat(chunks):
+    """Concatenate native DataFrame stream chunks (each its own schema) into one,
+    Arrow only at the final edge."""
+    chunks = list(chunks)
+    df = chunks[0] if len(chunks) == 1 else chunks[0].concat(*chunks[1:], how="diagonal")
+    return df.to_arrow()
+
+
 def _make_trace(env, name, rows):
     import os
 
@@ -49,6 +57,406 @@ class TestTraceViewer:
             # One string column of the distinct cat values, joined by \x1e.
             assert set(df["set_cat"].iloc[0].split("\x1e")) == {"POSIX", "STDIO"}
 
+    def test_time_bucket_normalize_alignment(self):
+        with Environment(lines=1) as env:
+            # Events start at ts=5000 (arbitrary absolute time); width 700 does
+            # not divide 5000, so alignment changes the first bucket.
+            rows = [
+                {
+                    "ph": "X",
+                    "name": "read",
+                    "cat": "posix",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 5000 + 100 * i,
+                    "dur": 5,
+                    "args": {},
+                }
+                for i in range(20)
+            ]
+            gz = _make_trace(env, "aligned.pfw.gz", rows)
+
+            def first_bucket(normalize_to):
+                tbl = (
+                    TraceViewer(gz)
+                    .group_by("cat")
+                    .time_bucket(700, normalize_to)
+                    .agg("count")
+                    .collect()
+                )
+                buckets = tbl.to_arrow().column("time_bucket").to_pylist()
+                return min(int(b) for b in buckets)
+
+            assert first_bucket(None) == 4900  # floor(5000/700)*700
+            assert first_bucket("min") == 5000  # aligned to the trace min ts
+            assert first_bucket(5000) == 5000  # explicit origin
+
+    def test_phase_selects_aggregated_events(self):
+        with Environment(lines=1) as env:
+            rows = (
+                [
+                    {
+                        "ph": "X",
+                        "name": "read",
+                        "cat": "posix",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": 1000 + i,
+                        "dur": 5,
+                        "args": {},
+                    }
+                    for i in range(5)
+                ]
+                + [
+                    {
+                        "ph": "C",
+                        "name": "cpu",
+                        "cat": "sys",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": 2000 + i,
+                        "args": {"user_pct": 50},
+                    }
+                    for i in range(3)
+                ]
+                + [
+                    {
+                        "ph": "A",
+                        "name": "agg",
+                        "cat": "posix",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": 3000 + i,
+                        "dur": 9,
+                        "args": {},
+                    }
+                    for i in range(4)
+                ]
+                + [
+                    {
+                        "ph": "M",
+                        "name": "process_name",
+                        "pid": 1,
+                        "tid": 1,
+                        "ts": 0,
+                        "args": {"value": "proc%d" % i},
+                    }
+                    for i in range(2)
+                ]
+            )
+            gz = _make_trace(env, "phases.pfw.gz", rows)
+
+            def count(ph):
+                t = TraceViewer(gz).phase(ph).agg("count").collect().to_arrow().to_pydict()
+                return int(t["count"][0]) if t["count"] else 0
+
+            assert count("events") == 5
+            assert count("counters") == 3
+            assert count("aggregated") == 4  # ph="A" folded events, newly selectable
+            assert count("metadata") == 2  # ph="M" metadata, aggregated only when selected
+
+    def test_collect_resolves_resolved_fields_per_event(self):
+        # resolved.fpath/hostname resolve fhash/hhash through the index name
+        # tables (built by the full bloom indexer), as per-event columns.
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "ph": "M",
+                    "name": "FH",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 0,
+                    "args": {"name": "/data/f.dat", "value": "fa"},
+                },
+                {
+                    "ph": "M",
+                    "name": "HH",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 0,
+                    "args": {"name": "node01", "value": "h1"},
+                },
+            ] + [
+                {
+                    "ph": "X",
+                    "name": "read",
+                    "cat": "posix",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 1000 + i,
+                    "dur": 5,
+                    "args": {"ret": i, "fhash": "fa", "hhash": "h1"},
+                }
+                for i in range(3)
+            ]
+            gz = _make_trace(env, "resolved.pfw.gz", rows)
+
+            d = (
+                TraceViewer(gz)
+                .phase("events")
+                .select("name", "resolved.fpath", "r.host")
+                .collect()
+                .to_arrow()
+                .to_pydict()
+            )
+            assert d["resolved.fpath"] == ["/data/f.dat"] * 3
+            assert d["r.host"] == ["node01"] * 3
+
+            # group_by on the resolved alias resolves the same value.
+            gf = (
+                TraceViewer(gz)
+                .phase("events")
+                .group_by("resolved.fpath")
+                .agg("count")
+                .collect()
+                .to_arrow()
+                .to_pydict()
+            )
+            assert gf["file_path"] == ["/data/f.dat"]
+            gh = (
+                TraceViewer(gz)
+                .phase("events")
+                .group_by("resolved.hostname")
+                .agg("count")
+                .collect()
+                .to_arrow()
+                .to_pydict()
+            )
+            assert gh["host_name"] == ["node01"]
+
+    def test_collect_resolves_fhash_hhash_per_event(self):
+        # fhash/hhash are parsed into dedicated fields (not generic args); the
+        # raw row builder must resolve them to their string, matching group_by.
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "ph": "X",
+                    "name": "read",
+                    "cat": "posix",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 1000 + i,
+                    "dur": 5,
+                    "args": {"ret": i, "fhash": "fa", "hhash": "h1"},
+                }
+                for i in range(4)
+            ]
+            gz = _make_trace(env, "hash.pfw.gz", rows)
+
+            sel = TraceViewer(gz).select("name", "fhash", "hhash").collect().to_arrow().to_pydict()
+            assert sel["fhash"] == ["fa"] * 4
+            assert sel["hhash"] == ["h1"] * 4
+
+            # The all-columns collect includes them too.
+            allc = TraceViewer(gz).collect().to_arrow().to_pydict()
+            assert allc["fhash"] == ["fa"] * 4
+            assert allc["hhash"] == ["h1"] * 4
+
+            # And they still resolve as group_by keys (the pre-existing path).
+            g = TraceViewer(gz).group_by("fhash").agg("count").collect().to_arrow().to_pydict()
+            assert g["fhash"] == ["fa"]
+
+    def test_view_var_std_match_dataframe_engine(self):
+        # The View and the dataframe engine must agree on var/std/mean (both the
+        # sample convention over the field-present count, matching pandas).
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "ph": "X",
+                    "name": "read",
+                    "cat": "posix",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 1000 + i,
+                    "dur": 10 + (i * 7) % 50,
+                }
+                for i in range(60)
+            ]
+            gz = _make_trace(env, "parity.pfw.gz", rows)
+            tv = TraceViewer(gz)
+            view = tv.group_by("cat").agg("var:dur", "std:dur", "mean:dur").collect()
+            view = view.to_arrow().to_pydict()
+            eng = (
+                tv.phase("events")
+                .collect()
+                .group_by("cat", "var:dur", "std:dur", "mean:dur")
+                .to_arrow()
+                .to_pydict()
+            )
+            for col in ("var_dur", "std_dur", "mean_dur"):
+                assert abs(view[col][0] - eng[col][0]) < 1e-9, col
+
+    def test_collect_row_query_returns_events(self):
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "ph": "X",
+                    "name": "read",
+                    "cat": "posix",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 1000 + i,
+                    "dur": 5,
+                    "args": {"ret": 100 + i, "path": "/f%d" % i},
+                }
+                for i in range(5)
+            ]
+            gz = _make_trace(env, "events.pfw.gz", rows)
+
+            # A plain collect() (no group_by/agg) returns the matching events
+            # with every column - top-level plus a union of the args.
+            d = TraceViewer(gz).collect().to_arrow().to_pydict()
+            assert {"name", "cat", "pid", "tid", "ts", "dur", "ph", "ret", "path"} <= set(d)
+            assert d["ret"] == [100, 101, 102, 103, 104]
+            assert d["name"] == ["read"] * 5
+            assert d["path"][0] == "/f0"
+
+            # select projects a subset (top-level + arg names).
+            sel = TraceViewer(gz).select("name", "ts", "ret").collect().to_arrow().to_pydict()
+            assert set(sel) == {"name", "ts", "ret"}
+
+            # filter narrows the event rows.
+            assert TraceViewer(gz).filter("ret > 102").collect().num_rows == 2
+
+    def test_call_tree_and_flamegraph(self):
+        # One (pid,tid) lane, nested: A[0,100) > B[10,40) > C[15,25).
+        with Environment(lines=1) as env:
+            rows = [
+                {"ph": "X", "name": n, "cat": "posix", "pid": 1, "tid": 1, "ts": t, "dur": d}
+                for n, t, d in [("A", 0, 100), ("B", 10, 30), ("C", 15, 10)]
+            ]
+            gz = _make_trace(env, "tree.pfw.gz", rows)
+
+            ct = TraceViewer(gz).call_tree().to_arrow().to_pydict()
+            order = {n: i for i, n in enumerate(ct["name"])}
+            assert ct["level"][order["A"]] == 0
+            assert ct["parent_id"][order["A"]] == -1
+            assert ct["level"][order["B"]] == 1
+            assert ct["parent_id"][order["B"]] == order["A"]
+            assert ct["level"][order["C"]] == 2
+            assert ct["parent_id"][order["C"]] == order["B"]
+
+            fg = TraceViewer(gz).flamegraph().to_arrow().to_pydict()
+            node = {n: i for i, n in enumerate(fg["name"])}
+            assert fg["total"][node["A"]] == 100 and fg["self"][node["A"]] == 70
+            assert fg["total"][node["B"]] == 30 and fg["self"][node["B"]] == 20
+            assert fg["total"][node["C"]] == 10 and fg["self"][node["C"]] == 10
+            assert fg["parent"][node["A"]] == node["all"]
+
+            # Composes with builder ops: filter drops B, so the tree recomputes
+            # and C folds directly under A (self 70 -> 90).
+            fg2 = TraceViewer(gz).filter('name != "B"').flamegraph().to_arrow().to_pydict()
+            n2 = {n: i for i, n in enumerate(fg2["name"])}
+            assert "B" not in n2
+            assert fg2["self"][n2["A"]] == 90
+            assert fg2["parent"][n2["C"]] == n2["A"]
+
+    def test_containment_single_fold_both_outputs(self):
+        with Environment(lines=1) as env:
+            rows = [
+                {"ph": "X", "name": n, "cat": "posix", "pid": 1, "tid": 1, "ts": t, "dur": d}
+                for n, t, d in [("A", 0, 100), ("B", 10, 30), ("C", 15, 10)]
+            ]
+            gz = _make_trace(env, "both.pfw.gz", rows)
+
+            # Standalone: one scan, both frames.
+            c = TraceViewer(gz).containment()
+            ct = c.call_tree().to_arrow().to_pydict()
+            fg = c.flamegraph().to_arrow().to_pydict()
+            order = {n: i for i, n in enumerate(ct["name"])}
+            assert ct["parent_id"][order["B"]] == order["A"]
+            node = {n: i for i, n in enumerate(fg["name"])}
+            assert fg["self"][node["A"]] == 70
+
+            # Session single branch: one fold feeds both.
+            with TraceViewer(gz).session() as s:
+                cc = s.view().containment()
+            ct2 = cc.call_tree().to_arrow().to_pydict()
+            fg2 = cc.flamegraph().to_arrow().to_pydict()
+            assert set(ct2["name"]) == {"A", "B", "C"}
+            n2 = {n: i for i, n in enumerate(fg2["name"])}
+            assert fg2["total"][n2["A"]] == 100
+
+    def test_flamegraph_distributed_partials(self):
+        # Two "ranks" own disjoint files; each folds a serialized arena partial,
+        # rank 0 merges them. Result must equal a single pass over both files.
+        with Environment(lines=1) as env:
+            r1 = [
+                {"ph": "X", "name": n, "cat": "c", "pid": 1, "tid": 1, "ts": t, "dur": d}
+                for n, t, d in [("A", 0, 100), ("B", 10, 30)]
+            ]
+            r2 = [
+                {"ph": "X", "name": n, "cat": "c", "pid": 2, "tid": 1, "ts": t, "dur": d}
+                for n, t, d in [("A", 0, 50), ("C", 5, 20)]
+            ]
+            g1 = _make_trace(env, "rank1.pfw.gz", r1)
+            g2 = _make_trace(env, "rank2.pfw.gz", r2)
+            p1 = TraceViewer(g1).flamegraph_partial()
+            p2 = TraceViewer(g2).flamegraph_partial()
+            assert isinstance(p1, bytes) and len(p1) > 0
+            merged = TraceViewer.merge_flamegraph_partials([p1, p2]).to_arrow().to_pydict()
+            single = TraceViewer([g1, g2]).flamegraph().to_arrow().to_pydict()
+
+            def totals(d):
+                return {n: d["total"][i] for i, n in enumerate(d["name"])}
+
+            assert totals(merged) == totals(single)
+            # A folds across both ranks: 100 + 50.
+            assert totals(merged)["A"] == 150
+
+    def test_session_fuses_flamegraph_with_agg(self):
+        # One scan feeds a group_by agg AND a flamegraph branch.
+        with Environment(lines=1) as env:
+            rows = [
+                {"ph": "X", "name": n, "cat": "posix", "pid": 1, "tid": 1, "ts": t, "dur": d}
+                for n, t, d in [("A", 0, 100), ("B", 10, 30), ("C", 15, 10)]
+            ]
+            gz = _make_trace(env, "sess_tree.pfw.gz", rows)
+            with TraceViewer(gz).session() as s:
+                agg = s.view().group_by("cat").agg("count").collect()
+                fg = s.view().flamegraph()
+                ct = s.view().call_tree()
+            adict = agg.result().to_arrow().to_pydict()
+            assert int(adict["count"][0]) == 3
+            fdict = fg.result().to_arrow().to_pydict()
+            node = {n: i for i, n in enumerate(fdict["name"])}
+            assert fdict["total"][node["A"]] == 100 and fdict["self"][node["A"]] == 70
+            assert fdict["total"][node["B"]] == 30
+            cdict = ct.result().to_arrow().to_pydict()
+            order = {n: i for i, n in enumerate(cdict["name"])}
+            assert cdict["parent_id"][order["B"]] == order["A"]
+            assert cdict["level"][order["C"]] == 2
+
+    def test_containment_schemaless_arg_field(self):
+        # Lanes and interval come from arg fields, not the schema: partition by
+        # arg "rank", interval from arg "begin"/"span".
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "ph": "X",
+                    "name": n,
+                    "cat": "c",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 0,
+                    "dur": 1,
+                    "args": {"rank": r, "begin": b, "span": s},
+                }
+                for n, r, b, s in [("A", 0, 0, 100), ("B", 0, 10, 30), ("X", 1, 0, 100)]
+            ]
+            gz = _make_trace(env, "argtree.pfw.gz", rows)
+            ct = (
+                TraceViewer(gz)
+                .call_tree(partition=["rank"], ts="begin", dur="span")
+                .to_arrow()
+                .to_pydict()
+            )
+            order = {n: i for i, n in enumerate(ct["name"])}
+            # B nests under A (same rank lane); X is a root in its own rank lane.
+            assert ct["parent_id"][order["B"]] == order["A"]
+            assert ct["level"][order["B"]] == 1
+            assert ct["parent_id"][order["X"]] == -1
+
     def test_statistics_summary(self):
         with Environment(lines=150) as env:
             gz = _indexed(env)
@@ -76,7 +484,7 @@ class TestTraceViewer:
 
             def stdio_count():
                 v = stdio_view()
-                return sum(pa.record_batch(c).num_rows for c in v.stream(batch_size=128))
+                return sum(c.num_rows for c in v.stream(batch_size=128))
 
             base = stdio_count()
             base_stats = stdio_view().statistics()
@@ -102,21 +510,20 @@ class TestTraceViewer:
             assert stdio_count() == base
             assert stdio_view().statistics()["duration_count"] == base_stats["duration_count"]
 
-    def test_stream_yields_all_events_as_arrow(self):
+    def test_stream_yields_all_events_as_dataframes(self):
         with Environment(lines=500) as env:
             gz = _indexed(env)
-            batches = [pa.record_batch(c) for c in TraceViewer(gz).stream(batch_size=128)]
-            assert batches, "stream produced no batches"
-            tbl = pa.Table.from_batches(batches)
+            chunks = list(TraceViewer(gz).stream(batch_size=128))
+            assert chunks, "stream produced no chunks"
+            # Each chunk is a native DataFrame; concat natively, Arrow at edge.
+            tbl = _concat(chunks)
             assert tbl.num_rows == 500
             assert {"name", "cat", "ts", "dur"}.issubset(tbl.column_names)
 
     def test_stream_respects_filter(self):
         with Environment(lines=400) as env:
             gz = _indexed(env)
-            tbl = pa.Table.from_batches(
-                [pa.record_batch(c) for c in TraceViewer(gz).filter('cat == "STDIO"').stream()]
-            )
+            tbl = _concat(TraceViewer(gz).filter('cat == "STDIO"').stream())
             assert 0 < tbl.num_rows < 400
             assert set(tbl.column("cat").to_pylist()) == {"STDIO"}
 
@@ -151,25 +558,20 @@ class TestTraceViewer:
     def test_stream_select_pushdown(self):
         with Environment(lines=300) as env:
             gz = _indexed(env)
-            tbl = pa.Table.from_batches(
-                [pa.record_batch(c) for c in TraceViewer(gz).select("ts", "dur").stream()]
-            )
+            tbl = _concat(TraceViewer(gz).select("ts", "dur").stream())
             assert set(tbl.column_names) == {"ts", "dur"}
             assert tbl.num_rows == 300
 
-    def test_stream_dictionary_encoding(self):
+    def test_stream_small_batches_cover_all_rows(self):
         with Environment(lines=600) as env:
             gz = _indexed(env)
-            # Small batches force multiple per-batch dictionaries to unify.
-            tbl = pa.Table.from_batches(
-                [pa.record_batch(c) for c in TraceViewer(gz).stream(batch_size=64, dict=True)]
-            )
-            assert pa.types.is_dictionary(tbl.schema.field("cat").type)
-            assert tbl.num_rows == 600
-            plain = pa.Table.from_batches(
-                [pa.record_batch(c) for c in TraceViewer(gz).stream(dict=False)]
-            )
-            assert pa.types.is_string(plain.schema.field("cat").type)
+            # Small batches split the scan into several chunks; every row is
+            # covered exactly once across them.
+            chunks = list(TraceViewer(gz).stream(batch_size=64))
+            assert len(chunks) > 1
+            assert sum(c.num_rows for c in chunks) == 600
+            tbl = _concat(chunks)
+            assert pa.types.is_string(tbl.schema.field("cat").type)
 
     def test_aggregate_partial_merge_matches_collect(self):
         """Distributed partial+merge equals a single collect (incl. mean/std)."""
@@ -535,9 +937,7 @@ class TestTraceViewer:
         us = pa.table(tv.time_unit(TimeUnit.US).group_by("cat").agg("mean:dur").collect())
         assert us.column("mean_dur").to_pylist()[0] == 2_000_000.0  # 2 s in us
 
-        strm = pa.Table.from_batches(
-            [pa.record_batch(c) for c in tv.time_unit("us").select("ts", "dur").stream()]
-        )
+        strm = _concat(tv.time_unit("us").select("ts", "dur").stream())
         durs = [x for x in strm.column("dur").to_pylist() if x is not None]
         assert set(durs) == {2_000_000} and len(durs) == 50
 

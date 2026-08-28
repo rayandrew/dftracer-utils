@@ -35,11 +35,6 @@
 #include <dftracer/utils/utilities/fileio/parallel/merge.h>
 #endif
 
-#ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
-#include <dftracer/utils/utilities/common/arrow/column_builder.h>
-#include <dftracer/utils/utilities/common/arrow/ipc_writer.h>
-#endif
-
 using namespace dftracer::utils;
 using namespace dftracer::utils::utilities;
 using namespace dftracer::utils::trace;
@@ -81,7 +76,9 @@ class ViewArgParse : public cli::ArgParse {
     std::uint64_t time_bucket = 0;
     std::uint64_t occ_cell = 0;
     bool counters = false;
-    std::string format;
+    bool call_tree = false;
+    bool flamegraph = false;
+    std::string ct_partition;
     std::string phase;
     bool merge = false;
     bool no_index = false;
@@ -202,9 +199,21 @@ class ViewArgParse : public cli::ArgParse {
             .flag();
 
         parser()
-            .add_argument("--format")
-            .help("Aggregate output format: text (default) or arrow (IPC file)")
-            .default_value<std::string>("text");
+            .add_argument("--call-tree")
+            .help("Containment call tree: events plus level/parent_id per lane")
+            .flag();
+        parser()
+            .add_argument("--flamegraph")
+            .help(
+                "Folded call tree (flamegraph) node frame; distributes under "
+                "MPI via arena partials")
+            .flag();
+        parser()
+            .add_argument("--ct-partition")
+            .help(
+                "Comma-separated lane keys for --call-tree/--flamegraph "
+                "(default pid,tid)")
+            .default_value<std::string>("pid,tid");
 
         parser()
             .add_argument("--phase")
@@ -306,7 +315,9 @@ class ViewArgParse : public cli::ArgParse {
         occ_cell = static_cast<std::uint64_t>(
             std::llround(cli::get_duration_arg(parser(), "--occ-cell", 1e6)));
         counters = parser().get<bool>("--counters");
-        format = parser().get<std::string>("--format");
+        call_tree = parser().get<bool>("--call-tree");
+        flamegraph = parser().get<bool>("--flamegraph");
+        ct_partition = parser().get<std::string>("--ct-partition");
         phase = parser().get<std::string>("--phase");
         merge = parser().get<bool>("--merge");
         no_index = parser().get<bool>("--no-index");
@@ -537,83 +548,6 @@ static void print_table(FILE* out, const dataframe::DataFrame& table) {
     }
 }
 
-// Emit a collect() result. Text goes to `out`; "arrow" writes an Arrow IPC file
-// to `path`, carrying each column with its native type (String, Int64, Uint64,
-// Double). Replaces the aggregator's Arrow output.
-static coro::CoroTask<int> emit_table(const dataframe::DataFrame& table,
-                                      bool arrow, const std::string& path,
-                                      FILE* out) {
-#ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
-    if (arrow) {
-        using common::arrow::ColumnType;
-        using common::arrow::IpcWriter;
-        using common::arrow::RecordBatchBuilder;
-        std::vector<common::arrow::ColumnSpec> specs;
-        std::vector<std::size_t> cols;  // table column index per builder column
-        for (std::size_t c = 0; c < table.columns.size(); ++c) {
-            ColumnType ct;
-            switch (table.columns[c].type()) {
-                case dataframe::TypeId::String:
-                case dataframe::TypeId::Binary:
-                    ct = ColumnType::STRING;
-                    break;
-                case dataframe::TypeId::Int64:
-                    ct = ColumnType::INT64;
-                    break;
-                case dataframe::TypeId::Uint64:
-                    ct = ColumnType::UINT64;
-                    break;
-                default:
-                    if (!cli_emittable(table.columns[c].type())) continue;
-                    ct = ColumnType::DOUBLE;
-            }
-            specs.push_back({table.names[c], ct});
-            cols.push_back(c);
-        }
-        RecordBatchBuilder builder;
-        builder.declare_schema(specs);
-        const std::int64_t nrows = table.num_rows();
-        for (std::int64_t r = 0; r < nrows; ++r) {
-            for (std::size_t k = 0; k < cols.size(); ++k) {
-                const dataframe::Series& col = table.columns[cols[k]];
-                switch (specs[k].type) {
-                    case ColumnType::STRING:
-                        builder.append_string(k, std::string(col.string_at(r)));
-                        break;
-                    case ColumnType::INT64:
-                        builder.append_int64(k, col.data<std::int64_t>()[r]);
-                        break;
-                    case ColumnType::UINT64:
-                        builder.append_uint64(k, col.data<std::uint64_t>()[r]);
-                        break;
-                    default:
-                        builder.append_double(k, col.data<double>()[r]);
-                }
-            }
-            builder.end_row();
-        }
-        auto batch = builder.finish();
-        IpcWriter writer;
-        if (co_await writer.open(path) != 0) {
-            DFTRACER_UTILS_LOG_ERROR("Failed to open Arrow output: %s",
-                                     path.c_str());
-            co_return 1;
-        }
-        if (co_await writer.write_batch(batch) != 0) co_return 1;
-        co_return co_await writer.close();
-    }
-#else
-    (void)path;
-    if (arrow) {
-        DFTRACER_UTILS_LOG_ERROR(
-            "%s", "Arrow output requires a build with Arrow IPC enabled.");
-        co_return 1;
-    }
-#endif
-    print_table(out, table);
-    co_return 0;
-}
-
 // Emit the three collect_typed() families to `out` as NDJSON rows, each family
 // preceded by a header on stderr so the sections stay identifiable when the
 // data stream is redirected.
@@ -749,20 +683,24 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
     if (!parse_agg(cli->agg, agg_specs)) co_return 1;
     const std::uint64_t time_bucket = cli->time_bucket;
     const bool counters = cli->counters;
+    const bool ct_mode = cli->call_tree;
+    const bool fg_mode = cli->flamegraph;
+    const std::vector<std::string> ct_partition = split_csv(cli->ct_partition);
     const bool aggregate = !group_keys.empty() || !agg_specs.empty() ||
                            counters || time_bucket > 0 || cli->agg_numeric_args;
     const bool typed_mode = cli->collect_typed;
     const bool mv_mode = cli->materialize;
-    const bool arrow = cli->format == "arrow";
     const bool merge = cli->merge;
     const bool no_index = cli->no_index;
     const bool verify = cli->verify;
     // One knob: gzip member size == checkpoint size (a checkpoint is a member).
     const std::uint64_t member_size = checkpoint_size;
     // Event export to a file -> compressed, indexed trace via the parallel
-    // writer. Aggregate/counter tables and stdout keep their own paths.
-    const bool write_trace = !arrow && !aggregate && !counters && !typed_mode &&
-                             !mv_mode && !cli->output.empty();
+    // writer. Aggregate/counter/containment tables and stdout keep their own
+    // paths.
+    const bool write_trace = !aggregate && !counters && !typed_mode &&
+                             !mv_mode && !ct_mode && !fg_mode &&
+                             !cli->output.empty();
 
     if (mv_mode && !aggregate) {
         DFTRACER_UTILS_LOG_ERROR(
@@ -777,6 +715,10 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
             view_phase = Phase::Events;
         else if (cli->phase == "counters")
             view_phase = Phase::Counters;
+        else if (cli->phase == "aggregated")
+            view_phase = Phase::Aggregated;
+        else if (cli->phase == "metadata")
+            view_phase = Phase::Metadata;
         else if (cli->phase == "any")
             view_phase = Phase::Any;
         else {
@@ -787,11 +729,12 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         }
     }
 
-    if (!view.query && !aggregate && !merge && !typed_mode && !mv_mode) {
+    if (!view.query && !aggregate && !merge && !typed_mode && !mv_mode &&
+        !ct_mode && !fg_mode) {
         DFTRACER_UTILS_LOG_ERROR(
             "%s",
-            "Nothing to do. Use --preset, --recipe, --query, --merge, or "
-            "--group-by/--agg.");
+            "Nothing to do. Use --preset, --recipe, --query, --merge, "
+            "--call-tree, --flamegraph, or --group-by/--agg.");
         co_return 1;
     }
 
@@ -908,7 +851,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
     // The trace-writing path owns its output through the parallel writer; only
     // the FileSink path (stdout / plain non-merge export) opens a FILE here.
     FILE* out_file = nullptr;
-    if (!final_output.empty() && !arrow && !write_trace) {
+    if (!final_output.empty() && !write_trace) {
         out_file = std::fopen(final_output.c_str(), "w");
         if (!out_file) {
             DFTRACER_UTILS_LOG_ERROR("Failed to open output file: %s",
@@ -968,7 +911,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
             // and emits (counters -> ph="C" events; aggregate -> collect
             // table). Only these reductions distribute; other modes fall
             // through to rank 0 (single-node) below.
-            if ((counters || aggregate) && transport.size() > 1 &&
+            if ((counters || aggregate || fg_mode) && transport.size() > 1 &&
                 shard_set_root.empty()) {
                 auto shard =
                     shard_files(files, transport.rank(), transport.size());
@@ -984,9 +927,9 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                 std::string rank_idx =
                     idx_base + "/rank_" + std::to_string(transport.rank());
                 if (!no_auto_index) {
-                    if (counters) {
-                        // The tier is EVENT-only; a counter partial scans
-                        // regardless, so build only the base index.
+                    if (counters || fg_mode) {
+                        // Event-only scans (counter/flamegraph partials) need
+                        // only the base index, not the aggregation tier.
                         co_await indexing::ensure_indexes_fresh(&ctx, "", shard,
                                                                 rank_idx);
                     } else {
@@ -1016,19 +959,26 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                 }
                 View shard_view =
                     configure(View::from_files(std::move(shard_files_vf)));
-                std::string partial = co_await shard_view.aggregate_partial();
+                std::string partial =
+                    fg_mode
+                        ? co_await shard_view.flamegraph_partial(ct_partition)
+                        : co_await shard_view.aggregate_partial();
                 auto partials = transport.all_gather(partial);
                 if (transport.rank() == 0) {
                     std::vector<std::string_view> pv(partials.begin(),
                                                      partials.end());
                     View merger = configure(View::from_files({}));
-                    if (counters) {
+                    if (fg_mode) {
+                        dataframe::DataFrame table =
+                            View::merge_flamegraph_partials(pv);
+                        print_table(out_target, table);
+                        stats.events_matched = table.num_rows();
+                    } else if (counters) {
                         stats = merger.merge_counter_partials(pv, sink);
                     } else {
                         dataframe::DataFrame table =
                             merger.merge_partials_to_table(pv);
-                        co_await emit_table(table, arrow, output_path,
-                                            out_target);
+                        print_table(out_target, table);
                         stats.events_matched = table.num_rows();
                     }
 
@@ -1113,7 +1063,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                 } else {
                     dataframe::DataFrame table =
                         co_await sv.aggregate(configure);
-                    co_await emit_table(table, arrow, output_path, out_target);
+                    print_table(out_target, table);
                     stats.events_matched = table.num_rows();
                 }
                 co_return;
@@ -1135,7 +1085,13 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                                                         index_dir);
             }
 
-            if (mv_mode) {
+            if (ct_mode || fg_mode) {
+                dataframe::DataFrame table =
+                    fg_mode ? co_await v.flamegraph(ct_partition)
+                            : co_await v.call_tree(ct_partition);
+                print_table(out_target, table);
+                stats.events_matched = table.num_rows();
+            } else if (mv_mode) {
                 // Build-only terminal: compute the aggregation and persist it
                 // as a rollup so a later matching query hits the fast path.
                 stats = co_await v.materialize().run();
@@ -1151,7 +1107,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                 stats = co_await v.export_counters(sink);
             } else if (aggregate) {
                 dataframe::DataFrame table = co_await collect_batch(v);
-                co_await emit_table(table, arrow, output_path, out_target);
+                print_table(out_target, table);
                 stats.events_matched = table.num_rows();
             } else if (write_trace) {
                 // Fused: export_trace builds the index during the write (no

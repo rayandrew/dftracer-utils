@@ -33,13 +33,18 @@
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/string_arena.h>
+#include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/json/parser.h>
 #include <dftracer/utils/python/arrow_helpers.h>
 #include <dftracer/utils/python/batch_byte_size.h>
 #include <dftracer/utils/python/streaming_iterator.h>
+#include <dftracer/utils/trace/views/fold_event.h>
+#include <dftracer/utils/trace/views/native_row_fold.h>
+#include <dftracer/utils/trace/views/view_resolver.h>
 #include <dftracer/utils/utilities/common/arrow/column_builder.h>
 #include <dftracer/utils/utilities/reader/internal/arrow_row_builder.h>
+#include <simdjson.h>
 #endif
 
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
@@ -47,6 +52,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -116,12 +122,15 @@ struct ViewerPlan {
     std::vector<GroupKey> group_by;
     std::vector<AggSpec> agg;
     std::uint64_t time_bucket_us = 0;
+    std::uint64_t bucket_origin_us = 0;
+    bool bucket_origin_min = false;
     std::uint64_t occ_cell_us = 0;
     std::optional<std::pair<double, double>> time_range;
     std::vector<std::string> select;
     std::uint64_t memory_budget = 0;
     bool auto_spill = false;
     bool auto_numeric = false;
+    std::vector<AggSpec> numeric_arg_aggs;  // reductions per discovered arg
     double time_scale = 1.0;  // ts/dur normalization factor (1.0 = none)
     std::uint64_t limit = 0;
     std::uint64_t offset = 0;
@@ -206,11 +215,14 @@ bool parse_group_key(const char* s, GroupKey& out) {
         out = GroupKey::io_cat();
     } else if (t == "acc_pat") {
         out = GroupKey::acc_pat();
-    } else if (t == "file_path") {
+    } else if (t == "file_path" || t == "resolved.fpath" || t == "r.fpath") {
+        // resolved.fpath/hostname resolve fhash/hhash, so group_by resolves the
+        // same aliases as select().
         out = GroupKey::file_path();
     } else if (t == "file_name") {
         out = GroupKey::file_name();
-    } else if (t == "host_name") {
+    } else if (t == "host_name" || t == "resolved.hostname" ||
+               t == "r.hostname" || t == "resolved.host" || t == "r.host") {
         out = GroupKey::host_name();
     } else if (t == "rank") {
         out = GroupKey::rank();
@@ -315,7 +327,14 @@ View build_view_from_data(const std::vector<std::string>& file_paths,
     }
     if (p.phase >= 0) v = v.phase(static_cast<Phase>(p.phase));
     if (p.time_scale != 1.0) v = v.time_scale(p.time_scale);
-    if (p.time_bucket_us) v = v.time_bucket(p.time_bucket_us);
+    if (p.time_bucket_us) {
+        if (p.bucket_origin_min)
+            v = v.time_bucket_min(p.time_bucket_us);
+        else if (p.bucket_origin_us)
+            v = v.time_bucket(p.time_bucket_us, p.bucket_origin_us);
+        else
+            v = v.time_bucket(p.time_bucket_us);
+    }
     if (p.occ_cell_us) v = v.occ_cell(p.occ_cell_us);
     if (p.time_range)
         v = v.time_range(p.time_range->first, p.time_range->second);
@@ -324,7 +343,10 @@ View build_view_from_data(const std::vector<std::string>& file_paths,
     if (aggregate) {
         if (!p.group_by.empty()) v = v.group_by(p.group_by);
         if (!p.agg.empty()) v = v.agg(p.agg);
-        if (p.auto_numeric) v = v.agg_numeric_args();
+        if (p.auto_numeric)
+            v = p.numeric_arg_aggs.empty()
+                    ? v.agg_numeric_args()
+                    : v.agg_numeric_args(p.numeric_arg_aggs);
         if (!p.select.empty()) v = v.select(p.select);
         if (!p.sort_col.empty()) v = v.sort_by(p.sort_col, p.sort_desc);
         if (!p.topk_col.empty())
@@ -499,11 +521,16 @@ PyObject* tv_phase(TraceViewerObject* self, PyObject* arg) {
         ph = (int)Phase::Events;
     else if (t == "counters")
         ph = (int)Phase::Counters;
+    else if (t == "aggregated")
+        ph = (int)Phase::Aggregated;
+    else if (t == "metadata")
+        ph = (int)Phase::Metadata;
     else if (t == "any")
         ph = (int)Phase::Any;
     else {
         PyErr_SetString(PyExc_ValueError,
-                        "phase must be 'events', 'counters', or 'any'");
+                        "phase must be 'events', 'counters', 'aggregated', "
+                        "'metadata', or 'any'");
         return nullptr;
     }
     TraceViewerObject* c = clone(self);
@@ -550,12 +577,45 @@ PyObject* tv_agg(TraceViewerObject* self, PyObject* args) {
     return (PyObject*)c;
 }
 
-PyObject* tv_time_bucket(TraceViewerObject* self, PyObject* arg) {
-    long long us = PyLong_AsLongLong(arg);
-    if (us < 0 && PyErr_Occurred()) return nullptr;
+PyObject* tv_time_bucket(TraceViewerObject* self, PyObject* args,
+                         PyObject* kwds) {
+    long long us = 0;
+    PyObject* normalize_to = nullptr;  // None, an int origin, or "min"
+    static const char* kwlist[] = {"interval_us", "normalize_to", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "L|O", const_cast<char**>(kwlist), &us, &normalize_to))
+        return nullptr;
+    if (us < 0) {
+        PyErr_SetString(PyExc_ValueError, "interval_us must be >= 0");
+        return nullptr;
+    }
+    std::uint64_t origin = 0;
+    bool origin_min = false;
+    if (normalize_to && normalize_to != Py_None) {
+        if (PyUnicode_Check(normalize_to)) {
+            const char* s = PyUnicode_AsUTF8(normalize_to);
+            if (!s) return nullptr;
+            if (std::strcmp(s, "min") != 0) {
+                PyErr_SetString(PyExc_ValueError,
+                                "normalize_to must be an int origin or 'min'");
+                return nullptr;
+            }
+            origin_min = true;
+        } else {
+            const long long o = PyLong_AsLongLong(normalize_to);
+            if (o < 0 && PyErr_Occurred()) return nullptr;
+            if (o < 0) {
+                PyErr_SetString(PyExc_ValueError, "normalize_to must be >= 0");
+                return nullptr;
+            }
+            origin = static_cast<std::uint64_t>(o);
+        }
+    }
     TraceViewerObject* c = clone(self);
     if (!c) return nullptr;
-    plan_of(c)->time_bucket_us = (std::uint64_t)us;
+    plan_of(c)->time_bucket_us = static_cast<std::uint64_t>(us);
+    plan_of(c)->bucket_origin_us = origin;
+    plan_of(c)->bucket_origin_min = origin_min;
     return (PyObject*)c;
 }
 
@@ -579,10 +639,10 @@ PyObject* tv_time_unit(TraceViewerObject* self, PyObject* arg) {
         target = dftracer::utils::trace::TimeMetric::US;
     else if (t == "ms")
         target = dftracer::utils::trace::TimeMetric::MS;
-    else if (t == "sec")
+    else if (t == "sec" || t == "s")
         target = dftracer::utils::trace::TimeMetric::SEC;
     else {
-        PyErr_SetString(PyExc_ValueError, "time_unit must be ns/us/ms/sec");
+        PyErr_SetString(PyExc_ValueError, "time_unit must be ns/us/ms/sec/s");
         return nullptr;
     }
     // Source unit read once from the first file (assumes the run is uniform).
@@ -670,10 +730,25 @@ PyObject* tv_auto_spill(TraceViewerObject* self, PyObject*) {
     return (PyObject*)c;
 }
 
-PyObject* tv_auto_numeric_args(TraceViewerObject* self, PyObject*) {
+PyObject* tv_auto_numeric_args(TraceViewerObject* self, PyObject* args) {
+    // Optional op names (e.g. "sum", "max", "mean") apply that reduction to
+    // every discovered numeric arg; no args keeps the legacy bare-mean column.
+    std::vector<AggSpec> reductions;
+    const Py_ssize_t n = PyTuple_Size(args);
+    for (Py_ssize_t i = 0; i < n; ++i) {
+        const char* s = as_utf8(PyTuple_GetItem(args, i));
+        if (!s) return nullptr;
+        AggSpec spec;
+        if (!parse_agg_spec(s, spec)) {
+            PyErr_Format(PyExc_ValueError, "unknown agg spec: %s", s);
+            return nullptr;
+        }
+        reductions.push_back(spec);
+    }
     TraceViewerObject* c = clone_agg(self);
     if (!c) return nullptr;
     plan_of(c)->auto_numeric = true;
+    plan_of(c)->numeric_arg_aggs = std::move(reductions);
     return (PyObject*)c;
 }
 
@@ -729,21 +804,6 @@ PyObject* tv_offset(TraceViewerObject* self, PyObject* arg) {
 }
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
-// dataframe::DataFrame -> a 1-batch pyarrow Table. The DataFrame is a struct
-// (columns as fields), so it exports zero-copy through the Arrow C Data
-// Interface: no per-cell rebuild, and every column type (incl. list<struct>
-// histograms) carries its native Arrow type.
-PyObject* batch_to_pyarrow(dftracer::utils::dataframe::DataFrame batch) {
-    namespace arrow = dftracer::utils::utilities::common::arrow;
-    dataframe::Series s =
-        dataframe::Series::structs(batch.names, std::move(batch.columns));
-    nanoarrow::UniqueSchema schema;
-    nanoarrow::UniqueArray array;
-    dataframe::to_arrow(s, schema.get(), array.get());
-    arrow::ArrowExportResult result(std::move(schema), std::move(array));
-    return dftracer::utils::python::arrow_result_to_table(std::move(result));
-}
-
 #endif
 
 // collect(cache=False) -> a native DataFrame (our columnar format); Arrow is
@@ -768,6 +828,157 @@ PyObject* tv_collect(TraceViewerObject* self, PyObject*) {
         }))
         return nullptr;
     return dftracer::utils::python::wrap_dataframe(std::move(table));
+#endif
+}
+
+static bool parse_partition(PyObject* seq_obj, std::vector<std::string>& out) {
+    PyObject* seq = PySequence_Fast(seq_obj, "partition must be a sequence");
+    if (!seq) return false;
+    const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    for (Py_ssize_t i = 0; i < n; ++i) {
+        const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
+        if (!s) {
+            Py_DECREF(seq);
+            return false;
+        }
+        out.emplace_back(s);
+    }
+    Py_DECREF(seq);
+    return true;
+}
+
+// Decode a session containment branch's sink "partition_csv\x1f ts\x1f dur\x1f
+// name" back into its fields (defaults to the dftracer schema on a short cfg).
+static void parse_containment_cfg(const std::string& sink,
+                                  std::vector<std::string>& partition,
+                                  std::string& ts, std::string& dur,
+                                  std::string& name) {
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char ch : sink) {
+        if (ch == '\x1f') {
+            parts.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(ch);
+        }
+    }
+    parts.push_back(cur);
+    if (parts.size() == 4 && !parts[0].empty()) {
+        std::string p;
+        for (char ch : parts[0]) {
+            if (ch == ',') {
+                partition.push_back(p);
+                p.clear();
+            } else {
+                p.push_back(ch);
+            }
+        }
+        partition.push_back(p);
+    }
+    ts = parts.size() == 4 ? parts[1] : "ts";
+    dur = parts.size() == 4 ? parts[2] : "dur";
+    name = parts.size() == 4 ? parts[3] : "name";
+}
+
+// call_tree(partition, ts_col, dur_col) -> scan the view, then the columnar
+// containment fold; returns the events DataFrame plus level/parent_id.
+PyObject* tv_call_tree(TraceViewerObject* self, PyObject* args) {
+#ifndef DFTRACER_UTILS_ENABLE_ARROW
+    PyErr_SetString(PyExc_RuntimeError,
+                    "call_tree() requires the arrow-enabled build");
+    return nullptr;
+#else
+    PyObject* part = nullptr;
+    const char* ts = "ts";
+    const char* dur = "dur";
+    const char* name = "name";
+    if (!PyArg_ParseTuple(args, "O|sss", &part, &ts, &dur, &name))
+        return nullptr;
+    std::vector<std::string> partition;
+    if (!parse_partition(part, partition)) return nullptr;
+    Runtime* rt = resolve_runtime(self);
+    auto files = extract_files(self);
+    auto index_dir = extract_index_dir(self);
+    ViewerPlan plan = *plan_of(self);
+    DataFrame table;
+    if (!run_blocking([&] {
+            View v = build_view_from_data(files, index_dir, plan);
+            table = rt->submit(v.call_tree(partition, ts, dur, name)).get();
+        }))
+        return nullptr;
+    return dftracer::utils::python::wrap_dataframe(std::move(table));
+#endif
+}
+
+// flamegraph(partition) -> scan the view, then fold by name path; returns the
+// node DataFrame.
+PyObject* tv_flamegraph(TraceViewerObject* self, PyObject* args) {
+#ifndef DFTRACER_UTILS_ENABLE_ARROW
+    PyErr_SetString(PyExc_RuntimeError,
+                    "flamegraph() requires the arrow-enabled build");
+    return nullptr;
+#else
+    PyObject* part = nullptr;
+    const char* ts = "ts";
+    const char* dur = "dur";
+    const char* name = "name";
+    if (!PyArg_ParseTuple(args, "O|sss", &part, &ts, &dur, &name))
+        return nullptr;
+    std::vector<std::string> partition;
+    if (!parse_partition(part, partition)) return nullptr;
+    Runtime* rt = resolve_runtime(self);
+    auto files = extract_files(self);
+    auto index_dir = extract_index_dir(self);
+    ViewerPlan plan = *plan_of(self);
+    DataFrame table;
+    if (!run_blocking([&] {
+            View v = build_view_from_data(files, index_dir, plan);
+            table = rt->submit(v.flamegraph(partition, ts, dur, name)).get();
+        }))
+        return nullptr;
+    return dftracer::utils::python::wrap_dataframe(std::move(table));
+#endif
+}
+
+// containment(partition, ts, dur, name) -> (call_tree_df, flamegraph_df) from
+// ONE scan and one buffered fold.
+PyObject* tv_containment(TraceViewerObject* self, PyObject* args) {
+#ifndef DFTRACER_UTILS_ENABLE_ARROW
+    PyErr_SetString(PyExc_RuntimeError,
+                    "containment() requires the arrow-enabled build");
+    return nullptr;
+#else
+    PyObject* part = nullptr;
+    const char* ts = "ts";
+    const char* dur = "dur";
+    const char* name = "name";
+    if (!PyArg_ParseTuple(args, "O|sss", &part, &ts, &dur, &name))
+        return nullptr;
+    std::vector<std::string> partition;
+    if (!parse_partition(part, partition)) return nullptr;
+    Runtime* rt = resolve_runtime(self);
+    auto files = extract_files(self);
+    auto index_dir = extract_index_dir(self);
+    ViewerPlan plan = *plan_of(self);
+    std::pair<DataFrame, DataFrame> pr;
+    if (!run_blocking([&] {
+            View v = build_view_from_data(files, index_dir, plan);
+            pr = rt->submit(v.containment(partition, ts, dur, name)).get();
+        }))
+        return nullptr;
+    PyObject* ct = dftracer::utils::python::wrap_dataframe(std::move(pr.first));
+    if (!ct) return nullptr;
+    PyObject* fg =
+        dftracer::utils::python::wrap_dataframe(std::move(pr.second));
+    if (!fg) {
+        Py_DECREF(ct);
+        return nullptr;
+    }
+    PyObject* t = PyTuple_Pack(2, ct, fg);  // Pack INCREFs both
+    Py_DECREF(ct);
+    Py_DECREF(fg);
+    return t;
 #endif
 }
 
@@ -833,7 +1044,10 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
         Plugin,
         Partial,
         Join,
-        Compare
+        Compare,
+        CallTree,
+        Flamegraph,
+        Containment
     };
     struct BranchData {
         Kind kind = Kind::Collect;
@@ -885,6 +1099,12 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
             bdata[i].kind = Kind::Join;
         else if (k == "compare")
             bdata[i].kind = Kind::Compare;
+        else if (k == "call_tree")
+            bdata[i].kind = Kind::CallTree;
+        else if (k == "flamegraph")
+            bdata[i].kind = Kind::Flamegraph;
+        else if (k == "containment")
+            bdata[i].kind = Kind::Containment;
         else {
             PyErr_Format(PyExc_ValueError, "unknown session branch kind: %s",
                          kind);
@@ -971,6 +1191,7 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
     };
 
     std::vector<DataFrame> results(nb);
+    std::vector<DataFrame> results2(nb);  // containment's second (flamegraph)
     std::vector<ExportStats> export_stats(nb);
     std::vector<std::string> partial_results(nb);
     std::string err;
@@ -979,6 +1200,7 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                                              /*aggregate=*/false);
             ViewSession sess = base.session();
             std::vector<Deferred<DataFrame>> agg_handles(nb);
+            std::vector<Deferred<DataFrame>> agg_handles2(nb);
             std::vector<Deferred<ExportStats>> exp_handles(nb);
             std::vector<Deferred<std::string>> partial_handles(nb);
             std::vector<std::unique_ptr<SessionFileSink>> sinks;
@@ -996,6 +1218,31 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                             bdata[i].files, bdata[i].index_dir, bdata[i].plan,
                             /*aggregate=*/true);
                         agg_handles[i] = sess.collect_events(bview);
+                        break;
+                    }
+                    case Kind::CallTree:
+                    case Kind::Flamegraph:
+                    case Kind::Containment: {
+                        View bview = build_view_from_data(
+                            bdata[i].files, bdata[i].index_dir, bdata[i].plan,
+                            /*aggregate=*/true);
+                        std::vector<std::string> partition;
+                        std::string ts, dur, nm;
+                        parse_containment_cfg(bdata[i].sink, partition, ts, dur,
+                                              nm);
+                        if (bdata[i].kind == Kind::Containment) {
+                            dftracer::utils::trace::views::ContainmentHandles
+                                ch = sess.containment(bview, partition, ts, dur,
+                                                      nm);
+                            agg_handles[i] = ch.call_tree;
+                            agg_handles2[i] = ch.flamegraph;
+                        } else if (bdata[i].kind == Kind::Flamegraph) {
+                            agg_handles[i] =
+                                sess.flamegraph(bview, partition, ts, dur, nm);
+                        } else {
+                            agg_handles[i] =
+                                sess.call_tree(bview, partition, ts, dur, nm);
+                        }
                         break;
                     }
                     case Kind::Partial: {
@@ -1054,9 +1301,14 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                 if (bdata[i].kind == Kind::Collect ||
                     bdata[i].kind == Kind::Events ||
                     bdata[i].kind == Kind::Join ||
-                    bdata[i].kind == Kind::Compare)
+                    bdata[i].kind == Kind::Compare ||
+                    bdata[i].kind == Kind::CallTree ||
+                    bdata[i].kind == Kind::Flamegraph)
                     results[i] = std::move(agg_handles[i].get());
-                else if (bdata[i].kind == Kind::Export)
+                else if (bdata[i].kind == Kind::Containment) {
+                    results[i] = std::move(agg_handles[i].get());
+                    results2[i] = std::move(agg_handles2[i].get());
+                } else if (bdata[i].kind == Kind::Export)
                     export_stats[i] = exp_handles[i].get();
                 else if (bdata[i].kind == Kind::Partial)
                     partial_results[i] = std::move(partial_handles[i].get());
@@ -1073,9 +1325,28 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
     for (Py_ssize_t i = 0; i < nb; ++i) {
         PyObject* item = nullptr;
         if (bdata[i].kind == Kind::Collect || bdata[i].kind == Kind::Events ||
-            bdata[i].kind == Kind::Join || bdata[i].kind == Kind::Compare) {
+            bdata[i].kind == Kind::Join || bdata[i].kind == Kind::Compare ||
+            bdata[i].kind == Kind::CallTree ||
+            bdata[i].kind == Kind::Flamegraph) {
             item =
                 dftracer::utils::python::wrap_dataframe(std::move(results[i]));
+        } else if (bdata[i].kind == Kind::Containment) {
+            PyObject* ct =
+                dftracer::utils::python::wrap_dataframe(std::move(results[i]));
+            if (!ct) {
+                Py_DECREF(out);
+                return nullptr;
+            }
+            PyObject* fg =
+                dftracer::utils::python::wrap_dataframe(std::move(results2[i]));
+            if (!fg) {
+                Py_DECREF(ct);
+                Py_DECREF(out);
+                return nullptr;
+            }
+            item = PyTuple_Pack(2, ct, fg);
+            Py_DECREF(ct);
+            Py_DECREF(fg);
         } else if (bdata[i].kind == Kind::Export) {
             const ExportStats& st = export_stats[i];
             item = Py_BuildValue(
@@ -1346,7 +1617,63 @@ PyObject* tv_merge_partials(TraceViewerObject* self, PyObject* arg) {
             table = v.merge_partials_to_table(parts);
         }))
         return nullptr;
-    return batch_to_pyarrow(std::move(table));
+    return dftracer::utils::python::wrap_dataframe(std::move(table));
+#endif
+}
+
+// Scan this rank's files into a serialized flamegraph arena partial (bytes).
+PyObject* tv_flamegraph_partial(TraceViewerObject* self, PyObject* args) {
+    PyObject* part = nullptr;
+    const char* ts = "ts";
+    const char* dur = "dur";
+    const char* name = "name";
+    if (!PyArg_ParseTuple(args, "O|sss", &part, &ts, &dur, &name))
+        return nullptr;
+    std::vector<std::string> partition;
+    if (!parse_partition(part, partition)) return nullptr;
+    Runtime* rt = resolve_runtime(self);
+    auto files = extract_files(self);
+    auto index_dir = extract_index_dir(self);
+    ViewerPlan plan = *plan_of(self);
+    std::string out;
+    if (!run_blocking([&] {
+            View v = build_view_from_data(files, index_dir, plan);
+            out = rt->submit(v.flamegraph_partial(partition, ts, dur, name))
+                      .get();
+        }))
+        return nullptr;
+    return PyBytes_FromStringAndSize(out.data(),
+                                     static_cast<Py_ssize_t>(out.size()));
+}
+
+// Merge flamegraph arena partials (from flamegraph_partial across ranks) into
+// the final node DataFrame. No scan.
+PyObject* tv_merge_flamegraph_partials(TraceViewerObject*, PyObject* arg) {
+#ifndef DFTRACER_UTILS_ENABLE_ARROW
+    PyErr_SetString(PyExc_RuntimeError,
+                    "merge_flamegraph_partials() requires the arrow build");
+    return nullptr;
+#else
+    PyObject* seq =
+        PySequence_Fast(arg, "merge_flamegraph_partials expects a sequence");
+    if (!seq) return nullptr;
+    const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    std::vector<std::string> owned;
+    owned.reserve(static_cast<std::size_t>(n));
+    for (Py_ssize_t i = 0; i < n; ++i) {
+        char* buf = nullptr;
+        Py_ssize_t len = 0;
+        if (PyBytes_AsStringAndSize(PySequence_Fast_GET_ITEM(seq, i), &buf,
+                                    &len) < 0) {
+            Py_DECREF(seq);
+            return nullptr;
+        }
+        owned.emplace_back(buf, static_cast<std::size_t>(len));
+    }
+    Py_DECREF(seq);
+    std::vector<std::string_view> parts(owned.begin(), owned.end());
+    DataFrame table = View::merge_flamegraph_partials(parts);
+    return dftracer::utils::python::wrap_dataframe(std::move(table));
 #endif
 }
 
@@ -1512,7 +1839,7 @@ PyObject* tv_reconstruct_if_cached(TraceViewerObject* self, PyObject*) {
         }))
         return nullptr;
     if (!table) Py_RETURN_NONE;
-    return batch_to_pyarrow(std::move(*table));
+    return dftracer::utils::python::wrap_dataframe(std::move(*table));
 #endif
 }
 
@@ -1661,65 +1988,77 @@ PyObject* tv_export(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
 }
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
-// Each scan slot owns its builder/parser/arena (single-threaded per slot);
-// push() blocks the slot when the bounded queue is full, and the Python
-// consumer drains it with the GIL released.
+// Each scan slot owns its parser/intern/buffer (single-threaded per slot) and
+// builds a native DataFrame chunk every `batch_size` events - the events cross
+// no Arrow. push() blocks the slot when the bounded queue is full; the Python
+// consumer drains it with the GIL released, converting to Arrow only if it
+// calls .to_arrow() on a chunk.
 dftracer::utils::coro::CoroTask<void> run_viewer_stream(
     dftracer::utils::CoroScope& scope,
-    std::shared_ptr<dftracer::utils::python::StreamingState<
-        dftracer::utils::utilities::common::arrow::ArrowExportResult>>
+    std::shared_ptr<
+        dftracer::utils::python::StreamingState<dataframe::DataFrame>>
         state,
     std::vector<std::string> files, std::string index_dir, ViewerPlan plan,
     std::size_t num_slots, std::size_t batch_size, bool normalize,
     bool dict_strings) {
-    namespace arrow = dftracer::utils::utilities::common::arrow;
-    namespace rd = dftracer::utils::utilities::reader::internal;
-    using dftracer::utils::StringArena;
-    using dftracer::utils::json::JsonParser;
-    using dftracer::utils::trace::TimeScaleState;
+    namespace views = dftracer::utils::trace::views;
+    using dftracer::utils::trace::RecordPhase;
     (void)scope;
+    (void)normalize;
+    (void)dict_strings;
     try {
         View v = build_view_from_data(files, index_dir, plan);
-        rd::RowBuildOptions ropts;
-        // select pushdown: only materialize the requested columns.
-        if (!plan.select.empty()) ropts.keep = &plan.select;
-        ropts.dict_strings = dict_strings;
-        ropts.time_scale = plan.time_scale;
-        std::vector<arrow::RecordBatchBuilder> builders(num_slots);
-        std::vector<JsonParser> parsers(num_slots);
-        std::vector<StringArena> arenas(num_slots);
-        std::vector<TimeScaleState> tscales(num_slots);
-        for (auto& b : builders) b.reserve(batch_size);
+        const std::vector<std::string>& select = plan.select;
+        // resolved.*/r.* columns need the index name tables; build the resolver
+        // once (shared, read-only) only when the projection asks for one.
+        std::shared_ptr<const views::detail::GroupResolver> resolver;
+        if (views::detail::select_needs_resolver(select)) {
+            std::vector<std::string> index_paths;
+            index_paths.reserve(files.size());
+            for (const auto& fp : files)
+                index_paths.push_back(
+                    dftint::determine_index_path(fp, index_dir));
+            resolver = std::make_shared<const views::detail::GroupResolver>(
+                index_paths);
+        }
+        std::vector<simdjson::dom::parser> parsers(num_slots);
+        std::vector<dftracer::utils::StringIntern> interns(num_slots);
+        std::vector<std::vector<views::detail::FoldEvent>> bufs(num_slots);
+
+        auto flush = [&](std::size_t slot) -> bool {
+            if (bufs[slot].empty()) return true;
+            dataframe::DataFrame df = views::detail::build_row_frame(
+                bufs[slot], interns[slot], select, plan.time_scale,
+                resolver.get());
+            bufs[slot].clear();
+            const std::size_t bytes =
+                static_cast<std::size_t>(df.num_rows()) *
+                static_cast<std::size_t>(df.num_columns() + 1) * 16;
+            return state->push(std::move(df), bytes);
+        };
 
         co_await v.for_each_batch(
             [&](std::size_t slot, const std::vector<std::string_view>& events) {
                 if (slot >= num_slots || state->cancelled()) return;
-                auto& b = builders[slot];
                 for (auto ev : events) {
                     if (state->cancelled()) return;
-                    if (!rd::process_json_line(b, parsers[slot], arenas[slot],
-                                               ev, normalize, tscales[slot],
-                                               ropts))
+                    simdjson::padded_string padded(ev);
+                    simdjson::dom::element root;
+                    if (parsers[slot].parse(padded).get(root)) continue;
+                    views::detail::FoldEvent fe =
+                        views::detail::extract_fold_event(root, interns[slot],
+                                                          /*needs_args=*/true);
+                    if (fe.phase == RecordPhase::METADATA ||
+                        fe.phase == RecordPhase::UNKNOWN)
                         continue;
-                    if (b.num_rows() >= batch_size) {
-                        auto res = b.finish();
-                        arenas[slot].clear();
-                        auto bytes = dftracer::utils::python::byte_size(res);
-                        if (!state->push(std::move(res), bytes)) return;
-                        if (!b.is_schema_locked()) b.lock_schema();
-                        b.reset(true);
-                        b.reserve(batch_size);
-                    }
+                    bufs[slot].push_back(std::move(fe));
+                    if (bufs[slot].size() >= batch_size && !flush(slot)) return;
                 }
             },
             num_slots, plan.limit);
 
-        for (std::size_t s = 0; s < num_slots && !state->cancelled(); ++s) {
-            if (builders[s].num_rows() == 0) continue;
-            auto res = builders[s].finish();
-            auto bytes = dftracer::utils::python::byte_size(res);
-            state->push(std::move(res), bytes);
-        }
+        for (std::size_t s = 0; s < num_slots && !state->cancelled(); ++s)
+            if (!flush(s)) break;
         state->complete();
     } catch (...) {
         state->fail(std::current_exception());
@@ -1755,8 +2094,8 @@ PyObject* tv_stream(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
     ViewerPlan plan = *plan_of(self);
 
     // 0 (unset) falls back to the RAM-fraction default.
-    auto state = std::make_shared<dftracer::utils::python::StreamingState<
-        dftracer::utils::utilities::common::arrow::ArrowExportResult>>(
+    auto state = std::make_shared<
+        dftracer::utils::python::StreamingState<dataframe::DataFrame>>(
         dftracer::utils::compute_memory_budget(plan.memory_budget));
 
     auto* iter_obj =
@@ -1765,9 +2104,9 @@ PyObject* tv_stream(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
                 &dftracer::utils::python::ArrowStreamingIteratorType, nullptr,
                 nullptr);
     if (!iter_obj) return nullptr;
-    using ExRes = dftracer::utils::utilities::common::arrow::ArrowExportResult;
     iter_obj->cpp_state->state = state;
-    iter_obj->cpp_state->pull_next = [state]() -> std::optional<ExRes> {
+    iter_obj->cpp_state->pull_df =
+        [state]() -> std::optional<dataframe::DataFrame> {
         return state->pull();
     };
     iter_obj->cpp_state->get_error = [state]() -> std::exception_ptr {
@@ -1792,20 +2131,28 @@ static PyMethodDef tv_methods[] = {
      "Keep events matching a query-DSL predicate (AND-combined)."},
     {"query", DFTU_PYCFUNCTION(tv_filter), METH_O, "Alias of filter()."},
     {"phase", DFTU_PYCFUNCTION(tv_phase), METH_O,
-     "Select 'events' (ph=X), 'counters' (ph=C), or 'any'."},
+     "Select 'events' (ph=X), 'counters' (ph=C), 'aggregated' (ph=A), "
+     "'metadata' (ph=M), or 'any'."},
     {"group_by", DFTU_PYCFUNCTION(tv_group_by), METH_VARARGS,
      "Group by keys: name/cat/pid/tid/fhash/arg:<key>."},
     {"agg", DFTU_PYCFUNCTION(tv_agg), METH_VARARGS,
      "Aggregations: count, sum:/min:/max:/mean:/var:/std:<field>, "
      "argmax:<field>:<by>, set_union:<field> (distinct values, one string "
      "column joined by \\x1e)."},
-    {"time_bucket", DFTU_PYCFUNCTION(tv_time_bucket), METH_O,
-     "Bucket events into fixed intervals (microseconds)."},
+    {"time_bucket", DFTU_PYCFUNCTION(tv_time_bucket),
+     METH_VARARGS | METH_KEYWORDS,
+     "time_bucket(interval_us, normalize_to=None): bucket events into fixed "
+     "intervals. normalize_to aligns bucket boundaries: an int origin, or "
+     "'min' "
+     "for the trace's minimum timestamp (from the index, no scan); None = "
+     "aligned to 0."},
     {"occ_cell", DFTU_PYCFUNCTION(tv_occ_cell), METH_O,
      "Occupancy cell size (busy quantum) in microseconds; 0 = default. Finer "
      "resolves overlap on short events (honored with time_range)."},
     {"time_unit", DFTU_PYCFUNCTION(tv_time_unit), METH_O,
-     "Normalize ts/dur to a target unit (ns/us/ms/sec); source read from the "
+     "Normalize ts/dur to a target unit (ns/us/ms/sec, s=sec); source read "
+     "from "
+     "the "
      "trace's CM time_metric. Higher-level helper over time_scale()."},
     {"time_scale", DFTU_PYCFUNCTION(tv_time_scale), METH_O,
      "Multiply ts/dur/te by this ratio (source_ns/target_ns; 1.0 = none). The "
@@ -1817,8 +2164,10 @@ static PyMethodDef tv_methods[] = {
      "Spill aggregation above this many bytes (0 = in-memory)."},
     {"auto_spill", DFTU_PYCFUNCTION(tv_auto_spill), METH_NOARGS,
      "Spill at ~1/3 of available memory."},
-    {"agg_numeric_args", DFTU_PYCFUNCTION(tv_auto_numeric_args), METH_NOARGS,
-     "Also aggregate every auto-discovered numeric arg (size, ret, ...)."},
+    {"agg_numeric_args", DFTU_PYCFUNCTION(tv_auto_numeric_args), METH_VARARGS,
+     "Aggregate every auto-discovered numeric arg (size, ret, ...). No args = "
+     "one bare-named mean column per arg; pass op names (sum/min/max/mean/var/"
+     "std/skew/kurt) for one <op>_<arg> column per (arg, op)."},
     {"limit", DFTU_PYCFUNCTION(tv_limit), METH_O, "Cap produced rows/events."},
     {"offset", DFTU_PYCFUNCTION(tv_offset), METH_O,
      "Skip the first N rows/events."},
@@ -1831,6 +2180,16 @@ static PyMethodDef tv_methods[] = {
     {"collect", DFTU_PYCFUNCTION(tv_collect), METH_NOARGS,
      "Run group_by+agg; return a native DataFrame (call .to_arrow() for "
      "Arrow)."},
+    {"call_tree", DFTU_PYCFUNCTION(tv_call_tree), METH_VARARGS,
+     "call_tree(partition) -> scan, then the events DataFrame plus "
+     "level/parent_id (containment nesting per lane)."},
+    {"flamegraph", DFTU_PYCFUNCTION(tv_flamegraph), METH_VARARGS,
+     "flamegraph(partition) -> scan, then a folded node DataFrame (node_id, "
+     "parent, name, level, total, self, count)."},
+    {"containment", DFTU_PYCFUNCTION(tv_containment), METH_VARARGS,
+     "containment(partition) -> (call_tree_df, flamegraph_df) from one scan "
+     "and "
+     "one buffered fold."},
     {"join", DFTU_PYCFUNCTION(tv_join), METH_VARARGS | METH_KEYWORDS,
      "Aggregate and equi-join another viewer on the shared group key; "
      "how=inner|left|right|full|semi|anti. Returns a DataFrame with l_/r_ "
@@ -1845,7 +2204,7 @@ static PyMethodDef tv_methods[] = {
      "shard range [shard_begin, shard_end) (shard_end<=0 = all); returns a "
      "dict {'regular','aggregated','counters'} of pyarrow.Table."},
     {"stream", DFTU_PYCFUNCTION(tv_stream), METH_VARARGS | METH_KEYWORDS,
-     "Iterate matching events as pyarrow record batches (parallel, bounded "
+     "Iterate matching events as native DataFrame chunks (parallel, bounded "
      "memory). kwargs: batch_size, workers, normalize."},
     {"_session_execute", DFTU_PYCFUNCTION(tv_session_run), METH_O,
      "Internal: run a Session's branches over one shared scan. Arg: a list of "
@@ -1857,6 +2216,10 @@ static PyMethodDef tv_methods[] = {
      "Combinable aggregation partial (bytes) for distributed merge."},
     {"merge_partials_to_table", DFTU_PYCFUNCTION(tv_merge_partials), METH_O,
      "Merge aggregate_partial() bytes into the final pyarrow.Table."},
+    {"flamegraph_partial", DFTU_PYCFUNCTION(tv_flamegraph_partial),
+     METH_VARARGS,
+     "flamegraph_partial(partition) -> serialized flamegraph arena (bytes) for "
+     "a distributed merge (combine with _ext.merge_flamegraph_partials)."},
     {"rollup_root", DFTU_PYCFUNCTION(tv_rollup_root), METH_O,
      "Override the aggregation-cache root dir (default: derive from index)."},
     {"views_root", DFTU_PYCFUNCTION(tv_views_root), METH_O,
@@ -1984,5 +2347,18 @@ int dftracer::utils::python::init_trace_viewer(PyObject* m) {
     if (register_type(m, &AggregatedTraceViewerType, "_AggregatedTraceViewer") <
         0)
         return -1;
+
+    // A pure reduce (no scan / viewer state), so it is a module function, not a
+    // viewer method. tv_merge_flamegraph_partials ignores its first argument.
+    static PyMethodDef merge_fg_def = {
+        "merge_flamegraph_partials",
+        DFTU_PYCFUNCTION(tv_merge_flamegraph_partials), METH_O,
+        "merge_flamegraph_partials(partials) -> node DataFrame (no scan)."};
+    PyObject* fn = PyCFunction_NewEx(&merge_fg_def, nullptr, nullptr);
+    if (!fn) return -1;
+    if (PyModule_AddObject(m, "merge_flamegraph_partials", fn) < 0) {
+        Py_DECREF(fn);
+        return -1;
+    }
     return 0;
 }

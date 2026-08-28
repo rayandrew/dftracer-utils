@@ -28,6 +28,7 @@
 #include <dftracer/utils/trace/views/result_join.h>
 
 #include <cstdint>
+#include <cstring>
 #include <nanoarrow/nanoarrow.hpp>
 #include <new>
 #include <optional>
@@ -611,14 +612,23 @@ PyObject* DataFrame_group_agg_expr(PyObject* self, PyObject* args) {
     aggs.reserve(static_cast<std::size_t>(ns));
     for (Py_ssize_t i = 0; i < ns; ++i) {
         PyObject* t = PySequence_Fast_GET_ITEM(seq, i);
-        if (!PyTuple_Check(t) || PyTuple_GET_SIZE(t) != 3) {
+        const Py_ssize_t tn = PyTuple_Check(t) ? PyTuple_GET_SIZE(t) : 0;
+        if (tn != 3 && tn != 4) {
             Py_DECREF(seq);
-            PyErr_SetString(PyExc_TypeError, "each spec is (op, ast, out)");
+            PyErr_SetString(PyExc_TypeError,
+                            "each spec is (op, ast, out[, param])");
             return nullptr;
         }
         dataframe::AggExprSpec s;
         s.op = static_cast<dataframe::AggOp>(
             PyLong_AsLong(PyTuple_GET_ITEM(t, 0)));
+        if (tn == 4) {
+            s.param = PyFloat_AsDouble(PyTuple_GET_ITEM(t, 3));
+            if (s.param == -1.0 && PyErr_Occurred()) {
+                Py_DECREF(seq);
+                return nullptr;
+            }
+        }
         PyObject* ast = PyTuple_GET_ITEM(t, 1);
         if (ast != Py_None) {
             dataframe::Expr v;
@@ -888,16 +898,35 @@ PyObject* DataFrame_group_by_dynamic(PyObject* self, PyObject* args,
     long long every = 0;
     PyObject* period_obj = Py_None;
     PyObject* aggs_obj = Py_None;
-    static const char* kwlist[] = {"time_col", "every", "period", "aggs",
-                                   nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "sL|OO",
-                                     const_cast<char**>(kwlist), &time_col,
-                                     &every, &period_obj, &aggs_obj))
+    PyObject* origin_obj = Py_None;  // int (explicit) or "min"
+    static const char* kwlist[] = {"time_col", "every",  "period",
+                                   "aggs",     "origin", nullptr};
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "sL|OOO", const_cast<char**>(kwlist), &time_col, &every,
+            &period_obj, &aggs_obj, &origin_obj))
         return nullptr;
     std::int64_t period = 0;
     if (period_obj && period_obj != Py_None) {
         period = PyLong_AsLongLong(period_obj);
         if (period == -1 && PyErr_Occurred()) return nullptr;
+    }
+    std::int64_t origin = 0;
+    bool origin_min = false;
+    if (origin_obj && origin_obj != Py_None) {
+        if (PyUnicode_Check(origin_obj)) {
+            const char* s = PyUnicode_AsUTF8(origin_obj);
+            if (!s) return nullptr;
+            if (std::string(s) != "min") {
+                PyErr_SetString(PyExc_ValueError,
+                                "group_by_dynamic: origin must be an int or "
+                                "\"min\"");
+                return nullptr;
+            }
+            origin_min = true;
+        } else {
+            origin = PyLong_AsLongLong(origin_obj);
+            if (origin == -1 && PyErr_Occurred()) return nullptr;
+        }
     }
     std::vector<dataframe::GroupAgg> aggs;
     if (aggs_obj && aggs_obj != Py_None && !aggs_from_seq(aggs_obj, aggs))
@@ -905,13 +934,33 @@ PyObject* DataFrame_group_by_dynamic(PyObject* self, PyObject* args,
     return run_batch_op([&] {
         return dataframe::group_by_dynamic(to_dataframe(b), time_col,
                                            static_cast<std::int64_t>(every),
-                                           period, aggs);
+                                           period, aggs, origin, origin_min);
     });
 }
 
-PyObject* DataFrame_concat(PyObject* self, PyObject* args) {
+PyObject* DataFrame_concat(PyObject* self, PyObject* args, PyObject* kwds) {
     DataFrameObject* b = as_dataframe(self);
     if (!b) return nullptr;
+    // `how` is the only keyword; every positional arg is another DataFrame.
+    dataframe::ConcatHow how = dataframe::ConcatHow::Vertical;
+    if (kwds) {
+        if (PyObject* h = PyDict_GetItemString(kwds, "how")) {
+            const char* s = PyUnicode_AsUTF8(h);
+            if (!s) return nullptr;
+            if (std::strcmp(s, "diagonal") == 0)
+                how = dataframe::ConcatHow::Diagonal;
+            else if (std::strcmp(s, "vertical") != 0) {
+                PyErr_SetString(PyExc_ValueError,
+                                "how must be 'vertical' or 'diagonal'");
+                return nullptr;
+            }
+        }
+        if (PyDict_Size(kwds) > (PyDict_GetItemString(kwds, "how") ? 1 : 0)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "concat() got an unexpected keyword argument");
+            return nullptr;
+        }
+    }
     std::vector<DataFrame> owned;
     owned.reserve(1 + static_cast<std::size_t>(PyTuple_GET_SIZE(args)));
     owned.push_back(to_dataframe(b));
@@ -923,7 +972,7 @@ PyObject* DataFrame_concat(PyObject* self, PyObject* args) {
     std::vector<const DataFrame*> parts;
     parts.reserve(owned.size());
     for (const DataFrame& x : owned) parts.push_back(&x);
-    return run_batch_op([&] { return dataframe::concat(parts); });
+    return run_batch_op([&] { return dataframe::concat(parts, how); });
 }
 
 // Arrow/pandas/polars conversion and pickling live in the Python wrapper
@@ -1040,6 +1089,24 @@ PyObject* DataFrame_arrow_c_stream(PyObject* self, PyObject*) {
     return cap;
 }
 
+#ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
+// to_ipc() -> bytes: the frame serialized as an Arrow IPC stream (schema + one
+// record batch + EOS), so a consumer needs no pyarrow to produce .arrow bytes.
+PyObject* DataFrame_to_ipc(PyObject* self, PyObject*) {
+    DataFrameObject* b = as_dataframe(self);
+    if (!b) return nullptr;
+    try {
+        std::vector<std::uint8_t> bytes = to_dataframe(b).to_ipc();
+        return PyBytes_FromStringAndSize(
+            reinterpret_cast<const char*>(bytes.data()),
+            static_cast<Py_ssize_t>(bytes.size()));
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+}
+#endif
+
 // __reduce__: pickle by round-tripping through Arrow (pyarrow Tables pickle via
 // IPC), so a DataFrame can ship across processes / be persisted.
 PyObject* DataFrame_get_num_rows(PyObject* self, void*) {
@@ -1109,8 +1176,9 @@ PyMethodDef DataFrame_methods[] = {
     {"topk", DFTU_PYCFUNCTION(DataFrame_topk), METH_VARARGS | METH_KEYWORDS,
      "topk(name, k, largest=True) -> DataFrame of the k best rows by a "
      "column."},
-    {"concat", DataFrame_concat, METH_VARARGS,
-     "concat(*others) -> DataFrame vertically concatenating batches."},
+    {"concat", DFTU_PYCFUNCTION(DataFrame_concat), METH_VARARGS | METH_KEYWORDS,
+     "concat(*others, how='vertical') -> DataFrame concatenating batches. "
+     "how='diagonal' unions columns (null-fill absent, promote numeric)."},
     {"unpivot", DFTU_PYCFUNCTION(DataFrame_unpivot),
      METH_VARARGS | METH_KEYWORDS,
      "unpivot(id_vars, value_vars) -> DataFrame reshaped wide->long, stacking "
@@ -1161,6 +1229,11 @@ PyMethodDef DataFrame_methods[] = {
     {"__arrow_c_stream__", DataFrame_arrow_c_stream, METH_VARARGS,
      "Arrow PyCapsule stream export (one struct batch); pa.table(batch) uses "
      "this to import every column zero-copy."},
+#ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
+    {"to_ipc", DataFrame_to_ipc, METH_NOARGS,
+     "to_ipc() -> bytes: the frame as an Arrow IPC stream (schema + one record "
+     "batch + EOS); no pyarrow needed to produce .arrow bytes."},
+#endif
     {nullptr, nullptr, 0, nullptr}};
 
 PyGetSetDef DataFrame_getset[] = {
