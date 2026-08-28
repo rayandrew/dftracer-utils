@@ -65,6 +65,7 @@ Compute over traces: aggregate, summarize, compare runs, and get results out.
    :maxdepth: 1
 
    analysis/views
+   analysis/sessions
    analysis/aggregation
    analysis/statistics
    analysis/comparison
