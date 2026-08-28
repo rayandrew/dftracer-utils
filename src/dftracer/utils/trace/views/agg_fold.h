@@ -2,12 +2,14 @@
 #define DFTRACER_UTILS_TRACE_VIEWS_AGG_FOLD_H
 
 #include <dftracer/utils/core/common/to_chars.h>
+#include <dftracer/utils/dataframe/sketch.h>  // sketch_bucket_keys, DDSketch
 #include <dftracer/utils/trace/aggregators/reserved_args.h>
 #include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -137,20 +139,61 @@ std::string group_dim_str(const Src& src, const GroupKey& gk) {
 }
 
 template <class Src>
-void fold_numeric_args_t(AggAccum& a, const Src& src) {
+void fold_numeric_args_t(AggAccum& a, const Src& src, bool want_sketch) {
     namespace agg = trace::aggregators;
-    if (auto sz = derived_size_t(src)) a.dyn["size"].add(*sz);
+    auto feed = [&](std::string_view key, double num) {
+        a.dyn[std::string(key)].add(num);
+        if (want_sketch) a.dyn_sketches[std::string(key)].add(num);
+    };
+    if (auto sz = derived_size_t(src)) feed("size", *sz);
     src.for_each_numeric_arg([&](std::string_view key, double num) {
         if (agg::is_reserved_arg(key) || agg::is_preagg_suffix(key)) return;
-        a.dyn[std::string(key)].add(num);
+        feed(key, num);
     });
 }
 
+// Deferred per-batch DDSketch updates. Stores the group's value-INDEX (not a
+// pointer): unordered_dense inserts are append-only and the fold never erases,
+// so the index survives map growth where a pointer would dangle.
+struct SketchBatch {
+    std::vector<double> vals;
+    std::vector<std::uint32_t> gidx;
+    std::vector<std::int32_t> slot;
+    std::vector<std::int32_t> keys;  // scratch out
+    bool empty() const { return vals.empty(); }
+    void record(double v, std::uint32_t g, std::int32_t s) {
+        vals.push_back(v);
+        gidx.push_back(g);
+        slot.push_back(s);
+    }
+    void clear() {
+        vals.clear();
+        gidx.clear();
+        slot.clear();
+    }
+};
+
+inline void flush_sketch_batch(GroupMap& map, SketchBatch& sb) {
+    if (sb.empty()) return;
+    const std::size_t n = sb.vals.size();
+    sb.keys.resize(n);
+    dftracer::utils::dataframe::sketch_bucket_keys(
+        sb.vals.data(), static_cast<std::int64_t>(n),
+        dftracer::utils::dataframe::DDSketch{}.log_gamma(), sb.keys.data());
+    for (std::size_t i = 0; i < n; ++i)
+        (map.begin() + static_cast<std::ptrdiff_t>(sb.gidx[i]))
+            ->second.sketches[static_cast<std::size_t>(sb.slot[i])]
+            .add_key(sb.keys[i]);
+    sb.clear();
+}
+
 // One event folded into `map`. `keybuf` is caller-owned scratch reused across
-// events so the hot path allocates no per-event key.
+// events so the hot path allocates no per-event key. A non-null `sketch_batch`
+// defers DDSketch updates into it (batched, SIMD-keyed at flush); null runs
+// them inline (scalar log).
 template <class Src>
 void fold_event_over(GroupMap& map, const Src& src, const ViewPlan& plan,
-                     std::string& keybuf) {
+                     std::string& keybuf, SketchBatch* sketch_batch = nullptr) {
     const AggSchema& sch = *plan.schema;
     keybuf.clear();
     std::int64_t bucket = 0;
@@ -159,9 +202,14 @@ void fold_event_over(GroupMap& map, const Src& src, const ViewPlan& plan,
     if (has_bucket) {
         auto ts = agg_field_t(src, "ts");
         if (!ts) return;
-        auto interval = static_cast<double>(plan.time_bucket_us);
-        bucket = static_cast<std::int64_t>(*ts * plan.time_scale / interval) *
-                 static_cast<std::int64_t>(plan.time_bucket_us);
+        const auto interval = static_cast<double>(plan.time_bucket_us);
+        const auto w = static_cast<std::int64_t>(plan.time_bucket_us);
+        const auto origin = static_cast<std::int64_t>(plan.bucket_origin_us);
+        // Floor (ts_scaled - origin) toward -inf so buckets tile evenly on
+        // either side of the origin, then shift back by origin.
+        const double rel = *ts * plan.time_scale - static_cast<double>(origin);
+        bucket =
+            static_cast<std::int64_t>(std::floor(rel / interval)) * w + origin;
         char b[24];
         char* p = to_chars_i64(b, b + sizeof(b), bucket);
         keybuf.append(b, static_cast<std::size_t>(p - b));
@@ -187,6 +235,8 @@ void fold_event_over(GroupMap& map, const Src& src, const ViewPlan& plan,
     }
     AggAccum& a = it->second;
     ++a.count;
+    const std::uint32_t gidx =
+        sketch_batch ? static_cast<std::uint32_t>(it - map.begin()) : 0;
 
     // Occupancy (time-window reduction): OR the event's [ts, ts+dur) coverage
     // into every bucket it spans. The scan already applied the window
@@ -219,15 +269,25 @@ void fold_event_over(GroupMap& map, const Src& src, const ViewPlan& plan,
         // A fractional time_scale turns an integer ts/dur into a real value, so
         // that field accumulates in double; otherwise the native domain is
         // kept.
+        const int sk = sch.field_sketch[fi];
         if (sch.field_scaled[fi] && plan.time_scale != 1.0) {
             const double x = v->as_double() * plan.time_scale;
             a.fields[fi].add(x);
-            if (sch.field_sketch[fi] >= 0)
-                a.sketches[sch.field_sketch[fi]].add(x);
+            if (sk >= 0) {
+                if (sketch_batch)
+                    sketch_batch->record(x, gidx, sk);
+                else
+                    a.sketches[static_cast<std::size_t>(sk)].add(x);
+            }
         } else {
             a.fields[fi].add(*v);
-            if (sch.field_sketch[fi] >= 0)
-                a.sketches[sch.field_sketch[fi]].add(v->as_double());
+            if (sk >= 0) {
+                const double x = v->as_double();
+                if (sketch_batch)
+                    sketch_batch->record(x, gidx, sk);
+                else
+                    a.sketches[static_cast<std::size_t>(sk)].add(x);
+            }
         }
     }
     for (std::size_t i = 0; i < plan.agg.size(); ++i) {
@@ -248,7 +308,7 @@ void fold_event_over(GroupMap& map, const Src& src, const ViewPlan& plan,
         std::string v = src.value(plan.agg[i].field);
         if (!v.empty()) a.sets[slot].insert(std::move(v));
     }
-    if (plan.auto_numeric_metrics) fold_numeric_args_t(a, src);
+    if (plan.auto_numeric_metrics) fold_numeric_args_t(a, src, sch.dyn_sketch);
 }
 
 }  // namespace dftracer::utils::trace::views::detail

@@ -61,7 +61,27 @@ def test_any_wildcard_mean_aggregates_numeric_args(indexed_trace):
     assert set(got) - {"cat", "count"}
 
 
-def test_any_wildcard_rejects_unsupported_reduction(indexed_trace):
+def test_any_wildcard_sum_aggregates_numeric_args(indexed_trace):
     gz = indexed_trace
-    with pytest.raises(ValueError):
-        TraceViewer(gz).group_by("cat").agg(F.any.sum()).collect()
+    # F.any.sum() now applies a sum to every numeric args.* field, one
+    # sum_<arg> column each (the bare name stays reserved for the legacy mean).
+    got = _dict(TraceViewer(gz).group_by("cat").agg(F.any.sum()))
+    assert any(c.startswith("sum_") for c in got)
+
+
+def test_agg_numeric_args_multiple_reductions(indexed_trace):
+    gz = indexed_trace
+    got = _dict(TraceViewer(gz).group_by("cat").agg_numeric_args("sum", "max", "mean"))
+    # Each discovered numeric arg emits one <op>_<arg> column per reduction.
+    assert any(c.startswith("sum_") for c in got)
+    assert any(c.startswith("max_") for c in got)
+    assert any(c.startswith("mean_") for c in got)
+
+
+def test_agg_numeric_args_percentile(indexed_trace):
+    gz = indexed_trace
+    # A per-arg percentile collects a per-arg sketch; pNN shorthand names the
+    # column p<NN>_<arg>.
+    got = _dict(TraceViewer(gz).group_by("cat").agg_numeric_args("p90", "mean"))
+    assert any(c.startswith("p90_") for c in got)
+    assert any(c.startswith("mean_") for c in got)

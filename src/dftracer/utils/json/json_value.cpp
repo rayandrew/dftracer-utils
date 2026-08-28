@@ -51,6 +51,28 @@ JsonValue JsonValue::at(const char* path) const {
             }
             if (all_digits) next = current[idx];
         }
+        // Flat-key fallback: an object member name may itself contain dots
+        // (e.g. the arg key "cqe.raw_ns" is one flat member, not a nested
+        // object). The single-segment lookup above is the nested attempt and
+        // wins when it exists; only on its miss do we try progressively longer
+        // dot-joined keys, longest first, then continue the walk from the end
+        // of the matched key so a value nested under a flat key still resolves.
+        if (!next.exists() && current.is_object() && *p == '.') {
+            const char* run_end = p;
+            while (*run_end && *run_end != '[') ++run_end;
+            for (const char* end = run_end; end > p;) {
+                std::string_view cand(start,
+                                      static_cast<std::size_t>(end - start));
+                JsonValue c = current[cand];
+                if (c.exists()) {
+                    next = c;
+                    p = end;
+                    break;
+                }
+                --end;
+                while (end > p && *end != '.') --end;
+            }
+        }
         current = next;
         if (!current.exists()) return JsonValue();
     }

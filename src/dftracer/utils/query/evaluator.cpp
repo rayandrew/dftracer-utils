@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/field_ref.h>
 #include <dftracer/utils/query/evaluator.h>
 #include <dftracer/utils/query/pattern.h>
 
@@ -111,11 +112,10 @@ JsonValue resolve_field(const JsonValue& event, const FieldNode& field) {
     auto v = event.at(field.path);
     if (!v.is_null()) return v;
     // DFTracer nests domain fields (fhash, hhash, ret, level, ...) under
-    // "args". Let a bare reference resolve there so nested fields are queryable
-    // by bare name, matching the index dimension names and the ValueMap path.
-    if (field.path.find_first_of(".[") == std::string::npos) {
-        return event.at("args." + field.path);
-    }
+    // "args". Any field not already prefixed resolves there too: a bare name,
+    // or a flat arg key that itself contains dots (e.g. "cqe.raw_ns"). at()'s
+    // flat-key fallback matches the dotted key against the flat args member.
+    if (!has_args_prefix(field.path)) return event.at("args." + field.path);
     return v;
 }
 

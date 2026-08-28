@@ -169,6 +169,11 @@ AggSchema make_agg_schema(const ViewPlan& plan) {
         if (bucket < OCC_SUB_SLOTS) bucket = OCC_SUB_SLOTS;
         s.occ_bucket_us = bucket;
     }
+    for (const auto& r : plan.numeric_arg_aggs)
+        if (r.op == AggOp::Pct) {
+            s.dyn_sketch = true;
+            break;
+        }
     return s;
 }
 
@@ -242,39 +247,22 @@ double finalize_value(const AggAccum& a, const ViewPlan& plan, std::size_t i) {
         case AggOp::SumSq:
             return fs ? fs->sumsq : 0.0;
         case AggOp::Mean:
-            // Mean/Var/Std use N = group rows (matches the pre-FieldStat
-            // behavior), which differs from fs->n only for sparse fields.
-            return (fs && a.count) ? fs->sum / N : 0.0;
+            // Mean/Var/Std/Skew/Kurt delegate to the shared FieldStat (over the
+            // field-present count, sample variance) so the View matches the
+            // dataframe engine and pandas/polars exactly.
+            return fs ? fs->mean() : 0.0;
         case AggOp::Var:
-        case AggOp::Std: {
-            double var = 0.0;
-            if (fs && a.count) {
-                const double mean = fs->sum / N;
-                var = fs->sumsq / N - mean * mean;
-                if (var < 0.0) var = 0.0;  // clamp round-off
-            }
-            return spec.op == AggOp::Std ? std::sqrt(var) : var;
-        }
+            return fs ? fs->variance(true) : 0.0;
+        case AggOp::Std:
+            return fs ? fs->stddev(true) : 0.0;
         case AggOp::Pct: {
             const int sk = fi >= 0 ? sch.field_sketch[fi] : -1;
             return sk >= 0 ? a.sketches[sk].quantile(spec.q) : 0.0;
         }
         case AggOp::Skew:
-        case AggOp::Kurt: {
-            // Population skewness/excess-kurtosis from the raw power sums, over
-            // N = group rows (matching Mean/Var).
-            if (!fs || a.count == 0) return 0.0;
-            const double mu = fs->sum / N;
-            const double cm2 = fs->sumsq / N - mu * mu;
-            if (cm2 <= 0.0) return 0.0;
-            const double cm3 =
-                fs->m3 / N - 3.0 * mu * (fs->sumsq / N) + 2.0 * mu * mu * mu;
-            if (spec.op == AggOp::Skew) return cm3 / std::pow(cm2, 1.5);
-            const double cm4 = fs->m4 / N - 4.0 * mu * (fs->m3 / N) +
-                               6.0 * mu * mu * (fs->sumsq / N) -
-                               3.0 * mu * mu * mu * mu;
-            return cm4 / (cm2 * cm2) - 3.0;
-        }
+            return fs ? fs->skewness() : 0.0;
+        case AggOp::Kurt:
+            return fs ? fs->kurtosis() : 0.0;
         case AggOp::ArgMax:
             return 0.0;  // emitted as a text column
         case AggOp::Hist:
@@ -409,6 +397,8 @@ void merge_accum(AggAccum& da, const AggAccum& sa, const ViewPlan& plan) {
     for (std::size_t i = 0; i < da.sets.size() && i < sa.sets.size(); ++i)
         da.sets[i].insert(sa.sets[i].begin(), sa.sets[i].end());
     for (const auto& [name, sm] : sa.dyn) da.dyn[name].merge(sm);
+    for (const auto& [name, sk] : sa.dyn_sketches)
+        da.dyn_sketches[name].merge(sk);
     if (sa.occ_bucket_us) {
         da.occ_bucket_us = sa.occ_bucket_us;
         da.occ_total += sa.occ_total;
@@ -570,6 +560,76 @@ std::string group_col_name(const GroupKey& gk) {
     return {};
 }
 
+// A discovered numeric arg reduces over the values that were present (N =
+// fs.n), matching the legacy bare-mean (sum/n). Only FieldStat-derivable ops
+// are reachable here; a Pct/Hist over a dyn arg needs a per-arg sketch and is
+// rejected at the builder.
+static double reduce_dyn(const FieldStat& fs, AggOp op, double /*q*/) {
+    switch (op) {
+        case AggOp::Count:
+            return static_cast<double>(fs.n);
+        case AggOp::Sum:
+            return fs.sum;
+        case AggOp::Min:
+            return fs.n ? fs.min : 0.0;
+        case AggOp::Max:
+            return fs.n ? fs.max : 0.0;
+        case AggOp::SumSq:
+            return fs.sumsq;
+        // Moment reductions delegate to the shared FieldStat (field-present n,
+        // sample variance) so the dyn path matches the named-field path, the
+        // dataframe engine, and pandas/polars.
+        case AggOp::Mean:
+            return fs.mean();
+        case AggOp::Var:
+            return fs.variance(true);
+        case AggOp::Std:
+            return fs.stddev(true);
+        case AggOp::Skew:
+            return fs.skewness();
+        case AggOp::Kurt:
+            return fs.kurtosis();
+        default:
+            return 0.0;
+    }
+}
+
+// Column name for a per-arg reduction: `<op>_<arg>`, matching the named-field
+// convention (sum_field). The legacy mean path keeps the bare arg name. Pct
+// uses the spec's out_name prefix (e.g. "p90_" from the pNN shorthand) so the
+// quantile is legible; otherwise it falls back to "pct_".
+static std::string dyn_col_name(const AggSpec& spec, const std::string& key) {
+    switch (spec.op) {
+        case AggOp::Count:
+            return "count_" + key;
+        case AggOp::Sum:
+            return "sum_" + key;
+        case AggOp::Min:
+            return "min_" + key;
+        case AggOp::Max:
+            return "max_" + key;
+        case AggOp::SumSq:
+            return "sumsq_" + key;
+        case AggOp::Mean:
+            return "mean_" + key;
+        case AggOp::Var:
+            return "var_" + key;
+        case AggOp::Std:
+            return "std_" + key;
+        case AggOp::Skew:
+            return "skew_" + key;
+        case AggOp::Kurt:
+            return "kurt_" + key;
+        case AggOp::Pct: {
+            std::string pfx = spec.out_name.empty() ? "pct_" : spec.out_name;
+            if (pfx.back() != '_') pfx += '_';
+            return pfx + key;
+        }
+        default:
+            return key;
+    }
+}
+
 std::string agg_col_name(const AggSpec& spec) {
     if (!spec.out_name.empty()) return spec.out_name;
     switch (spec.op) {
@@ -636,15 +696,30 @@ dataframe::DataFrame to_batch(const GroupMap& map, const ViewPlan& plan) {
                 value_cols.push_back(agg_col_name(spec));
         }
     }
-    std::vector<std::string> dyn_cols;
+    struct DynCol {
+        std::string key;
+        AggSpec spec;
+    };
+    std::vector<DynCol> dyn_cols;
     if (plan.auto_numeric_metrics) {
         std::set<std::string> names;
         for (const auto& [k, a] : map) {
             (void)k;
             for (const auto& [name, m] : a.dyn) names.insert(name);
         }
-        dyn_cols.assign(names.begin(), names.end());
-        for (const auto& n : dyn_cols) value_cols.push_back(n);
+        if (plan.numeric_arg_aggs.empty()) {
+            // Legacy: one bare-named per-arg mean column.
+            for (const auto& n : names) {
+                dyn_cols.push_back({n, AggSpec(AggOp::Mean)});
+                value_cols.push_back(n);
+            }
+        } else {
+            for (const auto& n : names)
+                for (const auto& spec : plan.numeric_arg_aggs) {
+                    dyn_cols.push_back({n, spec});
+                    value_cols.push_back(dyn_col_name(spec, n));
+                }
+        }
     }
     // Effective grid resolution, so a caller can tell a grid-derived busy from
     // a clamped one.
@@ -705,12 +780,16 @@ dataframe::DataFrame to_batch(const GroupMap& map, const ViewPlan& plan) {
                 }
             }
         }
-        for (const auto& n : dyn_cols) {
-            auto it = a.dyn.find(n);
-            vcells[vc++].push_back(dftracer::utils::dataframe::FieldNum::of(
-                it != a.dyn.end() && it->second.n
-                    ? it->second.sum / static_cast<double>(it->second.n)
-                    : 0.0));
+        for (const auto& dc : dyn_cols) {
+            double v = 0.0;
+            if (dc.spec.op == AggOp::Pct) {
+                auto it = a.dyn_sketches.find(dc.key);
+                if (it != a.dyn_sketches.end())
+                    v = it->second.quantile(dc.spec.q);
+            } else if (auto it = a.dyn.find(dc.key); it != a.dyn.end()) {
+                v = reduce_dyn(it->second, dc.spec.op, dc.spec.q);
+            }
+            vcells[vc++].push_back(dftracer::utils::dataframe::FieldNum::of(v));
         }
         if (occ_cell_col)
             vcells[vc++].push_back(dftracer::utils::dataframe::FieldNum::of(

@@ -1,7 +1,9 @@
 #ifndef DFTRACER_UTILS_TRACE_VIEWS_FOLD_EVENT_H
 #define DFTRACER_UTILS_TRACE_VIEWS_FOLD_EVENT_H
 
+#include <dftracer/utils/core/common/field_ref.h>
 #include <dftracer/utils/core/common/string_intern.h>
+#include <dftracer/utils/json/json_value.h>
 #include <dftracer/utils/trace/event.h>
 #include <simdjson.h>
 
@@ -61,72 +63,15 @@ inline bool is_nested_path(std::string_view field) {
 
 /// Resolve a dotted/bracketed path from `root` (`a.b[0].c`, `a.b.0`); `ok` is
 /// false if any segment is missing. Rooted at `root` with no args fallback,
-/// matching the query evaluator's treatment of dotted paths.
+/// matching the query evaluator's treatment of dotted paths. Delegates to the
+/// single path walker (JsonValue::at) so flat dotted member keys resolve here
+/// too; on failure `ok` is false and `root` is returned unchanged.
 inline simdjson::dom::element resolve_json_path(simdjson::dom::element root,
                                                 std::string_view path,
                                                 bool& ok) {
-    ok = true;
-    simdjson::dom::element cur = root;
-    std::size_t i = 0;
-    const std::size_t n = path.size();
-    auto index = [&](std::size_t idx) {
-        auto r = cur.at(idx);
-        if (r.error()) {
-            ok = false;
-            return;
-        }
-        cur = r.value_unsafe();
-    };
-    while (i < n) {
-        if (path[i] == '.') {
-            ++i;
-            continue;
-        }
-        if (path[i] == '[') {
-            ++i;
-            std::size_t idx = 0;
-            bool any = false;
-            while (i < n && path[i] >= '0' && path[i] <= '9') {
-                idx = idx * 10 + static_cast<std::size_t>(path[i] - '0');
-                ++i;
-                any = true;
-            }
-            if (i < n && path[i] == ']') ++i;
-            if (!any) {
-                ok = false;
-                return cur;
-            }
-            index(idx);
-            if (!ok) return cur;
-            continue;
-        }
-        const std::size_t start = i;
-        while (i < n && path[i] != '.' && path[i] != '[') ++i;
-        std::string_view key = path.substr(start, i - start);
-        auto r = cur[key];
-        if (!r.error()) {
-            cur = r.value_unsafe();
-            continue;
-        }
-        // A numeric key indexes an array (dot-numeric form, e.g. "tags.0").
-        bool all_digits = !key.empty();
-        std::size_t idx = 0;
-        for (char c : key) {
-            if (c < '0' || c > '9') {
-                all_digits = false;
-                break;
-            }
-            idx = idx * 10 + static_cast<std::size_t>(c - '0');
-        }
-        if (all_digits && cur.is_array()) {
-            index(idx);
-            if (!ok) return cur;
-            continue;
-        }
-        ok = false;
-        return cur;
-    }
-    return cur;
+    json::JsonValue v = json::JsonValue(root).at(path);
+    ok = v.exists();
+    return ok ? v.element() : root;
 }
 
 /// Capture a field the POD does not natively carry (top-level type/ph/id, or a

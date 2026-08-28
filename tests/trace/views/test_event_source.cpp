@@ -126,6 +126,36 @@ TEST_SUITE("EventSource") {
         CHECK(pod.phase() == dom.phase());
     }
 
+    // An arg key that itself contains dots ("cqe.raw_ns") is one flat member,
+    // not a nested object. It must resolve by its stored name, written bare or
+    // with the explicit "args." prefix, identically through both sources.
+    TEST_CASE("flat dotted arg key resolves bare and args.-prefixed") {
+        simdjson::dom::parser p;
+        std::string buf;
+        auto root = parse(
+            p, buf,
+            R"({"ph":"X","name":"rdma_send","pid":9,"args":{"cqe.raw_ns":2850744041253792,"ibv.qp":4712,"mlx5.op":"SEND"}})");
+
+        StringIntern intern;
+        FoldEvent ev = extract_fold_event(root, intern, /*needs_args=*/true);
+        DomSource dom(root);
+        PodSource pod(ev, intern);
+
+        for (const char* field : {"cqe.raw_ns", "args.cqe.raw_ns", "ibv.qp",
+                                  "args.ibv.qp", "mlx5.op", "args.mlx5.op"}) {
+            CAPTURE(field);
+            CHECK(dom.value(field) == pod.value(field));
+            auto dn = dom.number(field);
+            auto pn = pod.number(field);
+            CHECK(dn.has_value() == pn.has_value());
+            if (dn) CHECK(*dn == doctest::Approx(*pn));
+        }
+
+        CHECK(dom.number("cqe.raw_ns").has_value());
+        CHECK(dom.value("args.cqe.raw_ns") == "2850744041253792");
+        CHECK(dom.value("mlx5.op") == "SEND");
+    }
+
     TEST_CASE("for_each_numeric_arg visits every numeric arg once") {
         simdjson::dom::parser p;
         std::string buf;

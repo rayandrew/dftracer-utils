@@ -5,6 +5,8 @@
 // folding, arena merge, and node serialization. The scanning worker and
 // handler stay in viz_api.cpp. Internal to the server.
 
+#include <dftracer/utils/dataframe/containment.h>
+#include <dftracer/utils/dataframe/flame_arena.h>
 #include <dftracer/utils/server/viz_internal.h>
 #include <simdjson.h>
 
@@ -16,6 +18,12 @@ namespace dftracer::utils::server {
 
 using json::json_number;
 
+// The folded-tree node/arena and its fold+merge live in the dataframe layer so
+// the server, the columnar flamegraph() op, and the CLI share one core.
+using dataframe::FlameNode;
+using dataframe::fold_flame_node;
+using dataframe::merge_flame_arena;
+
 // One scanned event, reduced to what the call-tree needs.
 struct FlameEv {
     std::int64_t pid = 0;
@@ -23,17 +31,6 @@ struct FlameEv {
     double ts = 0;
     double dur = 0;
     std::string name;
-};
-
-// A node in the merged call tree: identical name-paths across all lanes fold
-// into one node. `total` is inclusive; `self` is total minus nested children.
-struct FlameNode {
-    std::string name;
-    double total = 0;
-    double self = 0;
-    std::uint64_t count = 0;
-    dftracer::utils::StringViewMap<std::uint32_t> kids;
-    std::vector<std::uint32_t> children;
 };
 
 static bool parse_flame_ev(std::string_view event, FlameEv& out) {
@@ -76,34 +73,6 @@ static void serialize_flame_node(simdjson::builder::string_builder& sb,
     sb.end_object();
 }
 
-// Fold one event under `base` in `arena` via the open-stack containment walk.
-// kids are keyed by owned name copies (StringViewMap), so the source events may
-// be discarded afterwards.
-static void fold_flame_event(
-    std::vector<FlameNode>& arena,
-    std::vector<std::pair<double, std::uint32_t>>& open, std::uint32_t base,
-    const FlameEv& ev) {
-    double e_end = ev.ts + (ev.dur > 0 ? ev.dur : 0);
-    while (!open.empty() && open.back().first <= ev.ts) open.pop_back();
-    std::uint32_t parent = open.empty() ? base : open.back().second;
-    std::uint32_t mi;
-    auto it = arena[parent].kids.find(ev.name);
-    if (it == arena[parent].kids.end()) {
-        mi = static_cast<std::uint32_t>(arena.size());
-        arena.emplace_back();
-        arena[mi].name = ev.name;
-        arena[parent].kids.emplace(ev.name, mi);
-        arena[parent].children.push_back(mi);
-    } else {
-        mi = it->second;
-    }
-    arena[mi].total += ev.dur;
-    arena[mi].self += ev.dur;
-    arena[mi].count += 1;
-    if (parent != 0) arena[parent].self -= ev.dur;
-    open.push_back({e_end, mi});
-}
-
 // Sort one file's events by (pid,tid,ts,dur) and fold each lane into `arena`.
 // Lanes never cross files (one pid per rank file), so this is a complete,
 // self-contained partial tree for the file.
@@ -135,33 +104,21 @@ static void fold_file_events(
                 base = pit->second;
             }
         }
-        open.clear();
-        for (; i < evs.size() && evs[i].pid == pid && evs[i].tid == tid; ++i)
-            fold_flame_event(arena, open, base, evs[i]);
-    }
-}
-
-// Merge partial tree `src` (subtree si) into `dst` (node di), summing stats per
-// name-path. src node names stay alive for the whole merge.
-static void merge_flame_arena(std::vector<FlameNode>& dst, std::uint32_t di,
-                              const std::vector<FlameNode>& src,
-                              std::uint32_t si) {
-    dst[di].total += src[si].total;
-    dst[di].self += src[si].self;
-    dst[di].count += src[si].count;
-    for (std::uint32_t sc : src[si].children) {
-        std::uint32_t dc;
-        auto it = dst[di].kids.find(src[sc].name);
-        if (it == dst[di].kids.end()) {
-            dc = static_cast<std::uint32_t>(dst.size());
-            dst.emplace_back();
-            dst[dc].name = src[sc].name;
-            dst[di].kids.emplace(src[sc].name, dc);
-            dst[di].children.push_back(dc);
-        } else {
-            dc = it->second;
-        }
-        merge_flame_arena(dst, dc, src, sc);
+        const std::size_t lane_begin = i;
+        while (i < evs.size() && evs[i].pid == pid && evs[i].tid == tid) ++i;
+        const std::int64_t lane_n = static_cast<std::int64_t>(i - lane_begin);
+        dataframe::containment_walk(
+            lane_n, [&](std::int64_t k) { return evs[lane_begin + k].ts; },
+            [&](std::int64_t k) {
+                const FlameEv& ev = evs[lane_begin + k];
+                return ev.ts + (ev.dur > 0 ? ev.dur : 0);
+            },
+            base,
+            [&](std::int64_t k, std::int64_t, std::uint32_t parent) {
+                const FlameEv& ev = evs[lane_begin + k];
+                return fold_flame_node(arena, ev.name, ev.dur, parent);
+            },
+            open);
     }
 }
 

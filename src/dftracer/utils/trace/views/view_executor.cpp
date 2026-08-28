@@ -7,11 +7,13 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/trace/views/aggfold.h>
 #include <dftracer/utils/trace/views/bloom_fold.h>
+#include <dftracer/utils/trace/views/containment_fold.h>
 #include <dftracer/utils/trace/views/coverage.h>
 #include <dftracer/utils/trace/views/dict_fold.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/index_fold_driver.h>
 #include <dftracer/utils/trace/views/mv_store.h>
+#include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <dftracer/utils/trace/views/typed_collect_fold.h>
 #include <dftracer/utils/trace/views/view_agg_tier.h>
@@ -19,6 +21,7 @@
 #include <dftracer/utils/trace/views/view_counter_format.h>
 #include <dftracer/utils/trace/views/view_definition.h>
 #include <dftracer/utils/trace/views/view_executor.h>
+#include <dftracer/utils/trace/views/view_resolver.h>
 #include <dftracer/utils/trace/views/view_scan.h>
 #include <dftracer/utils/trace/views/view_scanner_utility.h>
 #include <dftracer/utils/trace/views/view_spill.h>
@@ -40,6 +43,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -615,11 +619,45 @@ static coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
 
 // Aggregate `plan` by scanning: answer covered chunks from a materialized
 // aggregate source (if any), fold the rest through one spill-capable AggFold
+// Resolve a min-aligned bucket origin to the trace's minimum timestamp, read
+// from the index zone maps (no event scan), in the post-time_scale unit the
+// fold buckets in. Idempotent: a plan not requesting min alignment (or with no
+// bucket) is returned unchanged, so terminals can call it defensively. A
+// missing/locked index leaves the origin at 0 (absolute).
+static ViewPlan resolve_bucket_origin(const ViewPlan& plan) {
+    if (!plan.bucket_origin_min || plan.time_bucket_us == 0) return plan;
+    namespace idx = utilities::indexer;
+    std::uint64_t global_min = std::numeric_limits<std::uint64_t>::max();
+    for (const auto& f : plan.files) {
+        if (f.index_path.empty() || !fs::exists(f.index_path)) continue;
+        try {
+            idx::IndexDatabase db(f.index_path, idx::IndexOpenMode::ReadOnly);
+            const int fid = db.get_file_info_id(
+                idx::internal::get_logical_path(f.file_path));
+            if (fid < 0) continue;
+            const auto b = db.query_time_bounds(fid);
+            if (b.valid && b.min_timestamp_us < global_min)
+                global_min = b.min_timestamp_us;
+        } catch (const std::exception&) {
+            // Leave this file out; origin falls back to 0 if none resolve.
+        }
+    }
+    ViewPlan p = plan;
+    p.bucket_origin_min = false;
+    p.bucket_origin_us =
+        global_min == std::numeric_limits<std::uint64_t>::max()
+            ? 0
+            : static_cast<std::uint64_t>(static_cast<double>(global_min) *
+                                         p.time_scale);
+    return p;
+}
+
 // over a subsuming filtered-trace MV where present, then persist the result as
 // a rollup when materialize() opted in. Assumes the no-scan fast paths already
 // missed. The single-aggregation scan engine shared by run_collect and a
 // single-branch session.
-static coro::CoroTask<GroupMap> run_scan_aggregate(const ViewPlan& plan) {
+static coro::CoroTask<GroupMap> run_scan_aggregate(const ViewPlan& plan_in) {
+    const ViewPlan plan = resolve_bucket_origin(plan_in);
     ensure_schema(plan);
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/true);
 
@@ -735,7 +773,10 @@ static coro::CoroTask<GroupMap> run_scan_aggregate(const ViewPlan& plan) {
     co_return std::move(merged);
 }
 
-coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan) {
+coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan_in) {
+    // Resolve a min-aligned origin up front so the rollup signature matches a
+    // previously materialized min-aligned result.
+    const ViewPlan plan = resolve_bucket_origin(plan_in);
     ensure_schema(plan);
 
     // Occupancy is an exact interval union computed in the scan, so it works
@@ -784,6 +825,92 @@ coro::CoroTask<TypedResult> run_collect_typed(const ViewPlan& plan,
     out.aggregated = fold.build_aggregated();
     out.counters = fold.build_counters();
     co_return out;
+}
+
+bool is_row_query(const ViewPlan& plan) {
+    return plan.group_by.empty() && plan.agg.empty() &&
+           !plan.auto_numeric_metrics;
+}
+
+coro::CoroTask<dataframe::DataFrame> run_collect_rows(const ViewPlan& plan) {
+    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
+    dftracer::utils::StringIntern intern;
+    // resolved.*/r.* select columns need the index name tables; build the
+    // resolver once (shared across parallel slices) only when asked for.
+    std::shared_ptr<const GroupResolver> resolver;
+    if (select_needs_resolver(plan.select)) {
+        std::vector<std::string> index_paths;
+        index_paths.reserve(plan.files.size());
+        for (const auto& f : plan.files) index_paths.push_back(f.index_path);
+        resolver = std::make_shared<const GroupResolver>(index_paths);
+    }
+    NativeRowFold fold(intern, plan.select, plan.time_scale, resolver);
+    std::array<Fold*, 1> folds{&fold};
+    co_await fuse(plan, vdef, folds, intern);
+    dataframe::DataFrame b = fold.build();
+    if (!plan.sort_col.empty()) b = b.sort_by(plan.sort_col, plan.sort_desc);
+    if (!plan.topk_col.empty())
+        b = b.topk(plan.topk_col, plan.topk_k, plan.topk_largest);
+    if (plan.offset || plan.limit) {
+        const std::int64_t off = static_cast<std::int64_t>(plan.offset);
+        const std::int64_t len =
+            plan.limit ? static_cast<std::int64_t>(plan.limit) : b.num_rows();
+        b = b.slice(off, len);
+    }
+    co_return b;
+}
+
+coro::CoroTask<dataframe::DataFrame> run_call_tree(
+    const ViewPlan& plan, std::vector<std::string> partition,
+    std::string ts_field, std::string dur_field, std::string name_field) {
+    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
+    dftracer::utils::StringIntern intern;
+    ContainmentFold fold(intern, std::move(partition), std::move(ts_field),
+                         std::move(dur_field), std::move(name_field),
+                         plan.time_scale);
+    std::array<Fold*, 1> folds{&fold};
+    co_await fuse(plan, vdef, folds, intern);
+    co_return fold.call_tree();
+}
+
+coro::CoroTask<dataframe::DataFrame> run_flamegraph(
+    const ViewPlan& plan, std::vector<std::string> partition,
+    std::string ts_field, std::string dur_field, std::string name_field) {
+    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
+    dftracer::utils::StringIntern intern;
+    ContainmentFold fold(intern, std::move(partition), std::move(ts_field),
+                         std::move(dur_field), std::move(name_field),
+                         plan.time_scale);
+    std::array<Fold*, 1> folds{&fold};
+    co_await fuse(plan, vdef, folds, intern);
+    co_return fold.flamegraph();
+}
+
+coro::CoroTask<std::pair<dataframe::DataFrame, dataframe::DataFrame>>
+run_containment(const ViewPlan& plan, std::vector<std::string> partition,
+                std::string ts_field, std::string dur_field,
+                std::string name_field) {
+    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
+    dftracer::utils::StringIntern intern;
+    ContainmentFold fold(intern, std::move(partition), std::move(ts_field),
+                         std::move(dur_field), std::move(name_field),
+                         plan.time_scale);
+    std::array<Fold*, 1> folds{&fold};
+    co_await fuse(plan, vdef, folds, intern);
+    co_return fold.containment();
+}
+
+coro::CoroTask<std::string> run_flamegraph_partial(
+    const ViewPlan& plan, std::vector<std::string> partition,
+    std::string ts_field, std::string dur_field, std::string name_field) {
+    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
+    dftracer::utils::StringIntern intern;
+    ContainmentFold fold(intern, std::move(partition), std::move(ts_field),
+                         std::move(dur_field), std::move(name_field),
+                         plan.time_scale);
+    std::array<Fold*, 1> folds{&fold};
+    co_await fuse(plan, vdef, folds, intern);
+    co_return fold.flamegraph_partial();
 }
 
 static GroupMap merge_partials_into_map(

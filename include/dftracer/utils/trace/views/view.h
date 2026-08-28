@@ -40,8 +40,9 @@ using dftracer::utils::dataframe::field::FieldAggExpr;
 using dftracer::utils::dataframe::field::FieldExpr;
 using query::Query;
 
-/// `ph="X"` events, `ph="C"` counters, or both.
-enum class Phase { Events, Counters, Any };
+/// `ph="X"` events, `ph="C"` counters, `ph="A"` aggregated (folded events),
+/// `ph="M"` metadata, or all (`Any`).
+enum class Phase { Events, Counters, Aggregated, Metadata, Any };
 
 /// One column of a (possibly composite) group-by key. `Arg` groups on an
 /// args-map entry named by `arg`; the rest group on the like-named field.
@@ -138,6 +139,18 @@ enum class AggOp {
 inline bool is_occupancy_op(AggOp op) {
     return op == AggOp::Busy || op == AggOp::Concurrency ||
            op == AggOp::Utilization || op == AggOp::Active;
+}
+
+/// True for the reductions runnable over every discovered numeric arg
+/// (agg_numeric_args). Count/Sum/Min/Max/SumSq/Mean/Var/Std/Skew/Kurt come from
+/// the per-arg FieldStat; Pct additionally collects a per-arg DDSketch. Hist,
+/// ArgMax, SetUnion and occupancy need per-event or per-field state, so those
+/// stay on a named field.
+inline bool is_dyn_reduction(AggOp op) {
+    return op == AggOp::Count || op == AggOp::Sum || op == AggOp::Min ||
+           op == AggOp::Max || op == AggOp::SumSq || op == AggOp::Mean ||
+           op == AggOp::Var || op == AggOp::Std || op == AggOp::Skew ||
+           op == AggOp::Kurt || op == AggOp::Pct;
 }
 
 /// `field` is the field to reduce (ignored for `Count()`; for `ArgMax` it is
@@ -286,6 +299,12 @@ class Deferred {
 
 class View;
 
+/// The two handles a single containment branch yields from one buffered fold.
+struct ContainmentHandles {
+    Deferred<dftracer::utils::dataframe::DataFrame> call_tree;
+    Deferred<dftracer::utils::dataframe::DataFrame> flamegraph;
+};
+
 /// A batch of read ops over one shared scan of a base View. Register ops
 /// (collect/materialize/fold/export_json) - each returns a Deferred handle -
 /// then execute() runs them together, serving a materialized aggregate from its
@@ -329,6 +348,27 @@ class ViewSession {
     /// bound it.
     Deferred<dftracer::utils::dataframe::DataFrame> collect_events(
         const View& branch);
+
+    /// Containment over the shared scan: the branch's events buffer into a lean
+    /// per-event tuple, and the parallel per-lane nesting pass runs on execute.
+    /// call_tree returns the events plus level/parent_id; flamegraph returns
+    /// the folded node frame. `partition`/`ts`/`dur`/`name` are named fields
+    /// (POD scalar fast path, else captured arg/nested).
+    Deferred<dftracer::utils::dataframe::DataFrame> call_tree(
+        const View& branch, std::vector<std::string> partition = {"pid", "tid"},
+        std::string ts = "ts", std::string dur = "dur",
+        std::string name = "name");
+    Deferred<dftracer::utils::dataframe::DataFrame> flamegraph(
+        const View& branch, std::vector<std::string> partition = {"pid", "tid"},
+        std::string ts = "ts", std::string dur = "dur",
+        std::string name = "name");
+
+    /// Both containment outputs from ONE buffered fold over the shared scan -
+    /// the events buffer once and each lane sorts once, feeding both builders.
+    ContainmentHandles containment(
+        const View& branch, std::vector<std::string> partition = {"pid", "tid"},
+        std::string ts = "ts", std::string dur = "dur",
+        std::string name = "name");
 
     /// Equi-join two collect branches on their shared leading group keys, after
     /// the one scan. `left` and `right` must be collect() handles from this
@@ -410,6 +450,11 @@ class ViewSession {
     /// Look up the leading key-column count recorded for a collect branch's
     /// output, or -1 if that output was not a collect() of this session.
     std::int64_t key_count_of(const void* out) const;
+    void add_containment_branch(
+        const View& branch, const std::vector<std::string>& partition,
+        const std::string& ts, const std::string& dur, const std::string& name,
+        std::shared_ptr<dftracer::utils::dataframe::DataFrame> out_ct,
+        std::shared_ptr<dftracer::utils::dataframe::DataFrame> out_fg);
     std::size_t num_slots_;
     std::shared_ptr<detail::ViewSessionState> state_;
     std::shared_ptr<bool> executed_ = std::make_shared<bool>(false);
@@ -455,7 +500,15 @@ class View {
     View query(const std::string& dsl) const;
     View phase(Phase p) const;
     View time_range(double begin, double end) const;
+    /// Bucket events into fixed `interval_us` windows aligned to 0 (absolute).
     View time_bucket(std::uint64_t interval_us) const;
+    /// As above but align bucket boundaries to `origin_us` (in the post-scale
+    /// unit): bucket i spans [origin + i*interval, origin + (i+1)*interval).
+    View time_bucket(std::uint64_t interval_us, std::uint64_t origin_us) const;
+    /// As above but align to the trace's minimum timestamp, resolved from the
+    /// index zone maps (no scan) at execution. Best for a viewport whose trace
+    /// starts at an arbitrary absolute time.
+    View time_bucket_min(std::uint64_t interval_us) const;
     /// Target occupancy cell size (busy quantum) in us; 0 = engine default.
     /// Honored only with a time_range (see ViewPlan::occ_cell_us).
     View occ_cell(std::uint64_t cell_us) const;
@@ -487,6 +540,12 @@ class View {
     /// args are skipped). Lets counters aggregate without naming the fields up
     /// front.
     AggregatedView agg_numeric_args() const;
+    /// As above but applies each listed reduction to every discovered numeric
+    /// arg, emitting one `<op>_<arg>` column per (arg, reduction). Only
+    /// FieldStat-derivable ops are allowed (is_dyn_reduction); the AggSpec
+    /// field is ignored. Lets counters report sum/min/max/var/... without
+    /// naming keys.
+    AggregatedView agg_numeric_args(std::vector<AggSpec> reductions) const;
     /// Out-of-core aggregation budget shared by collect(), export_counters(),
     /// and aggregate_partial(): cap each worker's in-memory group map at
     /// `bytes`, spilling to sorted temp runs that are k-way merged at the end,
@@ -570,6 +629,39 @@ class View {
     /// Run group_by + agg, returning a columnar dataframe::DataFrame. No agg
     /// counts per group; no group_by folds the whole set into one row.
     coro::CoroTask<dftracer::utils::dataframe::DataFrame> collect() const;
+
+    /// Containment terminals over one scan. `partition` names the lane keys;
+    /// `ts`/`dur`/`name` name the interval and label fields (any field - a POD
+    /// scalar reads natively, an arg/nested field is captured). call_tree
+    /// returns the events plus level/parent_id; flamegraph returns the folded
+    /// node frame (node_id, parent, name, level, total, self, count).
+    coro::CoroTask<dftracer::utils::dataframe::DataFrame> call_tree(
+        std::vector<std::string> partition = {"pid", "tid"},
+        std::string ts = "ts", std::string dur = "dur",
+        std::string name = "name") const;
+    coro::CoroTask<dftracer::utils::dataframe::DataFrame> flamegraph(
+        std::vector<std::string> partition = {"pid", "tid"},
+        std::string ts = "ts", std::string dur = "dur",
+        std::string name = "name") const;
+
+    /// Both containment frames (.first = call_tree, .second = flamegraph) from
+    /// one scan and one buffered fold.
+    coro::CoroTask<std::pair<dftracer::utils::dataframe::DataFrame,
+                             dftracer::utils::dataframe::DataFrame>>
+    containment(std::vector<std::string> partition = {"pid", "tid"},
+                std::string ts = "ts", std::string dur = "dur",
+                std::string name = "name") const;
+
+    /// Distributed flamegraph. A rank folds its files into an arena and
+    /// serializes it; rank 0 (or a Dask reducer) passes every rank's blob to
+    /// merge_flamegraph_partials for the final node frame. Partition by pid so
+    /// a lane lives on one rank.
+    coro::CoroTask<std::string> flamegraph_partial(
+        std::vector<std::string> partition = {"pid", "tid"},
+        std::string ts = "ts", std::string dur = "dur",
+        std::string name = "name") const;
+    static dftracer::utils::dataframe::DataFrame merge_flamegraph_partials(
+        const std::vector<std::string_view>& partials);
 
     /// Build-only terminal: run the query for its side effect - materialize the
     /// rollup - and return scan stats, with no result DataFrame. The prewarm
@@ -718,6 +810,13 @@ class AggregatedView : public View {
     AggregatedView time_bucket(std::uint64_t interval_us) const {
         return {View::time_bucket(interval_us)};
     }
+    AggregatedView time_bucket(std::uint64_t interval_us,
+                               std::uint64_t origin_us) const {
+        return {View::time_bucket(interval_us, origin_us)};
+    }
+    AggregatedView time_bucket_min(std::uint64_t interval_us) const {
+        return {View::time_bucket_min(interval_us)};
+    }
     AggregatedView occ_cell(std::uint64_t cell_us) const {
         return {View::occ_cell(cell_us)};
     }
@@ -741,6 +840,9 @@ class AggregatedView : public View {
             std::vector<FieldAggExpr>{std::forward<Aggs>(exprs)...});
     }
     AggregatedView agg_numeric_args() const { return View::agg_numeric_args(); }
+    AggregatedView agg_numeric_args(std::vector<AggSpec> reductions) const {
+        return View::agg_numeric_args(std::move(reductions));
+    }
     AggregatedView memory_budget(std::uint64_t bytes) const {
         return {View::memory_budget(bytes)};
     }

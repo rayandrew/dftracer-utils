@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <exception>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <optional>
@@ -15,6 +16,7 @@
 #include <utility>
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
+#include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/utilities/common/arrow/arrow_export.h>
 #endif
 
@@ -139,6 +141,10 @@ using utilities::common::arrow::ArrowExportResult;
 struct ArrowStreamingIteratorState {
     std::shared_ptr<void> state;
     std::function<std::optional<ArrowExportResult>()> pull_next;
+    // When set, the iterator yields native DataFrame chunks instead of Arrow
+    // batches (pull_next is then unused). Keeps Arrow off the streaming path.
+    std::function<std::optional<dftracer::utils::dataframe::DataFrame>()>
+        pull_df;
     std::function<std::exception_ptr()> get_error;
     std::function<void()> cancel;
 };

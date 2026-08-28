@@ -1,19 +1,21 @@
 #include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/platform_compat.h>
 #include <dftracer/utils/core/common/string_arena.h>
+#include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/json/parser.h>
 #include <dftracer/utils/trace/comparator/compare_view.h>
 #include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/time_metric.h>
+#include <dftracer/utils/trace/views/containment_fold.h>
+#include <dftracer/utils/trace/views/fold_event.h>
 #include <dftracer/utils/trace/views/mv_store.h>
+#include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/trace/views/view_executor.h>
 #include <dftracer/utils/trace/views/view_plan.h>
-#include <dftracer/utils/utilities/common/arrow/column_builder.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
-#include <dftracer/utils/utilities/reader/internal/arrow_row_builder.h>
 
 #include <algorithm>
 #include <functional>
@@ -144,6 +146,22 @@ View View::time_bucket(std::uint64_t interval_us) const {
     return View(std::move(next));
 }
 
+View View::time_bucket(std::uint64_t interval_us,
+                       std::uint64_t origin_us) const {
+    auto next = clone(plan_);
+    next->time_bucket_us = interval_us;
+    next->bucket_origin_us = origin_us;
+    next->bucket_origin_min = false;
+    return View(std::move(next));
+}
+
+View View::time_bucket_min(std::uint64_t interval_us) const {
+    auto next = clone(plan_);
+    next->time_bucket_us = interval_us;
+    next->bucket_origin_min = true;
+    return View(std::move(next));
+}
+
 View View::occ_cell(std::uint64_t cell_us) const {
     auto next = clone(plan_);
     next->occ_cell_us = cell_us;
@@ -207,22 +225,48 @@ AggregatedView View::agg(std::vector<FieldAggExpr> exprs) const {
     using dftracer::utils::dataframe::field::AggFn;
     std::vector<AggSpec> specs;
     specs.reserve(exprs.size());
+    // Wildcard (F.any) reductions run over every discovered numeric arg. Mean
+    // alone keeps the legacy bare column; other reductions (and mean alongside
+    // them) emit `<op>_<arg>` columns via numeric_arg_aggs.
+    std::vector<AggSpec> num_args;
     bool wildcard_mean = false;
     for (const auto& e : exprs) {
         if (e.wildcard()) {
-            // The numeric-args path (agg_numeric_args) only computes a per-arg
-            // mean, so F.any honors .mean() (that path) and .count() (the plain
-            // group count); any other reduction over the wildcard is rejected.
-            if (e.fn() == AggFn::Mean) {
-                wildcard_mean = true;
-            } else if (e.fn() == AggFn::Count) {
-                specs.push_back(AggSpec(AggOp::Count));
-            } else {
-                throw DFTUtilsException::cat(
-                    ErrorCode::INVALID_ARGUMENT,
-                    "F.any supports only .mean() (per numeric arg) and "
-                    ".count(); name a field for other reductions, e.g. "
-                    "F(\"args.level\").sum()");
+            switch (e.fn()) {
+                case AggFn::Mean:
+                    wildcard_mean = true;
+                    break;
+                case AggFn::Count:
+                    specs.push_back(AggSpec(AggOp::Count));
+                    break;
+                case AggFn::Sum:
+                    num_args.push_back(AggSpec(AggOp::Sum));
+                    break;
+                case AggFn::Min:
+                    num_args.push_back(AggSpec(AggOp::Min));
+                    break;
+                case AggFn::Max:
+                    num_args.push_back(AggSpec(AggOp::Max));
+                    break;
+                case AggFn::Var:
+                    num_args.push_back(AggSpec(AggOp::Var));
+                    break;
+                case AggFn::Std:
+                    num_args.push_back(AggSpec(AggOp::Std));
+                    break;
+                case AggFn::Skew:
+                    num_args.push_back(AggSpec(AggOp::Skew));
+                    break;
+                case AggFn::Kurt:
+                    num_args.push_back(AggSpec(AggOp::Kurt));
+                    break;
+                default:
+                    throw DFTUtilsException::cat(
+                        ErrorCode::INVALID_ARGUMENT,
+                        "F.any supports .count()/.mean()/.sum()/.min()/.max()/"
+                        ".var()/.std()/.skew()/.kurt(); name a field for "
+                        "argmax "
+                        "or percentile, e.g. F(\"args.level\").pct(0.9)");
             }
             continue;
         }
@@ -230,13 +274,32 @@ AggregatedView View::agg(std::vector<FieldAggExpr> exprs) const {
     }
     View v = *this;
     if (!specs.empty()) v = v.agg(std::move(specs));
-    if (wildcard_mean) v = v.agg_numeric_args();
+    if (wildcard_mean && num_args.empty()) {
+        v = v.agg_numeric_args();
+    } else {
+        if (wildcard_mean) num_args.push_back(AggSpec(AggOp::Mean));
+        if (!num_args.empty()) v = v.agg_numeric_args(std::move(num_args));
+    }
     return AggregatedView(std::move(v));
 }
 
 AggregatedView View::agg_numeric_args() const {
     auto next = clone(plan_);
     next->auto_numeric_metrics = true;
+    return AggregatedView(View(std::move(next)));
+}
+
+AggregatedView View::agg_numeric_args(std::vector<AggSpec> reductions) const {
+    for (const auto& s : reductions)
+        if (!is_dyn_reduction(s.op))
+            throw DFTUtilsException::cat(
+                ErrorCode::INVALID_ARGUMENT,
+                "agg_numeric_args supports only Count/Sum/Min/Max/SumSq/Mean/"
+                "Var/Std/Skew/Kurt over numeric args; Pct/Hist/ArgMax need a "
+                "named field");
+    auto next = clone(plan_);
+    next->auto_numeric_metrics = true;
+    next->numeric_arg_aggs = std::move(reductions);
     return AggregatedView(View(std::move(next)));
 }
 
@@ -358,8 +421,48 @@ coro::CoroTask<ExportStats> View::export_trace(TraceWriteOptions opts) const {
 }
 
 coro::CoroTask<dataframe::DataFrame> View::collect() const {
+    // A row query (no group_by/agg) returns the matching events, not a count.
+    if (detail::is_row_query(*plan_))
+        co_return co_await detail::run_collect_rows(*plan_);
     detail::GroupMap m = co_await detail::run_collect(*plan_);
     co_return detail::finalize_collect_batch(m, *plan_);
+}
+
+coro::CoroTask<dataframe::DataFrame> View::call_tree(
+    std::vector<std::string> partition, std::string ts, std::string dur,
+    std::string name) const {
+    co_return co_await detail::run_call_tree(*plan_, std::move(partition),
+                                             std::move(ts), std::move(dur),
+                                             std::move(name));
+}
+
+coro::CoroTask<dataframe::DataFrame> View::flamegraph(
+    std::vector<std::string> partition, std::string ts, std::string dur,
+    std::string name) const {
+    co_return co_await detail::run_flamegraph(*plan_, std::move(partition),
+                                              std::move(ts), std::move(dur),
+                                              std::move(name));
+}
+
+coro::CoroTask<std::pair<dataframe::DataFrame, dataframe::DataFrame> >
+View::containment(std::vector<std::string> partition, std::string ts,
+                  std::string dur, std::string name) const {
+    co_return co_await detail::run_containment(*plan_, std::move(partition),
+                                               std::move(ts), std::move(dur),
+                                               std::move(name));
+}
+
+coro::CoroTask<std::string> View::flamegraph_partial(
+    std::vector<std::string> partition, std::string ts, std::string dur,
+    std::string name) const {
+    co_return co_await detail::run_flamegraph_partial(
+        *plan_, std::move(partition), std::move(ts), std::move(dur),
+        std::move(name));
+}
+
+dataframe::DataFrame View::merge_flamegraph_partials(
+    const std::vector<std::string_view>& partials) {
+    return detail::merge_flamegraph_partials(partials);
 }
 
 coro::CoroTask<ExportStats> View::run_folds(
@@ -571,50 +674,43 @@ Deferred<ExportStats> ViewSession::export_json(ExportSink& sink) {
 }
 
 Deferred<dataframe::DataFrame> ViewSession::collect_events(const View& branch) {
-#ifndef DFTRACER_UTILS_ENABLE_ARROW
-    (void)branch;
-    throw DFTUtilsException(ErrorCode::INVALID_ARGUMENT,
-                            "collect_events requires the arrow-enabled build");
-#else
-    namespace rd = utilities::reader::internal;
-    namespace arw = utilities::common::arrow;
     const auto& bp = *branch.plan_;
     auto out = std::make_shared<dataframe::DataFrame>();
     const std::size_t slots = num_slots_ ? num_slots_ : 1;
-    // One Arrow row builder per worker slot (indexed, never moved). The JSON
-    // row builder is the only JSON -> columns path, so events cross Arrow once.
-    auto builders =
-        std::make_shared<std::vector<arw::RecordBatchBuilder> >(slots);
-    auto parsers = std::make_shared<std::vector<json::JsonParser> >(slots);
-    auto arenas = std::make_shared<std::vector<StringArena> >(slots);
-    auto tscales = std::make_shared<std::vector<trace::TimeScaleState> >(slots);
-    auto keep = std::make_shared<std::vector<std::string> >(bp.select);
-    rd::RowBuildOptions ropts;
-    if (!keep->empty()) ropts.keep = keep.get();
-    ropts.time_scale = bp.time_scale;
+    // Per-slot owned events built straight into native columns (no Arrow); each
+    // slot interns its own strings, so build_row_frame resolves them per slot.
+    auto interns =
+        std::make_shared<std::vector<dftracer::utils::StringIntern> >(slots);
+    auto bufs =
+        std::make_shared<std::vector<std::vector<detail::FoldEvent> > >(slots);
+    auto select = std::make_shared<std::vector<std::string> >(bp.select);
+    const double time_scale = bp.time_scale;
 
-    auto consume = [builders, parsers, arenas, tscales, keep, ropts, slots](
-                       std::size_t slot, const json::JsonValue&,
-                       std::string_view raw) {
+    auto consume = [interns, bufs, slots](std::size_t slot,
+                                          const json::JsonValue& jv,
+                                          std::string_view) {
         if (slot >= slots) return;
-        rd::process_json_line((*builders)[slot], (*parsers)[slot],
-                              (*arenas)[slot], raw, /*normalize=*/false,
-                              (*tscales)[slot], ropts);
+        detail::FoldEvent fe = detail::extract_fold_event(
+            jv.element(), (*interns)[slot], /*needs_args=*/true);
+        if (fe.phase == RecordPhase::METADATA ||
+            fe.phase == RecordPhase::UNKNOWN)
+            return;
+        (*bufs)[slot].push_back(std::move(fe));
     };
-    auto finalize = [builders, slots, out]() {
+    auto finalize = [interns, bufs, select, slots, out, time_scale]() {
         std::vector<dataframe::DataFrame> frames;
         frames.reserve(slots);
         for (std::size_t s = 0; s < slots; ++s) {
-            if ((*builders)[s].num_rows() == 0) continue;
-            auto res = (*builders)[s].finish();
-            frames.push_back(dataframe::DataFrame::from_arrow(res.get_schema(),
-                                                              res.get_array()));
+            if ((*bufs)[s].empty()) continue;
+            frames.push_back(detail::build_row_frame((*bufs)[s], (*interns)[s],
+                                                     *select, time_scale));
         }
         if (frames.empty()) return;  // out stays an empty frame
         std::vector<const dataframe::DataFrame*> parts;
         parts.reserve(frames.size());
         for (const auto& f : frames) parts.push_back(&f);
-        *out = dataframe::concat(parts);
+        // Slots discover different args, so union their schemas.
+        *out = dataframe::concat(parts, dataframe::ConcatHow::Diagonal);
     };
 
     if (bp.query)
@@ -624,7 +720,84 @@ Deferred<dataframe::DataFrame> ViewSession::collect_events(const View& branch) {
         detail::add_fold_branch(*state_, std::move(consume),
                                 std::move(finalize));
     return {out, executed_};
-#endif
+}
+
+// One containment branch buffering rows once (shared intern for cross-slot lane
+// consistency); finalize builds whichever of out_ct/out_fg is requested,
+// sorting each lane once when both are.
+void ViewSession::add_containment_branch(
+    const View& branch, const std::vector<std::string>& partition,
+    const std::string& ts, const std::string& dur, const std::string& name,
+    std::shared_ptr<dataframe::DataFrame> out_ct,
+    std::shared_ptr<dataframe::DataFrame> out_fg) {
+    const auto& bp = *branch.plan_;
+    const std::size_t slots = num_slots_ ? num_slots_ : 1;
+    auto intern = std::make_shared<dftracer::utils::StringIntern>();
+    auto spec = std::make_shared<detail::ContainmentSpec>(
+        detail::make_containment_spec(*intern, partition, ts, dur, name));
+    auto bufs =
+        std::make_shared<std::vector<std::vector<detail::ContainmentRow> > >(
+            slots);
+    const double time_scale = bp.time_scale;
+
+    auto consume = [intern, spec, bufs, slots](std::size_t slot,
+                                               const json::JsonValue& jv,
+                                               std::string_view) {
+        if (slot >= slots) return;
+        detail::FoldEvent fe = detail::extract_fold_event(
+            jv.element(), *intern, spec->needs_args, &spec->nested_captures);
+        detail::ContainmentRow r;
+        if (detail::containment_row(fe, *spec, r)) (*bufs)[slot].push_back(r);
+    };
+    auto finalize = [intern, bufs, slots, out_ct, out_fg, time_scale]() {
+        std::vector<detail::ContainmentRow> all;
+        for (std::size_t s = 0; s < slots; ++s)
+            all.insert(all.end(), (*bufs)[s].begin(), (*bufs)[s].end());
+        if (out_ct && out_fg) {
+            auto pr = detail::build_containment_both(all, *intern, time_scale);
+            *out_ct = std::move(pr.first);
+            *out_fg = std::move(pr.second);
+        } else if (out_ct) {
+            *out_ct = detail::build_call_tree(all, detail::sorted_lanes(all),
+                                              *intern, time_scale);
+        } else if (out_fg) {
+            *out_fg = detail::build_flamegraph(all, detail::sorted_lanes(all),
+                                               *intern, time_scale);
+        }
+    };
+
+    if (bp.query)
+        detail::add_fold_branch(*state_, *bp.query, std::move(consume),
+                                std::move(finalize));
+    else
+        detail::add_fold_branch(*state_, std::move(consume),
+                                std::move(finalize));
+}
+
+Deferred<dataframe::DataFrame> ViewSession::call_tree(
+    const View& branch, std::vector<std::string> partition, std::string ts,
+    std::string dur, std::string name) {
+    auto out = std::make_shared<dataframe::DataFrame>();
+    add_containment_branch(branch, partition, ts, dur, name, out, nullptr);
+    return {out, executed_};
+}
+
+Deferred<dataframe::DataFrame> ViewSession::flamegraph(
+    const View& branch, std::vector<std::string> partition, std::string ts,
+    std::string dur, std::string name) {
+    auto out = std::make_shared<dataframe::DataFrame>();
+    add_containment_branch(branch, partition, ts, dur, name, nullptr, out);
+    return {out, executed_};
+}
+
+ContainmentHandles ViewSession::containment(const View& branch,
+                                            std::vector<std::string> partition,
+                                            std::string ts, std::string dur,
+                                            std::string name) {
+    auto out_ct = std::make_shared<dataframe::DataFrame>();
+    auto out_fg = std::make_shared<dataframe::DataFrame>();
+    add_containment_branch(branch, partition, ts, dur, name, out_ct, out_fg);
+    return {{out_ct, executed_}, {out_fg, executed_}};
 }
 
 coro::CoroTask<ExportStats> ViewSession::execute() {

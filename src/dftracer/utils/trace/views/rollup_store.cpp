@@ -69,7 +69,30 @@ void add_rest_fields(std::string& sig, const ViewPlan& plan) {
         add(a.out_name);
         add(a.by);
     }
+    // Bucket alignment shifts every bucket boundary, so it partitions the
+    // result grid: a min/origin-aligned query must not reuse an absolute
+    // rollup. Re-bucketing a coarser query from a finer rollup assumes
+    // 0-aligned flooring, so for an aligned plan pin the exact width too (no
+    // re-cut).
+    add(std::to_string(plan.bucket_origin_us));
+    add(plan.bucket_origin_min ? "1" : "0");
+    if (plan.bucket_origin_us || plan.bucket_origin_min)
+        add("bw=" + std::to_string(plan.time_bucket_us));
     add(plan.auto_numeric_metrics ? "1" : "0");
+    // Whether a per-arg quantile sketch was collected: an MV built without it
+    // cannot serve a dyn Pct query, so it must not be reused for one. The dyn
+    // FieldStat serves every other reduction, so those need no signature bump.
+    bool dyn_sketch = false;
+    for (const auto& r : plan.numeric_arg_aggs)
+        if (r.op == AggOp::Pct) {
+            dyn_sketch = true;
+            break;
+        }
+    add(dyn_sketch ? "1" : "0");
+    // Serialized-accum format tag: bump when serialize_accum's layout changes
+    // so a persisted MV from an older layout is never misread (it lands in a
+    // different slug and is recomputed). v2 added the per-arg sketch block.
+    add("accumfmt2");
     for (const auto& s : plan.select) add(s);
 }
 
@@ -170,6 +193,8 @@ void merge_accum_free(AggAccum& da, const AggAccum& sa) {
     for (std::size_t i = 0; i < sa.sets.size(); ++i)
         da.sets[i].insert(sa.sets[i].begin(), sa.sets[i].end());
     for (const auto& [name, sm] : sa.dyn) da.dyn[name].merge(sm);
+    for (const auto& [name, sk] : sa.dyn_sketches)
+        da.dyn_sketches[name].merge(sk);
 }
 
 std::shared_ptr<rdb::RocksDatabase> open_rollup_db(

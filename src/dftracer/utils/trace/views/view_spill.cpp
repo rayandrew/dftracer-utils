@@ -67,6 +67,12 @@ void serialize_accum(std::string& out, const std::string& key,
         codec::put_str(out, name);
         put_stat(out, m);
     }
+    codec::put_be64(out, a.dyn_sketches.size());
+    for (const auto& [name, sk] : a.dyn_sketches) {
+        codec::put_str(out, name);
+        auto bytes = sk.serialize();
+        codec::put_str(out, std::string(bytes.begin(), bytes.end()));
+    }
     codec::put_be64(out, a.sets.size());
     for (const auto& s : a.sets) {
         codec::put_be64(out, s.size());
@@ -113,6 +119,15 @@ void deserialize_accum(codec::BinaryReader& br, std::string& key, AggAccum& a) {
     for (std::uint64_t i = 0; i < ndyn; ++i) {
         std::string name(br.str());
         a.dyn.emplace(std::move(name), get_stat(br));
+    }
+    const std::uint64_t ndynsk = br.be64();
+    for (std::uint64_t i = 0; i < ndynsk; ++i) {
+        std::string name(br.str());
+        auto sv = br.str();
+        a.dyn_sketches.emplace(
+            std::move(name),
+            utilities::common::statistics::DDSketch::deserialize(
+                reinterpret_cast<const std::uint8_t*>(sv.data()), sv.size()));
     }
     a.sets.resize(br.be64());
     for (auto& s : a.sets) {

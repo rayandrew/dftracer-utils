@@ -69,6 +69,12 @@ class Fold {
     /// keeps raw lines when any is present.
     virtual bool wants_raw() const { return false; }
 
+    /// Extra fields (top-level type/ph/id, or nested a.b/a[0]) this fold needs
+    /// captured into each event beyond what the POD carries and beyond flat
+    /// args (which needs_args() already covers). Merged with the plan's own
+    /// captures.
+    virtual std::vector<std::string> extra_captures() const { return {}; }
+
     /// One per worker slot, folded lock-free, merged after the fan-out joins.
     virtual std::unique_ptr<Fold> slice() const = 0;
 

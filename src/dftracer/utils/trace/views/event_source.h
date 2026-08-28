@@ -62,55 +62,25 @@ class DomSource {
     }
 
     std::optional<double> number(std::string_view field) const {
-        if (is_nested_path(field)) {
-            bool ok = false;
-            auto e = resolve_json_path(root_, field, ok);
-            return ok ? as_number(e) : std::nullopt;
-        }
-        auto [e, ok] = top(field);
-        if (ok)
-            if (auto n = as_number(e)) return n;
-        if (has_args_)
-            if (auto rr = args_[field]; !rr.error())
-                if (auto n = as_number(rr.value_unsafe())) return n;
-        return std::nullopt;
+        auto [e, ok] = resolve(field);
+        return ok ? as_number(e) : std::nullopt;
     }
 
     std::optional<dftracer::utils::dataframe::FieldNum> number_typed(
         std::string_view field) const {
-        if (is_nested_path(field)) {
-            bool ok = false;
-            auto e = resolve_json_path(root_, field, ok);
-            return ok ? as_typed_number(e) : std::nullopt;
-        }
-        auto [e, ok] = top(field);
-        if (ok)
-            if (auto n = as_typed_number(e)) return n;
-        if (has_args_)
-            if (auto rr = args_[field]; !rr.error())
-                if (auto n = as_typed_number(rr.value_unsafe())) return n;
-        return std::nullopt;
+        auto [e, ok] = resolve(field);
+        return ok ? as_typed_number(e) : std::nullopt;
     }
 
     void append_value(std::string& out, std::string_view field) const {
-        if (is_nested_path(field)) {
-            bool ok = false;
-            auto e = resolve_json_path(root_, field, ok);
-            if (ok) append_text(out, e);
-            return;
-        }
-        auto [e, ok] = top(field);
-        if (ok) {
-            append_text(out, e);
-            return;
-        }
-        append_arg(out, field);
+        auto [e, ok] = resolve(field);
+        if (ok) append_text(out, e);
     }
 
     void append_arg(std::string& out, std::string_view key) const {
-        if (has_args_)
-            if (auto rr = args_[key]; !rr.error())
-                append_text(out, rr.value_unsafe());
+        if (!has_args_) return;
+        json::JsonValue av = json::JsonValue(args_).at(strip_args_prefix(key));
+        if (av.exists()) append_text(out, av.element());
     }
 
     std::string value(std::string_view field) const {
@@ -128,6 +98,23 @@ class DomSource {
 
    private:
     using Cached = std::pair<simdjson::dom::element, bool>;
+
+    // Top-level (schema/hot) first so a bare schema name never resolves a
+    // same-named arg; then the flat arg key (dotted or not, prefix optional);
+    // then a genuinely nested non-args path.
+    Cached resolve(std::string_view field) const {
+        if (auto t = top(field); t.second) return t;
+        if (has_args_) {
+            json::JsonValue av =
+                json::JsonValue(args_).at(strip_args_prefix(field));
+            if (av.exists()) return {av.element(), true};
+        }
+        if (is_nested_path(field)) {
+            json::JsonValue rv = json::JsonValue(root_).at(field);
+            if (rv.exists()) return {rv.element(), true};
+        }
+        return {{}, false};
+    }
 
     // The captured element for a hot field, else a live lookup so an uncaptured
     // field still resolves.
@@ -281,9 +268,10 @@ class PodSource {
     }
 
     void append_arg(std::string& out, std::string_view key) const {
-        if (key == "fhash")
+        const std::string_view bare = strip_args_prefix(key);
+        if (bare == "fhash")
             append_id(out, ev_.fhash_id);
-        else if (key == "hhash")
+        else if (bare == "hhash")
             append_id(out, ev_.hhash_id);
         else if (const auto* v = find_arg(key))
             append_arg_value(out, *v);
@@ -306,7 +294,18 @@ class PodSource {
     }
 
    private:
+    // Nested/extra fields are captured under their full name including the
+    // "args." prefix (capture_extra_field), while top-level args are stored
+    // bare. Match the field as written first, then its stripped form, so both
+    // "args.meta.host" (nested, prefixed) and "args.cqe.raw_ns" (flat arg key,
+    // stored bare) resolve.
     const FoldEvent::ArgValue* find_arg(std::string_view field) const {
+        if (const auto* v = find_arg_by(field)) return v;
+        const std::string_view bare = strip_args_prefix(field);
+        return bare == field ? nullptr : find_arg_by(bare);
+    }
+
+    const FoldEvent::ArgValue* find_arg_by(std::string_view field) const {
         const std::uint32_t id = intern_lookup(field);
         if (id == dftracer::utils::StringIntern::NO_ID) return nullptr;
         for (const auto& [key_id, v] : ev_.args)

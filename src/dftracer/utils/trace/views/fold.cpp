@@ -181,6 +181,17 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
     }
 
     std::vector<std::string> extra_fields = extra_capture_fields(plan);
+    // Fold-declared captures (nested fields a fold resolves itself) merged in.
+    for (auto* f : folds)
+        for (const std::string& c : f->extra_captures()) {
+            bool seen = false;
+            for (const std::string& e : extra_fields)
+                if (e == c) {
+                    seen = true;
+                    break;
+                }
+            if (!seen) extra_fields.push_back(c);
+        }
 
     // Coarse fan-out: one worker coroutine per runtime slot draining the shared
     // unit queue, so under the elastic runtime live threads grow toward the
