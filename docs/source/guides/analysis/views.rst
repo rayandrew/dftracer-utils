@@ -67,9 +67,13 @@ and ``filter`` throws. Plugins instead use the predicate-only ``query::F``
 (``<dftracer/utils/query/builder.h>``) finished with ``Expr::build()``, which
 links no dataframe engine. See :doc:`../core/query-dsl` for the builder surface.
 
-Row-shaping builders: ``.phase(Phase::Events | Phase::Counters | Phase::Any)``
-restricts to ``ph="X"`` events, ``ph="C"`` counters, or both; ``.time_range(begin,
-end)`` and ``.time_bucket(interval_us)`` window and bucket by timestamp;
+Row-shaping builders: ``.phase(Phase::Events | Phase::Counters |
+Phase::Aggregated | Phase::Metadata | Phase::Any)`` restricts to ``ph="X"``
+events, ``ph="C"`` counters, rollup (``Aggregated``) records, ``ph="M"``
+metadata, or any; ``.time_range(begin,
+end)`` and ``.time_bucket(interval_us, origin)`` window and bucket by timestamp
+(``origin`` anchors the windows; ``"min"`` anchors on the first event's
+timestamp instead of ``0``);
 ``.select({...})`` projects columns; ``.limit(n)`` / ``.offset(n)`` paginate;
 ``.sort_by(column, descending)`` / ``.topk(column, k)`` order the result. All
 return a new ``View`` (or, in Python, a new ``TraceViewer``).
@@ -233,8 +237,12 @@ other op:
    posix->num_rows();
 
 Reading a ``Deferred`` handle before ``execute()`` resolves it throws. From
-Python the same fused scan is ``TraceViewer.session()``; see
-:doc:`aggregation` and :doc:`../../api/trace_viewer`.
+Python the same fused scan is ``TraceViewer.session()``; each ``s.view()``
+branch (a ``SessionView``) registers the same terminals over the shared scan,
+and also the containment terminals ``call_tree`` / ``flamegraph`` /
+``containment`` (same ``partition`` / ``ts`` / ``dur`` / ``name`` arguments as
+:doc:`../../api/trace_viewer`), each returning a ``Handle`` resolved on
+``execute()``. See :doc:`aggregation` and :doc:`../../api/trace_viewer`.
 
 Materialized views
 -------------------

@@ -438,10 +438,9 @@ dftracer_view
   ``busy``/``concurrency``/``utilization``; finer resolves overlap on short
   events (honored with ``--time-range``, default 64 us)
 - ``--counters`` - Emit the aggregation as ``ph=C`` counter events
-- ``--format <fmt>`` - Aggregate output format: ``text`` (default) or
-  ``arrow`` (IPC file)
 - ``--phase <phase>`` - Select events by phase: ``events`` (ph=X),
-  ``counters`` (ph=C), ``any``
+  ``counters`` (ph=C), ``aggregated`` (rollup records), ``metadata`` (ph=M),
+  ``any``
 - ``--select <cols>`` - Project the result to these columns, comma-separated
 - ``--limit <n>`` - Cap the output to N rows/events (0 = unlimited)
 - ``--offset <n>`` - Skip the first N rows/events before applying ``--limit``
@@ -459,6 +458,13 @@ dftracer_view
 - ``--merge`` - Merge all inputs into one trace written to ``--output``
 - ``--no-index`` - Do not build an index for the written trace (default: index)
 - ``--verify`` - Re-scan the exported output and confirm the event count round-trips
+
+**Call tree / flamegraph:**
+
+- ``--call-tree`` - Emit the containment call tree as NDJSON
+- ``--flamegraph`` - Emit the folded flamegraph as NDJSON. Distributes under
+  ``mpirun`` (each rank folds an arena partial, ranks all-gather, rank 0
+  merges), so there is no separate ``_mpi`` binary.
 
 **Example:**
 
@@ -769,39 +775,6 @@ dftracer_gen_fake_trace
     # Generate with custom training parameters
     dftracer_gen_fake_trace -o ./traces -e 100 -s 500 --checkpoint-every 10
 
-dftracer_call_tree
-------------------
-
-**Description:** Build a hierarchical call tree from DFTracer trace files and
-write it out as Chrome Tracing JSON. Pipeline DAG: ``scan -> build -> merge ->
-hierarchy -> write_json``.
-
-**Usage:**
-
-.. code-block:: bash
-
-    dftracer_call_tree [OPTIONS] <inputs...>
-
-**Options:**
-
-- ``inputs`` - Trace files (.pfw.gz) or directories [required]
-- ``-r, --recursive`` - Recursively search directories for trace files
-- ``-o, --output <path>`` - Output JSON path (Chrome Tracing)
-- ``--no-save`` - Skip writing output
-- ``--gzip`` - gzip the output (``.gz`` appended if needed)
-
-This binary also accepts the shared :ref:`cli-shared-flags` (Pipeline).
-
-**Example:**
-
-.. code-block:: bash
-
-    # Build call tree from a directory, recursively
-    dftracer_call_tree ./traces -r -o call_tree.json
-
-    # Build and gzip the output
-    dftracer_call_tree ./traces -o call_tree.json --gzip
-
 dftracer_comparator
 -------------------
 
@@ -925,37 +898,3 @@ and ``--variant``.
         ]
     }
 
-dftracer_call_tree_mpi
-----------------------
-
-**Description:** MPI driver for parallel call-tree construction. Each rank
-owns a slice of PIDs, emits a Chrome Tracing JSON shard, and rank 0 merges
-the shards. Wraps the ``MPICallTreeBuilder`` engine
-(``discover_pids -> build -> hierarchy -> write -> merge`` coro phases).
-Requires ``DFTRACER_UTILS_ENABLE_MPI=ON``.
-
-**Usage:**
-
-.. code-block:: bash
-
-    mpirun -n <N> dftracer_call_tree_mpi [OPTIONS] <input>
-
-**Options:**
-
-- ``input`` - Input directory containing trace files [required]
-- ``-o, --output <path>`` - Output JSON path (default: ``call_tree.pfw``)
-- ``--staging-dir <path>`` - Shared-FS staging root for per-rank shards
-  (default: ``<output>.shards/``)
-- ``--gzip`` - gzip the merged output (``.gz`` appended if needed)
-- ``--keep-staging`` - Keep per-rank shard files after merge
-
-This binary also accepts the shared :ref:`cli-shared-flags` (Pipeline);
-per-rank thread counts are scaled down by the detected processes-per-node
-count.
-
-**Example:**
-
-.. code-block:: bash
-
-    # 32 ranks across nodes; gzip merged output
-    mpirun -n 32 dftracer_call_tree_mpi ./traces -o call_tree.pfw --gzip

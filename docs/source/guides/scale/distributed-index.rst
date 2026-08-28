@@ -113,6 +113,13 @@ native runtime thread count), ``assign_files_by_pid(file_pids, n_workers)``
 ``DaskAggregatedTraceViewer`` classes for querying across the cluster once the
 index exists.
 
+``DaskTraceViewer.flamegraph(partition=("pid", "tid"), ts, dur, name)`` builds a
+flamegraph across the cluster: each file shard folds a serialized arena partial
+(``TraceViewer.flamegraph_partial``), and the client tree-reduces them with
+``TraceViewer.merge_flamegraph_partials`` into the final node DataFrame, so a
+name folds across shards. Partition by ``pid`` so a lane lives on one shard. It
+composes with the branch's filter / phase / time like ``collect``.
+
 Query a shard set
 -----------------
 
@@ -197,7 +204,7 @@ supports aggregate/counter queries:
 .. code-block:: bash
 
    dftracer_view -d /shared/traces --group-by name --agg count,sum:dur \
-       --format arrow -o result.arrow
+       > result.ndjson
 
 If ``-d``/``--index-dir`` does not resolve to a shard set (no ``shards.json``
 under it or its ``.dftindex-shards`` subdirectory), ``dftracer_view`` falls
@@ -210,5 +217,5 @@ See also
 - :doc:`distributed-aggregation` - the partial-aggregate fan-in pattern
   ``ShardedView`` runs in-process, and the pattern to use when reducing
   partials yourself (e.g. across MPI ranks).
-- :doc:`mpi` - the MPI call-tree driver, the other cross-node path.
+- :doc:`mpi` - the MPI flamegraph driver, the other cross-node path.
 - :doc:`../io/compression` - ``checkpoint_size`` is the gzip member size.

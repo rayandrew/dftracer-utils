@@ -1,11 +1,11 @@
-:description: Reference for the DFTracer domain layer: aggregators, bloom-filter indexing, views and predicates, comparators, statistics, and the call-tree builder.
+:description: Reference for the DFTracer domain layer: aggregators, bloom-filter indexing, views and predicates, comparators, statistics, and the visitors.
 
 Trace Analysis
 ==============
 
 The DFTracer domain layer under ``dftracer::utils::trace``: event aggregators,
 the bloom-filter indexing system, views and predicates, comparators, statistics,
-the visitors, and the call-tree builder.
+and the visitors.
 
 Type relationships
 ------------------
@@ -21,4 +21,3 @@ Composition and inheritance across the trace-analysis types:
 .. include:: /cpp_api/_generated/trace.comparator.rst.inc
 .. include:: /cpp_api/_generated/trace.statistics.rst.inc
 .. include:: /cpp_api/_generated/trace.visitors.rst.inc
-.. include:: /cpp_api/_generated/call_tree.rst.inc

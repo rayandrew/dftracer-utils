@@ -56,11 +56,11 @@ through further builder calls).
    * - ``filter(dsl)`` / ``query(dsl)``
      - Keep events matching the :doc:`query DSL <query>` (e.g. ``'dur >= 1000 and cat == "POSIX"'``).
    * - ``phase(name)``
-     - Restrict to a record family: ``"events"`` (``ph="X"``), ``"counters"`` (``ph="C"``), or ``"any"``.
+     - Restrict to a record family: ``"events"`` (``ph="X"``), ``"counters"`` (``ph="C"``), ``"aggregated"`` (rollup records), ``"metadata"`` (``ph="M"``), or ``"any"``.
    * - ``time_range(begin, end)``
      - Keep events whose timestamp falls in ``[begin, end)``.
-   * - ``time_bucket(interval_us)``
-     - Bucket ``ts`` into fixed ``interval_us`` windows (a group key for time series).
+   * - ``time_bucket(interval_us, origin=...)``
+     - Bucket ``ts`` into fixed ``interval_us`` windows (a group key for time series). ``origin`` sets the window anchor; ``"min"`` anchors on the first event's timestamp instead of ``0``.
    * - ``time_unit(unit)`` / ``time_scale(ns_ratio)``
      - Interpret/scale the trace's native time unit (see the :doc:`quickstart <../quickstart>`).
    * - ``select(*cols)``
@@ -156,6 +156,42 @@ the base).
    v.materialize()                 # build once
    v.collect()                     # served from the materialized view
 
+Call trees and flamegraphs (Containment)
+----------------------------------------
+
+Three terminals fold events by their ``[ts, ts + dur)`` containment within each
+lane (rows sharing ``partition``, ``("pid", "tid")`` by default; ``ts`` /
+``dur`` / ``name`` name the interval and label columns):
+
+- ``call_tree(partition, ts, dur, name)`` scans the view and returns the events
+  plus ``level`` and ``parent_id`` (the containing event per lane).
+- ``flamegraph(partition, ts, dur, name)`` folds events by root-to-node
+  ``name`` path and returns one row per node: ``node_id``, ``parent``,
+  ``name``, ``level``, ``total`` (inclusive), ``self`` (exclusive), ``count``.
+- ``containment(partition, ts, dur, name)`` scans once and buffers one fold,
+  then returns a :class:`~dftracer.utils.dataframe.Containment` whose ``call_tree()`` and
+  ``flamegraph()`` give both frames from the shared scan - cheaper than calling
+  both terminals separately.
+
+.. code-block:: python
+
+   c = TraceViewer("traces/").containment()
+   tree = c.call_tree()          # events + level, parent_id
+   flame = c.flamegraph()        # node_id, parent, name, level, total, self, count
+
+For a distributed flamegraph, ``flamegraph_partial(partition, ts, dur, name)``
+scans one rank's files into a serialized arena (``bytes``); partition by ``pid``
+so each lane lives on one rank. Gather the partials (MPI all-gather or Dask) and
+reduce them with the static
+``TraceViewer.merge_flamegraph_partials(partials)``, which needs no scan or
+viewer and returns the final node DataFrame:
+
+.. code-block:: python
+
+   part = TraceViewer(my_files).flamegraph_partial(partition=("pid",))
+   # ... gather every rank's `part` bytes ...
+   nodes = TraceViewer.merge_flamegraph_partials(all_partials)   # on rank 0
+
 Distributed use
 ---------------
 
@@ -187,5 +223,9 @@ How the viewer types relate and what they return:
    :undoc-members:
 
 .. autoclass:: dftracer.utils.SessionView
+   :members:
+   :undoc-members:
+
+.. autoclass:: dftracer.utils.dataframe.Containment
    :members:
    :undoc-members:

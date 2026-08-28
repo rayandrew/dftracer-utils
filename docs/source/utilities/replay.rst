@@ -262,5 +262,4 @@ See Also
 --------
 
 - :doc:`/cli` - Command-line tools (``dftracer_replay``)
-- :doc:`/call-tree` - Call tree utility
 - :doc:`/cpp_api/index` - Full C++ API documentation

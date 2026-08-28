@@ -121,5 +121,4 @@ and a ``DFTracerExecutor`` does the sleep-based replay. Add your own with
 See also
 --------
 
-- :doc:`call-tree` - the hierarchy that drives ``--use-call-tree`` replay.
 - :doc:`dlio-config` - model a workload's timing instead of replaying it.

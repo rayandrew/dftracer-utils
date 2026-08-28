@@ -47,18 +47,23 @@ for task-oriented recipes. The rest of this page covers ``Runtime``,
 Reading events
 ~~~~~~~~~~~~~~
 
-A plain query (no ``group_by``) returns the matching events. ``collect()``
-materializes them as a native :class:`~dftracer.utils.DataFrame` (``to_arrow()``
-/ ``to_pandas()`` convert only at the edge); ``stream()`` yields Arrow record
-batches for out-of-core reads (zero-copy; consume with pyarrow, polars, or
-DuckDB).
+``collect()`` runs a group-by/aggregate and materializes the result as a native
+:class:`~dftracer.utils.DataFrame` (``to_arrow()`` / ``to_pandas()`` convert only
+at the edge). A query with no ``group_by``/``agg`` reduces to a one-row
+``count`` - it does **not** return the raw events. To read matching events as
+native DataFrames, use ``collect_typed()`` (splits into the ``regular`` /
+``counters`` / ``aggregated`` phase families) or ``stream()`` for out-of-core
+reads.
 
 .. code-block:: python
 
    view = TraceViewer("traces/")
 
-   # All POSIX events as a pandas DataFrame.
-   df = view.filter('cat == "POSIX"').select("name", "dur", "ts").collect().to_pandas()
+   # Per-cat aggregate as a pandas DataFrame.
+   df = view.filter('cat == "POSIX"').group_by("cat").agg("count", "mean:dur").collect().to_pandas()
+
+   # Raw matching events as native DataFrames, by phase family.
+   regular = view.filter('cat == "POSIX"').collect_typed()["regular"]
 
    # Stream Arrow batches instead of materializing.
    import pyarrow

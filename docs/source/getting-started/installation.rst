@@ -132,7 +132,7 @@ Pass with ``-D`` at configure time, for example
      - Build the CPython extension.
    * - ``DFTRACER_UTILS_BUILD_EXAMPLES``
      - ``ON``
-     - Build the call-tree and plugin examples under ``examples/``.
+     - Build the containment and plugin examples under ``examples/``.
    * - ``DFTRACER_UTILS_BUILD_BENCHMARKS``
      - ``OFF``
      - Build the standalone benchmarks.
@@ -163,7 +163,7 @@ Pass with ``-D`` at configure time, for example
      - LZ4 compression for RocksDB.
    * - ``DFTRACER_UTILS_ENABLE_MPI``
      - ``OFF``
-     - MPI support (the ``*_mpi`` call-tree tools).
+     - MPI support (distributes ``dftracer_view --flamegraph`` across ranks).
    * - ``DFTRACER_UTILS_ENABLE_PCH``
      - ``ON``
      - Precompiled headers (faster builds).

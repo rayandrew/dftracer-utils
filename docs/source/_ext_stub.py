@@ -160,8 +160,11 @@ def install_extension_stub() -> None:
             """Aggregate with ``op:field`` specs (e.g. 'count', 'sum:dur')."""
             return AggregatedTraceViewer(None)
 
-        def agg_numeric_args(self) -> "AggregatedTraceViewer":
-            """Aggregate every numeric arg field without naming them."""
+        def agg_numeric_args(self, *reductions: str) -> "AggregatedTraceViewer":
+            """Aggregate every numeric arg field without naming them. No args
+            emits one bare-named mean column per arg; op names (sum/min/max/
+            mean/var/std/skew/kurt, or pNN like ``p90``) emit one ``<op>_<arg>``
+            column each."""
             return AggregatedTraceViewer(None)
 
         def time_bucket(self, interval_us: int) -> "TraceViewer":

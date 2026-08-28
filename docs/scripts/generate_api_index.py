@@ -71,7 +71,6 @@ TITLE_OVERRIDES: dict[str, str] = {
     "rocksdb": "RocksDB",
     "task_graph": "Task Graph",
     "server": "HTTP Server",
-    "call_tree": "Call Tree",
     "mpi": "MPI Utilities",
     "utilities.common.statistics": "Statistics (DDSketch, Histogram)",
     "utilities.common.arrow": "Arrow Data Interchange",

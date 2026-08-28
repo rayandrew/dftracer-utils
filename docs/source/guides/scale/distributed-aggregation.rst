@@ -188,5 +188,5 @@ See also
   ``ShardedView::aggregate`` is the in-process form of this same partial
   fan-in, run over immutable index shards.
 - :doc:`mpi` - the one distributed CLI binary in the tree
-  (``dftracer_call_tree_mpi``); this guide's pattern is transport-agnostic and
-  not tied to it.
+  (``dftracer_view --flamegraph``); this guide's pattern is transport-agnostic
+  and not tied to it.
