@@ -16,6 +16,7 @@
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/trace/views/view_executor.h>
 #include <dftracer/utils/trace/views/view_plan.h>
+#include <dftracer/utils/trace/views/view_scan.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 
@@ -33,6 +34,20 @@ std::shared_ptr<detail::ViewPlan> clone(
     const std::shared_ptr<const detail::ViewPlan>& base) {
     return base ? std::make_shared<detail::ViewPlan>(*base)
                 : std::make_shared<detail::ViewPlan>();
+}
+
+// time_bucket() adds the bucket as an implicit leading group key, so listing
+// "time_bucket" in group_by would double it (and the extra key resolves to a
+// missing event field - an empty column). Drop the redundant key.
+void strip_redundant_time_bucket(detail::ViewPlan& p) {
+    if (p.time_bucket_us == 0) return;
+    auto& g = p.group_by;
+    g.erase(std::remove_if(g.begin(), g.end(),
+                           [](const GroupKey& k) {
+                               return k.kind == GroupKey::Kind::Field &&
+                                      k.arg == "time_bucket";
+                           }),
+            g.end());
 }
 }  // namespace
 
@@ -238,6 +253,7 @@ View View::time_range(double begin, double end) const {
 View View::time_bucket(std::uint64_t interval_us) const {
     auto next = clone(plan_);
     next->time_bucket_us = interval_us;
+    strip_redundant_time_bucket(*next);
     return View(std::move(next));
 }
 
@@ -247,6 +263,7 @@ View View::time_bucket(std::uint64_t interval_us,
     next->time_bucket_us = interval_us;
     next->bucket_origin_us = origin_us;
     next->bucket_origin_min = false;
+    strip_redundant_time_bucket(*next);
     return View(std::move(next));
 }
 
@@ -254,6 +271,7 @@ View View::time_bucket_min(std::uint64_t interval_us) const {
     auto next = clone(plan_);
     next->time_bucket_us = interval_us;
     next->bucket_origin_min = true;
+    strip_redundant_time_bucket(*next);
     return View(std::move(next));
 }
 
@@ -272,6 +290,7 @@ View View::time_scale(double ns_ratio) const {
 AggregatedView View::group_by(std::vector<GroupKey> keys) const {
     auto next = clone(plan_);
     next->group_by = std::move(keys);
+    strip_redundant_time_bucket(*next);
     return AggregatedView(View(std::move(next)));
 }
 
@@ -809,8 +828,10 @@ Deferred<dataframe::DataFrame> ViewSession::collect_events(const View& branch) {
         *out = dataframe::concat(parts, dataframe::ConcatHow::Diagonal);
     };
 
-    if (bp.query)
-        detail::add_fold_branch(*state_, *bp.query, std::move(consume),
+    // effective_query folds the branch's phase into the predicate (bp.query
+    // alone drops it), so a branch's phase() filters in a fused session.
+    if (auto eq = detail::effective_query(bp))
+        detail::add_fold_branch(*state_, std::move(*eq), std::move(consume),
                                 std::move(finalize));
     else
         detail::add_fold_branch(*state_, std::move(consume),

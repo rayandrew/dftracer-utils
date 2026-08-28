@@ -1212,3 +1212,85 @@ class TestFlamegraphGroup:
             names = set(fg["name"])
             assert "POSIX" not in names  # no group rooting -> only call names
             assert "read" in names and "write" in names
+
+
+class TestSessionPerBranchPhase:
+    """A fused session must honor each branch's phase(): an events() branch and
+    an aggregated() branch ride one scan, each filtered to its own phase. Aggregated
+    (ph=3) events must be reachable this way (they were dropped before)."""
+
+    def _rows(self):
+        rows = [
+            {
+                "ph": 1,
+                "name": "read",
+                "cat": "POSIX",
+                "pid": 1,
+                "tid": 1,
+                "ts": 100 + i,
+                "dur": 10,
+                "args": {},
+            }
+            for i in range(3)
+        ]
+        rows += [
+            {
+                "name": "write",
+                "cat": "POSIX",
+                "ts": 1000 + i,
+                "ph": 3,
+                "type": 3,
+                "pid": 1,
+                "tid": 1,
+                "args": {"hhash": "h1", "dur": 250},
+            }
+            for i in range(4)
+        ]
+        return rows
+
+    def _ph(self, df):
+        return list(df.to_arrow().to_pydict().get("ph"))
+
+    def test_per_branch_phase_in_one_session(self):
+        with Environment() as env:
+            path = _make_trace(env, "mixed_phase.pfw.gz", self._rows())
+            with TraceViewer(path).session() as s:
+                a = s.view().phase("events").events()
+                b = s.view().phase("aggregated").events()
+                c = s.view().events()
+            assert self._ph(a.result()) == [1, 1, 1]  # complete only
+            assert self._ph(b.result()) == [3, 3, 3, 3]  # aggregated only
+            assert sorted(self._ph(c.result())) == [1, 1, 1, 3, 3, 3, 3]  # all
+
+
+class TestTimeBucketGroupByDedup:
+    """Listing "time_bucket" in group_by after time_bucket() must not double the
+    auto-added bucket key (which used to emit an empty column)."""
+
+    def _rows(self):
+        return [
+            {
+                "ph": 1,
+                "name": "read",
+                "cat": "POSIX",
+                "pid": 1,
+                "tid": 1,
+                "ts": 1000 + t,
+                "dur": 5,
+                "args": {},
+            }
+            for t in (0, 50, 130)
+        ]
+
+    def test_time_bucket_in_group_by_is_deduped(self):
+        with Environment() as env:
+            path = _make_trace(env, "tb.pfw.gz", self._rows())
+            base = TraceViewer(path).time_bucket(100, normalize_to=1000)
+            with_key = (
+                base.group_by("pid", "time_bucket").agg("count").collect().to_arrow().to_pydict()
+            )
+            without = base.group_by("pid").agg("count").collect().to_arrow().to_pydict()
+            # same result either way, and the bucket column has real values
+            assert with_key == without
+            assert all(v != "" for v in with_key["time_bucket"])
+            assert sorted(with_key["time_bucket"]) == ["1000", "1100"]
