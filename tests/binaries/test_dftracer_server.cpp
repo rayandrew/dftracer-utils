@@ -309,7 +309,22 @@ struct ServerProcess {
 
     ~ServerProcess() { stop(); }
 
-    bool start(const std::string& binary, const std::string& data_dir, int p) {
+    // pick_port() reserves an ephemeral port then closes it, so under parallel
+    // load another process can claim it in the long gap before the child (which
+    // indexes first) binds. Retry on a fresh port rather than fail; `port` is
+    // updated to the port the server actually came up on.
+    bool start(const std::string& binary, const std::string& data_dir,
+               int& port_io) {
+        for (int attempt = 0; attempt < 5; ++attempt) {
+            if (attempt > 0) port_io = pick_port();
+            if (start_once(binary, data_dir, port_io)) return true;
+            stop();
+        }
+        return false;
+    }
+
+    bool start_once(const std::string& binary, const std::string& data_dir,
+                    int p) {
         port = p;
         // Build before fork: the child may only call async-signal-safe
         // functions until execl, and std::to_string allocates.
