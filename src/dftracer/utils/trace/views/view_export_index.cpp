@@ -169,8 +169,11 @@ coro::CoroTask<ExportStats> run_export_trace_indexed(
                         auto doc =
                             parser.parse(parse_buf.data(), line.size(), false);
                         if (doc.error()) continue;
+                        // BloomFold is always in the set, so harvest the
+                        // schemaless column leaves in this parse-once pass.
                         fold_events.push_back(extract_fold_event(
-                            doc.value_unsafe(), intern, /*needs_args=*/true));
+                            doc.value_unsafe(), intern, /*needs_args=*/true,
+                            /*extra_fields=*/nullptr, /*capture_schema=*/true));
                     }
                     ScanUnit unit;
                     unit.file_path = cur_path;

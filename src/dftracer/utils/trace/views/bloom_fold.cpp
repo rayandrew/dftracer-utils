@@ -14,6 +14,8 @@
 
 namespace dftracer::utils::trace::views::detail {
 
+namespace idx = utilities::indexer;
+
 namespace {
 
 using BV = visitors::BloomCore;
@@ -72,16 +74,19 @@ void BloomFold::step(const FoldBatch& batch) {
                 shash = intern_->resolve(*id);
         }
 
-        // Groupable columns: name/cat, args keys, and fhash/hhash (lifted out
-        // of args). pid/tid/ts/dur are axis fields, not offered as columns.
+        // Groupable columns: every scalar leaf the scan enumerated into
+        // schema_leaves (schemaless, arbitrarily nested; pid/tid/ts/dur and the
+        // structural keys are excluded there). Harvested once per distinct
+        // event name and folded, so this is O(distinct names) with no reparse.
         if (fs.col_seen_names.find(name) == fs.col_seen_names.end()) {
             fs.col_seen_names.emplace(name);
-            if (!name.empty()) fs.columns.emplace("name");
-            if (!cat.empty()) fs.columns.emplace("cat");
-            if (!fhash.empty()) fs.columns.emplace("fhash");
-            if (!hhash.empty()) fs.columns.emplace("hhash");
-            for (const auto& [k, v] : e.args)
-                fs.columns.emplace(intern_->resolve(k));
+            for (const auto& [leaf_id, tag] : e.schema_leaves) {
+                const auto t = static_cast<idx::ColumnType>(tag);
+                auto [pos, inserted] =
+                    fs.columns.emplace(intern_->resolve(leaf_id), t);
+                if (!inserted)
+                    pos->second = idx::merge_column_type(pos->second, t);
+            }
         }
 
         BV::observe_data(chunk, fs.pidtid, config_, name, cat, e.pid, e.tid,
@@ -107,12 +112,14 @@ void BloomFold::merge(Fold& slice) {
                 BV::merge_chunk_state(it->second, ochunk);
             }
         }
-        for (const auto& c : ofs.columns) fs.columns.emplace(c);
+        for (const auto& [c, t] : ofs.columns) {
+            auto [pos, inserted] = fs.columns.emplace(c, t);
+            if (!inserted) pos->second = idx::merge_column_type(pos->second, t);
+        }
     }
 }
 
 coro::CoroTask<bool> BloomFold::finalize(const CoverageSet& covered) {
-    namespace idx = utilities::indexer;
     bool wrote = false;
 
     for (auto& [file, fs] : files_) {

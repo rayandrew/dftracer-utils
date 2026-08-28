@@ -49,6 +49,10 @@ struct ViewScannerInput {
     /// a raw fold that parses it itself). Ignored when fold_intern is null -
     /// the non-fold scan already yields raw lines in `events`.
     bool fold_keep_raw = false;
+    /// In fold mode, enumerate every scalar leaf of each event into
+    /// FoldEvent::schema_leaves for schemaless column discovery (the index
+    /// build). Ignored when fold_intern is null.
+    bool fold_capture_schema = false;
 
     ViewScannerInput& with_file_path(const std::string& path);
     ViewScannerInput& with_index_path(const std::string& path);

@@ -33,7 +33,10 @@ class IndexFoldDriver : public utilities::indexer::IndexVisitor {
           file_path_(std::move(file_path)),
           index_path_(std::move(index_path)),
           extra_fields_(std::move(extra_fields)) {
-        for (auto* f : folds_) needs_args_ |= f->needs_args();
+        for (auto* f : folds_) {
+            needs_args_ |= f->needs_args();
+            capture_schema_ |= f->wants_schema();
+        }
     }
 
     void begin(std::size_t /*num_checkpoints*/) override {}
@@ -63,6 +66,9 @@ class IndexFoldDriver : public utilities::indexer::IndexVisitor {
                 for (const auto& name : extra_fields_)
                     capture_extra_field(batch_.back(), r.json.element(),
                                         *intern_, name);
+                if (capture_schema_)
+                    capture_schema_leaves(batch_.back(), r.json.element(),
+                                          *intern_);
             });
         // A line straddling this chunk's end is carried into the next chunk, so
         // it is parsed once and attributed to the chunk where it completes.
@@ -97,6 +103,7 @@ class IndexFoldDriver : public utilities::indexer::IndexVisitor {
     dftracer::utils::StringIntern* intern_;
     std::vector<Fold*> folds_;
     bool needs_args_ = false;
+    bool capture_schema_ = false;
     simdjson::dom::parser parser_;
     std::string partial_;
     std::size_t line_number_ = 0;

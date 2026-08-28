@@ -412,9 +412,12 @@ def _dv_flamegraph_partial_task(
     ts: str,
     dur: str,
     name: str,
+    group: Sequence[str],
 ) -> bytes:
     """Worker: serialized flamegraph arena partial for this shard (bytes)."""
-    return _make_viewer(files, index_dir, plan).flamegraph_partial(list(partition), ts, dur, name)
+    return _make_viewer(files, index_dir, plan).flamegraph_partial(
+        list(partition), ts, dur, name, list(group)
+    )
 
 
 def _dv_events_task(
@@ -672,13 +675,16 @@ class DaskTraceViewer:
         ts: str = "ts",
         dur: str = "dur",
         name: str = "name",
+        group: Sequence[str] = (),
     ):
         """Distributed flamegraph -> folded node DataFrame.
 
         Each file shard folds a serialized arena partial (flamegraph_partial);
         the client tree-reduces them via TraceViewer.merge_flamegraph_partials,
         so a name folds across shards. Partition by pid so a lane lives on one
-        shard. Composes with the branch's filter/phase/time like collect."""
+        shard. ``group`` roots the tree by an arbitrary key over the raw events,
+        as in TraceViewer.flamegraph. Composes with the branch's filter/phase/
+        time like collect."""
         client = self._resolve_client()
         futures = [
             client.submit(
@@ -690,6 +696,7 @@ class DaskTraceViewer:
                 ts,
                 dur,
                 name,
+                tuple(group),
                 pure=False,
             )
             for s in self._shards()

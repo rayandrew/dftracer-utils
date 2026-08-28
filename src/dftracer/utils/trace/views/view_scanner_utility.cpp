@@ -288,7 +288,8 @@ coro::AsyncGenerator<ViewScannerBatch> ViewScannerUtility::operator()(
                                         detail::extract_fold_event(
                                             root, *input.fold_intern,
                                             input.fold_needs_args,
-                                            input.fold_extra_fields));
+                                            input.fold_extra_fields,
+                                            input.fold_capture_schema));
                                     if (input.fold_keep_raw)
                                         batch.events.emplace_back(line_start,
                                                                   line_len);

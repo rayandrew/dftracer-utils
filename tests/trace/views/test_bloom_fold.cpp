@@ -11,8 +11,10 @@
 #include <doctest/doctest.h>
 #include <simdjson.h>
 
+#include <algorithm>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "test_view_common.h"
@@ -291,5 +293,79 @@ TEST_SUITE("BloomFold") {
             rd.query_hash_table(idx::IndexDatabase::HashType::FILE);
         REQUIRE(file_hashes.count("fh1") == 1);
         CHECK(file_hashes.at("fh1") == "/data/a.bin");
+    }
+
+    // Schemaless column harvest: nested-object and array args surface as dotted
+    // leaf columns with their types, and View::columns()/schema() read them
+    // back from the index with no trace scan.
+    TEST_CASE("schemaless columns and schema over nested args") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string pfw = env.get_dir() + "/schema.pfw";
+        {
+            std::ofstream ofs(pfw);
+            // hostname/size/rate are flat; pos is a nested object; tags is an
+            // array; fhash/hhash are lifted hashes. Schema is harvested once
+            // per event name, so a second "write" event carries size as a float
+            // to exercise the cross-name type fold (int64 + float64 ->
+            // float64).
+            ofs << R"({"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":2,"ts":100,"dur":5,)"
+                << R"("args":{"hostname":"h1","size":1024,"rate":3.5,)"
+                << R"("pos":{"x":1,"y":2},"tags":["a","b"],)"
+                << R"("fhash":"fh1","hhash":"hh1"}})"
+                << "\n";
+            ofs << R"({"ph":"X","name":"write","cat":"POSIX","pid":1,"tid":2,"ts":200,"dur":6,)"
+                << R"("args":{"size":2.5}})" << "\n";
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string index_path = determine_index_path(gz, "");
+        {
+            StringSink s;
+            View::from_file(gz, index_path)
+                .emit_all_metadata(true)
+                .export_json(s)
+                .get();
+        }
+
+        View v = View::from_file(gz, index_path);
+        auto cols = v.columns();
+        auto has = [&](const std::string& c) {
+            return std::find(cols.begin(), cols.end(), c) != cols.end();
+        };
+        // Base axis fields.
+        CHECK(has("pid"));
+        CHECK(has("tid"));
+        CHECK(has("ts"));
+        CHECK(has("dur"));
+        // Top-level + flat args.
+        CHECK(has("name"));
+        CHECK(has("cat"));
+        CHECK(has("hostname"));
+        CHECK(has("size"));
+        CHECK(has("rate"));
+        // Nested object -> dotted leaves; array -> representative index 0.
+        CHECK(has("pos.x"));
+        CHECK(has("pos.y"));
+        CHECK(has("tags.0"));
+        // Lifted hashes and their resolved.* aliases.
+        CHECK(has("fhash"));
+        CHECK(has("hhash"));
+        CHECK(has("resolved.fpath"));
+        CHECK(has("resolved.hostname"));
+
+        std::unordered_map<std::string, std::string> ty;
+        for (const auto& ci : v.schema()) ty[ci.name] = ci.type;
+        CHECK(ty["pid"] == "int64");
+        CHECK(ty["ts"] == "int64");
+        CHECK(ty["hostname"] == "string");
+        CHECK(ty["rate"] == "float64");
+        CHECK(ty["pos.x"] == "int64");
+        CHECK(ty["tags.0"] == "string");
+        // size is int (1024) in one event and float (2.5) in another; the fold
+        // widens it to float64.
+        CHECK(ty["size"] == "float64");
+        CHECK(ty["resolved.fpath"] == "string");
     }
 }

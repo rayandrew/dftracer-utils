@@ -626,6 +626,27 @@ class View {
     /// Ignores the view's filters/agg.
     std::vector<TraceConfig> config() const;
 
+    /// A column of the trace schema and its type, as reported by schema().
+    struct ColumnInfo {
+        std::string name;  ///< Dotted leaf path (e.g. "hostname", "pos.x").
+        std::string type;  ///< "int64", "float64", or "string".
+    };
+
+    /// The distinct columns discoverable from this view's index: the base axis
+    /// fields (pid/tid/ts/dur) plus every scalar leaf harvested at index build
+    /// (top-level fields, and flat and nested args as dotted paths), unioned
+    /// across the view's index files, plus a resolved.* alias for each hash
+    /// column present. Schemaless: a nested-object arg surfaces as its dotted
+    /// leaf columns. Reads index metadata only - no trace scan - and reads the
+    /// per-index metadata in parallel. Sorted, de-duplicated. Empty for files
+    /// without an index. Ignores the view's filters/agg.
+    std::vector<std::string> columns() const;
+
+    /// As columns(), each name paired with its type. Types fold across files
+    /// (numeric widens to float64, any mix with a string widens to string); a
+    /// column from a pre-v12 index that stored no type reads as "string".
+    std::vector<ColumnInfo> schema() const;
+
     /// Run group_by + agg, returning a columnar dataframe::DataFrame. No agg
     /// counts per group; no group_by folds the whole set into one row.
     coro::CoroTask<dftracer::utils::dataframe::DataFrame> collect() const;
@@ -635,6 +656,13 @@ class View {
     /// scalar reads natively, an arg/nested field is captured). call_tree
     /// returns the events plus level/parent_id; flamegraph returns the folded
     /// node frame (node_id, parent, name, level, total, self, count).
+    ///
+    /// `group` (flamegraph/containment/flamegraph_partial only) roots the
+    /// folded tree by an arbitrary key over the raw events - any field(s), e.g.
+    /// `{"pid"}`, `{"cat"}`, `{"hostname","pid"}` - so each group value gets
+    /// its own top-level subtree named by that value. It is distinct from the
+    /// aggregation `group_by`, which would collapse the events the tree needs.
+    /// Empty (the default) folds every lane together under one root.
     coro::CoroTask<dftracer::utils::dataframe::DataFrame> call_tree(
         std::vector<std::string> partition = {"pid", "tid"},
         std::string ts = "ts", std::string dur = "dur",
@@ -642,7 +670,7 @@ class View {
     coro::CoroTask<dftracer::utils::dataframe::DataFrame> flamegraph(
         std::vector<std::string> partition = {"pid", "tid"},
         std::string ts = "ts", std::string dur = "dur",
-        std::string name = "name") const;
+        std::string name = "name", std::vector<std::string> group = {}) const;
 
     /// Both containment frames (.first = call_tree, .second = flamegraph) from
     /// one scan and one buffered fold.
@@ -650,16 +678,17 @@ class View {
                              dftracer::utils::dataframe::DataFrame>>
     containment(std::vector<std::string> partition = {"pid", "tid"},
                 std::string ts = "ts", std::string dur = "dur",
-                std::string name = "name") const;
+                std::string name = "name",
+                std::vector<std::string> group = {}) const;
 
     /// Distributed flamegraph. A rank folds its files into an arena and
     /// serializes it; rank 0 (or a Dask reducer) passes every rank's blob to
     /// merge_flamegraph_partials for the final node frame. Partition by pid so
-    /// a lane lives on one rank.
+    /// a lane lives on one rank. `group` roots the tree as in flamegraph().
     coro::CoroTask<std::string> flamegraph_partial(
         std::vector<std::string> partition = {"pid", "tid"},
         std::string ts = "ts", std::string dur = "dur",
-        std::string name = "name") const;
+        std::string name = "name", std::vector<std::string> group = {}) const;
     static dftracer::utils::dataframe::DataFrame merge_flamegraph_partials(
         const std::vector<std::string_view>& partials);
 

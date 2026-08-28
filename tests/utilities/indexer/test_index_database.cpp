@@ -13,6 +13,7 @@
 #include <vector>
 
 using dftracer::utils::utilities::indexer::ChunkStatistics;
+using dftracer::utils::utilities::indexer::ColumnType;
 using dftracer::utils::utilities::indexer::IndexDatabase;
 
 TEST_SUITE("IndexDatabase") {
@@ -279,15 +280,25 @@ TEST_SUITE("IndexDatabase") {
             f1 = writer->get_or_create_file_info("a.pfw.gz", 0x1111);
             f2 = writer->get_or_create_file_info("b.pfw.gz", 0x2222);
             writer->insert_index_dimension(f1, "name");  // "d|" space
-            writer->insert_column(f1, "cat");
-            writer->insert_column(f1, "mhost");
-            writer->insert_column(f2, "mhost");  // duplicate across files
-            writer->insert_column(f2, "fhash");
+            writer->insert_column(f1, "cat", ColumnType::String);
+            writer->insert_column(f1, "mhost", ColumnType::Int64);
+            // duplicate across files with a wider type: folds to Float64.
+            writer->insert_column(f2, "mhost", ColumnType::Float64);
+            writer->insert_column(f2, "fhash", ColumnType::String);
             writer->commit();
         }
 
         auto cols = db.query_all_columns();  // sorted, de-duplicated union
         CHECK(cols == std::vector<std::string>{"cat", "fhash", "mhost"});
+
+        auto typed = db.query_all_column_types();  // name+type, folded
+        REQUIRE(typed.size() == 3);
+        CHECK(typed[0] ==
+              std::pair<std::string, ColumnType>{"cat", ColumnType::String});
+        CHECK(typed[1] ==
+              std::pair<std::string, ColumnType>{"fhash", ColumnType::String});
+        CHECK(typed[2] ==
+              std::pair<std::string, ColumnType>{"mhost", ColumnType::Float64});
 
         // Columns live under "c|" and must not leak into the dimension scan.
         auto dims = db.query_index_dimensions(f1);

@@ -367,10 +367,11 @@ BloomCore::ChunkStatistics BloomCore::persist_bloom_sink(
     utilities::indexer::IndexBatchSink& sink, int file_id,
     const std::vector<ChunkState>& chunks, const ChunkIndexerConfig& config,
     const std::vector<std::string>& extra_dims,
-    const dftracer::utils::StringViewSet& columns) {
+    const dftracer::utils::StringViewMap<utilities::indexer::ColumnType>&
+        columns) {
     auto file_statistics =
         persist_bloom_sink_writes(sink, file_id, extra_dims, chunks, config);
-    for (const auto& c : columns) sink.insert_column(file_id, c);
+    for (const auto& [c, t] : columns) sink.insert_column(file_id, c, t);
     return file_statistics;
 }
 
@@ -378,7 +379,8 @@ BloomCore::ChunkStatistics BloomCore::persist_bloom(
     utilities::indexer::IndexDatabaseWriterContext& db, int file_id,
     const std::vector<ChunkState>& chunks, const ChunkIndexerConfig& config,
     const std::vector<std::string>& extra_dims,
-    const dftracer::utils::StringViewSet& columns,
+    const dftracer::utils::StringViewMap<utilities::indexer::ColumnType>&
+        columns,
     bool refresh_root_summaries) {
     auto file_statistics =
         persist_bloom_sink(db, file_id, chunks, config, extra_dims, columns);

@@ -959,6 +959,21 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
         result = self._native.collect_typed(shard_begin, shard_end, progress)
         return {k: _wrap(v) for k, v in result.items()}
 
+    def columns(self) -> List[str]:
+        """The distinct columns discoverable from the index: base axis fields
+        (``pid``/``tid``/``ts``/``dur``), every scalar leaf harvested at index
+        build (top-level fields plus flat and nested args as dotted paths), and
+        a ``resolved.*`` alias per hash column present. Schemaless: a
+        nested-object arg surfaces as its dotted leaf columns. Reads index
+        metadata only - no trace scan - so it does not need the whole trace
+        materialized the way ``collect().keys()`` does."""
+        return list(self._native.columns())
+
+    def schema(self) -> Dict[str, str]:
+        """As :meth:`columns`, mapping each column to its type (``"int64"`` /
+        ``"float64"`` / ``"string"``). No trace scan."""
+        return dict(self._native.schema())
+
     def call_tree(
         self,
         partition: Sequence[str] = ("pid", "tid"),
@@ -979,12 +994,15 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
         ts: str = "ts",
         dur: str = "dur",
         name: str = "name",
+        group: Sequence[str] = (),
     ) -> "DataFrame":
         """Scan the view, then fold events by root-to-node ``name`` path into a
         flamegraph. Returns one row per node: ``node_id``, ``parent``,
         ``name``, ``level``, ``total`` (inclusive), ``self`` (exclusive),
-        ``count``."""
-        return _wrap(self._native.flamegraph(list(partition), ts, dur, name))
+        ``count``. ``group`` roots the tree by an arbitrary key over the raw
+        events (any field(s), e.g. ``("pid",)`` or ``("cat",)``), naming each
+        subtree by that value - distinct from the aggregation ``group_by``."""
+        return _wrap(self._native.flamegraph(list(partition), ts, dur, name, list(group)))
 
     def containment(
         self,
@@ -992,13 +1010,15 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
         ts: str = "ts",
         dur: str = "dur",
         name: str = "name",
+        group: Sequence[str] = (),
     ) -> "Containment":
         """Scan once and buffer one fold, then get both containment outputs:
         ``.call_tree()`` and ``.flamegraph()`` (see those methods). Cheaper than
-        calling both separately when you want both."""
+        calling both separately when you want both. ``group`` roots the
+        flamegraph as in :meth:`flamegraph`."""
 
         def resolve() -> "Tuple[DataFrame, DataFrame]":
-            ct, fg = self._native.containment(list(partition), ts, dur, name)
+            ct, fg = self._native.containment(list(partition), ts, dur, name, list(group))
             return _wrap(ct), _wrap(fg)
 
         return Containment(resolve)
@@ -1009,11 +1029,13 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
         ts: str = "ts",
         dur: str = "dur",
         name: str = "name",
+        group: Sequence[str] = (),
     ) -> bytes:
         """Scan this rank's files into a serialized flamegraph arena (bytes).
         Partition by pid so each lane lives on one rank; gather the partials
-        (MPI all_gather / Dask) and combine with :meth:`merge_flamegraph_partials`."""
-        return self._native.flamegraph_partial(list(partition), ts, dur, name)
+        (MPI all_gather / Dask) and combine with :meth:`merge_flamegraph_partials`.
+        ``group`` roots the tree as in :meth:`flamegraph`."""
+        return self._native.flamegraph_partial(list(partition), ts, dur, name, list(group))
 
     @staticmethod
     def merge_flamegraph_partials(partials: "Sequence[bytes]") -> "DataFrame":

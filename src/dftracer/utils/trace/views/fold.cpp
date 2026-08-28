@@ -32,6 +32,57 @@ std::uint32_t intern_string(dftracer::utils::StringIntern& intern,
     return intern.get_or_insert(val.get_string().value_unsafe());
 }
 
+// Type tag for a JSON scalar, matching utilities::indexer::ColumnType
+// (1=Int64, 2=Float64, 3=String); 0 for a non-scalar or null.
+std::uint8_t leaf_type_tag(simdjson::dom::element v) {
+    if (v.is_string()) return 3;
+    if (v.is_int64()) return 1;
+    if (v.is_uint64()) {
+        const std::uint64_t u = v.get_uint64().value_unsafe();
+        return u <= static_cast<std::uint64_t>(
+                        std::numeric_limits<std::int64_t>::max())
+                   ? 1
+                   : 2;
+    }
+    if (v.is_double()) return 2;
+    if (v.is_bool()) return 1;  // booleans read as 0/1 integers
+    return 0;
+}
+
+// Walk `v` to every scalar leaf, emitting (interned dotted path -> type tag)
+// into ev.schema_leaves. Objects recurse by key (a.b.c); an array recurses its
+// first element as a representative (a.0.b) so the path resolves and
+// cardinality stays bounded. `path` is a reused buffer (restored on return).
+void enumerate_leaves(std::string& path, simdjson::dom::element v,
+                      dftracer::utils::StringIntern& intern, FoldEvent& ev) {
+    simdjson::dom::object obj;
+    if (v.get_object().get(obj) == simdjson::SUCCESS) {
+        for (auto kv : obj) {
+            const std::size_t base = path.size();
+            if (base) path.push_back('.');
+            path.append(kv.key);
+            enumerate_leaves(path, kv.value, intern, ev);
+            path.resize(base);
+        }
+        return;
+    }
+    simdjson::dom::array arr;
+    if (v.get_array().get(arr) == simdjson::SUCCESS) {
+        auto it = arr.begin();
+        if (it != arr.end()) {
+            const std::size_t base = path.size();
+            if (base) path.push_back('.');
+            path.push_back('0');
+            enumerate_leaves(path, *it, intern, ev);
+            path.resize(base);
+        }
+        return;
+    }
+    const std::uint8_t tag = leaf_type_tag(v);
+    if (tag && !path.empty())
+        ev.schema_leaves.emplace_back(intern.get_or_insert(path), tag);
+}
+
 }  // namespace
 
 void FoldPortBus::publish(std::uint64_t key, const void* data,
@@ -111,7 +162,8 @@ FoldEvent build_fold_event(const DFTracerEvent& scalars,
 FoldEvent extract_fold_event(simdjson::dom::element root,
                              dftracer::utils::StringIntern& intern,
                              bool needs_args,
-                             const std::vector<std::string>* extra_fields) {
+                             const std::vector<std::string>* extra_fields,
+                             bool capture_schema) {
     DFTracerEvent scalars;
     simdjson::dom::element args;
     bool has_args = false;
@@ -122,7 +174,29 @@ FoldEvent extract_fold_event(simdjson::dom::element root,
     if (extra_fields)
         for (const auto& name : *extra_fields)
             capture_extra_field(ev, root, intern, name);
+    if (capture_schema) capture_schema_leaves(ev, root, intern);
     return ev;
+}
+
+void capture_schema_leaves(FoldEvent& ev, simdjson::dom::element root,
+                           dftracer::utils::StringIntern& intern) {
+    // Args children are bare columns (hostname, pos.x), matching the flat
+    // harvest and lifting fhash/hhash; other top-level fields keep their name;
+    // the axis/structural keys are not columns.
+    simdjson::dom::object obj;
+    if (root.get_object().get(obj) != simdjson::SUCCESS) return;
+    std::string path;
+    for (auto kv : obj) {
+        const std::string_view k = kv.key;
+        if (k == "pid" || k == "tid" || k == "ts" || k == "dur" || k == "ph" ||
+            k == "id")
+            continue;
+        if (k == "args")
+            path.clear();
+        else
+            path.assign(k);
+        enumerate_leaves(path, kv.value, intern, ev);
+    }
 }
 
 std::vector<std::string> extra_capture_fields(const ViewPlan& plan) {
@@ -172,8 +246,10 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
     bool any_needs_args = false;
     bool any_wants_raw = false;
     bool any_wants_fold_event = false;
+    bool any_wants_schema = false;
     for (auto* f : folds) {
         any_needs_args |= f->needs_args();
+        any_wants_schema |= f->wants_schema();
         if (f->wants_raw())
             any_wants_raw = true;
         else
@@ -245,6 +321,7 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
                     sin.fold_intern = any_wants_fold_event ? &intern : nullptr;
                     sin.fold_needs_args = any_needs_args;
                     sin.fold_keep_raw = any_wants_raw && any_wants_fold_event;
+                    sin.fold_capture_schema = any_wants_schema;
                     if (!extra_fields.empty())
                         sin.fold_extra_fields = &extra_fields;
                     ViewScannerUtility scanner;
