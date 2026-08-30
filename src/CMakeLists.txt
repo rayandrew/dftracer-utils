@@ -1463,15 +1463,17 @@ option(DFTRACER_UTILS_BUILD_BENCHMARKS "Build standalone benchmarks" OFF)
 
 if(DFTRACER_UTILS_BUILD_BENCHMARKS)
   set(DFTRACER_BENCHMARKS
-      ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/member_cache_bench.cpp)
+      ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/member_cache_bench.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/dataframe_parallel_bench.cpp)
 
   foreach(bench ${DFTRACER_BENCHMARKS})
     get_filename_component(bench_name ${bench} NAME_WE)
     add_executable(${bench_name} ${bench})
     target_add_rpath(${bench_name})
     target_link_libraries(${bench_name} PRIVATE dftracer_utils)
-    target_include_directories(${bench_name}
-                               PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+    target_include_directories(
+      ${bench_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
+                            ${CMAKE_CURRENT_SOURCE_DIR})
     add_stdfs_if_needed(${bench_name})
     target_set_warnings(${bench_name})
   endforeach()
