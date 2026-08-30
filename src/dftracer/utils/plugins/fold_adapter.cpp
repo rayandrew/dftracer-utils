@@ -2299,6 +2299,7 @@ void PluginFold::step(const FoldBatch& batch) {
         step_columns(batch);
         return;
     }
+    if (!plugin_->on_batch) return;  // malformed plugin sets neither seam
 
     const std::size_t count = batch.events.size();
     const bool with_args = needs_args();

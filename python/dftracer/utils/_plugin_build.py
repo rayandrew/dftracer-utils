@@ -57,9 +57,25 @@ def cache_dir() -> Path:
     return base
 
 
+def _abi_fingerprint(include: str) -> str:
+    # A compiled plugin's struct layout depends on the ABI headers, so a change
+    # to them must invalidate the cache - the emitted source text alone would
+    # not, silently reusing a .so built against an incompatible layout.
+    h = hashlib.sha256()
+    base = Path(include) / "dftracer" / "utils"
+    for rel in ("plugins/abi.h", "dataframe/abi.h"):
+        try:
+            h.update((base / rel).read_bytes())
+        except OSError:
+            h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
 def source_digest(source: str, include: str, cxx: str) -> str:
     return hashlib.sha256(
-        "\0".join([source, include, cxx, sys.platform]).encode("utf-8")
+        "\0".join(
+            [source, include, cxx, sys.platform, _abi_fingerprint(include)]
+        ).encode("utf-8")
     ).hexdigest()[:16]
 
 
