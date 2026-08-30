@@ -134,6 +134,11 @@ TEST_SUITE("lazyframe") {
         CHECK(w.names[0] == "idx");
         CHECK(w.column("idx").data<std::int64_t>()[0] == 0);
         CHECK(w.column("idx").data<std::int64_t>()[5] == 5);
+
+        // null_count over the nullable column (1 null), streamed at morsel 2.
+        DataFrame nc = df.lazy().null_count().collect(2);
+        CHECK(nc.num_rows() == 1);
+        CHECK(nc.column("a").data<std::int64_t>()[0] == 1);
     }
 
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {

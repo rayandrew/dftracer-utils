@@ -279,6 +279,33 @@ class WithRowIndexCursor : public Cursor {
     std::int64_t pos_ = 0;
 };
 
+// Per-column null counts, accumulated streaming, emitted as one row.
+class NullCountCursor : public Cursor {
+   public:
+    explicit NullCountCursor(std::unique_ptr<Cursor> in) : in_(std::move(in)) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (done_) return std::nullopt;
+        done_ = true;
+        std::vector<std::int64_t> counts;
+        while (auto m = in_->next(max_rows)) {
+            if (counts.empty()) counts.assign(m->columns.size(), 0);
+            for (std::size_t i = 0; i < m->columns.size(); ++i)
+                counts[i] += m->columns[i].null_count();
+        }
+        if (counts.empty()) return std::nullopt;
+        Morsel out;
+        out.rows = 1;
+        out.columns.reserve(counts.size());
+        for (std::int64_t& c : counts)
+            out.columns.push_back(Series::flat_i64(&c, 1));
+        return out;
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    bool done_ = false;
+};
+
 // ---- plan ops (tagged union) ------------------------------------------------
 
 struct FilterOp {
@@ -308,6 +335,7 @@ struct FillNullOp {
 struct WithRowIndexOp {
     std::string name;
 };
+struct NullCountOp {};
 
 template <class... Ts>
 struct overloaded : Ts... {
@@ -323,7 +351,7 @@ overloaded(Ts...) -> overloaded<Ts...>;
 class LazyOp {
    public:
     std::variant<FilterOp, SelectOp, WithColumnOp, RenameOp, SliceOp, TailOp,
-                 DropNullsOp, FillNullOp, WithRowIndexOp>
+                 DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp>
         node;
 };
 
@@ -356,7 +384,8 @@ std::vector<std::string> out_schema(const LazyOp& op,
                    [&](const WithRowIndexOp& o) {
                        in.insert(in.begin(), o.name);
                        return in;
-                   }},
+                   },
+                   [&](const NullCountOp&) { return in; }},
         op.node);
 }
 
@@ -375,7 +404,8 @@ std::string describe(const LazyOp& op) {
             [](const TailOp&) { return std::string("tail"); },
             [](const DropNullsOp&) { return std::string("drop_nulls"); },
             [](const FillNullOp&) { return std::string("fill_null"); },
-            [](const WithRowIndexOp& o) { return "with_row_index " + o.name; }},
+            [](const WithRowIndexOp& o) { return "with_row_index " + o.name; },
+            [](const NullCountOp&) { return std::string("null_count"); }},
         op.node);
 }
 
@@ -469,6 +499,9 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             },
             [&](const WithRowIndexOp&) -> std::unique_ptr<Cursor> {
                 return std::make_unique<WithRowIndexCursor>(std::move(in));
+            },
+            [&](const NullCountOp&) -> std::unique_ptr<Cursor> {
+                return std::make_unique<NullCountCursor>(std::move(in));
             }},
         op.node);
 }
@@ -544,6 +577,12 @@ LazyFrame LazyFrame::with_row_index(std::string name) const {
     auto ops = ops_;
     ops.push_back(
         std::make_shared<LazyOp>(LazyOp{WithRowIndexOp{std::move(name)}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::null_count() const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{NullCountOp{}}));
     return LazyFrame(source_, std::move(ops));
 }
 

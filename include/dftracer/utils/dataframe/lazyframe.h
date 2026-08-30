@@ -76,6 +76,8 @@ class LazyFrame {
         return fill_null(to_scalar(value));
     }
     LazyFrame with_row_index(std::string name) const;
+    /// A one-row frame of each column's null count.
+    LazyFrame null_count() const;
 
     /// Output column names without running the query.
     std::vector<std::string> schema() const;
