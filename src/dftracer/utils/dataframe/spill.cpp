@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/filesystem.h>  // fs:: portability alias
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/spill.h>
 #include <dftracer/utils/dataframe/types.h>
@@ -5,14 +6,11 @@
 
 #include <atomic>
 #include <cstring>
-#include <filesystem>
 #include <stdexcept>
 
 namespace dftracer::utils::dataframe::spill {
 
 namespace {
-
-namespace fs = std::filesystem;
 
 template <class T>
 void put_pod(std::string& out, T v) {
