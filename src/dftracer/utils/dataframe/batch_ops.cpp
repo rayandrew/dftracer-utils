@@ -6,6 +6,7 @@
 #include <dftracer/utils/dataframe/containment.h>
 #include <dftracer/utils/dataframe/internal/cell_ops.h>  // shared cell helpers
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_u64
+#include <dftracer/utils/dataframe/kernels/field_stat.h>
 #include <dftracer/utils/dataframe/kernels/filter.h>
 #include <dftracer/utils/dataframe/kernels/group_by.h>
 #include <dftracer/utils/dataframe/kernels/sort.h>
@@ -554,17 +555,6 @@ Series row_mask(const DataFrame& b, bool want_unique) {
                                        bits.data(), n, nullptr)};
 }
 
-double scalar_to_double(dftu_scalar s) {
-    switch (s.kind) {
-        case DFTU_SCALAR_TAG_F64:
-            return s.value.d;
-        case DFTU_SCALAR_TAG_U64:
-            return static_cast<double>(s.value.u);
-        default:
-            return static_cast<double>(s.value.i);
-    }
-}
-
 }  // namespace
 
 DataFrame drop_nulls(const DataFrame& b) {
@@ -692,16 +682,18 @@ DataFrame describe(const DataFrame& b) {
     DataFrame out;
     out.names.push_back("statistic");
     out.columns.push_back(Series::strings(stat_names));
+    const std::int64_t n = b.num_rows();
     for (std::size_t i = 0; i < b.columns.size(); ++i) {
         const Series& c = b.columns[i];
         if (!is_numeric(c.type())) continue;
+        const FieldStat fs = field_stat_reduce(c);
         double vals[6];
-        vals[0] = static_cast<double>(c.count());
-        vals[1] = static_cast<double>(c.null_count());
-        vals[2] = c.mean();
-        vals[3] = c.stddev();
-        vals[4] = scalar_to_double(c.min());
-        vals[5] = scalar_to_double(c.max());
+        vals[0] = static_cast<double>(fs.n);
+        vals[1] = static_cast<double>(n - static_cast<std::int64_t>(fs.n));
+        vals[2] = fs.mean();
+        vals[3] = fs.stddev();
+        vals[4] = fs.n ? fs.min : 0.0;
+        vals[5] = fs.n ? fs.max : 0.0;
         out.names.push_back(b.names[i]);
         out.columns.push_back(Series::flat_f64(vals, 6));
     }
