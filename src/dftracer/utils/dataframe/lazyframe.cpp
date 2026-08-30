@@ -1137,33 +1137,44 @@ class DescribeCursor : public Cursor {
 // emitting count>1 (is_duplicated) or count==1 (is_unique) as one Bool column
 // per morsel. Reads the upstream once; order-preserving; state is the count map
 // plus the spool.
+//
+// Pass 1 is DISTINCT == GROUP BY all columns: it reuses the mergeable agg IR
+// (AggOp::Count keyed by the row-key column) through the same bounded parallel
+// sink as GroupByCursor - a batch of morsels, one partial AggState per morsel
+// in parallel, merged serially - instead of a single hash map fed one row at a
+// time. Pass 2's per-row lookup against the finalized (key, count) map is
+// independent per row, so it fans out too; the output Bool column is bit-
+// packed, so each parallel task owns whole bytes (8 rows) to avoid a shared-
+// byte write race.
 class IsDupCursor : public Cursor {
    public:
     IsDupCursor(std::unique_ptr<Cursor> in, std::uint64_t budget, bool unique)
         : first_(std::move(in)), spool_(budget), unique_(unique) {}
 
     std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (!counted_) {
-            while (auto m = first_->next(max_rows)) {
-                for (std::int64_t i = 0; i < m->rows; ++i)
-                    ++counts_[row_key(m->columns, i)];
-                spool_.add(std::move(m->columns), m->rows);
-            }
-            first_.reset();
-            pass2_ = spool_.reader();
-            counted_ = true;
-        }
+        if (!counted_) count(max_rows);
         while (auto m = pass2_->next(max_rows)) {
             const std::int64_t n = m->rows;
-            std::vector<std::uint8_t> bits(
-                static_cast<std::size_t>((n + 7) / 8), 0);
-            for (std::int64_t i = 0; i < n; ++i) {
-                auto it = counts_.find(row_key(m->columns, i));
-                const std::int64_t c = it != counts_.end() ? it->second : 0;
-                if (unique_ ? c == 1 : c > 1)
-                    bits[static_cast<std::size_t>(i >> 3)] |=
-                        static_cast<std::uint8_t>(1u << (i & 7));
-            }
+            const std::int64_t nbytes = (n + 7) / 8;
+            std::vector<std::uint8_t> bits(static_cast<std::size_t>(nbytes), 0);
+            const std::vector<Series>& cols = m->columns;
+            parallel_for(nbytes, std::int64_t{1} << 10,
+                         [&](std::int64_t bb, std::int64_t be) {
+                             for (std::int64_t byte = bb; byte < be; ++byte) {
+                                 const std::int64_t base = byte * 8;
+                                 const std::int64_t lim = std::min(base + 8, n);
+                                 std::uint8_t v = 0;
+                                 for (std::int64_t i = base; i < lim; ++i) {
+                                     auto it = counts_.find(row_key(cols, i));
+                                     const std::int64_t c =
+                                         it != counts_.end() ? it->second : 0;
+                                     if (unique_ ? c == 1 : c > 1)
+                                         v |= static_cast<std::uint8_t>(
+                                             1u << (i - base));
+                                 }
+                                 bits[static_cast<std::size_t>(byte)] = v;
+                             }
+                         });
             Morsel out;
             out.rows = n;
             out.columns.push_back(Series::flat(TypeId::Bool, bits.data(), n));
@@ -1173,6 +1184,66 @@ class IsDupCursor : public Cursor {
     }
 
    private:
+    void count(std::int64_t max_rows) {
+        std::vector<AggSpec> specs(1);
+        specs[0].op = AggOp::Count;
+        specs[0].out = "count";
+        AggStatePtr state = agg_new(specs);
+        constexpr std::size_t BATCH = 32;
+        std::vector<Morsel> batch;
+        batch.reserve(BATCH);
+        auto key_series = [](const Morsel& m) {
+            std::vector<std::string> keys(static_cast<std::size_t>(m.rows));
+            for (std::int64_t i = 0; i < m.rows; ++i)
+                keys[static_cast<std::size_t>(i)] = row_key(m.columns, i);
+            return Series::strings(keys);
+        };
+        bool eof = false;
+        while (!eof) {
+            batch.clear();
+            for (std::size_t b = 0; b < BATCH; ++b) {
+                auto m = first_->next(max_rows);
+                if (!m) {
+                    eof = true;
+                    break;
+                }
+                batch.push_back(std::move(*m));
+            }
+            if (batch.empty()) break;
+            if (batch.size() == 1) {
+                Series key = key_series(batch[0]);
+                agg_accumulate(*state, key, {});
+            } else {
+                std::vector<AggStatePtr> partials(batch.size());
+                parallel_for(static_cast<std::int64_t>(batch.size()), 1,
+                             [&](std::int64_t bi, std::int64_t ei) {
+                                 for (std::int64_t j = bi; j < ei; ++j) {
+                                     auto st = agg_new(specs);
+                                     Series key = key_series(
+                                         batch[static_cast<std::size_t>(j)]);
+                                     agg_accumulate(*st, key, {});
+                                     partials[static_cast<std::size_t>(j)] =
+                                         std::move(st);
+                                 }
+                             });
+                for (auto& p : partials)
+                    if (p) agg_merge(*state, *p);
+            }
+            for (auto& m : batch) spool_.add(std::move(m.columns), m.rows);
+        }
+        first_.reset();
+        DataFrame r = agg_finalize(*state, "key");
+        const Series& kc = r.columns[0];
+        const Series& cc = r.columns[1];
+        const std::int64_t d = r.num_rows();
+        counts_.reserve(static_cast<std::size_t>(d));
+        for (std::int64_t i = 0; i < d; ++i)
+            counts_.emplace(std::string(kc.string_at(i)),
+                            cc.data<std::int64_t>()[i]);
+        pass2_ = spool_.reader();
+        counted_ = true;
+    }
+
     std::unique_ptr<Cursor> first_, pass2_;
     spill::Spool spool_;
     bool unique_;
