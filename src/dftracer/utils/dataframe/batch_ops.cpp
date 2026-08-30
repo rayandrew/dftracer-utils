@@ -352,15 +352,33 @@ std::vector<DataFrame> hash_partition(const DataFrame& b,
         key_cols.push_back(&b.columns[static_cast<std::size_t>(ki)]);
     }
 
+    // Bucket id per row is independent of every other row, so it fans out
+    // through parallel_for; the scatter into per-bucket index lists then runs
+    // as one pass per thread over private buckets, merged at the end (rows
+    // within a bucket need not keep their original order - only co-location).
+    std::vector<std::int32_t> bucket_of(static_cast<std::size_t>(n));
+    constexpr std::int64_t GRAIN = 1 << 15;
+    auto compute_bucket = [&](std::int64_t b0, std::int64_t e0) {
+        for (std::int64_t i = b0; i < e0; ++i) {
+            std::uint64_t h = 1469598103934665603ULL;
+            for (const Series* c : key_cols)
+                h = splitmix64(h ^ hash_cell(*c, i));
+            bucket_of[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(
+                h % static_cast<std::uint64_t>(n_parts));
+        }
+    };
+    if (parallel_backend_installed() && n > GRAIN) {
+        parallel_for(n, GRAIN, compute_bucket);
+    } else {
+        compute_bucket(0, n);
+    }
+
     std::vector<std::vector<std::int64_t>> buckets(
         static_cast<std::size_t>(n_parts));
-    for (std::int64_t i = 0; i < n; ++i) {
-        std::uint64_t h = 1469598103934665603ULL;
-        for (const Series* c : key_cols) h = splitmix64(h ^ hash_cell(*c, i));
-        buckets[static_cast<std::size_t>(h %
-                                         static_cast<std::uint64_t>(n_parts))]
+    for (std::int64_t i = 0; i < n; ++i)
+        buckets[static_cast<std::size_t>(
+                    bucket_of[static_cast<std::size_t>(i)])]
             .push_back(i);
-    }
 
     std::vector<DataFrame> parts;
     parts.reserve(static_cast<std::size_t>(n_parts));
@@ -603,6 +621,51 @@ DataFrame unique(const DataFrame& b) {
     return take(b, idx);
 }
 
+namespace {
+
+// Parallel stable sort of `order` by `less`: chunks are stable_sort'd in
+// parallel, then merged bottom-up (std::merge is itself stable), so the
+// overall result matches a single std::stable_sort over the whole range.
+// Falls back to one std::stable_sort when no backend is installed or `n` is
+// small.
+template <class Less>
+void parallel_stable_sort_indices(std::vector<std::int64_t>& order, Less less) {
+    const std::int64_t n = static_cast<std::int64_t>(order.size());
+    constexpr std::int64_t RUN = 1 << 16;
+    if (!parallel_backend_installed() || n <= RUN) {
+        std::stable_sort(order.begin(), order.end(), less);
+        return;
+    }
+    const std::int64_t nruns = (n + RUN - 1) / RUN;
+    parallel_for(nruns, 1, [&](std::int64_t c0, std::int64_t c1) {
+        for (std::int64_t c = c0; c < c1; ++c) {
+            const std::int64_t lo = c * RUN;
+            const std::int64_t hi = std::min(n, lo + RUN);
+            std::stable_sort(order.begin() + lo, order.begin() + hi, less);
+        }
+    });
+    std::vector<std::int64_t> scratch(static_cast<std::size_t>(n));
+    std::int64_t* src = order.data();
+    std::int64_t* dst = scratch.data();
+    for (std::int64_t width = RUN; width < n; width *= 2) {
+        const std::int64_t step = width * 2;
+        const std::int64_t npairs = (n + step - 1) / step;
+        parallel_for(npairs, 1, [&](std::int64_t p0, std::int64_t p1) {
+            for (std::int64_t p = p0; p < p1; ++p) {
+                const std::int64_t lo = p * step;
+                const std::int64_t mid = std::min(n, lo + width);
+                const std::int64_t hi = std::min(n, lo + step);
+                std::merge(src + lo, src + mid, src + mid, src + hi, dst + lo,
+                           less);
+            }
+        });
+        std::swap(src, dst);
+    }
+    if (src != order.data()) std::copy(src, src + n, order.data());
+}
+
+}  // namespace
+
 DataFrame sort_by_multi(const DataFrame& b,
                         const std::vector<std::string>& names,
                         bool descending) {
@@ -617,21 +680,20 @@ DataFrame sort_by_multi(const DataFrame& b,
     const std::int64_t n = b.num_rows();
     std::vector<std::int64_t> order(static_cast<std::size_t>(n));
     for (std::int64_t i = 0; i < n; ++i) order[static_cast<std::size_t>(i)] = i;
-    std::stable_sort(order.begin(), order.end(),
-                     [&](std::int64_t a, std::int64_t bb) {
-                         for (const Series* c : keys) {
-                             bool na = c->is_null(a);
-                             bool nb = c->is_null(bb);
-                             if (na || nb) {
-                                 if (na && nb) continue;
-                                 return !na;  // nulls last in both directions
-                             }
-                             int r = raw_cmp(*c, a, bb);
-                             if (descending) r = -r;
-                             if (r != 0) return r < 0;
-                         }
-                         return false;
-                     });
+    parallel_stable_sort_indices(order, [&](std::int64_t a, std::int64_t bb) {
+        for (const Series* c : keys) {
+            bool na = c->is_null(a);
+            bool nb = c->is_null(bb);
+            if (na || nb) {
+                if (na && nb) continue;
+                return !na;  // nulls last in both directions
+            }
+            int r = raw_cmp(*c, a, bb);
+            if (descending) r = -r;
+            if (r != 0) return r < 0;
+        }
+        return false;
+    });
     return take(b, order);
 }
 
@@ -902,6 +964,28 @@ DataFrame to_dummies(const DataFrame& b, const std::string& column) {
     for (std::int64_t i = 0; i < n; ++i)
         append_cell(row_key[static_cast<std::size_t>(i)], mat, i);
 
+    // Bucket id of each row (its index into `uniq`), one hash lookup per row,
+    // instead of comparing every row against every distinct value.
+    std::unordered_map<std::string, std::int64_t> bucket_of;
+    bucket_of.reserve(static_cast<std::size_t>(d));
+    for (std::int64_t u = 0; u < d; ++u) {
+        std::string ukey;
+        append_cell(ukey, uniq, u);
+        bucket_of.emplace(std::move(ukey), u);
+    }
+    std::vector<std::int64_t> bucket(static_cast<std::size_t>(n));
+    for (std::int64_t i = 0; i < n; ++i)
+        bucket[static_cast<std::size_t>(i)] =
+            bucket_of.at(row_key[static_cast<std::size_t>(i)]);
+
+    // One flag byte per (row, dummy) is set once, in row-major order.
+    std::vector<std::vector<std::int8_t>> bits(
+        static_cast<std::size_t>(d),
+        std::vector<std::int8_t>(static_cast<std::size_t>(n), 0));
+    for (std::int64_t i = 0; i < n; ++i)
+        bits[static_cast<std::size_t>(bucket[static_cast<std::size_t>(i)])]
+            [static_cast<std::size_t>(i)] = 1;
+
     DataFrame out;
     out.names.reserve(b.names.size() + static_cast<std::size_t>(d) - 1);
     out.columns.reserve(out.names.capacity());
@@ -912,14 +996,9 @@ DataFrame to_dummies(const DataFrame& b, const std::string& column) {
             continue;
         }
         for (std::int64_t u = 0; u < d; ++u) {
-            std::string ukey;
-            append_cell(ukey, uniq, u);
-            std::vector<std::int8_t> bits(static_cast<std::size_t>(n), 0);
-            for (std::int64_t i = 0; i < n; ++i)
-                bits[static_cast<std::size_t>(i)] =
-                    row_key[static_cast<std::size_t>(i)] == ukey ? 1 : 0;
             out.names.push_back(column + "_" + cell_to_string(uniq, u));
-            out.columns.push_back(Series::flat(TypeId::Int8, bits.data(), n));
+            out.columns.push_back(Series::flat(
+                TypeId::Int8, bits[static_cast<std::size_t>(u)].data(), n));
         }
     }
     return out;
