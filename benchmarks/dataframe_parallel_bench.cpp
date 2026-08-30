@@ -96,6 +96,31 @@ int main(int argc, char** argv) {
     std::printf("group_by: %lld rows, %lld groups, sum+mean+count\n",
                 static_cast<long long>(rows), static_cast<long long>(groups));
 
+    // Baselines for ops that are already SIMD (sort = Highway VQSort) or
+    // bandwidth-bound, to judge whether parallelizing them is worth it.
+    {
+        set_parallel_backend(nullptr, nullptr);
+        double s_sort = 1e300, s_desc = 1e300;
+        for (int r = 0; r < 3; ++r) {
+            auto t0 = std::chrono::steady_clock::now();
+            DataFrame o = df.sort_by("v");
+            auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(o.num_rows());
+            s_sort = std::min(
+                s_sort,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+            t0 = std::chrono::steady_clock::now();
+            DataFrame d = df.describe();
+            t1 = std::chrono::steady_clock::now();
+            do_not_optimize(d.num_rows());
+            s_desc = std::min(
+                s_desc,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        std::printf("baselines (serial): sort_by %.2f ms | describe %.2f ms\n",
+                    s_sort, s_desc);
+    }
+
     set_parallel_backend(nullptr, nullptr);  // serial baseline
     const double serial = time_group_by(df, aggs, 5);
     std::printf("  serial          : %8.2f ms  (1.00x)\n", serial);
@@ -133,5 +158,23 @@ int main(int argc, char** argv) {
     const double lz_par = time_lazy(5);
     std::printf("lazy group_by: serial %8.2f ms | runtime %8.2f ms (%.2fx)\n",
                 lz_ser, lz_par, lz_ser / lz_par);
+
+    // Consolidation overhead probe: route through lazy with ONE giant morsel
+    // (no chunking/concat). Shows the pure cursor-wrapping cost vs eager.
+    auto one_morsel = [&]() {
+        double best = 1e300;
+        for (int r = 0; r < 5; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            DataFrame out = df.lazy().group_by("k", aggs).collect(rows);
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(out.num_rows());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    const double lz_one = one_morsel();
+    std::printf("lazy group_by (1 morsel, runtime): %8.2f ms\n", lz_one);
     return 0;
 }
