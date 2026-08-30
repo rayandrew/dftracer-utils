@@ -74,15 +74,38 @@ dftu_series* dftu_series_filter_gt(const dftu_series* v,
     return make_selection(*v, sel);
 }
 
+namespace dftracer::utils::dataframe {
+
+std::vector<std::int64_t> mask_to_indices(const std::uint8_t* bits,
+                                          std::int64_t n) {
+    std::vector<std::int64_t> sel;
+    sel.resize(static_cast<std::size_t>(n));
+    std::int64_t count = 0;
+    std::int64_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        std::uint64_t w;
+        std::memcpy(&w, bits + (i >> 3), sizeof(w));
+        while (w != 0) {
+            sel[static_cast<std::size_t>(count++)] =
+                i + static_cast<unsigned>(__builtin_ctzll(w));
+            w &= w - 1;
+        }
+    }
+    for (; i < n; ++i)
+        if ((bits[i >> 3] >> (i & 7)) & 1)
+            sel[static_cast<std::size_t>(count++)] = i;
+    sel.resize(static_cast<std::size_t>(count));
+    return sel;
+}
+
+}  // namespace dftracer::utils::dataframe
+
 dftu_series* dftu_series_filter(const dftu_series* v, const dftu_series* mask) {
     if (mask->type != TypeId::Bool || mask->encoding != Encoding::Flat)
         return nullptr;
     if (mask->length != v->length) return nullptr;
-
-    const std::uint8_t* bits = mask->data->data();
-    std::vector<std::int64_t> sel;
-    for (std::int64_t i = 0; i < v->length; ++i)
-        if ((bits[i >> 3] >> (i & 7)) & 1) sel.push_back(i);
+    std::vector<std::int64_t> sel = dftracer::utils::dataframe::mask_to_indices(
+        mask->data->data(), v->length);
     return make_selection(*v, sel);
 }
 
@@ -210,12 +233,26 @@ static dftu_series* gather_column(const dftu_series& base,
     out->data = Buffer::allocate(static_cast<std::size_t>(n) * width);
     const std::uint8_t* src = base.data->data();
     std::uint8_t* dst = out->data->data();
-    for (std::int64_t i = 0; i < n; ++i) {
-        if (idx[i] < 0)  // negative = null: zero the (masked) cell
-            std::memset(dst + static_cast<std::size_t>(i) * width, 0, width);
-        else
-            std::memcpy(dst + static_cast<std::size_t>(i) * width,
-                        src + static_cast<std::size_t>(idx[i]) * width, width);
+
+    // Contiguous ascending indices (head/tail/slice, and any filter that keeps
+    // a run of rows) collapse to a single block copy. The check short-circuits
+    // on the first gap, so random indices pay only O(1) before falling through.
+    bool contiguous = n > 0 && idx[0] >= 0;
+    for (std::int64_t i = 1; contiguous && i < n; ++i)
+        contiguous = idx[i] == idx[i - 1] + 1;
+    if (contiguous && idx[n - 1] < base.length) {
+        std::memcpy(dst, src + static_cast<std::size_t>(idx[0]) * width,
+                    static_cast<std::size_t>(n) * width);
+    } else {
+        for (std::int64_t i = 0; i < n; ++i) {
+            if (idx[i] < 0)  // negative = null: zero the (masked) cell
+                std::memset(dst + static_cast<std::size_t>(i) * width, 0,
+                            width);
+            else
+                std::memcpy(dst + static_cast<std::size_t>(i) * width,
+                            src + static_cast<std::size_t>(idx[i]) * width,
+                            width);
+        }
     }
     out->validity = gather_validity(base, idx, n, out->null_count);
     return out;

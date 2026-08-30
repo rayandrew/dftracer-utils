@@ -21,6 +21,12 @@ bool compare(const dftu_series& v, std::int32_t op, dftu_scalar rhs,
 /// nonzero-mask store.
 void pack_flags(const char* flags, std::int64_t n, std::uint8_t* out);
 
+/// Monotonicity of a FLAT numeric column (integer or float), checked a vector
+/// of adjacent pairs at a time. Sets `*out` and returns true if handled;
+/// returns false (leaving `*out` untouched) for non-numeric, null-carrying, or
+/// non-flat columns so the caller takes the scalar path.
+bool is_sorted_numeric(const dftu_series& v, bool descending, bool* out);
+
 }  // namespace dftracer::utils::dataframe
 
 #endif  // DFTRACER_UTILS_DATAFRAME_INTERNAL_COMPARE_SIMD_H

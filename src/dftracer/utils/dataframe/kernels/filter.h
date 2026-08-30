@@ -23,6 +23,11 @@ inline Series filter_gt(const Series& v, T threshold) {
 /// produce Bool masks. Invalid (empty) if `mask` is not a matching Bool column.
 Series filter(const Series& v, const Series& mask);
 
+/// Positions of the set bits in the first `n` bits of the packed bitmap `bits`.
+/// Bit-parallel: scans 64 bits at a time and emits indices with ctz.
+std::vector<std::int64_t> mask_to_indices(const std::uint8_t* bits,
+                                          std::int64_t n);
+
 /// Resolve any encoding to a new FLAT column (gather through the indirection).
 Series materialize(const Series& v);
 

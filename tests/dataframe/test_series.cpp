@@ -1889,6 +1889,24 @@ TEST_SUITE("vec") {
 
         std::vector<std::int64_t> one{7};
         CHECK(Series::flat_i64(one.data(), 1).is_sorted());
+
+        // Exercise the vectorized loop (>64 rows) plus a late inversion in the
+        // scalar tail.
+        std::vector<std::int64_t> big(200);
+        for (std::size_t i = 0; i < big.size(); ++i)
+            big[i] = static_cast<std::int64_t>(i);
+        CHECK(Series::flat_i64(big.data(), 200).is_sorted());
+        big[199] = 0;
+        CHECK_FALSE(Series::flat_i64(big.data(), 200).is_sorted());
+
+        // Float: a NaN is never an inversion, matching the scalar rule.
+        std::vector<double> f(100);
+        for (std::size_t i = 0; i < f.size(); ++i)
+            f[i] = static_cast<double>(i);
+        f[50] = std::numeric_limits<double>::quiet_NaN();
+        CHECK(Series::flat_f64(f.data(), 100).is_sorted());
+        f[10] = 999.0;  // real inversion before the NaN
+        CHECK_FALSE(Series::flat_f64(f.data(), 100).is_sorted());
     }
 
     TEST_CASE("A2 drop_nulls") {

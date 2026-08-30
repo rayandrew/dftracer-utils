@@ -108,12 +108,7 @@ DataFrame take(const DataFrame& b, const std::vector<std::int64_t>& indices) {
 }
 
 DataFrame filter(const DataFrame& b, const Series& mask) {
-    std::vector<std::int64_t> indices;
-    const std::uint8_t* bits = mask.data<std::uint8_t>();
-    const std::int64_t n = mask.length();
-    for (std::int64_t i = 0; i < n; ++i)
-        if ((bits[i >> 3] >> (i & 7)) & 1) indices.push_back(i);
-    return take(b, indices);
+    return take(b, mask_to_indices(mask.data<std::uint8_t>(), mask.length()));
 }
 
 DataFrame slice(const DataFrame& b, std::int64_t offset, std::int64_t len) {

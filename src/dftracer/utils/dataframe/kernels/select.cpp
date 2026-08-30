@@ -91,6 +91,8 @@ Series occurrence_mask(const Series& v, bool keep_when_unique) {
 bool is_sorted_impl(const Series& v, bool descending) {
     const std::int64_t n = v.length();
     if (n < 2) return true;
+    bool simd = false;
+    if (is_sorted_numeric(*v.handle(), descending, &simd)) return simd;
     const bool is_str = v.type() == TypeId::String;
     for (std::int64_t i = 1; i < n; ++i) {
         int cmp;
