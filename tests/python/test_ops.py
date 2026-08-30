@@ -1,10 +1,10 @@
-"""The op registry exposed to Python (dftracer.utils.ops): discovery and one
+"""The op registry exposed to Python (dftracer.utils.jit.ops): discovery and one
 generic runner that marshals Python args per an op's signature."""
 
 import numpy as np
 import pytest
 
-from dftracer.utils import ops
+from dftracer.utils.jit import ops
 from dftracer.utils.series import Series
 
 

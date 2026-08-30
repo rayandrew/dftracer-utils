@@ -3,7 +3,7 @@
 Every engine column op and reducer lives in one name-keyed registry. Look one up
 and call it, discover what is there, or run one dynamically by name::
 
-    from dftracer.utils import ops
+    from dftracer.utils.jit import ops
 
     ops.add(a, b)            # a registered op as an attribute
     ops.run("add", a, b)     # by name (name-as-data)
@@ -18,8 +18,8 @@ a column op, or a Python scalar for a reducer.
 
 from typing import Callable, Dict, List, Union
 
-from . import dftracer_utils_ext as _ext
-from .series import Series, _unwrap, _wrap
+from .. import dftracer_utils_ext as _ext
+from ..series import Series, _unwrap, _wrap
 
 __all__ = ["run", "get", "list", "names", "info"]
 
