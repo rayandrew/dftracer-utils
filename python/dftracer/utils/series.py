@@ -123,6 +123,27 @@ _Scalar = Union[int, float]
 _SeriesOrScalar = Union["Series", int, float]
 
 
+class _OpsAccessor:
+    """Runs any registered op as a method on a Series: a built-in
+    (``s.ops.add(other)``, ``s.ops.count()``) or a @jit.series user op
+    (``s.ops.mydouble()``). The Series is the first operand; extra operands
+    follow. Returns a Series for a column op, or a scalar for a reducer."""
+
+    __slots__ = ("_series",)
+
+    def __init__(self, series: "Series") -> None:
+        self._series = series
+
+    def __getattr__(self, name: str) -> "Callable[..., object]":
+        from .jit import ops as _ops  # lazy: jit imports series
+
+        def call(*rest: "Union[Series, int, float, str]") -> object:
+            return _ops.run(name, self._series, *rest)
+
+        call.__name__ = name
+        return call
+
+
 class Series(_Wrapper["_ext._Series"]):
     """A typed column: SIMD ops from the native engine plus Arrow/NumPy conversion.
 
@@ -660,6 +681,12 @@ class Series(_Wrapper["_ext._Series"]):
     def null_count(self) -> int:
         """Number of null elements."""
         return self._native.null_count
+
+    @property
+    def ops(self) -> "_OpsAccessor":
+        """Call any registered op (built-in or @jit.series user op) as a method,
+        e.g. ``s.ops.add(other)``, ``s.ops.mydouble()``, ``s.ops.count()``."""
+        return _OpsAccessor(self)
 
     def __reduce__(self) -> "Tuple[Callable[[object], Series], Tuple[object, ...]]":
         return (_series_from_arrow, (self.to_arrow(),))

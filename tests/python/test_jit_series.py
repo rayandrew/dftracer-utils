@@ -56,6 +56,17 @@ def test_series_op_rejects_non_expr_body():
             return 5  # not a column expression
 
 
+def test_series_ops_accessor_on_a_series():
+    @jit.series
+    def tripled(a):
+        return a * 3
+
+    s = _col([1, 2, 3])
+    assert _vals(s.ops.tripled()) == [3, 6, 9]  # user op as a method
+    assert _vals(s.ops.add(_col([10, 20, 30]))) == [11, 22, 33]  # built-in as a method
+    assert s.ops.count() == 3  # reducer returns a scalar
+
+
 def test_series_op_rejects_builtin_name_clash():
     with pytest.raises(ValueError):
 
