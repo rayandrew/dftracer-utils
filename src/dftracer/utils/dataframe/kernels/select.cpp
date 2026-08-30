@@ -9,13 +9,13 @@
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>
 #include <dftracer/utils/dataframe/internal/compare_simd.h>  // pack_flags
+#include <dftracer/utils/dataframe/internal/radix_dedup.h>   // parallel dedup
 #include <dftracer/utils/dataframe/kernels/sort.h>
 #include <dftracer/utils/dataframe/series.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -41,50 +41,58 @@ std::vector<std::int64_t> to_index_vector(const Series& idx) {
     return std::vector<std::int64_t>(p, p + idx.length());
 }
 
-// Per-value occurrence counts, keyed in the column's domain. Nulls form one
-// group tracked in `nullc`.
-struct ValueCounts {
-    std::unordered_map<double, std::int64_t> numeric;
-    std::unordered_map<std::string, std::int64_t> str;
-    std::int64_t nullc = 0;
-    bool is_str = false;
-};
-
-ValueCounts count_values(const Series& v) {
-    ValueCounts c;
-    c.is_str = v.type() == TypeId::String;
+// Per-row occurrence count of each row's own value, keyed in the column's
+// domain (nulls all share one group, counted separately). Radix-partitioned
+// over the non-null rows, mirroring the eager DataFrame dedup helpers.
+std::vector<std::int64_t> count_values(const Series& v) {
     const std::int64_t n = v.length();
+    const bool is_str = v.type() == TypeId::String;
     const bool has_nulls = v.null_count() > 0;
-    for (std::int64_t i = 0; i < n; ++i) {
-        if (has_nulls && v.is_null(i)) {
-            ++c.nullc;
-        } else if (c.is_str) {
-            ++c.str[std::string(v.string_at(i))];
-        } else {
-            ++c.numeric[read_f64(v, i)];
-        }
+    const std::int64_t nullc = v.null_count();
+
+    std::vector<std::int64_t> nonnull_idx;
+    if (has_nulls) {
+        nonnull_idx.reserve(static_cast<std::size_t>(n - nullc));
+        for (std::int64_t i = 0; i < n; ++i)
+            if (!v.is_null(i)) nonnull_idx.push_back(i);
     }
-    return c;
+    const std::int64_t m =
+        has_nulls ? static_cast<std::int64_t>(nonnull_idx.size()) : n;
+    auto idx_at = [&](std::int64_t j) {
+        return has_nulls ? nonnull_idx[static_cast<std::size_t>(j)] : j;
+    };
+
+    std::vector<std::int64_t> sub_counts =
+        is_str ? radix_counts_by<std::string>(
+                     m,
+                     [&](std::int64_t j) {
+                         return std::string(v.string_at(idx_at(j)));
+                     })
+               : radix_counts_by<double>(
+                     m, [&](std::int64_t j) { return read_f64(v, idx_at(j)); });
+
+    std::vector<std::int64_t> counts(static_cast<std::size_t>(n), 0);
+    for (std::int64_t j = 0; j < m; ++j)
+        counts[static_cast<std::size_t>(idx_at(j))] =
+            sub_counts[static_cast<std::size_t>(j)];
+    if (has_nulls)
+        for (std::int64_t i = 0; i < n; ++i)
+            if (v.is_null(i)) counts[static_cast<std::size_t>(i)] = nullc;
+    return counts;
 }
 
 // keep_when_unique: true builds is_unique, false builds is_duplicated.
 Series occurrence_mask(const Series& v, bool keep_when_unique) {
-    const ValueCounts c = count_values(v);
+    const std::vector<std::int64_t> counts = count_values(v);
     const std::int64_t n = v.length();
-    const bool has_nulls = v.null_count() > 0;
     std::vector<char> flags(static_cast<std::size_t>(n), 0);
-    for (std::int64_t i = 0; i < n; ++i) {
-        std::int64_t cnt = 0;
-        if (has_nulls && v.is_null(i))
-            cnt = c.nullc;
-        else if (c.is_str)
-            cnt = c.str.at(std::string(v.string_at(i)));
-        else
-            cnt = c.numeric.at(read_f64(v, i));
-        const bool unique = cnt == 1;
-        flags[static_cast<std::size_t>(i)] =
-            (keep_when_unique ? unique : !unique) ? 1 : 0;
-    }
+    parallel_for(n, std::int64_t{1} << 15, [&](std::int64_t b, std::int64_t e) {
+        for (std::int64_t i = b; i < e; ++i) {
+            const bool unique = counts[static_cast<std::size_t>(i)] == 1;
+            flags[static_cast<std::size_t>(i)] =
+                (keep_when_unique ? unique : !unique) ? 1 : 0;
+        }
+    });
     return bool_from_flags(flags);
 }
 
