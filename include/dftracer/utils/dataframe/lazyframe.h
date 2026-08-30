@@ -95,6 +95,17 @@ class LazyFrame {
     LazyFrame unique() const;
     /// Alias of unique().
     LazyFrame drop_duplicates() const;
+    /// A deterministic n-row sample. Buffers input (reservoir is a follow-up).
+    LazyFrame sample(std::int64_t n, std::uint64_t seed = 0) const;
+    /// One Bool column: true where the whole row is duplicated. Buffers input.
+    LazyFrame is_duplicated() const;
+    /// One Bool column: true where the whole row is unique. Buffers input.
+    LazyFrame is_unique() const;
+    /// Tumbling/sliding time-window aggregation. Buffers input.
+    LazyFrame group_by_dynamic(std::string time_col, std::int64_t every,
+                               std::int64_t period, std::vector<GroupAgg> aggs,
+                               std::int64_t origin = 0,
+                               bool origin_min = false) const;
 
     /// Output column names without running the query.
     std::vector<std::string> schema() const;

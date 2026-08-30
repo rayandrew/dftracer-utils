@@ -199,6 +199,30 @@ TEST_SUITE("lazyframe") {
         CHECK(u.num_rows() == 3);
     }
 
+    TEST_CASE("sample / is_duplicated / group_by_dynamic") {
+        DataFrame s = make_df().lazy().sample(3, 42).collect(2);
+        CHECK(s.num_rows() == 3);
+
+        std::vector<std::int64_t> d{1, 1, 2};
+        DataFrame df;
+        df.names = {"x"};
+        df.columns.push_back(Series::flat_i64(d.data(), 3));
+        DataFrame du = df.lazy().is_duplicated().collect();
+        CHECK(du.names == std::vector<std::string>{"is_duplicated"});
+        CHECK(du.num_rows() == 3);
+
+        std::vector<std::int64_t> t{0, 1, 2, 3}, v{1, 1, 1, 1};
+        DataFrame tf;
+        tf.names = {"t", "v"};
+        tf.columns.push_back(Series::flat_i64(t.data(), 4));
+        tf.columns.push_back(Series::flat_i64(v.data(), 4));
+        std::vector<GroupAgg> aggs{{Agg::Sum, "v", "sum", 0.0}};
+        DataFrame gd = tf.lazy().group_by_dynamic("t", 2, 2, aggs).collect(2);
+        CHECK(gd.names == std::vector<std::string>{"t", "sum"});
+        CHECK(gd.num_rows() == 2);  // windows [0,2), [2,4)
+        CHECK(gd.column("sum").data<std::int64_t>()[0] == 2);
+    }
+
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {
         // Filter on 'c' (col 2, the added column) must NOT move up.
         auto lf = make_df()

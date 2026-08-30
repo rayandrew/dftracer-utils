@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <functional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -540,45 +541,24 @@ class GroupByCursor : public Cursor {
     bool done_ = false;
 };
 
-// Pipeline breakers that need all rows. They buffer the input then apply the
-// eager op; a spillable form (external merge for sort, spill hash for unique)
-// is a follow-up.
-class SortByCursor : public Cursor {
+// Pipeline breakers that need all rows: buffer the input, apply `fn` once. A
+// spillable form (external merge for sort, spill hash for unique/pivot) is a
+// follow-up.
+class BufferSinkCursor : public Cursor {
    public:
-    SortByCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
-                 std::string name, bool descending)
-        : in_(std::move(in)),
-          sch_(std::move(sch)),
-          name_(std::move(name)),
-          descending_(descending) {}
+    BufferSinkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                     std::function<DataFrame(DataFrame&&)> fn)
+        : in_(std::move(in)), sch_(std::move(sch)), fn_(std::move(fn)) {}
     std::optional<Morsel> next(std::int64_t max_rows) override {
         if (done_) return std::nullopt;
         done_ = true;
-        return morsel_of(
-            drain_to_frame(*in_, sch_, max_rows).sort_by(name_, descending_));
+        return morsel_of(fn_(drain_to_frame(*in_, sch_, max_rows)));
     }
 
    private:
     std::unique_ptr<Cursor> in_;
     std::vector<std::string> sch_;
-    std::string name_;
-    bool descending_;
-    bool done_ = false;
-};
-
-class UniqueCursor : public Cursor {
-   public:
-    UniqueCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch)
-        : in_(std::move(in)), sch_(std::move(sch)) {}
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
-        done_ = true;
-        return morsel_of(drain_to_frame(*in_, sch_, max_rows).unique());
-    }
-
-   private:
-    std::unique_ptr<Cursor> in_;
-    std::vector<std::string> sch_;
+    std::function<DataFrame(DataFrame&&)> fn_;
     bool done_ = false;
 };
 
@@ -633,6 +613,21 @@ struct SortByOp {
     bool descending;
 };
 struct UniqueOp {};
+struct SampleOp {
+    std::int64_t n;
+    std::uint64_t seed;
+};
+struct IsDupOp {
+    bool unique;  // true = is_unique, false = is_duplicated
+};
+struct GroupByDynamicOp {
+    std::string time_col;
+    std::int64_t every;
+    std::int64_t period;
+    std::vector<GroupAgg> aggs;
+    std::int64_t origin;
+    bool origin_min;
+};
 
 template <class... Ts>
 struct overloaded : Ts... {
@@ -649,7 +644,8 @@ class LazyOp {
    public:
     std::variant<FilterOp, SelectOp, WithColumnOp, RenameOp, SliceOp, TailOp,
                  DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp,
-                 ExplodeOp, UnpivotOp, TopkOp, GroupByOp, SortByOp, UniqueOp>
+                 ExplodeOp, UnpivotOp, TopkOp, GroupByOp, SortByOp, UniqueOp,
+                 SampleOp, IsDupOp, GroupByDynamicOp>
         node;
 };
 
@@ -698,7 +694,17 @@ std::vector<std::string> out_schema(const LazyOp& op,
                        return s;
                    },
                    [&](const SortByOp&) { return in; },
-                   [&](const UniqueOp&) { return in; }},
+                   [&](const UniqueOp&) { return in; },
+                   [&](const SampleOp&) { return in; },
+                   [&](const IsDupOp& o) {
+                       return std::vector<std::string>{
+                           o.unique ? "is_unique" : "is_duplicated"};
+                   },
+                   [&](const GroupByDynamicOp& o) {
+                       std::vector<std::string> s{o.time_col};
+                       for (const GroupAgg& a : o.aggs) s.push_back(a.out);
+                       return s;
+                   }},
         op.node);
 }
 
@@ -724,7 +730,14 @@ std::string describe(const LazyOp& op) {
             [](const TopkOp& o) { return "topk " + o.name; },
             [](const GroupByOp& o) { return "group_by " + o.key; },
             [](const SortByOp& o) { return "sort_by " + o.name; },
-            [](const UniqueOp&) { return std::string("unique"); }},
+            [](const UniqueOp&) { return std::string("unique"); },
+            [](const SampleOp&) { return std::string("sample"); },
+            [](const IsDupOp& o) {
+                return std::string(o.unique ? "is_unique" : "is_duplicated");
+            },
+            [](const GroupByDynamicOp& o) {
+                return "group_by_dynamic " + o.time_col;
+            }},
         op.node);
 }
 
@@ -839,11 +852,38 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                                        o.key, o.aggs);
             },
             [&](const SortByOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<SortByCursor>(std::move(in), sch,
-                                                      o.name, o.descending);
+                return std::make_unique<BufferSinkCursor>(
+                    std::move(in), sch, [o](DataFrame&& f) {
+                        return f.sort_by(o.name, o.descending);
+                    });
             },
             [&](const UniqueOp&) -> std::unique_ptr<Cursor> {
-                return std::make_unique<UniqueCursor>(std::move(in), sch);
+                return std::make_unique<BufferSinkCursor>(
+                    std::move(in), sch,
+                    [](DataFrame&& f) { return f.unique(); });
+            },
+            [&](const SampleOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<BufferSinkCursor>(
+                    std::move(in), sch,
+                    [o](DataFrame&& f) { return f.sample(o.n, o.seed); });
+            },
+            [&](const IsDupOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<BufferSinkCursor>(
+                    std::move(in), sch, [o](DataFrame&& f) {
+                        DataFrame r;
+                        r.names = {o.unique ? "is_unique" : "is_duplicated"};
+                        r.columns.push_back(o.unique ? f.is_unique()
+                                                     : f.is_duplicated());
+                        return r;
+                    });
+            },
+            [&](const GroupByDynamicOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<BufferSinkCursor>(
+                    std::move(in), sch, [o](DataFrame&& f) {
+                        return f.group_by_dynamic(o.time_col, o.every, o.period,
+                                                  o.aggs, o.origin,
+                                                  o.origin_min);
+                    });
             }},
         op.node);
 }
@@ -973,6 +1013,36 @@ LazyFrame LazyFrame::unique() const {
 }
 
 LazyFrame LazyFrame::drop_duplicates() const { return unique(); }
+
+LazyFrame LazyFrame::sample(std::int64_t n, std::uint64_t seed) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{SampleOp{n, seed}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::is_duplicated() const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{IsDupOp{false}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::is_unique() const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{IsDupOp{true}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::group_by_dynamic(std::string time_col, std::int64_t every,
+                                      std::int64_t period,
+                                      std::vector<GroupAgg> aggs,
+                                      std::int64_t origin,
+                                      bool origin_min) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(
+        LazyOp{GroupByDynamicOp{std::move(time_col), every, period,
+                                std::move(aggs), origin, origin_min}}));
+    return LazyFrame(source_, std::move(ops));
+}
 
 std::vector<std::string> LazyFrame::schema() const {
     std::vector<std::string> s = source_->names();
