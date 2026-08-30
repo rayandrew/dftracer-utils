@@ -16,6 +16,7 @@
 #include <dftracer/utils/dataframe/kernels/prims.h>
 #include <dftracer/utils/python/dataframe.h>
 #include <dftracer/utils/python/py_method.h>
+#include <dftracer/utils/python/py_scalar_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <nanoarrow/nanoarrow.h>
 
@@ -148,19 +149,6 @@ PyObject* Series_prim(PyObject* self, PyObject* code) {
     return make_series(dataframe::prim(*a, static_cast<dataframe::Prim>(op)));
 }
 
-bool py_to_vec_scalar(PyObject* value, dftu_scalar* out) {
-    if (PyFloat_Check(value)) {
-        out->kind = DFTU_SCALAR_TAG_F64;
-        out->value.d = PyFloat_AsDouble(value);
-        return !(out->value.d == -1.0 && PyErr_Occurred());
-    }
-    long long v = PyLong_AsLongLong(value);
-    if (v == -1 && PyErr_Occurred()) return false;
-    out->kind = DFTU_SCALAR_TAG_I64;
-    out->value.i = v;
-    return true;
-}
-
 // Compare a column against a scalar (op is a DFTU_CMP_* code) -> Bool
 // column.
 PyObject* Series_compare(PyObject* self, PyObject* args) {
@@ -170,7 +158,7 @@ PyObject* Series_compare(PyObject* self, PyObject* args) {
     PyObject* value = nullptr;
     if (!PyArg_ParseTuple(args, "iO", &op, &value)) return nullptr;
     dftu_scalar s{};
-    if (!py_to_vec_scalar(value, &s)) return nullptr;
+    if (!py_to_scalar(value, &s)) return nullptr;
     return make_series(Series{
         dftu_series_compare(a->handle(), static_cast<dftu_cmp_op>(op), s)});
 }
@@ -653,15 +641,14 @@ PyObject* Series_is_between(PyObject* self, PyObject* args) {
     PyObject* hi = nullptr;
     if (!PyArg_ParseTuple(args, "OO", &lo, &hi)) return nullptr;
     dftu_scalar slo{}, shi{};
-    if (!py_to_vec_scalar(lo, &slo) || !py_to_vec_scalar(hi, &shi))
-        return nullptr;
+    if (!py_to_scalar(lo, &slo) || !py_to_scalar(hi, &shi)) return nullptr;
     return make_series(Series{dftu_series_is_between(a->handle(), slo, shi)});
 }
 PyObject* Series_fillna(PyObject* self, PyObject* value) {
     Series* a = as_series(self);
     if (!a) return nullptr;
     dftu_scalar s{};
-    if (!py_to_vec_scalar(value, &s)) return nullptr;
+    if (!py_to_scalar(value, &s)) return nullptr;
     return make_series(Series{dftu_series_fillna(a->handle(), s)});
 }
 PyObject* Series_clip(PyObject* self, PyObject* args) {
@@ -671,8 +658,7 @@ PyObject* Series_clip(PyObject* self, PyObject* args) {
     PyObject* hi = nullptr;
     if (!PyArg_ParseTuple(args, "OO", &lo, &hi)) return nullptr;
     dftu_scalar slo{}, shi{};
-    if (!py_to_vec_scalar(lo, &slo) || !py_to_vec_scalar(hi, &shi))
-        return nullptr;
+    if (!py_to_scalar(lo, &slo) || !py_to_scalar(hi, &shi)) return nullptr;
     return make_series(Series{dftu_series_clip(a->handle(), slo, shi)});
 }
 

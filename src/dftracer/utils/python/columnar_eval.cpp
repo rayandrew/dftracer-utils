@@ -17,6 +17,7 @@
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/parallel.h>
 #include <dftracer/utils/python/py_method.h>
+#include <dftracer/utils/python/py_scalar_helpers.h>
 #include <dftracer/utils/python/series.h>
 
 #include <cstdint>
@@ -41,19 +42,6 @@ enum {
     AST_CLIP = 10,
     AST_FILLNA = 11,
 };
-
-bool py_to_scalar(PyObject* v, dftu_scalar* out) {
-    if (PyFloat_Check(v)) {
-        out->kind = DFTU_SCALAR_TAG_F64;
-        out->value.d = PyFloat_AsDouble(v);
-        return !(out->value.d == -1.0 && PyErr_Occurred());
-    }
-    long long i = PyLong_AsLongLong(v);
-    if (i == -1 && PyErr_Occurred()) return false;
-    out->kind = DFTU_SCALAR_TAG_I64;
-    out->value.i = i;
-    return true;
-}
 
 // Rebuild a dataframe::Expr from a post-order list of (op, arg0[, arg1])
 // tuples.

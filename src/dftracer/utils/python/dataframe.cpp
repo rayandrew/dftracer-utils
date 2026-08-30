@@ -16,10 +16,14 @@
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/kernels/kernels.h>
+#include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/dataframe/plan.h>
 #include <dftracer/utils/python/columnar_eval.h>
+#include <dftracer/utils/python/lazyframe.h>
+#include <dftracer/utils/python/py_agg_helpers.h>
 #include <dftracer/utils/python/py_errors.h>
 #include <dftracer/utils/python/py_method.h>
+#include <dftracer/utils/python/py_scalar_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/series.h>
 #include <dftracer/utils/query/errc.h>
@@ -43,6 +47,8 @@ namespace {
 
 using dataframe::DataFrame;
 using dataframe::Series;
+using dftracer::utils::python::aggs_from_seq;
+using dftracer::utils::python::group_agg_from_spec;
 
 // A DataFrame owns its columns as one STRUCT column: child(i) hands out a
 // column sharing the struct's buffers (O(1)), and the struct exports to Arrow
@@ -105,21 +111,6 @@ PyObject* run_batch_op(Fn&& fn) {
         PyErr_SetString(PyExc_ValueError, e.what());
         return nullptr;
     }
-}
-
-// Parse an "op[:column]" aggregate spec; throws std::out_of_range on a bad op.
-dataframe::GroupAgg group_agg_from_spec(const std::string& spec) {
-    std::size_t colon = spec.find(':');
-    std::string op = spec.substr(0, colon);
-    dataframe::GroupAgg a;
-    a.op = dataframe::agg_from_string(op);
-    if (colon == std::string::npos) {
-        a.out = op;
-    } else {
-        a.column = spec.substr(colon + 1);
-        a.out = op + "_" + a.column;
-    }
-    return a;
 }
 
 PyObject* DataFrame_subscript(PyObject* self, PyObject* key) {
@@ -361,16 +352,7 @@ PyObject* DataFrame_fill_null(PyObject* self, PyObject* value) {
     DataFrameObject* b = as_dataframe(self);
     if (!b) return nullptr;
     dftu_scalar s{};
-    if (PyFloat_Check(value)) {
-        s.kind = DFTU_SCALAR_TAG_F64;
-        s.value.d = PyFloat_AsDouble(value);
-        if (s.value.d == -1.0 && PyErr_Occurred()) return nullptr;
-    } else {
-        long long v = PyLong_AsLongLong(value);
-        if (v == -1 && PyErr_Occurred()) return nullptr;
-        s.kind = DFTU_SCALAR_TAG_I64;
-        s.value.i = v;
-    }
+    if (!py_to_scalar(value, &s)) return nullptr;
     return run_batch_op(
         [&] { return dataframe::fill_null(to_dataframe(b), s); });
 }
@@ -864,30 +846,6 @@ PyObject* DataFrame_pivot(PyObject* self, PyObject* args, PyObject* kwds) {
     });
 }
 
-// Parse a sequence of agg spec strings ("count" or "<op>:<column>") into
-// GroupAgg records, mirroring the group_by string-spec form.
-bool aggs_from_seq(PyObject* obj, std::vector<dataframe::GroupAgg>& out) {
-    PyObject* seq = PySequence_Fast(obj, "aggs must be a sequence of str");
-    if (!seq) return false;
-    Py_ssize_t m = PySequence_Fast_GET_SIZE(seq);
-    for (Py_ssize_t i = 0; i < m; ++i) {
-        const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-        if (!s) {
-            Py_DECREF(seq);
-            return false;
-        }
-        try {
-            out.push_back(group_agg_from_spec(s));
-        } catch (const std::exception& e) {
-            PyErr_SetString(PyExc_ValueError, e.what());
-            Py_DECREF(seq);
-            return false;
-        }
-    }
-    Py_DECREF(seq);
-    return true;
-}
-
 // group_by_dynamic(time_col, every, period=None, aggs=[...]): tumbling/sliding
 // time-window aggregation. aggs mirror the group_by string-spec format.
 PyObject* DataFrame_group_by_dynamic(PyObject* self, PyObject* args,
@@ -1123,7 +1081,22 @@ PyObject* DataFrame_get_column_names(PyObject* self, void*) {
     return DataFrame_keys(self, nullptr);
 }
 
+// lazy() -> _LazyFrame: start a deferred query over a copy of this batch.
+PyObject* DataFrame_lazy(PyObject* self, PyObject*) {
+    DataFrameObject* b = as_dataframe(self);
+    if (!b) return nullptr;
+    try {
+        return dftracer::utils::python::wrap_lazyframe(
+            dataframe::lazy(to_dataframe(b)));
+    } catch (const std::exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+}
+
 PyMethodDef DataFrame_methods[] = {
+    {"lazy", DataFrame_lazy, METH_NOARGS,
+     "lazy() -> _LazyFrame, a deferred query over this batch."},
     {"keys", DataFrame_keys, METH_NOARGS, "Series names, in order."},
     {"filter", DataFrame_filter, METH_O,
      "filter(mask) -> DataFrame keeping rows where the Bool mask is true."},

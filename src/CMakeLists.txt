@@ -1530,6 +1530,8 @@ if(DFTRACER_UTILS_BUILD_PYTHON)
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/dataframe.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/columnar_eval.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/columnar_eval.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/py_scalar_helpers.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/py_agg_helpers.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/batch_indexer.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/batch_indexer.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer.cpp
