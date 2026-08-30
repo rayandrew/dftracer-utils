@@ -1179,5 +1179,77 @@ int main(int argc, char** argv) {
                 de_ser, de_par, de_ser / de_par, de_ok ? "OK" : "MISMATCH");
     ok = ok && de_ok;
 
+    // ewm_mean: affine-transform prefix scan. Random walk data (not a flat
+    // series) so the recurrence's decaying tail actually mixes many inputs.
+    std::vector<double> ewm_v(static_cast<std::size_t>(rows));
+    {
+        double acc = 0.0;
+        for (std::int64_t i = 0; i < rows; ++i) {
+            acc += static_cast<double>(
+                       (static_cast<std::uint64_t>(i) * 2654435761ULL) %
+                       1000003ULL) /
+                   1000003.0 -
+                   0.5;
+            ewm_v[static_cast<std::size_t>(i)] = acc;
+        }
+    }
+    Series ewm_col = Series::flat(TypeId::Float64, ewm_v.data(), rows);
+    const double ewm_alpha = 0.05;
+    auto time_ewm = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = ewm_col.ewm_mean(ewm_alpha);
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series ewm_serial_out = time_ewm(5);
+    double ewm_ser = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = ewm_col.ewm_mean(ewm_alpha);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        ewm_ser = std::min(
+            ewm_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series ewm_par_out = time_ewm(5);
+    double ewm_par = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = ewm_col.ewm_mean(ewm_alpha);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        ewm_par = std::min(
+            ewm_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    // Affine composition reassociates the recurrence's rounding, so require a
+    // tight relative tolerance rather than bit-identical equality.
+    bool ewm_ok = ewm_serial_out.length() == ewm_par_out.length();
+    double ewm_max_rel = 0.0;
+    {
+        const double* a2 = ewm_serial_out.data<double>();
+        const double* b2 = ewm_par_out.data<double>();
+        for (std::int64_t i = 0; ewm_ok && i < ewm_serial_out.length(); ++i) {
+            const double denom = std::max(1e-12, std::fabs(a2[i]));
+            const double rel = std::fabs(a2[i] - b2[i]) / denom;
+            ewm_max_rel = std::max(ewm_max_rel, rel);
+            if (rel > 1e-9) ewm_ok = false;
+        }
+    }
+    std::printf("ewm_mean (alpha=%.2f): serial %8.2f ms | runtime %8.2f ms "
+                "(%.2fx) correctness: %s (max rel err %.3e)\n",
+                ewm_alpha, ewm_ser, ewm_par, ewm_ser / ewm_par,
+                ewm_ok ? "OK" : "MISMATCH", ewm_max_rel);
+    ok = ok && ewm_ok;
+
     return ok ? 0 : 1;
 }

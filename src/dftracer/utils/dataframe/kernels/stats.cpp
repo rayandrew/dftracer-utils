@@ -359,11 +359,49 @@ Series rolling_quantile(const Series& v, std::int64_t window, double q) {
     });
 }
 
+// y[i] = alpha*x[i] + beta*y[i-1] (y[0] = x[0]) is a prefix scan of affine
+// maps y -> a*y + c: within a chunk not containing index 0, a is the constant
+// `beta` at every step, so the correction for the chunk's true entering value
+// V is just beta^k * V added to the locally-scanned (entering-seed-0) value -
+// no need to track per-index transforms. Chunk 0 needs no correction: its
+// local scan (seeded at 0) already equals the true answer, since a=0 at i=0
+// erases any dependence on the entering seed.
 Series ewm_mean(const Series& v, double alpha) {
     const std::int64_t n = v.length();
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
     if (n == 0) return Series::flat(TypeId::Float64, out.data(), n);
     const double beta = 1.0 - alpha;
+    constexpr std::int64_t GRAIN = 1 << 14;
+    if (parallel_backend_installed() && n > GRAIN) {
+        using T = std::pair<double, double>;  // (a, c): y -> a*y + c
+        parallel_prefix_scan<T>(
+            n, GRAIN, T{1.0, 0.0},
+            [&](std::int64_t b, std::int64_t e) -> T {
+                double y = (b == 0) ? read_f64(v, 0) : 0.0;
+                if (b == 0) out[0] = y;
+                std::int64_t i0 = (b == 0) ? 1 : b;
+                for (std::int64_t i = i0; i < e; ++i) {
+                    y = alpha * read_f64(v, i) + beta * y;
+                    out[static_cast<std::size_t>(i)] = y;
+                }
+                if (b == 0) return T{0.0, y};
+                return T{std::pow(beta, e - b), y};
+            },
+            [&](std::int64_t b, std::int64_t e, T offset) {
+                if (b == 0) return;
+                const double v_pre = offset.second;
+                double p = beta;
+                for (std::int64_t i = b; i < e; ++i) {
+                    out[static_cast<std::size_t>(i)] += p * v_pre;
+                    p *= beta;
+                }
+            },
+            [](T lhs, T rhs) -> T {
+                return T{lhs.first * rhs.first,
+                         rhs.first * lhs.second + rhs.second};
+            });
+        return Series::flat(TypeId::Float64, out.data(), n);
+    }
     double y = read_f64(v, 0);
     out[0] = y;
     for (std::int64_t i = 1; i < n; ++i) {
