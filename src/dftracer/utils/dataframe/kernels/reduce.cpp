@@ -1,12 +1,15 @@
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
+#include <dftracer/utils/dataframe/internal/radix_dedup.h>  // parallel dedup
 #include <dftracer/utils/dataframe/internal/reduce_simd.h>
 #include <dftracer/utils/dataframe/kernels/reduce.h>
+#include <dftracer/utils/dataframe/parallel.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <type_traits>
-#include <unordered_map>
+#include <vector>
 
 namespace dftracer::utils::dataframe {
 
@@ -170,25 +173,75 @@ void argextreme_one(const dftu_series& v, bool is_min, std::int64_t& out_idx) {
     }
 }
 
+// Serial fallback (and reference algorithm): strictly-greater keeps the value
+// that first reached the top count, so ties resolve to whichever value's
+// count first attains the eventual maximum.
 template <class T>
-void mode_one(const dftu_series& v, dftu_scalar& out) {
-    const T* p = reinterpret_cast<const T*>(v.data->data());
-    const std::int64_t n = v.length;
-    const bool has_null = v.validity != nullptr;
-    std::unordered_map<T, std::int64_t> counts;
+void mode_serial(const T* p, const std::vector<std::int64_t>& idx,
+                 dftu_scalar& out) {
+    ankerl::unordered_dense::map<T, std::int64_t> counts;
     T best{};
     std::int64_t best_count = 0;
-    for (std::int64_t i = 0; i < n; ++i) {
-        if (has_null && !is_valid(v, i)) continue;
-        const std::int64_t c = ++counts[p[i]];
-        // Strictly-greater keeps the value that first reached the top count,
-        // so ties resolve to the earlier-appearing value.
+    for (std::int64_t j : idx) {
+        const std::int64_t c = ++counts[p[j]];
         if (c > best_count) {
             best_count = c;
-            best = p[i];
+            best = p[j];
         }
     }
     store_domain<T>(out, best);
+}
+
+template <class T>
+void mode_one(const dftu_series& v, dftu_scalar& out) {
+    using dftracer::utils::dataframe::radix_counts_by;
+    const T* p = reinterpret_cast<const T*>(v.data->data());
+    const std::int64_t n = v.length;
+    const bool has_null = v.validity != nullptr;
+
+    std::vector<std::int64_t> idx;
+    idx.reserve(static_cast<std::size_t>(n));
+    for (std::int64_t i = 0; i < n; ++i)
+        if (!has_null || is_valid(v, i)) idx.push_back(i);
+    const std::int64_t m = static_cast<std::int64_t>(idx.size());
+
+    if (m == 0) {
+        store_domain<T>(out, T{});
+        return;
+    }
+    if (!dftracer::utils::dataframe::parallel_backend_installed() ||
+        m < dftracer::utils::dataframe::RADIX_DEDUP_MIN_ROWS) {
+        mode_serial<T>(p, idx, out);
+        return;
+    }
+
+    // Frequency of each valid position's value, radix-partitioned and merged
+    // (the same shape as group_agg Count). A unique highest-frequency value
+    // wins outright; a tie in the final count falls back to a bounded serial
+    // rescan restricted to the tied candidates, to reproduce the sequential
+    // "first-reaching-top" tie-break exactly (the last event on the winning
+    // path can only ever be caused by a value at the eventual maximum count,
+    // so skipping non-candidate rows cannot change the outcome).
+    std::vector<std::int64_t> counts = radix_counts_by<T>(
+        m, [&](std::int64_t j) { return p[idx[static_cast<std::size_t>(j)]]; });
+    std::int64_t best_count = 0;
+    for (std::int64_t c : counts) best_count = std::max(best_count, c);
+
+    ankerl::unordered_dense::set<T> candidates;
+    for (std::int64_t j = 0; j < m; ++j)
+        if (counts[static_cast<std::size_t>(j)] == best_count)
+            candidates.insert(p[idx[static_cast<std::size_t>(j)]]);
+
+    if (candidates.size() == 1) {
+        store_domain<T>(out, *candidates.begin());
+        return;
+    }
+
+    std::vector<std::int64_t> tied;
+    tied.reserve(idx.size());
+    for (std::int64_t j : idx)
+        if (candidates.count(p[j]) != 0) tied.push_back(j);
+    mode_serial<T>(p, tied, out);
 }
 
 }  // namespace
