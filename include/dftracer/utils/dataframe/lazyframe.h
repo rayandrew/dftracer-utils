@@ -122,8 +122,10 @@ class LazyFrame {
     /// unpivot alias.
     LazyFrame melt(std::vector<std::string> id_vars,
                    std::vector<std::string> value_vars) const;
-    /// Reshape long -> wide. Buffers input; output columns are data-dependent
-    /// (one per distinct `on` value), so schema() is empty until collect().
+    /// Reshape long -> wide. Two-pass (distinct index+on values, then cell
+    /// aggregation via the agg IR); state is bounded by the output (index rows
+    /// x on-values). Output columns are data-dependent (one per distinct `on`
+    /// value), so schema() is empty until collect().
     LazyFrame pivot(std::string index, std::string on, std::string values,
                     std::string agg = "first") const;
     /// One-hot encode `column`. Two-pass (distinct values, then stream-encode);

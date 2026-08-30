@@ -354,9 +354,15 @@ TEST_SUITE("lazyframe") {
         pf.columns.push_back(Series::flat_i64(i.data(), 4));
         pf.columns.push_back(Series::flat_i64(k.data(), 4));
         pf.columns.push_back(Series::flat_i64(v.data(), 4));
-        DataFrame p = pf.lazy().pivot("i", "k", "v").collect(2);
-        CHECK(p.num_rows() == 2);     // i in {0,1}
-        CHECK(p.num_columns() == 3);  // i + two k-values
+        DataFrame p = pf.lazy().pivot("i", "k", "v", "sum").collect(2);
+        DataFrame pe = pf.pivot("i", "k", "v", "sum");
+        REQUIRE(p.names == pe.names);  // i, 10, 20 (ascending on-values)
+        REQUIRE(p.num_rows() == pe.num_rows());
+        for (const std::string& cn : p.names) {
+            const std::int64_t* a = p.column(cn).data<std::int64_t>();
+            const std::int64_t* b = pe.column(cn).data<std::int64_t>();
+            for (std::int64_t r = 0; r < p.num_rows(); ++r) CHECK(a[r] == b[r]);
+        }
 
         // describe: streaming stats must match eager, across small morsels.
         DataFrame ds = make_df().lazy().describe().collect(2);

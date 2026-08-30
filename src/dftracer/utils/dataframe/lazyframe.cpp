@@ -1347,30 +1347,149 @@ class ToDummiesCursor : public Cursor {
     std::vector<std::string> produced_;
 };
 
-// Pipeline breakers that need all rows: buffer the input, apply `fn` once.
-// (pivot only; a spillable form is a follow-up.)
-class BufferSinkCursor : public Cursor {
+// Two-pass long->wide pivot, matching DataFrame::pivot. Pass 1 discovers the
+// distinct index rows and `on` columns (both ascending via Series::unique);
+// pass 2 aggregates each (index, on) cell through the mergeable agg IR keyed by
+// row*C+col (first/last/sum/min/max/mean all map to an AggOp), so state is
+// bounded by the output (R*C) not the input. Output columns are data-dependent,
+// reported via out_names().
+class PivotCursor : public Cursor {
    public:
-    BufferSinkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
-                     std::function<DataFrame(DataFrame&&)> fn)
-        : in_(std::move(in)), sch_(std::move(sch)), fn_(std::move(fn)) {}
+    PivotCursor(std::unique_ptr<Cursor> in, CursorFactory rebuild,
+                std::vector<std::string> sch, std::string index, std::string on,
+                std::string values, std::string agg)
+        : first_(std::move(in)),
+          rebuild_(std::move(rebuild)),
+          sch_(std::move(sch)),
+          index_(std::move(index)),
+          on_(std::move(on)),
+          values_(std::move(values)),
+          agg_(std::move(agg)) {}
+
     std::optional<Morsel> next(std::int64_t max_rows) override {
         if (done_) return std::nullopt;
         done_ = true;
-        DataFrame r = fn_(drain_to_frame(*in_, sch_, max_rows));
-        produced_names_ = r.names;
-        return morsel_of(std::move(r));
+        const int ii = idx_of(index_), ci = idx_of(on_), vi = idx_of(values_);
+        if (ii < 0) throw std::out_of_range("pivot: no column named " + index_);
+        if (ci < 0) throw std::out_of_range("pivot: no column named " + on_);
+        if (vi < 0)
+            throw std::out_of_range("pivot: no column named " + values_);
+
+        // Pass 1: distinct index and `on` values (ascending, matching eager).
+        ankerl::unordered_dense::set<std::string> seen_i, seen_c;
+        std::vector<Series> ich, cch;
+        while (auto m = first_->next(max_rows)) {
+            distinct_into(m->columns[static_cast<std::size_t>(ii)], seen_i,
+                          ich);
+            distinct_into(m->columns[static_cast<std::size_t>(ci)], seen_c,
+                          cch);
+        }
+        first_.reset();
+        Series uniq_idx =
+            ich.empty()
+                ? Series{}
+                : concat_columns(column_ptrs(ich)).unique().materialize();
+        Series uniq_col =
+            cch.empty()
+                ? Series{}
+                : concat_columns(column_ptrs(cch)).unique().materialize();
+        const std::int64_t R = uniq_idx.length(), C = uniq_col.length();
+        ankerl::unordered_dense::map<std::string, std::int64_t> row_of, col_of;
+        key_index(uniq_idx, R, row_of);
+        key_index(uniq_col, C, col_of);
+        const std::int64_t sentinel = R * C;
+
+        // Pass 2: aggregate each cell through the agg IR keyed by row*C+col.
+        std::vector<AggSpec> specs;
+        AggSpec sp;
+        sp.op = to_agg_op(agg_from_string(agg_));
+        sp.value_col = 0;
+        sp.out = "v";
+        specs.push_back(std::move(sp));
+        AggStatePtr state = agg_new(std::move(specs));
+        auto p2 = rebuild_();
+        while (auto m = p2->next(max_rows)) {
+            const Series& ic = m->columns[static_cast<std::size_t>(ii)];
+            const Series& cc = m->columns[static_cast<std::size_t>(ci)];
+            const Series& vc = m->columns[static_cast<std::size_t>(vi)];
+            const std::int64_t n = m->rows;
+            std::vector<Series> oi, oc;
+            oi.push_back(ic.share());
+            oc.push_back(cc.share());
+            std::vector<std::int64_t> keyv(static_cast<std::size_t>(n),
+                                           sentinel);
+            for (std::int64_t i = 0; i < n; ++i) {
+                if (ic.is_null(i) || cc.is_null(i)) continue;
+                auto ri = row_of.find(row_key(oi, i));
+                auto rc = col_of.find(row_key(oc, i));
+                if (ri != row_of.end() && rc != col_of.end())
+                    keyv[static_cast<std::size_t>(i)] =
+                        ri->second * C + rc->second;
+            }
+            Series keyc = Series::flat_i64(keyv.data(), n);
+            std::vector<const Series*> values{&vc};
+            agg_accumulate(*state, keyc, values);
+        }
+        DataFrame agg_res = agg_finalize(*state, "cell");
+        Series source = agg_res.column("v");
+        Series cells_col = agg_res.column("cell");
+        const std::int64_t* cells = cells_col.data<std::int64_t>();
+        std::vector<std::int64_t> cell_src(static_cast<std::size_t>(R * C), -1);
+        for (std::int64_t p = 0; p < cells_col.length(); ++p) {
+            const std::int64_t cell = cells[p];
+            if (cell != sentinel) cell_src[static_cast<std::size_t>(cell)] = p;
+        }
+
+        DataFrame out;
+        out.names.push_back(index_);
+        out.columns.push_back(uniq_idx.share());
+        for (std::int64_t c = 0; c < C; ++c) {
+            std::vector<std::int64_t> ti(static_cast<std::size_t>(R));
+            for (std::int64_t r = 0; r < R; ++r)
+                ti[static_cast<std::size_t>(r)] =
+                    cell_src[static_cast<std::size_t>(r * C + c)];
+            out.names.push_back(cell_to_string(uniq_col, c));
+            out.columns.push_back(source.take(ti));
+        }
+        produced_ = out.names;
+        return morsel_of(std::move(out));
     }
+
     std::optional<std::vector<std::string>> out_names() const override {
-        return produced_names_;
+        return produced_;
     }
 
    private:
-    std::unique_ptr<Cursor> in_;
+    int idx_of(const std::string& name) const {
+        auto it = std::find(sch_.begin(), sch_.end(), name);
+        return it == sch_.end() ? -1 : static_cast<int>(it - sch_.begin());
+    }
+    // Append the first-occurrence non-null cells of `col` to `chunks`.
+    static void distinct_into(const Series& col,
+                              ankerl::unordered_dense::set<std::string>& seen,
+                              std::vector<Series>& chunks) {
+        std::vector<Series> one;
+        one.push_back(col.share());
+        std::vector<std::int64_t> keep;
+        for (std::int64_t i = 0; i < col.length(); ++i)
+            if (!col.is_null(i) && seen.insert(row_key(one, i)).second)
+                keep.push_back(i);
+        if (!keep.empty()) chunks.push_back(col.take(keep));
+    }
+    static void key_index(
+        const Series& uniq, std::int64_t n,
+        ankerl::unordered_dense::map<std::string, std::int64_t>& out) {
+        std::vector<Series> one;
+        one.push_back(uniq.share());
+        for (std::int64_t i = 0; i < n; ++i) out.emplace(row_key(one, i), i);
+    }
+
+    std::unique_ptr<Cursor> first_;
+    CursorFactory rebuild_;
     std::vector<std::string> sch_;
-    std::function<DataFrame(DataFrame&&)> fn_;
-    std::optional<std::vector<std::string>> produced_names_;
+    std::string index_, on_, values_, agg_;
     bool done_ = false;
+    std::vector<std::string> produced_;
 };
 
 // ---- plan ops (tagged union) ------------------------------------------------
@@ -1702,10 +1821,9 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                     o.origin, o.origin_min);
             },
             [&](const PivotOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<BufferSinkCursor>(
-                    std::move(in), sch, [o](DataFrame&& f) {
-                        return f.pivot(o.index, o.on, o.values, o.agg);
-                    });
+                return std::make_unique<PivotCursor>(std::move(in), rebuild,
+                                                     sch, o.index, o.on,
+                                                     o.values, o.agg);
             },
             [&](const ToDummiesOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<ToDummiesCursor>(std::move(in), rebuild,
