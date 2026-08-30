@@ -10,6 +10,7 @@
 using dftracer::utils::dataframe::col;
 using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::eval;
+using dftracer::utils::dataframe::LazyFrame;
 using dftracer::utils::dataframe::Series;
 
 namespace {
@@ -90,6 +91,29 @@ TEST_SUITE("lazyframe") {
         DataFrame r = lf.collect();
         CHECK(r.num_rows() == 3);
         CHECK(r.column("c").data<std::int64_t>()[0] == 44);  // 4 + 40
+    }
+
+    TEST_CASE("streaming row ops: head / slice / tail / rename") {
+        LazyFrame base = make_df().lazy();      // a=1..6, b=10..60
+
+        DataFrame h = base.head(3).collect(2);  // morsel 2 -> multi-morsel
+        CHECK(h.num_rows() == 3);
+        CHECK(h.column("a").data<std::int64_t>()[0] == 1);
+        CHECK(h.column("a").data<std::int64_t>()[2] == 3);
+
+        DataFrame s = base.slice(2, 3).collect(2);  // rows a=3,4,5
+        CHECK(s.num_rows() == 3);
+        CHECK(s.column("a").data<std::int64_t>()[0] == 3);
+        CHECK(s.column("a").data<std::int64_t>()[2] == 5);
+
+        DataFrame t = base.tail(2).collect(2);  // a=5,6
+        CHECK(t.num_rows() == 2);
+        CHECK(t.column("a").data<std::int64_t>()[0] == 5);
+        CHECK(t.column("a").data<std::int64_t>()[1] == 6);
+
+        DataFrame r = base.rename({"x", "y"}).collect();
+        CHECK(r.names == std::vector<std::string>{"x", "y"});
+        CHECK(r.column("x").data<std::int64_t>()[5] == 6);
     }
 
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {

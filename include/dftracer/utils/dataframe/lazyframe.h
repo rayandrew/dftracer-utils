@@ -64,6 +64,10 @@ class LazyFrame {
     LazyFrame select(std::vector<std::string> names) const;
     LazyFrame filter(Expr predicate) const;
     LazyFrame with_column(std::string name, Expr expr) const;
+    LazyFrame rename(std::vector<std::string> names) const;
+    LazyFrame slice(std::int64_t offset, std::int64_t len) const;
+    LazyFrame head(std::int64_t n) const;
+    LazyFrame tail(std::int64_t n) const;
 
     /// Output column names without running the query.
     std::vector<std::string> schema() const;
