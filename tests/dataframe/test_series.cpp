@@ -430,6 +430,22 @@ TEST_SUITE("vec") {
               isum);  // explicit i64 kernel
         CHECK(scalar_value<std::int64_t>(min(ic)) == imin);
         CHECK(scalar_value<std::int64_t>(max(ic)) == imax);
+
+        // Null-present sum takes the masked SIMD path: every 4th row is null.
+        std::vector<std::uint8_t> bm(static_cast<std::size_t>((n + 7) / 8), 0);
+        std::int64_t isum_valid = 0;
+        double fsum_valid = 0.0;
+        for (std::int64_t i = 0; i < n; ++i) {
+            if (i % 4 != 0) {
+                bm[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+                isum_valid += vi[i];
+                fsum_valid += fd[i];
+            }
+        }
+        Series icn = Series::flat_i64(vi.data(), n, bm.data());
+        Series fcn = Series::flat_f64(fd.data(), n, bm.data());
+        CHECK(scalar_value<std::int64_t>(sum(icn)) == isum_valid);
+        CHECK(scalar_value<double>(sum(fcn)) == doctest::Approx(fsum_valid));
     }
 
     TEST_CASE("group_by aggregates values by a string key") {
