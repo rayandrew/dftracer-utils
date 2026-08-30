@@ -4,13 +4,13 @@
 // reverse, shift, top_k/bottom_k, sample. None is a lane kernel: the numeric
 // heavy lifting is delegated to argsort/topk_indices (SIMD) and take/filter.
 
+#include <dftracer/utils/core/common/hash/splitmix64.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>
 #include <dftracer/utils/dataframe/internal/compare_simd.h>  // pack_flags
 #include <dftracer/utils/dataframe/kernels/sort.h>
 #include <dftracer/utils/dataframe/series.h>
-#include <dftracer/utils/plugins/prims.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -190,7 +190,8 @@ Series sample_impl(const Series& v, std::int64_t n, std::uint64_t seed) {
     for (std::int64_t i = 0; i < len; ++i)
         order[static_cast<std::size_t>(i)] = i;
     auto key = [seed](std::int64_t i) {
-        return dftu_mix64(static_cast<std::uint64_t>(i) + seed);
+        return dftracer::utils::hash::splitmix64(static_cast<std::uint64_t>(i) +
+                                                 seed);
     };
     // The n smallest-hash rows are the sample; nth_element partitions in
     // O(len).

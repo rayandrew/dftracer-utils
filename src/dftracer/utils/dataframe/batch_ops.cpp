@@ -1,3 +1,5 @@
+#include <dftracer/utils/core/common/hash/fnv1a.h>       // string cell hashing
+#include <dftracer/utils/core/common/hash/splitmix64.h>  // row/cell hashing
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
@@ -7,7 +9,6 @@
 #include <dftracer/utils/dataframe/kernels/group_by.h>
 #include <dftracer/utils/dataframe/kernels/sort.h>
 #include <dftracer/utils/dataframe/parallel.h>
-#include <dftracer/utils/plugins/prims.h>  // dftu_mix64
 
 #include <algorithm>
 #include <bit>
@@ -306,12 +307,7 @@ DataFrame group_by(const DataFrame& b, const std::string& key,
 
 namespace {
 
-std::uint64_t splitmix64(std::uint64_t x) {
-    x += 0x9E3779B97F4A7C15ULL;
-    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
-    return x ^ (x >> 31);
-}
+using dftracer::utils::hash::splitmix64;
 
 std::uint64_t read_f64_bits(const Series& c, std::int64_t i) {
     if (c.type() == TypeId::Float32)
@@ -323,13 +319,8 @@ std::uint64_t read_f64_bits(const Series& c, std::int64_t i) {
 // node.
 std::uint64_t hash_cell(const Series& c, std::int64_t i) {
     switch (c.type()) {
-        case TypeId::String: {
-            std::string_view s = c.string_at(i);
-            std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset
-            for (char ch : s)
-                h = (h ^ static_cast<std::uint8_t>(ch)) * 1099511628211ULL;
-            return h;
-        }
+        case TypeId::String:
+            return hash::fnv1a_hash(c.string_at(i));
         case TypeId::Bool: {
             const std::uint8_t* b = c.data<std::uint8_t>();
             return splitmix64((b[i >> 3] >> (i & 7)) & 1);
@@ -709,7 +700,7 @@ DataFrame sample(const DataFrame& b, std::int64_t n, std::uint64_t seed) {
     for (std::int64_t i = 0; i < len; ++i)
         order[static_cast<std::size_t>(i)] = i;
     auto key = [seed](std::int64_t i) {
-        return dftu_mix64(static_cast<std::uint64_t>(i) + seed);
+        return splitmix64(static_cast<std::uint64_t>(i) + seed);
     };
     if (n < len)
         std::nth_element(
