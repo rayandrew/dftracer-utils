@@ -15,11 +15,12 @@ _HAS_CXX = bool(shutil.which("c++") or shutil.which("clang++") or shutil.which("
 _needs_cxx = pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler for the jit backend")
 
 
-def _write_trace(path, durs):
+def _write_trace(path, durs, pids=None):
     with gzip.open(path, "wt", encoding="utf-8") as f:
         for i, d in enumerate(durs):
+            pid = 1 if pids is None else pids[i]
             f.write(
-                f'{{"name":"read","cat":"POSIX","pid":1,"tid":1,'
+                f'{{"name":"read","cat":"POSIX","pid":{pid},"tid":1,'
                 f'"ts":{1000 + i},"dur":{d},"ph":"X","args":{{}}}}\n'
             )
 
@@ -69,6 +70,46 @@ def test_vfold_scalar_min_max(tmp_path):
     assert int(_value(result, "hi").sum()) == 50
 
 
+@_needs_cxx
+def test_vfold_keyed_sum_per_pid(tmp_path):
+    @jit.vfold
+    class PerPid:
+        busy = jit.map(key=jit.i64, value=jit.sum())
+
+        @jit.each_batch
+        def step(self, df):
+            self.busy[df["pid"]] += df["dur"]
+
+    durs = [10, 20, 30, 40]
+    pids = [1, 2, 1, 2]
+    _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
+    host = PluginHost()
+    host.load(PerPid)
+    host.resolve()
+    tbl = pa.table(host.run(str(tmp_path))["busy"])
+    got = dict(zip(tbl.column(0).to_pylist(), tbl.column("value").to_pylist()))
+    assert got == {1: 40.0, 2: 60.0}  # pid1: 10+30, pid2: 20+40
+
+
+@_needs_cxx
+def test_vfold_keyed_count_per_pid(tmp_path):
+    @jit.vfold
+    class Hits:
+        n = jit.map(key=jit.i64, value=jit.count())
+
+        @jit.each_batch
+        def step(self, df):
+            self.n[df["pid"]] += 1
+
+    _write_trace(str(tmp_path / "t.pfw.gz"), [1, 1, 1, 1, 1], [1, 1, 2, 2, 2])
+    host = PluginHost()
+    host.load(Hits)
+    host.resolve()
+    tbl = pa.table(host.run(str(tmp_path))["n"])
+    got = dict(zip(tbl.column(0).to_pylist(), tbl.column("value").to_pylist()))
+    assert got == {1: 2, 2: 3}
+
+
 class TestAuthoring:
     def test_reducer_must_match_accumulator(self):
         with pytest.raises(jit.JitError):
@@ -81,16 +122,16 @@ class TestAuthoring:
                 def step(self, df):
                     self.total += df["dur"].max()  # max into a sum accumulator
 
-    def test_keyed_maps_not_supported_yet(self):
+    def test_keyed_field_must_be_numeric(self):
         with pytest.raises(jit.JitError):
 
             @jit.vfold
-            class Keyed:
-                busy = jit.map(key=jit.i64, value=jit.sum())
+            class BadKey:
+                by_name = jit.map(key=jit.i64, value=jit.sum())
 
                 @jit.each_batch
                 def step(self, df):
-                    self.busy[df["pid"]] += df["dur"]
+                    self.by_name[df["name"]] += df["dur"]  # string key not supported
 
     def test_needs_one_each_batch(self):
         with pytest.raises(jit.JitError):

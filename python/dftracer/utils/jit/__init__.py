@@ -3498,6 +3498,9 @@ _VFOLD_REDUCERS = {
     "max": ("DFTU_REDUCE_MAX", "MAX"),
 }
 _VFOLD_TOP_FIELDS = frozenset({"name", "cat", "pid", "tid", "ts", "dur", "ph", "fhash", "hhash"})
+# Numeric top-level columns build_row_frame emits as flat UInt64, so a keyed
+# fold can read them directly as a uint64 buffer.
+_VFOLD_NUMERIC = frozenset({"pid", "tid", "ts", "dur"})
 
 
 def _vfold_df_field(node: ast.expr) -> str:
@@ -3514,26 +3517,73 @@ def _vfold_df_field(node: ast.expr) -> str:
 
 
 def _compile_vfold(
-    fn: Callable[..., object], accums: Dict[str, _Monoid]
-) -> Tuple[List[Tuple[str, _Monoid, str, str]], "builtins.set[str]"]:
+    fn: Callable[..., object],
+    accums: Dict[str, _Monoid],
+    maps: Dict[str, _MapDecl],
+) -> Tuple[List[Dict[str, object]], "builtins.set[str]"]:
     tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
     func = tree.body[0]
     if not isinstance(func, ast.FunctionDef):
         raise JitError("@jit.each_batch must decorate a function")
-    scalars: List[Tuple[str, _Monoid, str, str]] = []
+    ops: List[Dict[str, object]] = []
     fields: "builtins.set[str]" = builtins.set()
+    shape = (
+        '@jit.vfold body must be self.<acc> += df["f"].<reducer>() '
+        'or self.<map>[df["k"]] += df["v"]'
+    )
     for stmt in func.body:
         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
             continue  # docstring
         if not (isinstance(stmt, ast.AugAssign) and isinstance(stmt.op, ast.Add)):
-            raise JitError('@jit.vfold body must be self.<acc> += df["<field>"].<reducer>()')
+            raise JitError(shape)
         tgt = stmt.target
+        # keyed: self.<map>[df["key"]] += df["val"] | <int>
+        if (
+            isinstance(tgt, ast.Subscript)
+            and isinstance(tgt.value, ast.Attribute)
+            and isinstance(tgt.value.value, ast.Name)
+            and tgt.value.value.id == "self"
+        ):
+            attr = tgt.value.attr
+            if attr not in maps:
+                raise JitError(f"@jit.vfold: '{attr}' is not a declared jit.map")
+            keyfield = _vfold_df_field(_unwrap_index(tgt.slice))
+            if keyfield not in _VFOLD_NUMERIC:
+                raise JitError(
+                    f"@jit.vfold: key field '{keyfield}' must be numeric (pid/tid/ts/dur)"
+                )
+            rhs = stmt.value
+            vfield: str | None = None
+            const: int | None = None
+            if isinstance(rhs, ast.Constant) and isinstance(rhs.value, int):
+                const = int(rhs.value)
+            else:
+                vfield = _vfold_df_field(rhs)
+                if vfield not in _VFOLD_NUMERIC:
+                    raise JitError(
+                        f"@jit.vfold: value field '{vfield}' must be numeric (pid/tid/ts/dur)"
+                    )
+                fields.add(vfield)
+            fields.add(keyfield)
+            ops.append(
+                {
+                    "kind": "keyed",
+                    "attr": attr,
+                    "mon": maps[attr].values[0],
+                    "keytype": maps[attr].key_types[0].dft,
+                    "keyfield": keyfield,
+                    "vfield": vfield,
+                    "const": const,
+                }
+            )
+            continue
+        # scalar: self.<acc> += df["field"].<reducer>()
         if not (
             isinstance(tgt, ast.Attribute)
             and isinstance(tgt.value, ast.Name)
             and tgt.value.id == "self"
         ):
-            raise JitError("@jit.vfold: target must be self.<accumulator>")
+            raise JitError(shape)
         attr = tgt.attr
         if attr not in accums:
             raise JitError(f"@jit.vfold: '{attr}' is not a declared accumulator")
@@ -3541,7 +3591,7 @@ def _compile_vfold(
         if not (
             isinstance(call, ast.Call) and not call.args and isinstance(call.func, ast.Attribute)
         ):
-            raise JitError('@jit.vfold: value must be df["<field>"].<reducer>()')
+            raise JitError('@jit.vfold: scalar value must be df["<field>"].<reducer>()')
         reducer = call.func.attr
         if reducer not in _VFOLD_REDUCERS:
             raise JitError(f"@jit.vfold: unsupported reducer '.{reducer}()' (use sum/min/max)")
@@ -3555,21 +3605,22 @@ def _compile_vfold(
                 f"(a jit.{reducer}() accumulator)"
             )
         field = _vfold_df_field(call.func.value)
-        scalars.append((attr, mon, field, rop))
+        ops.append({"kind": "scalar", "attr": attr, "mon": mon, "field": field, "rop": rop})
         fields.add(field)
-    if not scalars:
+    if not ops:
         raise JitError("@jit.vfold: the @jit.each_batch body is empty")
-    return scalars, fields
+    return ops, fields
 
 
 def _emit_vfold(
     cls_name: str,
-    scalars: List[Tuple[str, _Monoid, str, str]],
+    ops: List[Dict[str, object]],
     needs_expr: str,
     plan_query: str | None,
 ) -> str:
     used = {"map_new"}
-    for _attr, mon, _f, _op in scalars:
+    for opd in ops:
+        mon = cast(_Monoid, opd["mon"])
         used.add("map_add_f64" if mon.dft in _F64_MONOIDS else "map_add_u64")
     guard = " || ".join(["!map"] + [f"!map->{fn}" for fn in sorted(used)])
     plan_query_field = "plan_query" if plan_query is not None else "NULL"
@@ -3608,36 +3659,85 @@ def _emit_vfold(
         "    (void)slice;",
         f"    if ({guard}) return NULL;",
     ]
-    for attr, mon, field, rop in scalars:
+    for opd in ops:
+        mon = cast(_Monoid, opd["mon"])
         f64 = mon.dft in _F64_MONOIDS
         add_fn = "map_add_f64" if f64 else "map_add_u64"
-        if f64:
-            valexpr = (
-                "s.kind == DFTU_SCALAR_TAG_F64 ? s.value.d : "
-                "(s.kind == DFTU_SCALAR_TAG_U64 ? (double)s.value.u "
-                ": (double)s.value.i)"
-            )
+        attr = cast(str, opd["attr"])
+        if opd["kind"] == "scalar":
+            field = cast(str, opd["field"])
+            rop = cast(str, opd["rop"])
+            if f64:
+                valexpr = (
+                    "s.kind == DFTU_SCALAR_TAG_F64 ? s.value.d : "
+                    "(s.kind == DFTU_SCALAR_TAG_U64 ? (double)s.value.u "
+                    ": (double)s.value.i)"
+                )
+            else:
+                valexpr = (
+                    "s.kind == DFTU_SCALAR_TAG_F64 ? (uint64_t)s.value.d : "
+                    "(s.kind == DFTU_SCALAR_TAG_U64 ? s.value.u "
+                    ": (uint64_t)s.value.i)"
+                )
+            # A scalar accumulator is a single-key map with a constant key 0 (the
+            # map machinery needs a key); the result is a one-row table.
+            out += [
+                "    {",
+                f"        dftu_series* col = dftu_dataframe_column(df, {_c_str_literal(field)});",
+                "        if (col) {",
+                f"            dftu_scalar s = dftu_series_reduce(col, {rop});",
+                "            const dftu_type kt[1] = {DFTU_T_I64};",
+                "            int64_t key[1] = {0};",
+                f"            dftu_map* m = map->map_new(host->h, {_c_str_literal(attr)}, kt, 1, {mon.dft});",
+                f"            map->{add_fn}(host->h, m, key, {valexpr});",
+                "            dftu_series_free(col);",
+                "        }",
+                "    }",
+            ]
+            continue
+        # keyed: per-batch group by reading the key/value columns, folding each
+        # row into the monoid-valued map (the map does the grouping across rows
+        # and merges across worker slices).
+        keyfield = cast(str, opd["keyfield"])
+        keytype = cast(str, opd["keytype"])
+        vfield = opd["vfield"]
+        read_val = vfield is not None
+        if read_val:
+            perrow = "(double)vd[i]" if f64 else "(uint64_t)vd[i]"
         else:
-            valexpr = (
-                "s.kind == DFTU_SCALAR_TAG_F64 ? (uint64_t)s.value.d : "
-                "(s.kind == DFTU_SCALAR_TAG_U64 ? s.value.u "
-                ": (uint64_t)s.value.i)"
-            )
-        # A scalar accumulator is a single-key map with a constant key 0 (the
-        # map machinery needs at least one key); the result is a one-row table.
-        out += [
+            perrow = f"(double){opd['const']}" if f64 else f"(uint64_t){opd['const']}"
+        block = [
             "    {",
-            f"        dftu_series* col = dftu_dataframe_column(df, {_c_str_literal(field)});",
-            "        if (col) {",
-            f"            dftu_scalar s = dftu_series_reduce(col, {rop});",
-            "            const dftu_type kt[1] = {DFTU_T_I64};",
-            "            int64_t key[1] = {0};",
-            f"            dftu_map* m = map->map_new(host->h, {_c_str_literal(attr)}, kt, 1, {mon.dft});",
-            f"            map->{add_fn}(host->h, m, key, {valexpr});",
-            "            dftu_series_free(col);",
-            "        }",
-            "    }",
+            f"        dftu_series* kc = dftu_dataframe_column(df, {_c_str_literal(keyfield)});",
         ]
+        if read_val:
+            block.append(
+                f"        dftu_series* vc = dftu_dataframe_column(df, {_c_str_literal(cast(str, vfield))});"
+            )
+        cond = "kc && vc" if read_val else "kc"
+        block += [
+            f"        if ({cond}) {{",
+            "            int64_t n = dftu_series_length(kc);",
+            "            const uint64_t* kd = (const uint64_t*)dftu_series_data(kc);",
+        ]
+        if read_val:
+            block.append("            const uint64_t* vd = (const uint64_t*)dftu_series_data(vc);")
+        block += [
+            f"            const dftu_type kt[1] = {{{keytype}}};",
+            f"            dftu_map* m = map->map_new(host->h, {_c_str_literal(attr)}, kt, 1, {mon.dft});",
+            ("            if (kd && vd) {" if read_val else "            if (kd) {"),
+            "                for (int64_t i = 0; i < n; i++) {",
+            "                    int64_t key[1];",
+            "                    key[0] = (int64_t)kd[i];",
+            f"                    map->{add_fn}(host->h, m, key, {perrow});",
+            "                }",
+            "            }",
+            "            dftu_series_free(kc);",
+        ]
+        if read_val:
+            block.append("            dftu_series_free(vc);")
+        block += ["        }", "    }"]
+        out += block
     out += [
         "    return NULL;",
         "}",
@@ -3688,34 +3788,39 @@ def _build_vfold(cls: type) -> type:
             accums[attr] = val
         elif isinstance(val, _EachBatch):
             batch.append(val)
-    if maps:
-        raise JitError(
-            "@jit.vfold keyed maps are not supported yet; declare scalar "
-            "accumulators (jit.sum()/min()/max())"
-        )
-    if not accums:
-        raise JitError("@jit.vfold needs at least one scalar accumulator (jit.sum()/min()/max())")
+    for attr, m in maps.items():
+        if m.is_product or m.nested is not None or m.argrow is not None or m.ordered:
+            raise JitError(
+                f"@jit.vfold: '{attr}' must be a simple jit.map(key=<type>, value=<monoid>)"
+            )
+        if len(m.key_types) != 1:
+            raise JitError(f"@jit.vfold: '{attr}' must have exactly one key")
+        if len(m.values) != 1:
+            raise JitError(f"@jit.vfold: '{attr}' must have exactly one value monoid")
+    if not accums and not maps:
+        raise JitError("@jit.vfold needs an accumulator (jit.sum()/min()/max()) or a jit.map")
     if len(batch) != 1:
         raise JitError("@jit.vfold needs exactly one @jit.each_batch method")
     plan_query = getattr(cls, "plan_query", None)
     if plan_query is not None and not isinstance(plan_query, str):
         raise JitError("@jit.vfold plan_query must be a query DSL string")
-    scalars, fields = _compile_vfold(batch[0].fn, accums)
+    ops, fields = _compile_vfold(batch[0].fn, accums, maps)
     needs_expr = "DFTU_NEED_ARGS" if any(f not in _VFOLD_TOP_FIELDS for f in fields) else "0u"
-    source = _emit_vfold(cls.__name__, scalars, needs_expr, plan_query)
+    source = _emit_vfold(cls.__name__, ops, needs_expr, plan_query)
     setattr(cls, "_jit_plugin", JitPlugin(cls.__name__, source, {}))
     return cls
 
 
 def vfold(cls: type) -> type:
     """Author a vectorized fold: a per-batch fold whose body runs SIMD column
-    reductions on the batch and folds them into scalar accumulators.
+    ops on the batch and folds them into scalar accumulators or keyed maps.
 
-    Declare accumulators as jit.sum()/min()/max() class attributes and one
-    :func:`each_batch` method whose body is a sequence of
-    ``self.<acc> += df["<field>"].<reducer>()`` (reducer matching the
-    accumulator). It compiles to a native plugin using the columnar on_batch
-    seam, so each batch is reduced with SIMD in-scan; run it through
+    Declare scalar accumulators as jit.sum()/min()/max() and/or keyed maps as
+    jit.map(key=<type>, value=<monoid>), plus one :func:`each_batch` method whose
+    body is a sequence of ``self.<acc> += df["f"].<reducer>()`` (reducer matching
+    the accumulator) and ``self.<map>[df["k"]] += df["v"]`` (numeric key/value
+    columns, or ``+= 1`` for a counter). It compiles to a native plugin using the
+    columnar on_batch seam, so each batch is folded in-scan; run it through
     :class:`dftracer.utils.plugins.PluginHost` like any other jit plugin."""
     return _build_vfold(cls)
 
