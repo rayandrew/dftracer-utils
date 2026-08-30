@@ -223,6 +223,37 @@ TEST_SUITE("lazyframe") {
         CHECK(gd.column("sum").data<std::int64_t>()[0] == 2);
     }
 
+    TEST_CASE("data-dependent schema: pivot / to_dummies / describe") {
+        // to_dummies: one Int8 column per distinct value of "g".
+        std::vector<std::int64_t> g{0, 1, 0};
+        DataFrame gf;
+        gf.names = {"g"};
+        gf.columns.push_back(Series::flat_i64(g.data(), 3));
+        LazyFrame dl = gf.lazy().to_dummies("g");
+        CHECK(dl.schema().empty());   // unknown until run
+        DataFrame d = dl.collect(2);
+        CHECK(d.num_rows() == 3);
+        CHECK(d.num_columns() == 2);  // g_0, g_1
+        CHECK(!d.names.empty());
+
+        // pivot: rows = distinct index, one value column per distinct "on".
+        std::vector<std::int64_t> i{0, 0, 1, 1}, k{10, 20, 10, 20},
+            v{1, 2, 3, 4};
+        DataFrame pf;
+        pf.names = {"i", "k", "v"};
+        pf.columns.push_back(Series::flat_i64(i.data(), 4));
+        pf.columns.push_back(Series::flat_i64(k.data(), 4));
+        pf.columns.push_back(Series::flat_i64(v.data(), 4));
+        DataFrame p = pf.lazy().pivot("i", "k", "v").collect(2);
+        CHECK(p.num_rows() == 2);     // i in {0,1}
+        CHECK(p.num_columns() == 3);  // i + two k-values
+
+        // describe: some stats rows, non-empty schema after collect.
+        DataFrame ds = make_df().lazy().describe().collect();
+        CHECK(ds.num_rows() > 0);
+        CHECK(!ds.names.empty());
+    }
+
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {
         // Filter on 'c' (col 2, the added column) must NOT move up.
         auto lf = make_df()

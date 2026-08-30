@@ -28,6 +28,12 @@ class Cursor {
    public:
     virtual ~Cursor() = default;
     virtual std::optional<Morsel> next(std::int64_t max_rows) = 0;
+    /// Output column names, when they are only known after producing (a
+    /// data-dependent schema like pivot/to_dummies). nullopt means the plan's
+    /// static schema is authoritative. Valid only after the cursor is drained.
+    virtual std::optional<std::vector<std::string>> out_names() const {
+        return std::nullopt;
+    }
 };
 
 /// A data source for a lazy query. Immutable: names() reports the schema and
@@ -106,8 +112,22 @@ class LazyFrame {
                                std::int64_t period, std::vector<GroupAgg> aggs,
                                std::int64_t origin = 0,
                                bool origin_min = false) const;
+    /// unpivot alias.
+    LazyFrame melt(std::vector<std::string> id_vars,
+                   std::vector<std::string> value_vars) const;
+    /// Reshape long -> wide. Buffers input; output columns are data-dependent
+    /// (one per distinct `on` value), so schema() is empty until collect().
+    LazyFrame pivot(std::string index, std::string on, std::string values,
+                    std::string agg = "first") const;
+    /// One-hot encode `column`. Buffers input; output columns are
+    /// data-dependent, so schema() is empty until collect().
+    LazyFrame to_dummies(std::string column) const;
+    /// Per-column summary statistics. Buffers input; output columns are
+    /// data-dependent, so schema() is empty until collect().
+    LazyFrame describe() const;
 
-    /// Output column names without running the query.
+    /// Output column names without running the query. Empty for a plan ending
+    /// in a data-dependent op (pivot/to_dummies/describe).
     std::vector<std::string> schema() const;
 
     /// The optimized plan as text (source then one op per line), for

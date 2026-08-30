@@ -29,7 +29,10 @@ DataFrame drain_to_frame(Cursor& in, const std::vector<std::string>& names,
     while (auto m = in.next(max_rows)) chunks.push_back(std::move(m->columns));
     DataFrame out;
     out.names = names;
-    const std::size_t ncols = names.size();
+    // Trust the produced column count over `names`: a data-dependent sink emits
+    // more (or fewer) columns than the static schema, and the caller relabels.
+    const std::size_t ncols =
+        chunks.empty() ? names.size() : chunks.front().size();
     out.columns.reserve(ncols);
     for (std::size_t c = 0; c < ncols; ++c) {
         std::vector<const Series*> parts;
@@ -552,13 +555,19 @@ class BufferSinkCursor : public Cursor {
     std::optional<Morsel> next(std::int64_t max_rows) override {
         if (done_) return std::nullopt;
         done_ = true;
-        return morsel_of(fn_(drain_to_frame(*in_, sch_, max_rows)));
+        DataFrame r = fn_(drain_to_frame(*in_, sch_, max_rows));
+        produced_names_ = r.names;
+        return morsel_of(std::move(r));
+    }
+    std::optional<std::vector<std::string>> out_names() const override {
+        return produced_names_;
     }
 
    private:
     std::unique_ptr<Cursor> in_;
     std::vector<std::string> sch_;
     std::function<DataFrame(DataFrame&&)> fn_;
+    std::optional<std::vector<std::string>> produced_names_;
     bool done_ = false;
 };
 
@@ -628,6 +637,13 @@ struct GroupByDynamicOp {
     std::int64_t origin;
     bool origin_min;
 };
+struct PivotOp {
+    std::string index, on, values, agg;
+};
+struct ToDummiesOp {
+    std::string column;
+};
+struct DescribeOp {};
 
 template <class... Ts>
 struct overloaded : Ts... {
@@ -645,7 +661,8 @@ class LazyOp {
     std::variant<FilterOp, SelectOp, WithColumnOp, RenameOp, SliceOp, TailOp,
                  DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp,
                  ExplodeOp, UnpivotOp, TopkOp, GroupByOp, SortByOp, UniqueOp,
-                 SampleOp, IsDupOp, GroupByDynamicOp>
+                 SampleOp, IsDupOp, GroupByDynamicOp, PivotOp, ToDummiesOp,
+                 DescribeOp>
         node;
 };
 
@@ -663,52 +680,58 @@ std::string join_names(const std::vector<std::string>& v) {
 std::vector<std::string> out_schema(const LazyOp& op,
                                     std::vector<std::string> in) {
     return std::visit(
-        overloaded{[&](const FilterOp&) { return in; },
-                   [&](const SliceOp&) { return in; },
-                   [&](const TailOp&) { return in; },
-                   [&](const DropNullsOp&) { return in; },
-                   [&](const FillNullOp&) { return in; },
-                   [&](const SelectOp& o) { return o.names; },
-                   [&](const RenameOp& o) { return o.names; },
-                   [&](const WithColumnOp& o) {
-                       if (std::find(in.begin(), in.end(), o.name) == in.end())
-                           in.push_back(o.name);
-                       return in;
-                   },
-                   [&](const WithRowIndexOp& o) {
-                       in.insert(in.begin(), o.name);
-                       return in;
-                   },
-                   [&](const NullCountOp&) { return in; },
-                   [&](const ExplodeOp&) { return in; },
-                   [&](const TopkOp&) { return in; },
-                   [&](const UnpivotOp& o) {
-                       std::vector<std::string> s = o.id_vars;
-                       s.push_back("variable");
-                       s.push_back("value");
-                       return s;
-                   },
-                   [&](const GroupByOp& o) {
-                       std::vector<std::string> s{o.key};
-                       for (const GroupAgg& a : o.aggs) s.push_back(a.out);
-                       return s;
-                   },
-                   [&](const SortByOp&) { return in; },
-                   [&](const UniqueOp&) { return in; },
-                   [&](const SampleOp&) { return in; },
-                   [&](const IsDupOp& o) {
-                       return std::vector<std::string>{
-                           o.unique ? "is_unique" : "is_duplicated"};
-                   },
-                   [&](const GroupByDynamicOp& o) {
-                       std::vector<std::string> s{o.time_col};
-                       for (const GroupAgg& a : o.aggs) s.push_back(a.out);
-                       return s;
-                   }},
+        overloaded{
+            [&](const FilterOp&) { return in; },
+            [&](const SliceOp&) { return in; },
+            [&](const TailOp&) { return in; },
+            [&](const DropNullsOp&) { return in; },
+            [&](const FillNullOp&) { return in; },
+            [&](const SelectOp& o) { return o.names; },
+            [&](const RenameOp& o) { return o.names; },
+            [&](const WithColumnOp& o) {
+                if (std::find(in.begin(), in.end(), o.name) == in.end())
+                    in.push_back(o.name);
+                return in;
+            },
+            [&](const WithRowIndexOp& o) {
+                in.insert(in.begin(), o.name);
+                return in;
+            },
+            [&](const NullCountOp&) { return in; },
+            [&](const ExplodeOp&) { return in; },
+            [&](const TopkOp&) { return in; },
+            [&](const UnpivotOp& o) {
+                std::vector<std::string> s = o.id_vars;
+                s.push_back("variable");
+                s.push_back("value");
+                return s;
+            },
+            [&](const GroupByOp& o) {
+                std::vector<std::string> s{o.key};
+                for (const GroupAgg& a : o.aggs) s.push_back(a.out);
+                return s;
+            },
+            [&](const SortByOp&) { return in; },
+            [&](const UniqueOp&) { return in; },
+            [&](const SampleOp&) { return in; },
+            [&](const IsDupOp& o) {
+                return std::vector<std::string>{o.unique ? "is_unique"
+                                                         : "is_duplicated"};
+            },
+            [&](const GroupByDynamicOp& o) {
+                std::vector<std::string> s{o.time_col};
+                for (const GroupAgg& a : o.aggs) s.push_back(a.out);
+                return s;
+            },
+            // Data-dependent schema: known only after running; collect()
+            // relabels from the cursor's out_names().
+            [&](const PivotOp&) { return std::vector<std::string>{}; },
+            [&](const ToDummiesOp&) { return std::vector<std::string>{}; },
+            [&](const DescribeOp&) { return std::vector<std::string>{}; }},
         op.node);
 }
 
-std::string describe(const LazyOp& op) {
+std::string describe_op(const LazyOp& op) {
     return std::visit(
         overloaded{
             [](const FilterOp&) { return std::string("filter"); },
@@ -737,7 +760,10 @@ std::string describe(const LazyOp& op) {
             },
             [](const GroupByDynamicOp& o) {
                 return "group_by_dynamic " + o.time_col;
-            }},
+            },
+            [](const PivotOp& o) { return "pivot on " + o.on; },
+            [](const ToDummiesOp& o) { return "to_dummies " + o.column; },
+            [](const DescribeOp&) { return std::string("describe"); }},
         op.node);
 }
 
@@ -884,6 +910,22 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                                   o.aggs, o.origin,
                                                   o.origin_min);
                     });
+            },
+            [&](const PivotOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<BufferSinkCursor>(
+                    std::move(in), sch, [o](DataFrame&& f) {
+                        return f.pivot(o.index, o.on, o.values, o.agg);
+                    });
+            },
+            [&](const ToDummiesOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<BufferSinkCursor>(
+                    std::move(in), sch,
+                    [o](DataFrame&& f) { return f.to_dummies(o.column); });
+            },
+            [&](const DescribeOp&) -> std::unique_ptr<Cursor> {
+                return std::make_unique<BufferSinkCursor>(
+                    std::move(in), sch,
+                    [](DataFrame&& f) { return f.describe(); });
             }},
         op.node);
 }
@@ -1044,6 +1086,32 @@ LazyFrame LazyFrame::group_by_dynamic(std::string time_col, std::int64_t every,
     return LazyFrame(source_, std::move(ops));
 }
 
+LazyFrame LazyFrame::melt(std::vector<std::string> id_vars,
+                          std::vector<std::string> value_vars) const {
+    return unpivot(std::move(id_vars), std::move(value_vars));
+}
+
+LazyFrame LazyFrame::pivot(std::string index, std::string on,
+                           std::string values, std::string agg) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{PivotOp{
+        std::move(index), std::move(on), std::move(values), std::move(agg)}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::to_dummies(std::string column) const {
+    auto ops = ops_;
+    ops.push_back(
+        std::make_shared<LazyOp>(LazyOp{ToDummiesOp{std::move(column)}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::describe() const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{DescribeOp{}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
 std::vector<std::string> LazyFrame::schema() const {
     std::vector<std::string> s = source_->names();
     for (const auto& op : ops_) s = out_schema(*op, std::move(s));
@@ -1053,7 +1121,7 @@ std::vector<std::string> LazyFrame::schema() const {
 std::string LazyFrame::explain() const {
     std::string s = "scan [" + join_names(source_->names()) + "]";
     for (const auto& op : pushdown_predicates(source_->names(), ops_))
-        s += "\n" + describe(*op);
+        s += "\n" + describe_op(*op);
     return s;
 }
 
@@ -1065,7 +1133,11 @@ DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
         cur = make_cursor(*op, std::move(cur), sch);
         sch = out_schema(*op, std::move(sch));
     }
-    return drain_to_frame(*cur, sch, morsel_rows);
+    DataFrame out = drain_to_frame(*cur, sch, morsel_rows);
+    // A data-dependent terminal (pivot/to_dummies/describe) knows its true
+    // schema only after running; prefer it over the static plan schema.
+    if (auto n = cur->out_names()) out.names = std::move(*n);
+    return out;
 }
 
 LazyFrame DataFrame::lazy() const {
