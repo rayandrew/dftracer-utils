@@ -190,6 +190,25 @@ void len_bytes_simd(const std::int32_t* off, std::int64_t* out, std::size_t n) {
     for (; i < n; ++i) out[i] = static_cast<std::int64_t>(off[i + 1] - off[i]);
 }
 
+// UTF-8 character count of a byte range: every byte that is not a continuation
+// byte ((c & 0xC0) != 0x80) starts a character. Highway compares a block and
+// folds the mask with CountTrue.
+std::int64_t count_char_starts(const std::uint8_t* p, std::size_t len) {
+    const hn::ScalableTag<std::uint8_t> d;
+    const auto vc0 = hn::Set(d, 0xC0);
+    const auto v80 = hn::Set(d, 0x80);
+    const std::size_t lanes = hn::Lanes(d);
+    std::int64_t count = 0;
+    std::size_t i = 0;
+    for (; i + lanes <= len; i += lanes) {
+        const auto m = hn::Ne(hn::And(hn::LoadU(d, p + i), vc0), v80);
+        count += static_cast<std::int64_t>(hn::CountTrue(d, m));
+    }
+    for (; i < len; ++i)
+        if ((p[i] & 0xC0) != 0x80) ++count;
+    return count;
+}
+
 // ASCII case fold of a byte buffer: `add` is +32 (upper->lower) or -32
 // (lower->upper); `lo`/`hi` bound the source case. Non-matching bytes pass
 // through unchanged (ASCII-only fold).
@@ -524,6 +543,18 @@ dftu_series* dftu_series_str_len_bytes(const dftu_series* v) {
 }
 
 dftu_series* dftu_series_str_len_chars(const dftu_series* v) {
+    // FLAT: count non-continuation bytes per row with the vectorized scan;
+    // DICTIONARY and other encodings take the scalar per-row path.
+    if (v->encoding == Encoding::Flat && v->offsets && v->data) {
+        const std::int32_t* off =
+            reinterpret_cast<const std::int32_t*>(v->offsets->data());
+        const std::uint8_t* data = v->data->data();
+        std::vector<std::int64_t> vals(static_cast<std::size_t>(v->length), 0);
+        for (std::int64_t i = 0; i < v->length; ++i)
+            vals[static_cast<std::size_t>(i)] = count_char_starts(
+                data + off[i], static_cast<std::size_t>(off[i + 1] - off[i]));
+        return make_i64(v, vals);
+    }
     return int_transform(v, [](std::string_view s) {
         std::int64_t count = 0;
         for (unsigned char c : s)

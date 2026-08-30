@@ -727,6 +727,13 @@ TEST_SUITE("vec") {
         CHECK(chars.data<std::int64_t>()[0] == 3);
         CHECK(chars.data<std::int64_t>()[1] == 2);  // 3 bytes, 2 codepoints
 
+        // Long mixed ASCII + multibyte string exercises the vectorized counter
+        // body: 40 ASCII 'a' + 10 x 2-byte 'e-acute' = 80 bytes, 50 codepoints.
+        std::string longs(40, 'a');
+        for (int k = 0; k < 10; ++k) longs += "\xC3\xA9";
+        Series lc = Series::strings({longs}).str_len_chars();
+        CHECK(lc.data<std::int64_t>()[0] == 50);
+
         Series find = Series::strings({"hello/world", "nope"}).str_find("/");
         CHECK(find.data<std::int64_t>()[0] == 5);
         CHECK(find.data<std::int64_t>()[1] == -1);
