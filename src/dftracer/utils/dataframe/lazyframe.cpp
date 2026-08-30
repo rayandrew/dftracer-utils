@@ -3,13 +3,14 @@
 #include <dftracer/utils/core/common/memory_budget.h>  // compute_memory_budget
 #include <dftracer/utils/dataframe/agg.h>        // streaming group-by state
 #include <dftracer/utils/dataframe/batch_ops.h>  // concat_columns, take, concat
+#include <dftracer/utils/dataframe/field_stat.h>         // FieldStat (describe)
 #include <dftracer/utils/dataframe/internal/cell_ops.h>  // row_key, cell_to_string
 #include <dftracer/utils/dataframe/internal/spill.h>     // external-merge spill
+#include <dftracer/utils/dataframe/kernels/field_stat.h>  // field_stat_reduce (SIMD)
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/dataframe/types.h>  // byte_width, buffer_bytes
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -1031,13 +1032,12 @@ class DescribeCursor : public Cursor {
     std::optional<Morsel> next(std::int64_t max_rows) override {
         if (done_) return std::nullopt;
         done_ = true;
-        struct Acc {
-            std::int64_t n = 0, nulls = 0;
-            double mean = 0, m2 = 0, mn = 0, mx = 0;
-            bool init = false;
-        };
+        // Per-morsel SIMD reduction into one mergeable FieldStat per numeric
+        // column (the engine's shared aggregation atom), so the numeric work is
+        // vectorized and bounded by the column count.
         std::vector<int> num_idx;
-        std::vector<Acc> acc;
+        std::vector<FieldStat> acc;
+        std::int64_t total_rows = 0;
         bool first = true;
         while (auto m = in_->next(max_rows)) {
             if (first) {
@@ -1047,43 +1047,25 @@ class DescribeCursor : public Cursor {
                         num_idx.push_back(static_cast<int>(c));
                 acc.resize(num_idx.size());
             }
-            for (std::size_t j = 0; j < num_idx.size(); ++j) {
-                const Series& col =
-                    m->columns[static_cast<std::size_t>(num_idx[j])];
-                Acc& a = acc[j];
-                for (std::int64_t i = 0; i < m->rows; ++i) {
-                    if (col.is_null(i)) {
-                        ++a.nulls;
-                        continue;
-                    }
-                    const double x = read_num(col, i);
-                    ++a.n;
-                    if (!a.init) {
-                        a.mn = a.mx = x;
-                        a.init = true;
-                    } else {
-                        a.mn = std::min(a.mn, x);
-                        a.mx = std::max(a.mx, x);
-                    }
-                    const double d = x - a.mean;
-                    a.mean += d / static_cast<double>(a.n);
-                    a.m2 += d * (x - a.mean);
-                }
-            }
+            total_rows += m->rows;
+            for (std::size_t j = 0; j < num_idx.size(); ++j)
+                acc[j].merge(field_stat_reduce(
+                    m->columns[static_cast<std::size_t>(num_idx[j])]));
         }
         DataFrame out;
         out.names.push_back("statistic");
         out.columns.push_back(Series::strings(
             {"count", "null_count", "mean", "std", "min", "max"}));
         for (std::size_t j = 0; j < num_idx.size(); ++j) {
-            const Acc& a = acc[j];
+            const FieldStat& fs = acc[j];
             const double vals[6] = {
-                static_cast<double>(a.n),
-                static_cast<double>(a.nulls),
-                a.mean,
-                a.n > 1 ? std::sqrt(a.m2 / static_cast<double>(a.n - 1)) : 0.0,
-                a.init ? a.mn : 0.0,
-                a.init ? a.mx : 0.0};
+                static_cast<double>(fs.n),
+                static_cast<double>(total_rows -
+                                    static_cast<std::int64_t>(fs.n)),
+                fs.mean(),
+                fs.stddev(),
+                fs.n ? fs.min : 0.0,
+                fs.n ? fs.max : 0.0};
             out.columns.push_back(Series::flat_f64(vals, 6));
             out.names.push_back(sch_[static_cast<std::size_t>(num_idx[j])]);
         }
