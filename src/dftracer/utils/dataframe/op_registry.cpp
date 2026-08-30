@@ -251,6 +251,12 @@ dftu_scalar dftu_op_run_aggregate(const dftu_op_desc* op, const dftu_series* v,
         case DFTU_OP_SIG(SCALAR, SERIES, REDUCE, NONE):
             return as<dftu_scalar (*)(CS, dftu_reduce_op)>(op->fn)(
                 v, static_cast<dftu_reduce_op>(g[1].i32));
+        case DFTU_OP_SIG(SCALAR, SERIES, SERIES, NONE):
+            if (!g || !g[1].series) {
+                if (ok) *ok = 0;
+                return z;
+            }
+            return as<dftu_scalar (*)(CS, CS)>(op->fn)(v, g[1].series);
         case DFTU_OP_SIG(I64, SERIES, NONE, NONE):
             z.value.i = as<int64_t (*)(CS)>(op->fn)(v);
             return z;

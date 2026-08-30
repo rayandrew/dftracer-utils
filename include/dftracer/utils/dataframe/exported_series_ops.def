@@ -87,6 +87,7 @@ DFTU_SERIES_OP(any, dftu_series_any, BOOL, SERIES, NONE, NONE)
 DFTU_SERIES_OP(arg_min, dftu_series_arg_min, I64, SERIES, NONE, NONE)
 DFTU_SERIES_OP(arg_max, dftu_series_arg_max, I64, SERIES, NONE, NONE)
 DFTU_SERIES_OP(mode, dftu_series_mode, SCALAR, SERIES, NONE, NONE)
+DFTU_SERIES_OP(dot, dftu_series_dot, SCALAR, SERIES, SERIES, NONE)
 DFTU_SERIES_OP(nunique, dftu_series_nunique, I64, SERIES, NONE, NONE)
 
 /* Unary numeric / null / cumulative (series -> series). */

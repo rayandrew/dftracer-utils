@@ -113,6 +113,13 @@ TEST_SUITE("op_registry") {
         arg.args[1].i32 = DFTU_REDUCE_SUM;
         CHECK(dftu_op_run_aggregate(dftu_op_find("reduce"), cp, &arg, &ok)
                   .value.i == 9);
+
+        // dot: second series rides args[1].series -> 2*2 + 3*3 + 4*4 = 29.
+        dftu_op_arg darg{};
+        darg.args[1].series = cp;
+        CHECK(dftu_op_run_aggregate(dftu_op_find("dot"), cp, &darg, &ok)
+                  .value.d == doctest::Approx(29.0));
+        CHECK(ok == 1);
         dftu_series_free(c);
         dftu_series_free(cp);
     }

@@ -131,6 +131,9 @@ PyObject* op_run(PyObject*, PyObject* args) {
                                  next - 1);
                     return nullptr;
                 }
+                // Series ride in[] for series-return ops and args[i] for
+                // aggregate/frame ops (e.g. dot's second column).
+                slot.series = s->handle();
                 if (n_series < 2) in[n_series++] = s->handle();
                 break;
             }
