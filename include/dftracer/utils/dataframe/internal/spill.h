@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -57,6 +58,31 @@ class Reader : public Cursor {
 
    private:
     std::ifstream is_;
+};
+
+/// A replayable copy of a morsel stream: keeps morsels in memory up to `budget`
+/// bytes, spilling the overflow to a temp run. Lets a two-pass sink read its
+/// upstream once (feed via add) and re-scan it (reader) with bounded memory,
+/// regardless of how expensive the source is to reproduce.
+class Spool {
+   public:
+    explicit Spool(std::uint64_t budget);
+    ~Spool();
+    Spool(const Spool&) = delete;
+    Spool& operator=(const Spool&) = delete;
+    /// Take ownership of one morsel (it may go to memory or disk).
+    void add(std::vector<Series> columns, std::int64_t rows);
+    /// A fresh cursor replaying every added morsel, in order. Call after all
+    /// add()s; may be called more than once.
+    std::unique_ptr<Cursor> reader();
+
+   private:
+    std::uint64_t budget_;
+    std::size_t bytes_ = 0;
+    bool spilling_ = false;
+    std::vector<Morsel> mem_;
+    std::unique_ptr<Dir> dir_;
+    std::unique_ptr<Writer> writer_;
 };
 
 }  // namespace dftracer::utils::dataframe::spill

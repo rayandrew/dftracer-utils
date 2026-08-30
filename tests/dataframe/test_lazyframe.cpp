@@ -377,6 +377,40 @@ TEST_SUITE("lazyframe") {
         }
     }
 
+    TEST_CASE("two-pass sinks spill the input under a tiny budget") {
+        // memory_budget(1) forces the input spool to disk between passes; the
+        // results must still match the in-memory path.
+        std::vector<std::int64_t> x{5, 3, 5, 1, 3, 5, 2, 1};
+        DataFrame df;
+        df.names = {"x"};
+        df.columns.push_back(Series::flat_i64(x.data(), 8));
+        auto bit = [](const Series& s, std::int64_t i) {
+            return (s.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1;
+        };
+        DataFrame du = df.lazy().memory_budget(1).is_duplicated().collect(2);
+        Series ed = df.is_duplicated();
+        REQUIRE(du.num_rows() == 8);
+        for (std::int64_t i = 0; i < 8; ++i)
+            CHECK(bit(du.column("is_duplicated"), i) == bit(ed, i));
+
+        std::vector<std::int64_t> i2{0, 0, 1, 1}, k2{10, 20, 10, 20},
+            v2{1, 2, 3, 4};
+        DataFrame pf;
+        pf.names = {"i", "k", "v"};
+        pf.columns.push_back(Series::flat_i64(i2.data(), 4));
+        pf.columns.push_back(Series::flat_i64(k2.data(), 4));
+        pf.columns.push_back(Series::flat_i64(v2.data(), 4));
+        DataFrame p =
+            pf.lazy().memory_budget(1).pivot("i", "k", "v", "sum").collect(2);
+        DataFrame pe = pf.pivot("i", "k", "v", "sum");
+        REQUIRE(p.names == pe.names);
+        for (const std::string& cn : p.names) {
+            const std::int64_t* a = p.column(cn).data<std::int64_t>();
+            const std::int64_t* b = pe.column(cn).data<std::int64_t>();
+            for (std::int64_t r = 0; r < p.num_rows(); ++r) CHECK(a[r] == b[r]);
+        }
+    }
+
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {
         // Filter on 'c' (col 2, the added column) must NOT move up.
         auto lf = make_df()

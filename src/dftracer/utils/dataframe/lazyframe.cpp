@@ -11,7 +11,6 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -21,10 +20,6 @@
 namespace dftracer::utils::dataframe {
 
 namespace {
-
-// Rebuilds a fresh cursor over the same upstream (source + prior ops). Two-pass
-// sinks (is_duplicated/to_dummies) use it to re-scan the input in order.
-using CursorFactory = std::function<std::unique_ptr<Cursor>()>;
 
 std::vector<const Series*> column_ptrs(const std::vector<Series>& cols) {
     std::vector<const Series*> in;
@@ -1199,24 +1194,25 @@ class DescribeCursor : public Cursor {
     std::vector<std::string> produced_;
 };
 
-// Two-pass per-row mask: pass 1 counts each row key over all input; pass 2
-// re-scans the input (via the rebuild factory) in order, emitting count>1
-// (is_duplicated) or count==1 (is_unique) as one Bool column per morsel. Order-
-// preserving; state is the count map, bounded by the distinct row count.
+// Two-pass per-row mask: pass 1 counts each row key while spooling the input
+// (RAM up to the budget, overflow to disk); pass 2 replays the spool in order,
+// emitting count>1 (is_duplicated) or count==1 (is_unique) as one Bool column
+// per morsel. Reads the upstream once; order-preserving; state is the count map
+// plus the spool.
 class IsDupCursor : public Cursor {
    public:
-    IsDupCursor(std::unique_ptr<Cursor> in, CursorFactory rebuild, bool unique)
-        : first_(std::move(in)),
-          rebuild_(std::move(rebuild)),
-          unique_(unique) {}
+    IsDupCursor(std::unique_ptr<Cursor> in, std::uint64_t budget, bool unique)
+        : first_(std::move(in)), spool_(budget), unique_(unique) {}
 
     std::optional<Morsel> next(std::int64_t max_rows) override {
         if (!counted_) {
-            while (auto m = first_->next(max_rows))
+            while (auto m = first_->next(max_rows)) {
                 for (std::int64_t i = 0; i < m->rows; ++i)
                     ++counts_[row_key(m->columns, i)];
+                spool_.add(std::move(m->columns), m->rows);
+            }
             first_.reset();
-            pass2_ = rebuild_();
+            pass2_ = spool_.reader();
             counted_ = true;
         }
         while (auto m = pass2_->next(max_rows)) {
@@ -1240,7 +1236,7 @@ class IsDupCursor : public Cursor {
 
    private:
     std::unique_ptr<Cursor> first_, pass2_;
-    CursorFactory rebuild_;
+    spill::Spool spool_;
     bool unique_;
     bool counted_ = false;
     ankerl::unordered_dense::map<std::string, std::int64_t> counts_;
@@ -1253,10 +1249,10 @@ class IsDupCursor : public Cursor {
 // data-dependent, reported via out_names().
 class ToDummiesCursor : public Cursor {
    public:
-    ToDummiesCursor(std::unique_ptr<Cursor> in, CursorFactory rebuild,
+    ToDummiesCursor(std::unique_ptr<Cursor> in, std::uint64_t budget,
                     std::vector<std::string> sch, std::string column)
         : first_(std::move(in)),
-          rebuild_(std::move(rebuild)),
+          spool_(budget),
           sch_(std::move(sch)),
           column_(std::move(column)) {}
 
@@ -1314,6 +1310,7 @@ class ToDummiesCursor : public Cursor {
                 if (!col.is_null(i) && seen.insert(row_key(one, i)).second)
                     keep.push_back(i);
             if (!keep.empty()) chunks.push_back(col.take(keep));
+            spool_.add(std::move(m->columns), m->rows);
         }
         first_.reset();
         // Distinct values, ascending (Series::unique sorts), matching eager.
@@ -1333,12 +1330,12 @@ class ToDummiesCursor : public Cursor {
             for (std::int64_t u = 0; u < d; ++u)
                 produced_.push_back(column_ + "_" + cell_to_string(uniq, u));
         }
-        pass2_ = rebuild_();
+        pass2_ = spool_.reader();
         built_ = true;
     }
 
     std::unique_ptr<Cursor> first_, pass2_;
-    CursorFactory rebuild_;
+    spill::Spool spool_;
     std::vector<std::string> sch_;
     std::string column_;
     bool built_ = false;
@@ -1355,11 +1352,11 @@ class ToDummiesCursor : public Cursor {
 // reported via out_names().
 class PivotCursor : public Cursor {
    public:
-    PivotCursor(std::unique_ptr<Cursor> in, CursorFactory rebuild,
+    PivotCursor(std::unique_ptr<Cursor> in, std::uint64_t budget,
                 std::vector<std::string> sch, std::string index, std::string on,
                 std::string values, std::string agg)
         : first_(std::move(in)),
-          rebuild_(std::move(rebuild)),
+          spool_(budget),
           sch_(std::move(sch)),
           index_(std::move(index)),
           on_(std::move(on)),
@@ -1383,6 +1380,7 @@ class PivotCursor : public Cursor {
                           ich);
             distinct_into(m->columns[static_cast<std::size_t>(ci)], seen_c,
                           cch);
+            spool_.add(std::move(m->columns), m->rows);
         }
         first_.reset();
         Series uniq_idx =
@@ -1407,7 +1405,7 @@ class PivotCursor : public Cursor {
         sp.out = "v";
         specs.push_back(std::move(sp));
         AggStatePtr state = agg_new(std::move(specs));
-        auto p2 = rebuild_();
+        auto p2 = spool_.reader();
         while (auto m = p2->next(max_rows)) {
             const Series& ic = m->columns[static_cast<std::size_t>(ii)];
             const Series& cc = m->columns[static_cast<std::size_t>(ci)];
@@ -1485,7 +1483,7 @@ class PivotCursor : public Cursor {
     }
 
     std::unique_ptr<Cursor> first_;
-    CursorFactory rebuild_;
+    spill::Spool spool_;
     std::vector<std::string> sch_;
     std::string index_, on_, values_, agg_;
     bool done_ = false;
@@ -1743,8 +1741,7 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
 std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                     std::unique_ptr<Cursor> in,
                                     const std::vector<std::string>& sch,
-                                    std::uint64_t budget,
-                                    const CursorFactory& rebuild) {
+                                    std::uint64_t budget) {
     return std::visit(
         overloaded{
             [&](const FilterOp& o) -> std::unique_ptr<Cursor> {
@@ -1812,7 +1809,7 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                                       o.seed);
             },
             [&](const IsDupOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<IsDupCursor>(std::move(in), rebuild,
+                return std::make_unique<IsDupCursor>(std::move(in), budget,
                                                      o.unique);
             },
             [&](const GroupByDynamicOp& o) -> std::unique_ptr<Cursor> {
@@ -1821,12 +1818,11 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                     o.origin, o.origin_min);
             },
             [&](const PivotOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<PivotCursor>(std::move(in), rebuild,
-                                                     sch, o.index, o.on,
-                                                     o.values, o.agg);
+                return std::make_unique<PivotCursor>(
+                    std::move(in), budget, sch, o.index, o.on, o.values, o.agg);
             },
             [&](const ToDummiesOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<ToDummiesCursor>(std::move(in), rebuild,
+                return std::make_unique<ToDummiesCursor>(std::move(in), budget,
                                                          sch, o.column);
             },
             [&](const DescribeOp&) -> std::unique_ptr<Cursor> {
@@ -2043,20 +2039,10 @@ DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
     auto ops = pushdown_predicates(source_->names(), ops_);
     // 0 resolves to auto (~1/3 RAM), same policy as View.
     const std::uint64_t budget = resolve_spill_budget(memory_budget_);
-    std::shared_ptr<const Source> src = source_;
-    CursorFactory upstream = [src]() { return src->open(); };
-    std::unique_ptr<Cursor> cur = src->open();
-    std::vector<std::string> sch = src->names();
+    std::unique_ptr<Cursor> cur = source_->open();
+    std::vector<std::string> sch = source_->names();
     for (const auto& op : ops) {
-        cur = make_cursor(*op, std::move(cur), sch, budget, upstream);
-        // Extend the rebuild factory to include this op, so a later two-pass
-        // sink can re-scan through it.
-        CursorFactory prev = upstream;
-        std::shared_ptr<const LazyOp> opp = op;
-        std::vector<std::string> sch_copy = sch;
-        upstream = [prev, opp, sch_copy, budget]() {
-            return make_cursor(*opp, prev(), sch_copy, budget, prev);
-        };
+        cur = make_cursor(*op, std::move(cur), sch, budget);
         sch = out_schema(*op, std::move(sch));
     }
     DataFrame out = drain_to_frame(*cur, sch, morsel_rows);

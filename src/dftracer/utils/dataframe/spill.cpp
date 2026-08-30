@@ -57,6 +57,48 @@ int next_seq() {
     return seq.fetch_add(1);
 }
 
+// Approximate in-memory bytes of a set of FLAT columns (spool spill trigger).
+std::size_t columns_bytes(const std::vector<Series>& cols) {
+    std::size_t total = 0;
+    for (const Series& c : cols) {
+        const std::int64_t n = c.length();
+        if (byte_width(c.type()) == 0) {  // String / Binary
+            const std::int32_t* offs = dftu_series_offsets(c.handle());
+            total += static_cast<std::size_t>(n + 1) * sizeof(std::int32_t) +
+                     (n > 0 ? static_cast<std::size_t>(offs[n]) : 0);
+        } else {
+            total += buffer_bytes(c.type(), n);
+        }
+    }
+    return total;
+}
+
+// Cursor replaying a Spool: in-memory morsels first, then the spilled run.
+class SpoolReader : public Cursor {
+   public:
+    SpoolReader(const std::vector<Morsel>* mem, std::string spill_path)
+        : mem_(mem) {
+        if (!spill_path.empty()) disk_ = std::make_unique<Reader>(spill_path);
+    }
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (pos_ < mem_->size()) {
+            const Morsel& m = (*mem_)[pos_++];
+            Morsel out;
+            out.rows = m.rows;
+            out.columns.reserve(m.columns.size());
+            for (const Series& c : m.columns) out.columns.push_back(c.share());
+            return out;
+        }
+        if (disk_) return disk_->next(max_rows);
+        return std::nullopt;
+    }
+
+   private:
+    const std::vector<Morsel>* mem_;
+    std::size_t pos_ = 0;
+    std::unique_ptr<Reader> disk_;
+};
+
 }  // namespace
 
 void put_series(std::string& out, const Series& s_in) {
@@ -146,6 +188,32 @@ void Writer::close() { os_.close(); }
 
 Reader::Reader(const std::string& path) : is_(path, std::ios::binary) {
     if (!is_) throw std::runtime_error("spill: cannot open run file " + path);
+}
+
+Spool::Spool(std::uint64_t budget) : budget_(budget) {}
+Spool::~Spool() = default;
+
+void Spool::add(std::vector<Series> columns, std::int64_t rows) {
+    if (!spilling_) {
+        bytes_ += columns_bytes(columns);
+        Morsel m;
+        m.rows = rows;
+        m.columns = std::move(columns);
+        mem_.push_back(std::move(m));
+        if (bytes_ > budget_) {  // overflow: subsequent morsels go to disk
+            dir_ = std::make_unique<Dir>();
+            writer_ = std::make_unique<Writer>(dir_->run_path(0));
+            spilling_ = true;
+        }
+        return;
+    }
+    writer_->write(columns, rows);
+}
+
+std::unique_ptr<Cursor> Spool::reader() {
+    if (writer_) writer_->close();
+    return std::make_unique<SpoolReader>(
+        &mem_, dir_ ? dir_->run_path(0) : std::string());
 }
 
 std::optional<Morsel> Reader::next(std::int64_t /*max_rows*/) {
