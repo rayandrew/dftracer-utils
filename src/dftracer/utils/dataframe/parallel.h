@@ -73,6 +73,38 @@ T parallel_reduce(std::int64_t n, std::int64_t grain, T identity, Map&& map,
     return acc;
 }
 
+/// Two-pass parallel prefix scan over [0, n) for an associative op (cumsum,
+/// cummax, cummin, cumprod, ...). `local(begin, end)` computes the chunk's
+/// local scan (as if it were the whole array, seeded from `identity`) and
+/// returns the chunk's final accumulated value. `apply(begin, end, offset)`
+/// folds the preceding chunks' combined result into an already-scanned chunk.
+/// `combine` folds two chunk totals together and must share the same
+/// identity element as `local`'s seed. Falls back to one `local(0, n)` call
+/// when no backend is installed or `n <= grain`.
+template <class T, class Local, class Apply, class Combine>
+void parallel_prefix_scan(std::int64_t n, std::int64_t grain, T identity,
+                          Local&& local, Apply&& apply, Combine&& combine) {
+    if (n <= 0) return;
+    if (!parallel_backend_installed() || n <= grain) {
+        local(0, n);
+        return;
+    }
+    const std::int64_t chunks = (n + grain - 1) / grain;
+    std::vector<T> totals(static_cast<std::size_t>(chunks));
+    parallel_for(n, grain, [&](std::int64_t b, std::int64_t e) {
+        totals[static_cast<std::size_t>(b / grain)] = local(b, e);
+    });
+    std::vector<T> offsets(static_cast<std::size_t>(chunks));
+    T acc = identity;
+    for (std::int64_t c = 0; c < chunks; ++c) {
+        offsets[static_cast<std::size_t>(c)] = acc;
+        acc = combine(acc, totals[static_cast<std::size_t>(c)]);
+    }
+    parallel_for(n, grain, [&](std::int64_t b, std::int64_t e) {
+        apply(b, e, offsets[static_cast<std::size_t>(b / grain)]);
+    });
+}
+
 }  // namespace dftracer::utils::dataframe
 
 #endif  // DFTRACER_UTILS_DATAFRAME_PARALLEL_H

@@ -790,5 +790,104 @@ int main(int argc, char** argv) {
                 sbm_ser, sbm_par, sbm_ser / sbm_par, sbm_ok ? "OK" : "MISMATCH");
     ok = ok && sbm_ok;
 
+    // cumsum: two-pass parallel prefix scan (dense, no nulls) over the wide
+    // scattered i64 column.
+    auto time_cumsum = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = qcol.cumsum();
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series cs_serial_out = time_cumsum(3);
+    double cs_ser = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = qcol.cumsum();
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        cs_ser = std::min(
+            cs_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series cs_par_out = time_cumsum(3);
+    double cs_par = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = qcol.cumsum();
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        cs_par = std::min(
+            cs_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool cs_ok = cs_serial_out.length() == cs_par_out.length();
+    {
+        const std::int64_t* a2 = cs_serial_out.data<std::int64_t>();
+        const std::int64_t* b2 = cs_par_out.data<std::int64_t>();
+        for (std::int64_t i = 0; cs_ok && i < cs_serial_out.length(); ++i)
+            cs_ok = a2[i] == b2[i];
+    }
+    std::printf("cumsum: serial %8.2f ms | runtime %8.2f ms (%.2fx) "
+                "correctness: %s\n",
+                cs_ser, cs_par, cs_ser / cs_par, cs_ok ? "OK" : "MISMATCH");
+    ok = ok && cs_ok;
+
+    // cummax: same scan, max-combine.
+    auto time_cummax = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = qcol.cummax();
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series cx_serial_out = time_cummax(3);
+    double cx_ser = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = qcol.cummax();
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        cx_ser = std::min(
+            cx_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series cx_par_out = time_cummax(3);
+    double cx_par = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = qcol.cummax();
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        cx_par = std::min(
+            cx_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool cx_ok = cx_serial_out.length() == cx_par_out.length();
+    {
+        const std::int64_t* a2 = cx_serial_out.data<std::int64_t>();
+        const std::int64_t* b2 = cx_par_out.data<std::int64_t>();
+        for (std::int64_t i = 0; cx_ok && i < cx_serial_out.length(); ++i)
+            cx_ok = a2[i] == b2[i];
+    }
+    std::printf("cummax: serial %8.2f ms | runtime %8.2f ms (%.2fx) "
+                "correctness: %s\n",
+                cx_ser, cx_par, cx_ser / cx_par, cx_ok ? "OK" : "MISMATCH");
+    ok = ok && cx_ok;
+
     return ok ? 0 : 1;
 }

@@ -2,6 +2,7 @@
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
 #include <dftracer/utils/dataframe/kernels/elementwise.h>
+#include <dftracer/utils/dataframe/parallel.h>
 #include <dftracer/utils/dataframe/scalar.h>
 
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <type_traits>
+#include <vector>
 
 #undef HWY_TARGET_INCLUDE
 #define HWY_TARGET_INCLUDE "dftracer/utils/dataframe/kernels/elementwise.cpp"
@@ -373,17 +375,85 @@ void CumMinImpl(const void* av, void* ov, std::size_t n) {
     CumExtremeImpl<T, false>(av, ov, n);
 }
 
+// Chunk size for the two-pass parallel prefix scan below; small enough to
+// give several chunks per core on a 20M-row column, large enough that the
+// per-chunk fan-out cost stays negligible.
+constexpr std::int64_t CUM_SCAN_GRAIN = 1 << 20;
+
+template <class T>
+void CumSumParallel(const void* av, void* ov, std::size_t n) {
+    const T* in = static_cast<const T*>(av);
+    T* out = static_cast<T*>(ov);
+    parallel_prefix_scan<T>(
+        static_cast<std::int64_t>(n), CUM_SCAN_GRAIN, T{0},
+        [&](std::int64_t b, std::int64_t e) -> T {
+            CumSumImpl<T>(in + b, out + b, static_cast<std::size_t>(e - b));
+            return out[e - 1];
+        },
+        [&](std::int64_t b, std::int64_t e, T off) {
+            for (std::int64_t i = b; i < e; ++i)
+                out[i] = static_cast<T>(off + out[i]);
+        },
+        [](T a, T b) { return static_cast<T>(a + b); });
+}
+
+template <class T>
+void CumProdParallel(const void* av, void* ov, std::size_t n) {
+    const T* in = static_cast<const T*>(av);
+    T* out = static_cast<T*>(ov);
+    parallel_prefix_scan<T>(
+        static_cast<std::int64_t>(n), CUM_SCAN_GRAIN, T{1},
+        [&](std::int64_t b, std::int64_t e) -> T {
+            CumProdImpl<T>(in + b, out + b, static_cast<std::size_t>(e - b));
+            return out[e - 1];
+        },
+        [&](std::int64_t b, std::int64_t e, T off) {
+            for (std::int64_t i = b; i < e; ++i)
+                out[i] = static_cast<T>(off * out[i]);
+        },
+        [](T a, T b) { return static_cast<T>(a * b); });
+}
+
+template <class T, bool IS_MAX>
+void CumExtremeParallel(const void* av, void* ov, std::size_t n) {
+    const T* in = static_cast<const T*>(av);
+    T* out = static_cast<T*>(ov);
+    const T ident = IS_MAX ? std::numeric_limits<T>::lowest()
+                           : std::numeric_limits<T>::max();
+    parallel_prefix_scan<T>(
+        static_cast<std::int64_t>(n), CUM_SCAN_GRAIN, ident,
+        [&](std::int64_t b, std::int64_t e) -> T {
+            CumExtremeImpl<T, IS_MAX>(in + b, out + b,
+                                      static_cast<std::size_t>(e - b));
+            return out[e - 1];
+        },
+        [&](std::int64_t b, std::int64_t e, T off) {
+            for (std::int64_t i = b; i < e; ++i)
+                out[i] = IS_MAX ? (off > out[i] ? off : out[i])
+                                : (off < out[i] ? off : out[i]);
+        },
+        [](T a, T b) { return IS_MAX ? (a > b ? a : b) : (a < b ? a : b); });
+}
+template <class T>
+void CumMaxParallel(const void* av, void* ov, std::size_t n) {
+    CumExtremeParallel<T, true>(av, ov, n);
+}
+template <class T>
+void CumMinParallel(const void* av, void* ov, std::size_t n) {
+    CumExtremeParallel<T, false>(av, ov, n);
+}
+
 void CumSumKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
-    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumSumImpl, a, out, n)
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumSumParallel, a, out, n)
 }
 void CumProdKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
-    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumProdImpl, a, out, n)
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumProdParallel, a, out, n)
 }
 void CumMaxKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
-    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumMaxImpl, a, out, n)
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumMaxParallel, a, out, n)
 }
 void CumMinKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
-    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumMinImpl, a, out, n)
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumMinParallel, a, out, n)
 }
 
 void FillKernel(std::int32_t type, const void* a, const std::uint8_t* valid,
@@ -440,7 +510,9 @@ dftu_series* alloc_like(const dftu_series* a, bool keep_validity) {
 }
 
 // cumsum and the running extrema are scalar (sequential prefix scans); one
-// template each, dispatched by type.
+// template each, dispatched by type. Nulls make the per-row "seen" state
+// path-dependent in a way that is not worth the risk to parallelize (this is
+// only the has-nulls fallback; the hot dense path is parallelized above).
 template <class T>
 void cumsum_one(const dftu_series& a, void* ov) {
     T* out = static_cast<T*>(ov);
@@ -809,6 +881,8 @@ dftu_series* dftu_series_cum_prod(const dftu_series* a) {
     return out;
 }
 
+constexpr std::int64_t CUM_ONE_SCAN_GRAIN = 1 << 20;
+
 dftu_series* dftu_series_cum_count(const dftu_series* a) {
     using namespace dftracer::utils::dataframe;
     if (a->encoding != Encoding::Flat) return nullptr;
@@ -819,11 +893,20 @@ dftu_series* dftu_series_cum_count(const dftu_series* a) {
     out->null_count = 0;
     out->data = Buffer::allocate(buffer_bytes(TypeId::Int64, a->length));
     auto* o = reinterpret_cast<std::int64_t*>(out->data->data());
-    std::int64_t acc = 0;
-    for (std::int64_t i = 0; i < a->length; ++i) {
-        if (is_valid(*a, i)) ++acc;
-        o[i] = acc;
-    }
+    parallel_prefix_scan<std::int64_t>(
+        a->length, CUM_ONE_SCAN_GRAIN, 0,
+        [&](std::int64_t b, std::int64_t e) -> std::int64_t {
+            std::int64_t acc = 0;
+            for (std::int64_t i = b; i < e; ++i) {
+                if (is_valid(*a, i)) ++acc;
+                o[i] = acc;
+            }
+            return acc;
+        },
+        [&](std::int64_t b, std::int64_t e, std::int64_t off) {
+            for (std::int64_t i = b; i < e; ++i) o[i] += off;
+        },
+        [](std::int64_t x, std::int64_t y) { return x + y; });
     return out;
 }
 
