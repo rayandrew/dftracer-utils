@@ -4,9 +4,9 @@
 #include <dftracer/utils/dataframe/kernels/cast.h>          // cast_simd
 #include <dftracer/utils/dataframe/kernels/field_stat.h>    // field_stat_reduce
 #include <dftracer/utils/dataframe/kernels/filter.h>        // take
-#include <dftracer/utils/dataframe/kernels/sort.h>          // argsort
+#include <dftracer/utils/dataframe/kernels/sort.h>  // argsort, parallel_packed_sort
 #include <dftracer/utils/dataframe/kernels/stats.h>
-#include <hwy/contrib/sort/vqsort.h>
+#include <dftracer/utils/dataframe/parallel.h>
 
 #include <algorithm>
 #include <cmath>
@@ -78,7 +78,7 @@ double quantile(const Series& v, double q) {
     std::vector<double> x = nonnull_values(v);
     const std::size_t n = x.size();
     if (n == 0) return std::nan("");
-    hwy::VQSort(x.data(), n, hwy::SortAscending());
+    parallel_packed_sort(x.data(), n, [](double a, double b) { return a < b; });
     if (q <= 0.0) return x.front();
     if (q >= 1.0) return x.back();
     double pos = q * static_cast<double>(n - 1);
@@ -269,22 +269,65 @@ double window_sample_var(const std::vector<double>& x) {
 
 // Materialize each trailing `window` as a scratch vector and reduce it with
 // `agg`; the first window-1 rows are null. Mirrors rolling's windowing (no
-// per-window null-skip: every cell is read as a double).
+// per-window null-skip: every cell is read as a double). Rows are independent
+// (each reads only its own trailing window), so above a size threshold and
+// with a backend installed the row range fans out through parallel_for; the
+// valid mask is filled in bulk first so worker threads only ever touch their
+// own disjoint `out` slots.
 template <class Agg>
 Series rolling_window(const Series& v, std::int64_t window, Agg agg) {
     const std::int64_t n = v.length();
     if (window < 1) window = 1;
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
     std::vector<std::uint8_t> valid(static_cast<std::size_t>((n + 7) / 8), 0);
-    std::vector<double> buf;
-    buf.reserve(static_cast<std::size_t>(window));
-    for (std::int64_t i = 0; i < n; ++i) {
-        if (i < window - 1) continue;
-        buf.clear();
-        for (std::int64_t j = i - window + 1; j <= i; ++j)
-            buf.push_back(read_f64(v, j));
-        out[static_cast<std::size_t>(i)] = agg(buf);
-        valid[static_cast<std::size_t>(i >> 3)] |= (1u << (i & 7));
+    {
+        std::int64_t a = std::max<std::int64_t>(window - 1, 0);
+        std::int64_t i = a;
+        for (; i < n && (i & 7); ++i)
+            valid[static_cast<std::size_t>(i >> 3)] |= (1u << (i & 7));
+        const std::int64_t full_end = n & ~std::int64_t{7};
+        if (i < full_end) {
+            std::memset(&valid[static_cast<std::size_t>(i >> 3)], 0xFF,
+                        static_cast<std::size_t>((full_end - i) / 8));
+            i = full_end;
+        }
+        for (; i < n; ++i)
+            valid[static_cast<std::size_t>(i >> 3)] |= (1u << (i & 7));
+    }
+
+    std::vector<double> vals;
+    if (n > 0 && v.null_count() == 0 && v.encoding() == Encoding::Flat) {
+        vals = nonnull_values(v);
+    } else {
+        vals.resize(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i)
+            vals[static_cast<std::size_t>(i)] = read_f64(v, i);
+    }
+    const double* p = vals.data();
+
+    const std::int64_t begin = std::min<std::int64_t>(window - 1, n);
+    const std::int64_t rows = n - begin;
+    constexpr std::int64_t GRAIN = 1 << 12;
+    if (parallel_backend_installed() && rows > GRAIN) {
+        parallel_for(rows, GRAIN, [&](std::int64_t b, std::int64_t e) {
+            std::vector<double> buf;
+            buf.reserve(static_cast<std::size_t>(window));
+            for (std::int64_t i = begin + b; i < begin + e; ++i) {
+                buf.clear();
+                for (std::int64_t j = i - window + 1; j <= i; ++j)
+                    buf.push_back(p[j]);
+                out[static_cast<std::size_t>(i)] = agg(buf);
+            }
+        });
+    } else {
+        std::vector<double> buf;
+        buf.reserve(static_cast<std::size_t>(window));
+        for (std::int64_t i = begin; i < n; ++i) {
+            buf.clear();
+            for (std::int64_t j = i - window + 1; j <= i; ++j)
+                buf.push_back(p[j]);
+            out[static_cast<std::size_t>(i)] = agg(buf);
+        }
     }
     return Series::flat(TypeId::Float64, out.data(), n, valid.data());
 }

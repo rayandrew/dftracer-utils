@@ -98,49 +98,6 @@ std::uint64_t sortable_f64(double f) {
     return u ^ ((u >> 63) ? ~0ULL : 0x8000000000000000ULL);
 }
 
-// Parallel full sort of `n` packed keys: SIMD-sort runs in parallel, then a
-// bottom-up parallel merge. Falls back to a single VQSort when no backend is
-// installed (the merge would be pure overhead) or n is small. `less` must match
-// VQSort's ascending order so the merge is consistent.
-template <class T, class Less>
-void parallel_packed_sort(T* data, std::size_t n, Less less) {
-    constexpr std::size_t RUN = std::size_t{1} << 18;
-    if (!parallel_backend_installed() || n <= RUN) {
-        hwy::VQSort(data, n, hwy::SortAscending());
-        return;
-    }
-    const std::size_t nruns = (n + RUN - 1) / RUN;
-    parallel_for(static_cast<std::int64_t>(nruns), 1,
-                 [&](std::int64_t c0, std::int64_t c1) {
-                     for (std::int64_t c = c0; c < c1; ++c) {
-                         const std::size_t lo =
-                             static_cast<std::size_t>(c) * RUN;
-                         const std::size_t hi = std::min(n, lo + RUN);
-                         hwy::VQSort(data + lo, hi - lo, hwy::SortAscending());
-                     }
-                 });
-    std::vector<T> scratch(n);
-    T* src = data;
-    T* dst = scratch.data();
-    for (std::size_t width = RUN; width < n; width *= 2) {
-        const std::size_t step = width * 2;
-        const std::size_t npairs = (n + step - 1) / step;
-        parallel_for(static_cast<std::int64_t>(npairs), 1,
-                     [&](std::int64_t p0, std::int64_t p1) {
-                         for (std::int64_t p = p0; p < p1; ++p) {
-                             const std::size_t lo =
-                                 static_cast<std::size_t>(p) * step;
-                             const std::size_t mid = std::min(n, lo + width);
-                             const std::size_t hi = std::min(n, lo + step);
-                             std::merge(src + lo, src + mid, src + mid,
-                                        src + hi, dst + lo, less);
-                         }
-                     });
-        std::swap(src, dst);
-    }
-    if (src != data) std::copy(src, src + n, data);
-}
-
 // Pack 32-bit keys with the index into uint64 and (partial-)sort. `k < 0` sorts
 // fully; otherwise only the first k indices are produced (VQPartialSort).
 template <class KeyFn>
@@ -156,8 +113,8 @@ Series argsort_pack32(std::int64_t n, bool descending, std::int64_t k,
     }
     std::int64_t out_n = n;
     if (k >= 0 && k < n) {
-        hwy::VQPartialSort(packed.data(), static_cast<std::size_t>(n),
-                           static_cast<std::size_t>(k), hwy::SortAscending());
+        parallel_partial_sort(packed.data(), static_cast<std::size_t>(n),
+                              static_cast<std::size_t>(k));
         out_n = k;
     } else {
         parallel_packed_sort(
@@ -184,8 +141,8 @@ Series argsort_pack64(std::int64_t n, bool descending, std::int64_t k,
     }
     std::int64_t out_n = n;
     if (k >= 0 && k < n) {
-        hwy::VQPartialSort(packed.data(), static_cast<std::size_t>(n),
-                           static_cast<std::size_t>(k), hwy::SortAscending());
+        parallel_partial_sort(packed.data(), static_cast<std::size_t>(n),
+                              static_cast<std::size_t>(k));
         out_n = k;
     } else {
         parallel_packed_sort(

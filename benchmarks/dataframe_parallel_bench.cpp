@@ -13,9 +13,12 @@
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/field_stat.h>
 #include <dftracer/utils/dataframe/kernels/field_stat.h>
+#include <dftracer/utils/dataframe/kernels/stats.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/dataframe/parallel.h>
 #include <dftracer/utils/dataframe/series.h>
+
+#include <dftracer/utils/dataframe/batch_ops.h>
 
 #include <algorithm>
 #include <atomic>
@@ -428,6 +431,364 @@ int main(int argc, char** argv) {
                 "correctness: %s\n",
                 lk_ser, lk_par, lk_ser / lk_par, lk_ok ? "OK" : "MISMATCH");
     ok = ok && lk_ok;
+
+    // quantile/median: the full VQSort over a wide numeric column.
+    Series qcol = df.column("s");  // scattered i64 -> cast to f64 internally
+    auto time_quantile = [&](int reps) {
+        double best = 1e300;
+        double r = 0.0;
+        for (int i = 0; i < reps; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            r = quantile(qcol, 0.5);
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(r);
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    const double q_ser = time_quantile(5);
+    const double q_ser_val = quantile(qcol, 0.5);
+    install_runtime_parallel_backend();
+    const double q_par = time_quantile(5);
+    const double q_par_val = quantile(qcol, 0.5);
+    bool q_ok = q_ser_val == q_par_val;
+    std::printf("quantile(0.5): serial %8.2f ms | runtime %8.2f ms (%.2fx) "
+                "correctness: %s\n",
+                q_ser, q_par, q_ser / q_par, q_ok ? "OK" : "MISMATCH");
+    ok = ok && q_ok;
+
+    // rolling_var: O(n*window) with each row's window independent.
+    const std::int64_t rwin = 64;
+    auto time_rolling_var = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            r = qcol.rolling_var(rwin);
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    double rv_ser = 1e300;
+    {
+        const auto t0 = std::chrono::steady_clock::now();
+        Series r = qcol.rolling_var(rwin);
+        const auto t1 = std::chrono::steady_clock::now();
+        rv_ser = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        do_not_optimize(r.length());
+    }
+    Series rv_serial_out = time_rolling_var(3);
+    install_runtime_parallel_backend();
+    Series rv_par_out = time_rolling_var(3);
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 3; ++i) {
+        Series r = qcol.rolling_var(rwin);
+        do_not_optimize(r.length());
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+    const double rv_par =
+        std::chrono::duration<double, std::milli>(t1 - t0).count() / 3.0;
+    bool rv_ok = rv_serial_out.length() == rv_par_out.length();
+    {
+        const double* a2 = rv_serial_out.data<double>();
+        const double* b2 = rv_par_out.data<double>();
+        for (std::int64_t i = 0; rv_ok && i < rv_serial_out.length(); ++i) {
+            const bool na = rv_serial_out.is_null(i);
+            const bool nb = rv_par_out.is_null(i);
+            if (na != nb) {
+                rv_ok = false;
+            } else if (!na) {
+                rv_ok = std::abs(a2[i] - b2[i]) < 1e-6 * (1.0 + std::abs(a2[i]));
+            }
+        }
+    }
+    std::printf("rolling_var(w=%lld): serial %8.2f ms | runtime %8.2f ms "
+                "(%.2fx) correctness: %s\n",
+                static_cast<long long>(rwin), rv_ser, rv_par, rv_ser / rv_par,
+                rv_ok ? "OK" : "MISMATCH");
+    ok = ok && rv_ok;
+
+    // topk_indices (via top_k): SIMD partial sort of a wide numeric column.
+    const std::int64_t topk_k = 1000;
+    auto time_topk = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = qcol.top_k(topk_k);
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series tk_serial_out = time_topk(3);
+    double tk_ser = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = qcol.top_k(topk_k);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        tk_ser = std::min(
+            tk_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series tk_par_out = time_topk(3);
+    double tk_par = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = qcol.top_k(topk_k);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        tk_par = std::min(
+            tk_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool tk_ok = tk_serial_out.length() == tk_par_out.length();
+    {
+        std::vector<std::int64_t> sv, pv;
+        for (std::int64_t i = 0; i < tk_serial_out.length(); ++i)
+            sv.push_back(tk_serial_out.data<std::int64_t>()[i]);
+        for (std::int64_t i = 0; i < tk_par_out.length(); ++i)
+            pv.push_back(tk_par_out.data<std::int64_t>()[i]);
+        std::sort(sv.begin(), sv.end());
+        std::sort(pv.begin(), pv.end());
+        tk_ok = tk_ok && sv == pv;
+    }
+    std::printf("top_k(k=%lld): serial %8.2f ms | runtime %8.2f ms (%.2fx) "
+                "correctness: %s\n",
+                static_cast<long long>(topk_k), tk_ser, tk_par, tk_ser / tk_par,
+                tk_ok ? "OK" : "MISMATCH");
+    ok = ok && tk_ok;
+
+    // to_dummies: O(n*d) nested string-eq loop fixed to an O(n) bucket pass.
+    // d dummy columns of n rows each, so keep both bounded (d * n int8 cells).
+    const std::int64_t drows = std::min<std::int64_t>(rows, 4'000'000);
+    const std::int64_t dgroups = std::min<std::int64_t>(groups, 64);
+    DataFrame dummy_df;
+    dummy_df.names = {"cat"};
+    {
+        std::vector<std::string> cats(static_cast<std::size_t>(drows));
+        for (std::int64_t i = 0; i < drows; ++i)
+            cats[static_cast<std::size_t>(i)] =
+                "c" + std::to_string(i % dgroups);
+        dummy_df.columns.push_back(Series::strings(cats));
+    }
+    auto time_dummies = [&](int reps) {
+        double best = 1e300;
+        DataFrame r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = dummy_df.to_dummies("cat");
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.num_rows());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    DataFrame td_serial_out = time_dummies(1);
+    const double td_ser = [&] {
+        const auto tt0 = std::chrono::steady_clock::now();
+        DataFrame r = dummy_df.to_dummies("cat");
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.num_rows());
+        return std::chrono::duration<double, std::milli>(tt1 - tt0).count();
+    }();
+    install_runtime_parallel_backend();
+    DataFrame td_par_out = time_dummies(3);
+    double td_par = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        DataFrame r = dummy_df.to_dummies("cat");
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.num_rows());
+        td_par = std::min(
+            td_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool td_ok = td_serial_out.num_rows() == td_par_out.num_rows() &&
+                td_serial_out.num_columns() == td_par_out.num_columns();
+    for (std::int64_t c = 1;
+        td_ok && c < static_cast<std::int64_t>(td_serial_out.num_columns());
+        ++c) {
+        const Series& a2 = td_serial_out.columns[static_cast<std::size_t>(c)];
+        const Series& b2 = td_par_out.columns[static_cast<std::size_t>(c)];
+        for (std::int64_t i = 0; td_ok && i < a2.length(); ++i)
+            td_ok = a2.data<std::int8_t>()[i] == b2.data<std::int8_t>()[i];
+    }
+    std::printf("to_dummies (%lld groups): serial %8.2f ms | runtime %8.2f ms "
+                "(%.2fx) correctness: %s\n",
+                static_cast<long long>(groups), td_ser, td_par, td_ser / td_par,
+                td_ok ? "OK" : "MISMATCH");
+    ok = ok && td_ok;
+
+    // hash_partition: per-row multi-col hash into shared buckets.
+    auto time_hp = [&](int reps) {
+        double best = 1e300;
+        std::vector<DataFrame> r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = hash_partition(dummy_df, {"cat"}, 64);
+            const auto tt1 = std::chrono::steady_clock::now();
+            std::int64_t total = 0;
+            for (const auto& p : r) total += p.num_rows();
+            do_not_optimize(total);
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    std::vector<DataFrame> hp_serial_out = time_hp(3);
+    double hp_ser = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        std::vector<DataFrame> r = hash_partition(dummy_df, {"cat"}, 64);
+        const auto tt1 = std::chrono::steady_clock::now();
+        std::int64_t total = 0;
+        for (const auto& p : r) total += p.num_rows();
+        do_not_optimize(total);
+        hp_ser = std::min(
+            hp_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    std::vector<DataFrame> hp_par_out = time_hp(3);
+    double hp_par = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        std::vector<DataFrame> r = hash_partition(dummy_df, {"cat"}, 64);
+        const auto tt1 = std::chrono::steady_clock::now();
+        std::int64_t total = 0;
+        for (const auto& p : r) total += p.num_rows();
+        do_not_optimize(total);
+        hp_par = std::min(
+            hp_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    std::int64_t hp_ser_total = 0, hp_par_total = 0;
+    for (const auto& p : hp_serial_out) hp_ser_total += p.num_rows();
+    for (const auto& p : hp_par_out) hp_par_total += p.num_rows();
+    bool hp_ok = hp_ser_total == drows && hp_par_total == drows &&
+                hp_serial_out.size() == hp_par_out.size();
+    std::printf("hash_partition (64 parts): serial %8.2f ms | runtime %8.2f "
+                "ms (%.2fx) correctness: %s\n",
+                hp_ser, hp_par, hp_ser / hp_par, hp_ok ? "OK" : "MISMATCH");
+    ok = ok && hp_ok;
+
+    // is_in: general (string) path, no SIMD fast path.
+    Series needles = Series::strings({"c1", "c5", "c9", "c13"});
+    auto time_is_in = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = dummy_df.column("cat").is_in(needles);
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series iin_serial_out = time_is_in(3);
+    double iin_ser = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = dummy_df.column("cat").is_in(needles);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        iin_ser = std::min(
+            iin_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series iin_par_out = time_is_in(3);
+    double iin_par = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = dummy_df.column("cat").is_in(needles);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        iin_par = std::min(
+            iin_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool iin_ok = iin_serial_out.length() == iin_par_out.length();
+    for (std::int64_t i = 0; iin_ok && i < iin_serial_out.length(); ++i)
+        iin_ok = bit_at(iin_serial_out, i) == bit_at(iin_par_out, i);
+    std::printf("is_in (string): serial %8.2f ms | runtime %8.2f ms (%.2fx) "
+                "correctness: %s\n",
+                iin_ser, iin_par, iin_ser / iin_par, iin_ok ? "OK" : "MISMATCH");
+    ok = ok && iin_ok;
+
+    // sort_by_multi: std::stable_sort of indices with a multi-col comparator.
+    DataFrame multi_df;
+    multi_df.names = {"k", "v"};
+    multi_df.columns.push_back(Series::flat_i64(k.data(), rows));
+    multi_df.columns.push_back(Series::flat_i64(v.data(), rows));
+    auto time_sbm = [&](int reps) {
+        double best = 1e300;
+        DataFrame r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = sort_by_multi(multi_df, {"k", "v"}, false);
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.num_rows());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    DataFrame sbm_serial_out = time_sbm(3);
+    double sbm_ser = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        DataFrame r = sort_by_multi(multi_df, {"k", "v"}, false);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.num_rows());
+        sbm_ser = std::min(
+            sbm_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    DataFrame sbm_par_out = time_sbm(3);
+    double sbm_par = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        DataFrame r = sort_by_multi(multi_df, {"k", "v"}, false);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.num_rows());
+        sbm_par = std::min(
+            sbm_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool sbm_ok = sbm_serial_out.num_rows() == sbm_par_out.num_rows();
+    {
+        const std::int64_t* ka =
+            sbm_serial_out.column("k").data<std::int64_t>();
+        const std::int64_t* kb = sbm_par_out.column("k").data<std::int64_t>();
+        const std::int64_t* va =
+            sbm_serial_out.column("v").data<std::int64_t>();
+        const std::int64_t* vb = sbm_par_out.column("v").data<std::int64_t>();
+        for (std::int64_t i = 0; sbm_ok && i < sbm_serial_out.num_rows(); ++i)
+            sbm_ok = ka[i] == kb[i] && va[i] == vb[i];
+    }
+    std::printf("sort_by_multi: serial %8.2f ms | runtime %8.2f ms (%.2fx) "
+                "correctness: %s\n",
+                sbm_ser, sbm_par, sbm_ser / sbm_par, sbm_ok ? "OK" : "MISMATCH");
+    ok = ok && sbm_ok;
 
     return ok ? 0 : 1;
 }
