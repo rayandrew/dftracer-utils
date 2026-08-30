@@ -87,5 +87,79 @@ DFTU_SERIES_OP(any, dftu_series_any, BOOL, SERIES, NONE, NONE)
 DFTU_SERIES_OP(arg_min, dftu_series_arg_min, I64, SERIES, NONE, NONE)
 DFTU_SERIES_OP(arg_max, dftu_series_arg_max, I64, SERIES, NONE, NONE)
 DFTU_SERIES_OP(mode, dftu_series_mode, SCALAR, SERIES, NONE, NONE)
+DFTU_SERIES_OP(nunique, dftu_series_nunique, I64, SERIES, NONE, NONE)
+
+/* Unary numeric / null / cumulative (series -> series). */
+DFTU_SERIES_OP(abs, dftu_series_abs, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(round, dftu_series_round, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(ceil, dftu_series_ceil, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(floor, dftu_series_floor, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(trunc, dftu_series_trunc, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(sign, dftu_series_sign, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(negate, dftu_series_negate, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(sqrt, dftu_series_sqrt, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(exp, dftu_series_exp, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(log, dftu_series_log, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(cumsum, dftu_series_cumsum, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(cummax, dftu_series_cummax, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(cummin, dftu_series_cummin, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(cum_prod, dftu_series_cum_prod, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(cum_count, dftu_series_cum_count, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(diff, dftu_series_diff, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(pct_change, dftu_series_pct_change, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(is_nan, dftu_series_is_nan, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(is_finite, dftu_series_is_finite, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(is_infinite, dftu_series_is_infinite, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(is_unique, dftu_series_is_unique, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(is_duplicated, dftu_series_is_duplicated, SERIES, SERIES, NONE,
+               NONE)
+DFTU_SERIES_OP(unique, dftu_series_unique, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(drop_nulls, dftu_series_drop_nulls, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(reverse, dftu_series_reverse, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(interpolate, dftu_series_interpolate, SERIES, SERIES, NONE, NONE)
+
+/* Fill / windowed shape (series + operand -> series). */
+DFTU_SERIES_OP(fillna, dftu_series_fillna, SERIES, SERIES, SCALAR, NONE)
+DFTU_SERIES_OP(shift, dftu_series_shift, SERIES, SERIES, I64, NONE)
+DFTU_SERIES_OP(head, dftu_series_head, SERIES, SERIES, I64, NONE)
+DFTU_SERIES_OP(tail, dftu_series_tail, SERIES, SERIES, I64, NONE)
+DFTU_SERIES_OP(top_k, dftu_series_top_k, SERIES, SERIES, I64, NONE)
+DFTU_SERIES_OP(bottom_k, dftu_series_bottom_k, SERIES, SERIES, I64, NONE)
+DFTU_SERIES_OP(rolling_var, dftu_series_rolling_var, SERIES, SERIES, I64, NONE)
+DFTU_SERIES_OP(rolling_std, dftu_series_rolling_std, SERIES, SERIES, I64, NONE)
+DFTU_SERIES_OP(rolling_median, dftu_series_rolling_median, SERIES, SERIES, I64,
+               NONE)
+
+/* Membership / binning (series, series -> series). */
+DFTU_SERIES_OP(is_in, dftu_series_is_in, SERIES, SERIES, SERIES, NONE)
+DFTU_SERIES_OP(cut, dftu_series_cut, SERIES, SERIES, SERIES, NONE)
+DFTU_SERIES_OP(search_sorted, dftu_series_search_sorted, SERIES, SERIES, SERIES,
+               NONE)
+
+/* Statistics reducers (column -> double). variance/stddev take an int32 sample
+ * flag via the I32 operand. */
+DFTU_SERIES_OP(skewness, dftu_series_skewness, F64, SERIES, NONE, NONE)
+DFTU_SERIES_OP(kurtosis, dftu_series_kurtosis, F64, SERIES, NONE, NONE)
+DFTU_SERIES_OP(variance, dftu_series_variance, F64, SERIES, I32, NONE)
+DFTU_SERIES_OP(stddev, dftu_series_stddev, F64, SERIES, I32, NONE)
+DFTU_SERIES_OP(quantile, dftu_series_quantile, F64, SERIES, F64, NONE)
+DFTU_SERIES_OP(is_sorted, dftu_series_is_sorted, BOOL, SERIES, I32, NONE)
+
+/* Ordering / selection (series + flag/enum -> series). */
+DFTU_SERIES_OP(sort, dftu_series_sort, SERIES, SERIES, I32, NONE)
+DFTU_SERIES_OP(argsort, dftu_series_argsort, SERIES, SERIES, I32, NONE)
+DFTU_SERIES_OP(qcut, dftu_series_qcut, SERIES, SERIES, I32, NONE)
+DFTU_SERIES_OP(rank, dftu_series_rank, SERIES, SERIES, RANK, I64)
+
+/* Windowed (series + window / params -> series). */
+DFTU_SERIES_OP(rolling, dftu_series_rolling, SERIES, SERIES, I64, ROLLING)
+DFTU_SERIES_OP(rolling_quantile, dftu_series_rolling_quantile, SERIES, SERIES,
+               I64, F64)
+DFTU_SERIES_OP(ewm_mean, dftu_series_ewm_mean, SERIES, SERIES, F64, NONE)
+DFTU_SERIES_OP(ewm_std, dftu_series_ewm_std, SERIES, SERIES, F64, NONE)
+
+/* Clamp / range (series + two scalars -> series). */
+DFTU_SERIES_OP(clip, dftu_series_clip, SERIES, SERIES, SCALAR, SCALAR)
+DFTU_SERIES_OP(is_between, dftu_series_is_between, SERIES, SERIES, SCALAR, SCALAR)
 
 #undef DFTU_SERIES_OP

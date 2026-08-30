@@ -750,7 +750,11 @@ typedef enum {
     DFTU_TOK_DTYPE,    /**< dftu_dtype operand */
     DFTU_TOK_REDUCE,   /**< dftu_reduce_op operand */
     DFTU_TOK_STR,      /**< (const char*, int32 length) operand */
-    DFTU_TOK_CHAR      /**< char operand */
+    DFTU_TOK_CHAR,     /**< char operand */
+    DFTU_TOK_F64,      /**< double operand, or a double return */
+    DFTU_TOK_I32,      /**< int32 flag operand (e.g. a `descending` flag) */
+    DFTU_TOK_RANK,     /**< dftu_rank_method operand */
+    DFTU_TOK_ROLLING   /**< dftu_rolling_op operand */
 } dftu_op_tok;
 
 /** Pack a signature from a return token and up to three operand tokens. Pass
@@ -817,15 +821,17 @@ DFTU_EXPORT int dftu_op_register(const dftu_op_desc* desc);
  * signature has (CMP / PRIM / LOGICAL / REDUCE / DTYPE), since a signature has
  * at most one. */
 typedef struct dftu_op_arg {
-    dftu_scalar scalar; /**< the SCALAR token */
-    int32_t op_code;    /**< the CMP / PRIM / LOGICAL / REDUCE / DTYPE token */
-    const char* s0;     /**< the first STR token (bytes) */
-    int32_t s0_len;     /**< length of s0 */
-    const char* s1;     /**< the second STR token */
-    int32_t s1_len;     /**< length of s1 */
-    int64_t i0;         /**< the first I64 token */
-    int64_t i1;         /**< the second I64 token */
-    char ch;            /**< the CHAR token */
+    dftu_scalar scalar;  /**< the SCALAR token */
+    int32_t op_code;     /**< the CMP / PRIM / LOGICAL / REDUCE / DTYPE token */
+    const char* s0;      /**< the first STR token (bytes) */
+    int32_t s0_len;      /**< length of s0 */
+    const char* s1;      /**< the second STR token */
+    int32_t s1_len;      /**< length of s1 */
+    int64_t i0;          /**< the first I64 token */
+    int64_t i1;          /**< the second I64 token */
+    char ch;             /**< the CHAR token */
+    double f0;           /**< the F64 token */
+    dftu_scalar scalar2; /**< the second SCALAR token */
 } dftu_op_arg;
 
 /** Run a column op (a signature whose return token is SERIES): `in` are `n`

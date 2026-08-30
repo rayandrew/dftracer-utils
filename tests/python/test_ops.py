@@ -74,3 +74,24 @@ class TestRun:
     def test_missing_argument_raises(self):
         with pytest.raises(TypeError):
             ops.add(_col([1, 2]))  # add needs two columns
+
+
+class TestExtendedSurface:
+    def test_unary_and_cumulative(self):
+        assert _vals(ops.abs(_col([1, -2, 3, -4]))) == [1, 2, 3, 4]
+        assert _vals(ops.run("cumsum", _col([1, 2, 3, 4]))) == [1, 3, 6, 10]
+
+    def test_two_scalar_op_clip(self):
+        assert _vals(ops.clip(_col([1, 5, 9]), 2, 8)) == [2, 5, 8]
+
+    def test_f64_reducer_with_flag_and_operand(self):
+        var = ops.run("variance", _col([1, 2, 3, 4]), 1)  # i32 sample flag
+        assert abs(var - 5.0 / 3.0) < 1e-9
+        q = ops.run("quantile", _col([1, 2, 3, 4]), 0.5)  # f64 operand
+        assert isinstance(q, float)
+
+    def test_u64_scalar_operand_above_int64_max(self):
+        big = 2**63 + 5  # only representable as u64
+        col = Series.from_numpy(np.array([10, 20], dtype=np.uint64))
+        out = ops.add_scalar(col, big)  # must not raise OverflowError
+        assert np.asarray(out).tolist()[0] == 10 + big

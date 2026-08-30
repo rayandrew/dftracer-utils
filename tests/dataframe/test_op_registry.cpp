@@ -146,7 +146,7 @@ TEST_SUITE("op_registry") {
         CHECK(dftu_op_find("no_such_op") == nullptr);
 
         uint32_t n = dftu_op_count();
-        REQUIRE(n >= 40);
+        REQUIRE(n >= 95);
         bool saw_add = false;
         for (uint32_t i = 0; i < n; ++i) {
             const dftu_op_desc* op = dftu_op_at(i);
@@ -155,6 +155,54 @@ TEST_SUITE("op_registry") {
         }
         CHECK(saw_add);
         CHECK(dftu_op_at(n) == nullptr);
+    }
+
+    TEST_CASE("the newly-added ops and sig shapes are present and run") {
+        for (const char* name :
+             {"abs", "sqrt", "cumsum", "fillna", "shift", "is_in", "nunique",
+              "variance", "stddev", "quantile", "skewness", "clip",
+              "is_between", "sort", "rank", "rolling", "ewm_mean"})
+            CHECK(dftu_op_find(name) != nullptr);
+
+        std::int64_t v[4] = {1, 2, 3, 4};
+        dftu_series* c = i64_col(v, 4);
+        int ok = 0;
+
+        // F64 reducer + i32 flag: sample variance of 1,2,3,4 = 5/3.
+        dftu_op_arg varg{};
+        varg.op_code = 1;  // sample
+        dftu_scalar var =
+            dftu_op_run_aggregate(dftu_op_find("variance"), c, &varg, &ok);
+        CHECK(ok == 1);
+        CHECK(var.kind == DFTU_SCALAR_TAG_F64);
+        CHECK(var.value.d == doctest::Approx(5.0 / 3.0));
+
+        // F64 reducer + f64 operand: median (quantile 0.5).
+        dftu_op_arg qarg{};
+        qarg.f0 = 0.5;
+        dftu_scalar q =
+            dftu_op_run_aggregate(dftu_op_find("quantile"), c, &qarg, &ok);
+        CHECK(ok == 1);
+        CHECK(q.kind == DFTU_SCALAR_TAG_F64);
+
+        // Two-scalar series op: clip to [2, 3].
+        dftu_op_arg carg{};
+        carg.scalar = i64_scalar(2);
+        carg.scalar2 = i64_scalar(3);
+        const dftu_series* in1[1] = {c};
+        dftu_series* clipped = dftu_op_run(dftu_op_find("clip"), in1, 1, &carg);
+        REQUIRE(clipped != nullptr);
+        CHECK(i64_of(clipped)[0] == 2);
+        CHECK(i64_of(clipped)[3] == 3);
+        dftu_series_free(clipped);
+
+        // Unary series op via the shared runner.
+        dftu_series* cs = dftu_op_run(dftu_op_find("cumsum"), in1, 1, nullptr);
+        REQUIRE(cs != nullptr);
+        CHECK(i64_of(cs)[3] == 10);  // 1+2+3+4
+        dftu_series_free(cs);
+
+        dftu_series_free(c);
     }
 
     TEST_CASE("a user op registers under a module prefix and runs") {

@@ -70,6 +70,14 @@ const char* tok_name(dftu_op_tok t) {
             return "str";
         case DFTU_TOK_CHAR:
             return "char";
+        case DFTU_TOK_F64:
+            return "f64";
+        case DFTU_TOK_I32:
+            return "i32";
+        case DFTU_TOK_RANK:
+            return "rank";
+        case DFTU_TOK_ROLLING:
+            return "rolling";
     }
     return "?";
 }
@@ -183,6 +191,24 @@ dftu_series* dftu_op_run(const dftu_op_desc* op, const dftu_series* const* in,
                                                                    a->ch);
         case DFTU_OP_SIG(SERIES, SERIES, I64, NONE):
             return as<dftu_series* (*)(CS, int64_t)>(op->fn)(in[0], a->i0);
+        case DFTU_OP_SIG(SERIES, SERIES, SCALAR, SCALAR):
+            return as<dftu_series* (*)(CS, dftu_scalar, dftu_scalar)>(op->fn)(
+                in[0], a->scalar, a->scalar2);
+        case DFTU_OP_SIG(SERIES, SERIES, I32, NONE):
+            return as<dftu_series* (*)(CS, int32_t)>(op->fn)(
+                in[0], static_cast<int32_t>(a->op_code));
+        case DFTU_OP_SIG(SERIES, SERIES, F64, NONE):
+            return as<dftu_series* (*)(CS, double)>(op->fn)(in[0], a->f0);
+        case DFTU_OP_SIG(SERIES, SERIES, I64, F64):
+            return as<dftu_series* (*)(CS, int64_t, double)>(op->fn)(
+                in[0], a->i0, a->f0);
+        case DFTU_OP_SIG(SERIES, SERIES, I64, ROLLING):
+            return as<dftu_series* (*)(CS, int64_t, dftu_rolling_op)>(op->fn)(
+                in[0], a->i0, static_cast<dftu_rolling_op>(a->op_code));
+        case DFTU_OP_SIG(SERIES, SERIES, RANK, I64):
+            return as<dftu_series* (*)(CS, dftu_rank_method, int32_t)>(op->fn)(
+                in[0], static_cast<dftu_rank_method>(a->op_code),
+                static_cast<int32_t>(a->i0));
         default:
             return nullptr;
     }
@@ -213,6 +239,23 @@ dftu_scalar dftu_op_run_aggregate(const dftu_op_desc* op, const dftu_series* v,
             return z;
         case DFTU_OP_SIG(BOOL, SERIES, NONE, NONE):
             z.value.i = as<int32_t (*)(CS)>(op->fn)(v);
+            return z;
+        case DFTU_OP_SIG(BOOL, SERIES, I32, NONE):
+            z.value.i = as<int32_t (*)(CS, int32_t)>(op->fn)(
+                v, static_cast<int32_t>(a->op_code));
+            return z;
+        case DFTU_OP_SIG(F64, SERIES, NONE, NONE):
+            z.kind = DFTU_SCALAR_TAG_F64;
+            z.value.d = as<double (*)(CS)>(op->fn)(v);
+            return z;
+        case DFTU_OP_SIG(F64, SERIES, I32, NONE):
+            z.kind = DFTU_SCALAR_TAG_F64;
+            z.value.d = as<double (*)(CS, int32_t)>(op->fn)(
+                v, static_cast<int32_t>(a->op_code));
+            return z;
+        case DFTU_OP_SIG(F64, SERIES, F64, NONE):
+            z.kind = DFTU_SCALAR_TAG_F64;
+            z.value.d = as<double (*)(CS, double)>(op->fn)(v, a->f0);
             return z;
         default:
             if (ok) *ok = 0;

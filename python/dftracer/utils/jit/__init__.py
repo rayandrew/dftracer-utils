@@ -3633,6 +3633,13 @@ def _compile_vfold(
                 fields.add(vfield)
             mon = maps[attr].values[0]
             fam = mon.dft.split("_")[2] if len(mon.dft.split("_")) > 2 else ""
+            # A counter ignores its added value, so `+= df[col]` would count
+            # rows, not sum the column - almost never what's meant.
+            if fam == "COUNTER" and const is None:
+                raise JitError(
+                    f"@jit.vfold: a jit.count() map ('{attr}') counts rows; "
+                    "write self.<map>[df[...]] += 1, not a column"
+                )
             if keycat == "str" and (const is not None or fam not in ("SUM", "MIN", "MAX")):
                 raise JitError(
                     f"@jit.vfold: a string key ('{keyfield}') supports only "
@@ -3680,6 +3687,11 @@ def _compile_vfold(
                 f"(a jit.{reducer}() accumulator)"
             )
         field = _vfold_df_field(call.func.value)
+        if field not in _VFOLD_NUMERIC:
+            raise JitError(
+                f"@jit.vfold: scalar reducer field '{field}' must be numeric "
+                "(pid/tid/ts/dur); a reduce over a non-numeric column is 0"
+            )
         ops.append({"kind": "scalar", "attr": attr, "mon": mon, "field": field, "rop": rop})
         fields.add(field)
     if not ops:

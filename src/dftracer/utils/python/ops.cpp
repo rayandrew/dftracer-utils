@@ -49,7 +49,8 @@ PyObject* op_info(PyObject*, PyObject* args) {
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 
-// Fill dftu_scalar from a Python number (float -> F64, int -> I64).
+// Fill dftu_scalar from a Python number: float -> F64, int -> I64, or U64 for
+// an integer above INT64_MAX (so the whole uint64 range stays exact).
 bool to_scalar(PyObject* o, dftu_scalar* s) {
     if (PyFloat_Check(o)) {
         s->kind = DFTU_SCALAR_TAG_F64;
@@ -57,7 +58,15 @@ bool to_scalar(PyObject* o, dftu_scalar* s) {
         return !PyErr_Occurred();
     }
     long long v = PyLong_AsLongLong(o);
-    if (v == -1 && PyErr_Occurred()) return false;
+    if (v == -1 && PyErr_Occurred()) {
+        PyErr_Clear();  // may be a positive value in (INT64_MAX, UINT64_MAX]
+        unsigned long long u = PyLong_AsUnsignedLongLong(o);
+        if (u == static_cast<unsigned long long>(-1) && PyErr_Occurred())
+            return false;
+        s->kind = DFTU_SCALAR_TAG_U64;
+        s->value.u = u;
+        return true;
+    }
     s->kind = DFTU_SCALAR_TAG_I64;
     s->value.i = v;
     return true;
@@ -94,7 +103,7 @@ PyObject* op_run(PyObject*, PyObject* args) {
     const dftu_series* in[2] = {nullptr, nullptr};
     uint32_t n_series = 0;
     dftu_op_arg arg{};
-    int n_str = 0, n_i64 = 0;
+    int n_str = 0, n_i64 = 0, n_scalar = 0;
     Py_ssize_t next = 1;
     for (int i = 0; i < 3; ++i) {
         dftu_op_tok t = DFTU_OP_SIG_ARG(op->sig, i);
@@ -118,13 +127,23 @@ PyObject* op_run(PyObject*, PyObject* args) {
                 break;
             }
             case DFTU_TOK_SCALAR:
-                if (!to_scalar(a, &arg.scalar)) return nullptr;
+                if (!to_scalar(a, n_scalar++ == 0 ? &arg.scalar : &arg.scalar2))
+                    return nullptr;
                 break;
+            case DFTU_TOK_F64: {
+                double d = PyFloat_AsDouble(a);
+                if (d == -1.0 && PyErr_Occurred()) return nullptr;
+                arg.f0 = d;
+                break;
+            }
             case DFTU_TOK_CMP:
             case DFTU_TOK_PRIM:
             case DFTU_TOK_LOGICAL:
             case DFTU_TOK_DTYPE:
             case DFTU_TOK_REDUCE:
+            case DFTU_TOK_I32:
+            case DFTU_TOK_RANK:
+            case DFTU_TOK_ROLLING:
                 arg.op_code = static_cast<int32_t>(PyLong_AsLong(a));
                 if (arg.op_code == -1 && PyErr_Occurred()) return nullptr;
                 break;

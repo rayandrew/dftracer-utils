@@ -184,3 +184,25 @@ class TestAuthoring:
             @jit.vfold
             class NoBatch:
                 total = jit.sum()
+
+    def test_scalar_string_field_rejected(self):
+        with pytest.raises(jit.JitError):
+
+            @jit.vfold
+            class Bad:
+                total = jit.sum()
+
+                @jit.each_batch
+                def step(self, df):
+                    self.total += df["name"].sum()  # reduce over a string is 0
+
+    def test_counter_map_rejects_a_column(self):
+        with pytest.raises(jit.JitError):
+
+            @jit.vfold
+            class Bad2:
+                hits = jit.map(key=jit.i64, value=jit.count())
+
+                @jit.each_batch
+                def step(self, df):
+                    self.hits[df["pid"]] += df["dur"]  # a counter needs += 1
