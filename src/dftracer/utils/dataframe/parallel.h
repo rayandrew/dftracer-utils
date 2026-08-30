@@ -25,6 +25,13 @@ using ParallelForFn = void (*)(void* ctx, std::int64_t n, std::int64_t grain,
 /// Install the backend (nullptr restores serial). Set once at startup.
 void set_parallel_backend(ParallelForFn fn, void* ctx);
 
+/// Install a backend that fans work out through the core coroutine runtime's
+/// thread pool (default_runtime()). One call at startup makes the data-parallel
+/// dataframe kernels (group-by, expr eval, ...) run multi-threaded on the C++
+/// path, mirroring what the Python extension installs. Opt-in: the engine stays
+/// serial until this (or another backend) is set.
+void install_runtime_parallel_backend();
+
 namespace detail {
 /// Dispatch through the backend, or run serial when none is installed or
 /// `n <= grain` (so small work never pays the fan-out cost).

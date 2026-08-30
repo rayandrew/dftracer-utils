@@ -456,6 +456,7 @@ set(DFTRACER_UTILS_VEC_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/lazyframe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/spill.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/parallel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/parallel_runtime.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/arrow_bridge.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/arrow.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/batch_ops.cpp

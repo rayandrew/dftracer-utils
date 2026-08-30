@@ -105,5 +105,10 @@ int main(int argc, char** argv) {
         std::printf("  parallel %2d thr : %8.2f ms  (%.2fx)\n", t, ms,
                     serial / ms);
     }
+
+    // The real installer: fan out through the core coroutine runtime.
+    install_runtime_parallel_backend();
+    const double rt = time_group_by(df, aggs, 5);
+    std::printf("  runtime backend : %8.2f ms  (%.2fx)\n", rt, serial / rt);
     return 0;
 }
