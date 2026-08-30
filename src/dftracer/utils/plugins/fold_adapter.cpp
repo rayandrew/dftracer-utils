@@ -12,6 +12,8 @@
 #include <dftracer/utils/core/coro/yield.h>
 #include <dftracer/utils/core/io/ops.h>
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/map_grouping_arrow.h>
 #include <dftracer/utils/plugins/map_join_arrow.h>
@@ -20,6 +22,7 @@
 #include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/fold_event.h>
+#include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/utilities/common/serialization/binary_codec.h>
 #include <dftracer/utils/utilities/common/statistics/ddsketch.h>
@@ -2292,6 +2295,11 @@ void PluginFold::step(const FoldBatch& batch) {
     // call, so freeing them now is safe.
     task_arena_.clear();
 
+    if (plugin_->on_batch_columns) {
+        step_columns(batch);
+        return;
+    }
+
     const std::size_t count = batch.events.size();
     const bool with_args = needs_args();
 
@@ -2374,6 +2382,44 @@ void PluginFold::step(const FoldBatch& batch) {
     cbatch_ = dftu_batch{event_scratch_.data(),
                          static_cast<std::uint32_t>(event_scratch_.size())};
     pending_ = plugin_->on_batch(slice_, &cbatch_, &host_);
+}
+
+// Vectorized-fold seam: materialize the (query-passing, non-metadata) events of
+// this batch into a native DataFrame and hand it across the ABI as a
+// dftu_dataframe, so the plugin runs SIMD column ops instead of a per-event
+// loop. build_row_frame is the same columnar materializer NativeRowFold uses.
+void PluginFold::step_columns(const FoldBatch& batch) {
+    namespace views = dftracer::utils::trace::views::detail;
+    col_scratch_.clear();
+    for (const auto& fe : batch.events) {
+        if (fe.phase == trace::RecordPhase::METADATA ||
+            fe.phase == trace::RecordPhase::UNKNOWN)
+            continue;
+        if (query_ && !passes_query(fe)) continue;
+        col_scratch_.push_back(fe);
+    }
+    if (col_scratch_.empty()) return;
+
+    dataframe::DataFrame df =
+        views::build_row_frame(col_scratch_, *intern_, {}, 1.0, nullptr);
+
+    // dftu_dataframe_new takes ownership of the column handles, so pass shared
+    // copies (a refcount bump, no data copy); df keeps its own.
+    std::vector<dftu_series*> handles;
+    handles.reserve(df.columns.size());
+    std::vector<const char*> names;
+    names.reserve(df.names.size());
+    for (const auto& c : df.columns)
+        handles.push_back(dftu_series_share(c.handle()));
+    for (const auto& n : df.names) names.push_back(n.c_str());
+
+    dftu_dataframe* cdf =
+        dftu_dataframe_new(names.data(), handles.data(),
+                           static_cast<std::int32_t>(handles.size()));
+    // The seam is synchronous (a returned task would outlive cdf).
+    plugin_->on_batch_columns(slice_, cdf, &host_);
+    dftu_dataframe_free(cdf);
+    pending_ = nullptr;
 }
 
 MonoidAccumulator* PluginFold::handle_get(const char* cap_id,

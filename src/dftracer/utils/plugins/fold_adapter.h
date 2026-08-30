@@ -392,6 +392,9 @@ class PluginFold : public trace::views::detail::Fold {
     using FoldEvent = trace::views::detail::FoldEvent;
 
     bool passes_query(const FoldEvent& ev);
+    // Materialize this batch's events into a DataFrame and drive the plugin's
+    // on_batch_columns seam (the vectorized-fold path).
+    void step_columns(const FoldBatch& batch);
     // Build each merged map's Arrow table and emit it under its name; reloads
     // spilled runs first, so a spilled map materializes identically.
     void materialize_maps();
@@ -489,6 +492,7 @@ class PluginFold : public trace::views::detail::Fold {
     std::vector<std::size_t> kept_scratch_;
     std::vector<dftu_event> event_scratch_;
     std::vector<dftu_arg> arg_scratch_;
+    std::vector<FoldEvent> col_scratch_;  // vectorized-fold materialization
 };
 
 }  // namespace dftracer::utils::plugins

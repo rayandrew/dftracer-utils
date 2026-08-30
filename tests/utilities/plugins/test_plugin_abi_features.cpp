@@ -344,7 +344,64 @@ struct FoldFixture {
     }
 };
 
+// A raw columnar plugin: on_batch_columns gets the batch as a dftu_dataframe
+// and SIMD-reduces its `dur` column. Mirrors the slice total into a global so
+// the test can read it.
+struct ColState {
+    std::int64_t dur_sum = 0;
+};
+ColState g_col_state;
+
+void* col_make_slice(void*) { return new ColState(); }
+void col_destroy_slice(void* s) { delete static_cast<ColState*>(s); }
+void col_destroy(void*) {}
+void col_merge(void* into, void* other) {
+    static_cast<ColState*>(into)->dur_sum +=
+        static_cast<ColState*>(other)->dur_sum;
+}
+std::uint32_t col_needs(void*) { return 0; }
+const char* col_plan_query(void*) { return nullptr; }
+::dftu_task* col_on_finalize(void*, const dftu_host*) { return nullptr; }
+::dftu_task* col_on_batch_columns(void* slice, const dftu_dataframe* df,
+                                  const dftu_host*) {
+    dftu_series* col = dftu_dataframe_column(df, "dur");
+    if (col) {
+        dftu_scalar s = dftu_series_reduce(col, DFTU_REDUCE_SUM);
+        auto* st = static_cast<ColState*>(slice);
+        st->dur_sum += s.kind == DFTU_SCALAR_TAG_U64
+                           ? static_cast<std::int64_t>(s.value.u)
+                           : s.value.i;
+        g_col_state.dur_sum = st->dur_sum;
+        dftu_series_free(col);
+    }
+    return nullptr;
+}
+
 }  // namespace
+
+TEST_CASE("plugin ABI: on_batch_columns hands the batch as columns") {
+    g_col_state = {};
+    dftu_plugin p{};
+    p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
+    p.needs = col_needs;
+    p.plan_query = col_plan_query;
+    p.make_slice = col_make_slice;
+    p.on_batch = nullptr;  // uses the columnar seam instead
+    p.merge = col_merge;
+    p.on_finalize = col_on_finalize;
+    p.destroy_slice = col_destroy_slice;
+    p.destroy = col_destroy;
+    p.on_batch_columns = col_on_batch_columns;
+
+    StringIntern intern;
+    PluginFold fold(&p, intern);
+    std::vector<FoldEvent> evs = {make_event(intern, "f", "h"),
+                                  make_event(intern, "f", "h"),
+                                  make_event(intern, "f", "h")};
+    ScanUnit unit{};
+    fold.step(FoldBatch{std::span<const FoldEvent>(evs), unit, {}});
+    CHECK(g_col_state.dur_sum == 15);  // 3 events x dur 5, SIMD-reduced
+}
 
 TEST_CASE("plugin ABI: config tree reads scalars, nested, array, and default") {
     dftu_utils_test::TestEnvironment env(0);

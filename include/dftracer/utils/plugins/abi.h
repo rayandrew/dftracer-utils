@@ -120,6 +120,11 @@ typedef struct dftu_trace_writer
 typedef struct dftu_stream
     dftu_stream;                /**< pulled utility stream; plugin-owned */
 typedef struct dftu_op dftu_op; /**< composable async op node; scan-lifetime */
+/** A columnar batch/table handle for the vectorized fold seam. The concrete
+   type is the dataframe engine's (dftracer/utils/dataframe/abi.h); a plugin
+   that uses it includes that header for the dftu_dataframe and dftu_series
+   column ops. */
+typedef struct dftu_dataframe dftu_dataframe;
 
 typedef struct {
     uint64_t count;
@@ -1040,6 +1045,14 @@ typedef struct dftu_plugin {
 
     /** Optional capability discovery, symmetric to dftu_host; NULL if none. */
     const void* (*get_extension)(void* self, const char* ext_id);
+
+    /** Optional vectorized-fold seam: when set, the host hands each batch as a
+       dftu_dataframe (its events materialized into columns) instead of calling
+       on_batch per event, so the fold runs SIMD column ops in-scan. A plugin
+       sets EITHER on_batch OR this. Must be synchronous (return NULL); `df` is
+       owned by the host and valid only for the call. */
+    dftu_task* (*on_batch_columns)(void* slice, const dftu_dataframe* df,
+                                   const dftu_host* host);
 } dftu_plugin;
 
 /** The one symbol the loader resolves via dlsym; config is NULL when none
