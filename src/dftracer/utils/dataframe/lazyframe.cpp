@@ -206,6 +206,79 @@ class TailCursor : public Cursor {
     bool done_ = false;
 };
 
+// Wrap a morsel's columns in a DataFrame (dummy names), apply `fn`, and return
+// the result materialized FLAT.
+template <class Fn>
+Morsel map_frame(Morsel&& m, Fn&& fn) {
+    DataFrame tmp;
+    tmp.names.assign(m.columns.size(), std::string());
+    for (Series& c : m.columns) tmp.columns.push_back(std::move(c));
+    DataFrame r = fn(std::move(tmp));
+    Morsel out;
+    out.columns.reserve(r.columns.size());
+    for (const Series& c : r.columns) out.columns.push_back(c.materialize());
+    out.rows = out.columns.empty() ? 0 : out.columns.front().length();
+    return out;
+}
+
+// Drops rows null in any column; skips fully-dropped morsels.
+class DropNullsCursor : public Cursor {
+   public:
+    explicit DropNullsCursor(std::unique_ptr<Cursor> in) : in_(std::move(in)) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        while (auto m = in_->next(max_rows)) {
+            Morsel out = map_frame(std::move(*m),
+                                   [](DataFrame f) { return f.drop_nulls(); });
+            if (out.rows > 0) return out;
+        }
+        return std::nullopt;
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+};
+
+// Fills nulls per morsel.
+class FillNullCursor : public Cursor {
+   public:
+    FillNullCursor(std::unique_ptr<Cursor> in, dftu_scalar value)
+        : in_(std::move(in)), value_(value) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        auto m = in_->next(max_rows);
+        if (!m) return std::nullopt;
+        return map_frame(std::move(*m),
+                         [&](DataFrame f) { return f.fill_null(value_); });
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    dftu_scalar value_;
+};
+
+// Prepends a global Int64 row-index column.
+class WithRowIndexCursor : public Cursor {
+   public:
+    explicit WithRowIndexCursor(std::unique_ptr<Cursor> in)
+        : in_(std::move(in)) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        auto m = in_->next(max_rows);
+        if (!m) return std::nullopt;
+        std::vector<std::int64_t> idx(static_cast<std::size_t>(m->rows));
+        for (std::int64_t i = 0; i < m->rows; ++i) idx[i] = pos_ + i;
+        pos_ += m->rows;
+        Morsel out;
+        out.rows = m->rows;
+        out.columns.reserve(m->columns.size() + 1);
+        out.columns.push_back(Series::flat_i64(idx.data(), m->rows));
+        for (Series& c : m->columns) out.columns.push_back(std::move(c));
+        return out;
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::int64_t pos_ = 0;
+};
+
 // ---- plan ops (tagged union) ------------------------------------------------
 
 struct FilterOp {
@@ -228,6 +301,13 @@ struct SliceOp {
 struct TailOp {
     std::int64_t n;
 };
+struct DropNullsOp {};
+struct FillNullOp {
+    dftu_scalar value;
+};
+struct WithRowIndexOp {
+    std::string name;
+};
 
 template <class... Ts>
 struct overloaded : Ts... {
@@ -242,7 +322,8 @@ overloaded(Ts...) -> overloaded<Ts...>;
 // the LazyFrame plan.
 class LazyOp {
    public:
-    std::variant<FilterOp, SelectOp, WithColumnOp, RenameOp, SliceOp, TailOp>
+    std::variant<FilterOp, SelectOp, WithColumnOp, RenameOp, SliceOp, TailOp,
+                 DropNullsOp, FillNullOp, WithRowIndexOp>
         node;
 };
 
@@ -263,11 +344,17 @@ std::vector<std::string> out_schema(const LazyOp& op,
         overloaded{[&](const FilterOp&) { return in; },
                    [&](const SliceOp&) { return in; },
                    [&](const TailOp&) { return in; },
+                   [&](const DropNullsOp&) { return in; },
+                   [&](const FillNullOp&) { return in; },
                    [&](const SelectOp& o) { return o.names; },
                    [&](const RenameOp& o) { return o.names; },
                    [&](const WithColumnOp& o) {
                        if (std::find(in.begin(), in.end(), o.name) == in.end())
                            in.push_back(o.name);
+                       return in;
+                   },
+                   [&](const WithRowIndexOp& o) {
+                       in.insert(in.begin(), o.name);
                        return in;
                    }},
         op.node);
@@ -285,7 +372,10 @@ std::string describe(const LazyOp& op) {
                 return "rename [" + join_names(o.names) + "]";
             },
             [](const SliceOp&) { return std::string("slice"); },
-            [](const TailOp&) { return std::string("tail"); }},
+            [](const TailOp&) { return std::string("tail"); },
+            [](const DropNullsOp&) { return std::string("drop_nulls"); },
+            [](const FillNullOp&) { return std::string("fill_null"); },
+            [](const WithRowIndexOp& o) { return "with_row_index " + o.name; }},
         op.node);
 }
 
@@ -345,32 +435,41 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                     std::unique_ptr<Cursor> in,
                                     const std::vector<std::string>& sch) {
     return std::visit(
-        overloaded{[&](const FilterOp& o) -> std::unique_ptr<Cursor> {
-                       return std::make_unique<FilterCursor>(std::move(in),
-                                                             o.pred);
-                   },
-                   [&](const SelectOp& o) -> std::unique_ptr<Cursor> {
-                       std::vector<int> idx;
-                       idx.reserve(o.names.size());
-                       for (const std::string& nm : o.names)
-                           idx.push_back(col_index(sch, nm));
-                       return std::make_unique<SelectCursor>(std::move(in),
-                                                             std::move(idx));
-                   },
-                   [&](const WithColumnOp& o) -> std::unique_ptr<Cursor> {
-                       return std::make_unique<WithColumnCursor>(
-                           std::move(in), o.expr, col_index(sch, o.name));
-                   },
-                   [&](const RenameOp&) -> std::unique_ptr<Cursor> {
-                       return std::move(in);  // names-only; data passes through
-                   },
-                   [&](const SliceOp& o) -> std::unique_ptr<Cursor> {
-                       return std::make_unique<SliceCursor>(std::move(in),
-                                                            o.offset, o.len);
-                   },
-                   [&](const TailOp& o) -> std::unique_ptr<Cursor> {
-                       return std::make_unique<TailCursor>(std::move(in), o.n);
-                   }},
+        overloaded{
+            [&](const FilterOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<FilterCursor>(std::move(in), o.pred);
+            },
+            [&](const SelectOp& o) -> std::unique_ptr<Cursor> {
+                std::vector<int> idx;
+                idx.reserve(o.names.size());
+                for (const std::string& nm : o.names)
+                    idx.push_back(col_index(sch, nm));
+                return std::make_unique<SelectCursor>(std::move(in),
+                                                      std::move(idx));
+            },
+            [&](const WithColumnOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<WithColumnCursor>(
+                    std::move(in), o.expr, col_index(sch, o.name));
+            },
+            [&](const RenameOp&) -> std::unique_ptr<Cursor> {
+                return std::move(in);  // names-only; data passes through
+            },
+            [&](const SliceOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<SliceCursor>(std::move(in), o.offset,
+                                                     o.len);
+            },
+            [&](const TailOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<TailCursor>(std::move(in), o.n);
+            },
+            [&](const DropNullsOp&) -> std::unique_ptr<Cursor> {
+                return std::make_unique<DropNullsCursor>(std::move(in));
+            },
+            [&](const FillNullOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<FillNullCursor>(std::move(in), o.value);
+            },
+            [&](const WithRowIndexOp&) -> std::unique_ptr<Cursor> {
+                return std::make_unique<WithRowIndexCursor>(std::move(in));
+            }},
         op.node);
 }
 
@@ -426,6 +525,25 @@ LazyFrame LazyFrame::head(std::int64_t n) const { return slice(0, n); }
 LazyFrame LazyFrame::tail(std::int64_t n) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{TailOp{n}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::drop_nulls() const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{DropNullsOp{}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::fill_null(dftu_scalar value) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{FillNullOp{value}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::with_row_index(std::string name) const {
+    auto ops = ops_;
+    ops.push_back(
+        std::make_shared<LazyOp>(LazyOp{WithRowIndexOp{std::move(name)}}));
     return LazyFrame(source_, std::move(ops));
 }
 

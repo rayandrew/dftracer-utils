@@ -68,6 +68,14 @@ class LazyFrame {
     LazyFrame slice(std::int64_t offset, std::int64_t len) const;
     LazyFrame head(std::int64_t n) const;
     LazyFrame tail(std::int64_t n) const;
+    LazyFrame drop_nulls() const;
+    LazyFrame fill_null(dftu_scalar value) const;
+    /// Fill nulls with a natural C++ value; converts to each column's type.
+    template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
+    LazyFrame fill_null(T value) const {
+        return fill_null(to_scalar(value));
+    }
+    LazyFrame with_row_index(std::string name) const;
 
     /// Output column names without running the query.
     std::vector<std::string> schema() const;

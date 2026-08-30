@@ -116,6 +116,26 @@ TEST_SUITE("lazyframe") {
         CHECK(r.column("x").data<std::int64_t>()[5] == 6);
     }
 
+    TEST_CASE("streaming fill_null / drop_nulls / with_row_index") {
+        std::vector<std::int64_t> a{1, 2, 3, 4};
+        std::uint8_t bm = 0b1011;  // rows 0,1,3 valid; row 2 null
+        DataFrame df;
+        df.names = {"a"};
+        df.columns.push_back(Series::flat_i64(a.data(), 4, &bm));
+
+        DataFrame f = df.lazy().fill_null(std::int64_t{-1}).collect();
+        CHECK(f.num_rows() == 4);
+        CHECK(f.column("a").data<std::int64_t>()[2] == -1);
+
+        DataFrame d = df.lazy().drop_nulls().collect();
+        CHECK(d.num_rows() == 3);
+
+        DataFrame w = make_df().lazy().with_row_index("idx").collect(2);
+        CHECK(w.names[0] == "idx");
+        CHECK(w.column("idx").data<std::int64_t>()[0] == 0);
+        CHECK(w.column("idx").data<std::int64_t>()[5] == 5);
+    }
+
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {
         // Filter on 'c' (col 2, the added column) must NOT move up.
         auto lf = make_df()
