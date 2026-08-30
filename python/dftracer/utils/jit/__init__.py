@@ -3969,25 +3969,12 @@ def vfold(cls: type) -> type:
     return _build_vfold(cls)
 
 
-def series(fn: Callable[..., object]) -> Callable[..., object]:
-    """Author a reusable column op from an expression over its arguments.
-
-    The body builds a lazy column expression from its Series arguments using the
-    columnar DSL (arithmetic, comparisons, clip/cast/fillna, prims), e.g.::
-
-        @jit.series
-        def doubled(dur):
-            return dur * 2
-
-    It registers under the function name in dftracer.utils.jit.ops and returns a
-    callable, so both ``doubled(s)`` and ``ops.doubled(s)`` apply it via the
-    engine's Expr evaluator - no compile step, and it fuses with built-in Expr
-    math. Arguments are positional column operands."""
+def _series_impl(fn: Callable[..., object], module: "str | None") -> Callable[..., object]:
     from ..columnar import Expr, col
     from . import ops as _ops
 
-    name = getattr(fn, "__name__", None)
-    if not isinstance(name, str):
+    fname = getattr(fn, "__name__", None)
+    if not isinstance(fname, str):
         raise JitError("@jit.series must decorate a named function")
     params = builtins.list(inspect.signature(fn).parameters.values())
     if any(p.kind not in (p.POSITIONAL_OR_KEYWORD, p.POSITIONAL_ONLY) for p in params):
@@ -3998,8 +3985,30 @@ def series(fn: Callable[..., object]) -> Callable[..., object]:
     built = fn(*[col(f"__x{i}__") for i in range(n)])
     if not isinstance(built, Expr):
         raise JitError("@jit.series body must return a column expression built from its arguments")
+    name = f"{module}.{fname}" if module else fname
     _ops._register_user(name, n, built)
     return _ops.get(name)
+
+
+def series(fn: "Callable[..., object] | None" = None, *, module: "str | None" = None) -> object:
+    """Author a reusable column op from an expression over its arguments.
+
+    The body builds a lazy column expression from its Series arguments using the
+    columnar DSL (arithmetic, comparisons, clip/cast/fillna, prims), e.g.::
+
+        @jit.series
+        def doubled(dur):
+            return dur * 2
+
+    It registers in dftracer.utils.jit.ops and returns a callable, so both
+    ``doubled(s)`` and ``ops.doubled(s)`` apply it via the engine's Expr
+    evaluator - no compile step, and it fuses with built-in Expr math. Pass
+    ``module="stats"`` to group it as ``stats.<name>``, reachable as
+    ``ops.run("stats.<name>", s)`` and ``s.ops.stats.<name>()``. Arguments are
+    positional column operands."""
+    if fn is None:
+        return lambda f: _series_impl(f, module)
+    return _series_impl(fn, module)
 
 
 @overload

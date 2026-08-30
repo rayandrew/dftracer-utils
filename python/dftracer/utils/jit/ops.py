@@ -102,8 +102,29 @@ def info(name: str) -> Dict[str, object]:
     return _ext.op_info(name)
 
 
-def __getattr__(name: str) -> Callable[..., Result]:
-    # ops.add / ops.str_contains / a user op ... resolve to a bound callable.
+def _is_module(name: str) -> bool:
+    """True if `name` is a module prefix, i.e. some user op is `name.<op>`."""
+    prefix = name + "."
+    return any(k.startswith(prefix) for k in _USER)
+
+
+class _ModuleNs:
+    """A module namespace: ``ops.stats.zscore(a, b)`` runs the user op
+    ``stats.zscore``."""
+
+    __slots__ = ("_prefix",)
+
+    def __init__(self, prefix: str) -> None:
+        self._prefix = prefix
+
+    def __getattr__(self, name: str) -> Callable[..., Result]:
+        return get(f"{self._prefix}.{name}")
+
+
+def __getattr__(name: str):
+    # ops.add / a user op -> a bound callable; ops.<module> -> a namespace.
     if name in _USER or name in _ext.op_list():
         return get(name)
+    if _is_module(name):
+        return _ModuleNs(name)
     raise AttributeError(f"module {__name__!r} has no op or attribute {name!r}")

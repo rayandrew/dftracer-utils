@@ -48,6 +48,18 @@ def test_series_op_arity_mismatch_raises():
         ops.run("triple", _col([1]), _col([2]))
 
 
+def test_series_op_module_grouping():
+    @jit.series(module="stats")
+    def scaled(dur):
+        return dur * 10
+
+    s = _col([1, 2, 3])
+    assert _vals(ops.run("stats.scaled", s)) == [10, 20, 30]  # by dotted name
+    assert _vals(ops.stats.scaled(s)) == [10, 20, 30]  # ops.<module>.<name>
+    assert _vals(s.ops.stats.scaled()) == [10, 20, 30]  # s.ops.<module>.<name>
+    assert "stats.scaled" in ops.list()
+
+
 def test_series_op_rejects_non_expr_body():
     with pytest.raises(jit.JitError):
 

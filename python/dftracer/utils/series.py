@@ -125,20 +125,26 @@ _SeriesOrScalar = Union["Series", int, float]
 
 class _OpsAccessor:
     """Runs any registered op as a method on a Series: a built-in
-    (``s.ops.add(other)``, ``s.ops.count()``) or a @jit.series user op
-    (``s.ops.mydouble()``). The Series is the first operand; extra operands
-    follow. Returns a Series for a column op, or a scalar for a reducer."""
+    (``s.ops.add(other)``, ``s.ops.count()``), a @jit.series user op
+    (``s.ops.mydouble()``), or a module namespace (``s.ops.stats.zscore()``).
+    The Series is the first operand; extra operands follow. Returns a Series for
+    a column op, or a scalar for a reducer."""
 
-    __slots__ = ("_series",)
+    __slots__ = ("_series", "_prefix")
 
-    def __init__(self, series: "Series") -> None:
+    def __init__(self, series: "Series", prefix: str = "") -> None:
         self._series = series
+        self._prefix = prefix
 
-    def __getattr__(self, name: str) -> "Callable[..., object]":
+    def __getattr__(self, name: str) -> object:
         from .jit import ops as _ops  # lazy: jit imports series
 
+        full = f"{self._prefix}.{name}" if self._prefix else name
+        if not self._prefix and _ops._is_module(name):
+            return _OpsAccessor(self._series, name)
+
         def call(*rest: "Union[Series, int, float, str]") -> object:
-            return _ops.run(name, self._series, *rest)
+            return _ops.run(full, self._series, *rest)
 
         call.__name__ = name
         return call
