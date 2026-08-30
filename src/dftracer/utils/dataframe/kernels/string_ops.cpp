@@ -2,6 +2,7 @@
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/substr_simd.h>
 #include <dftracer/utils/dataframe/kernels/string_ops.h>
+#include <dftracer/utils/dataframe/parallel.h>
 
 #include <cstring>
 #include <regex>
@@ -40,6 +41,8 @@ namespace {
 using dftracer::utils::dataframe::Buffer;
 using dftracer::utils::dataframe::buffer_bytes;
 using dftracer::utils::dataframe::Encoding;
+using dftracer::utils::dataframe::parallel_backend_installed;
+using dftracer::utils::dataframe::parallel_for;
 using dftracer::utils::dataframe::TypeId;
 
 std::string_view value_at(const dftu_series& c, std::int64_t i) {
@@ -50,10 +53,19 @@ std::string_view value_at(const dftu_series& c, std::int64_t i) {
                             static_cast<std::size_t>(off[i + 1] - off[i]));
 }
 
+// Row grain for the parallel FLAT predicate loop: a multiple of 8 so every
+// chunk boundary (except the very last) falls on a byte boundary of the
+// bit-packed output, giving disjoint bytes per task with no atomics needed.
+constexpr std::int64_t STRING_PREDICATE_GRAIN = 1 << 15;
+
 // Apply a string predicate, returning a Bool column. On a DICTIONARY input the
 // predicate is evaluated once per dictionary entry, then codes are mapped.
+// `heavy` marks a compute-bound predicate (regex, glob) worth fanning out
+// through the parallel_for seam on the FLAT path; cheap byte-compare
+// predicates are bandwidth-bound and stay serial.
 template <class Pred>
-dftu_series* string_predicate(const dftu_series* v, Pred pred) {
+dftu_series* string_predicate(const dftu_series* v, Pred pred,
+                              bool heavy = false) {
     if (v->type != TypeId::String && v->type != TypeId::Binary) return nullptr;
 
     auto* out = new dftu_series();
@@ -71,8 +83,17 @@ dftu_series* string_predicate(const dftu_series* v, Pred pred) {
     };
 
     if (v->encoding == Encoding::Flat) {
-        for (std::int64_t i = 0; i < v->length; ++i)
-            if (pred(value_at(*v, i))) set(i);
+        if (heavy && v->length > STRING_PREDICATE_GRAIN &&
+            parallel_backend_installed()) {
+            parallel_for(v->length, STRING_PREDICATE_GRAIN,
+                         [&](std::int64_t b, std::int64_t e) {
+                             for (std::int64_t i = b; i < e; ++i)
+                                 if (pred(value_at(*v, i))) set(i);
+                         });
+        } else {
+            for (std::int64_t i = 0; i < v->length; ++i)
+                if (pred(value_at(*v, i))) set(i);
+        }
     } else if (v->encoding == Encoding::Dictionary && v->child) {
         const dftu_series& dict = *v->child;
         std::vector<char> hit(static_cast<std::size_t>(dict.length));
@@ -463,9 +484,12 @@ dftu_series* dftu_series_str_matches(const dftu_series* v, const char* pattern,
     } catch (const std::regex_error&) {
         return nullptr;
     }
-    return string_predicate(v, [&re](std::string_view s) {
-        return std::regex_match(s.begin(), s.end(), re);
-    });
+    return string_predicate(
+        v,
+        [&re](std::string_view s) {
+            return std::regex_match(s.begin(), s.end(), re);
+        },
+        /*heavy=*/true);
 }
 
 dftu_series* dftu_series_str_like(const dftu_series* v, const char* pattern,
@@ -519,9 +543,12 @@ dftu_series* dftu_series_str_like(const dftu_series* v, const char* pattern,
                                static_cast<std::int64_t>(mid.size())) >= 0;
         });
     }
-    return string_predicate(v, [toks = std::move(toks)](std::string_view s) {
-        return glob_match(toks, s);
-    });
+    return string_predicate(
+        v,
+        [toks = std::move(toks)](std::string_view s) {
+            return glob_match(toks, s);
+        },
+        /*heavy=*/true);
 }
 
 dftu_series* dftu_series_str_len_bytes(const dftu_series* v) {

@@ -366,5 +366,68 @@ int main(int argc, char** argv) {
                 uni_ser, uni_par, uni_ser / uni_par, uni_ok ? "OK" : "MISMATCH");
     ok = ok && uni_ok;
 
+    // String predicate row loop (regex / LIKE): the compute-bound per-row
+    // scan parallelized on 8-row (byte) chunk boundaries in string_ops.cpp.
+    const std::int64_t srows = 5'000'000;
+    std::vector<std::string> str_vals(static_cast<std::size_t>(srows));
+    for (std::int64_t i = 0; i < srows; ++i)
+        str_vals[static_cast<std::size_t>(i)] =
+            "event_" + std::to_string(i % 97) + "_tag" + std::to_string(i % 13);
+    Series str_col = Series::strings(str_vals);
+
+    auto time_regex = [&](int reps) {
+        double best = 1e300;
+        for (int r = 0; r < reps; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            Series mask = str_col.str_matches("event_[0-9]+_tag1.*");
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(mask.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    const double re_ser = time_regex(3);
+    Series re_serial_out = str_col.str_matches("event_[0-9]+_tag1.*");
+    install_runtime_parallel_backend();
+    const double re_par = time_regex(3);
+    Series re_par_out = str_col.str_matches("event_[0-9]+_tag1.*");
+    bool re_ok = re_serial_out.length() == re_par_out.length();
+    for (std::int64_t i = 0; re_ok && i < re_serial_out.length(); ++i)
+        re_ok = bit_at(re_serial_out, i) == bit_at(re_par_out, i);
+    std::printf("str_matches (regex): serial %8.2f ms | runtime %8.2f ms "
+                "(%.2fx) correctness: %s\n",
+                re_ser, re_par, re_ser / re_par, re_ok ? "OK" : "MISMATCH");
+    ok = ok && re_ok;
+
+    auto time_like = [&](int reps) {
+        double best = 1e300;
+        for (int r = 0; r < reps; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            Series mask = str_col.str_like("event_%_tag1?");
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(mask.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    const double lk_ser = time_like(3);
+    Series lk_serial_out = str_col.str_like("event_%_tag1?");
+    install_runtime_parallel_backend();
+    const double lk_par = time_like(3);
+    Series lk_par_out = str_col.str_like("event_%_tag1?");
+    bool lk_ok = lk_serial_out.length() == lk_par_out.length();
+    for (std::int64_t i = 0; lk_ok && i < lk_serial_out.length(); ++i)
+        lk_ok = bit_at(lk_serial_out, i) == bit_at(lk_par_out, i);
+    std::printf("str_like (glob): serial %8.2f ms | runtime %8.2f ms (%.2fx) "
+                "correctness: %s\n",
+                lk_ser, lk_par, lk_ser / lk_par, lk_ok ? "OK" : "MISMATCH");
+    ok = ok && lk_ok;
+
     return ok ? 0 : 1;
 }
