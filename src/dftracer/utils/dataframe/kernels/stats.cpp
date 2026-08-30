@@ -9,6 +9,7 @@
 #include <dftracer/utils/dataframe/parallel.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -480,22 +481,63 @@ Series interpolate(const Series& v) {
         }
         return Series::flat(TypeId::Float64, out.data(), n, valid.data());
     }
-    std::int64_t prev = -1;  // last non-null row seen
+    // Collect anchors (non-null rows) first; the null runs between
+    // consecutive anchors are then independent of each other, so they can be
+    // filled in parallel once the anchor list (and its values) is known.
+    std::vector<std::int64_t> anchors;
     for (std::int64_t i = 0; i < n; ++i) {
         if (v.is_null(i)) continue;
-        const double cur = read_f64(v, i);
-        out[static_cast<std::size_t>(i)] = cur;
+        out[static_cast<std::size_t>(i)] = read_f64(v, i);
         mark(i);
-        if (prev >= 0 && i - prev > 1) {
-            const double a = out[static_cast<std::size_t>(prev)];
-            const double span = static_cast<double>(i - prev);
-            for (std::int64_t j = prev + 1; j < i; ++j) {
-                const double t = static_cast<double>(j - prev) / span;
+        anchors.push_back(i);
+    }
+    constexpr std::int64_t INTERPOLATE_GRAIN = 1 << 16;
+    const std::int64_t npairs = static_cast<std::int64_t>(anchors.size()) - 1;
+    if (parallel_backend_installed() && npairs > INTERPOLATE_GRAIN) {
+        // Two threads filling adjacent runs can land bits in the same
+        // validity byte, so bit-sets here must be atomic (a plain `|=` would
+        // race); fold into the plain bitmap once every run is filled.
+        std::vector<std::atomic<std::uint8_t>> avalid(valid.size());
+        for (std::size_t i = 0; i < valid.size(); ++i) avalid[i] = valid[i];
+        auto amark = [&](std::int64_t i) {
+            avalid[static_cast<std::size_t>(i >> 3)].fetch_or(
+                static_cast<std::uint8_t>(1u << (i & 7)),
+                std::memory_order_relaxed);
+        };
+        parallel_for(
+            npairs, INTERPOLATE_GRAIN, [&](std::int64_t b, std::int64_t e) {
+                for (std::int64_t k = b; k < e; ++k) {
+                    const std::int64_t i0 =
+                        anchors[static_cast<std::size_t>(k)];
+                    const std::int64_t i1 =
+                        anchors[static_cast<std::size_t>(k) + 1];
+                    if (i1 - i0 <= 1) continue;
+                    const double a = out[static_cast<std::size_t>(i0)];
+                    const double cur = out[static_cast<std::size_t>(i1)];
+                    const double span = static_cast<double>(i1 - i0);
+                    for (std::int64_t j = i0 + 1; j < i1; ++j) {
+                        const double t = static_cast<double>(j - i0) / span;
+                        out[static_cast<std::size_t>(j)] = a + (cur - a) * t;
+                        amark(j);
+                    }
+                }
+            });
+        for (std::size_t i = 0; i < valid.size(); ++i)
+            valid[i] = avalid[i].load(std::memory_order_relaxed);
+    } else {
+        for (std::int64_t k = 0; k < npairs; ++k) {
+            const std::int64_t i0 = anchors[static_cast<std::size_t>(k)];
+            const std::int64_t i1 = anchors[static_cast<std::size_t>(k) + 1];
+            if (i1 - i0 <= 1) continue;
+            const double a = out[static_cast<std::size_t>(i0)];
+            const double cur = out[static_cast<std::size_t>(i1)];
+            const double span = static_cast<double>(i1 - i0);
+            for (std::int64_t j = i0 + 1; j < i1; ++j) {
+                const double t = static_cast<double>(j - i0) / span;
                 out[static_cast<std::size_t>(j)] = a + (cur - a) * t;
                 mark(j);
             }
         }
-        prev = i;
     }
     return Series::flat(TypeId::Float64, out.data(), n, valid.data());
 }
