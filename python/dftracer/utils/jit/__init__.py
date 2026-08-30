@@ -106,6 +106,7 @@ __all__ = [
     "argmin_row",
     "argmax_row",
     "record",
+    "config",
     "each_event",
     "vfold",
     "each_batch",
@@ -235,6 +236,28 @@ u32: _Type[int] = _Type("DFTU_T_U32")
 u64: _Type[int] = _Type("DFTU_T_U64")
 f32: _Type[float] = _Type("DFTU_T_F32")
 f64: _Type[float] = _Type("DFTU_T_F64")
+
+
+class _Config(Generic[T_co]):
+    """A runtime config field marker (jit.config). Read from the plugin's load
+    config into a file-scope static and referenced in the body as self.<name>."""
+
+    __slots__ = ("dft",)
+
+    def __init__(self, dft: str) -> None:
+        self.dft = dft
+
+
+def config(of: "_Type[T_co]") -> T_co:
+    """Declare a runtime config field bound at load from PluginHost config.
+
+    ``threshold = jit.config(jit.i64)`` reads ``config["threshold"]`` into the
+    plugin and the body reads it as ``self.threshold``. Any numeric type works
+    (all integer/float widths ride the int64/double slot); a string config is
+    not supported yet (interning it needs the host, absent at load time)."""
+    if of.dft in ("DFTU_T_STR", "DFTU_T_BYTES"):
+        raise JitError("jit.config supports a numeric type; a string config is not supported yet")
+    return cast(T_co, _Config(of.dft))
 
 
 class _Sentinel:
@@ -1729,6 +1752,7 @@ class _Compiler:
         ports: Dict[str, _Port] | None = None,
         shared: Dict[str, _Shared] | None = None,
         resolve_flags: builtins.set[str] | None = None,
+        config_fields: "Dict[str, bool] | None" = None,
     ) -> None:
         self.maps = maps
         self.joins = joins if joins is not None else builtins.set()
@@ -1738,6 +1762,9 @@ class _Compiler:
         # Flags a @jit.on_resolve method sets; each_event reads them as
         # self.<flag>, lowering to the file-scope _rflag_<flag> static.
         self.resolve_flags = resolve_flags if resolve_flags is not None else builtins.set()
+        # Config fields {name: is_f64}; each_event reads them as self.<name>,
+        # lowering to the file-scope _cfg_<name> static set at load.
+        self.config_fields = config_fields if config_fields is not None else {}
         # Referenced @jit.op transforms, inlined into the plugin as static C
         # functions the moment the body calls one.
         self.ops = ops if ops is not None else {}
@@ -2618,6 +2645,8 @@ class _Compiler:
                 return self._consume_ref(node.attr)
             if node.value.id == self.self_name and node.attr in self.resolve_flags:
                 return f"_rflag_{node.attr}"
+            if node.value.id == self.self_name and node.attr in self.config_fields:
+                return f"_cfg_{node.attr}"
             if node.value.id == self.event_name:
                 return self._field(node.attr)
             if node.attr == "NONE":
@@ -2662,6 +2691,8 @@ class _Compiler:
                 return self._consume_ref(node.attr), port.is_f64
             if node.value.id == self.self_name and node.attr in self.resolve_flags:
                 return f"_rflag_{node.attr}", False
+            if node.value.id == self.self_name and node.attr in self.config_fields:
+                return f"_cfg_{node.attr}", self.config_fields[node.attr]
             if node.value.id == self.event_name:
                 return self._field(node.attr), False
         if isinstance(node, ast.Constant):
@@ -3076,6 +3107,7 @@ def _emit(
     shared: Dict[str, _Shared] | None = None,
     resolve_flags: List[str] | None = None,
     resolve_body: List[str] | None = None,
+    config_fields: "Dict[str, bool] | None" = None,
 ) -> str:
     fused_groups = fused_groups or []
     fused_of = fused_of or {}
@@ -3131,6 +3163,20 @@ def _emit(
         out.append(f"static dftu_str argkey_{idx};")
     if arg_keys:
         out += ["static int args_resolved = 0;", ""]
+    cfgs = config_fields if config_fields is not None else {}
+    for cn, is_f in cfgs.items():
+        out.append(f"static {'double' if is_f else 'int64_t'} _cfg_{cn} = 0;")
+    if cfgs:
+        out.append("")
+    # Config reads for the factory: (void)config then one dftu_as_* per field.
+    cfg_reads = "\n".join(
+        ["    (void)config;"]
+        + [
+            f"    _cfg_{cn} = dftu_as_{'f64' if is_f else 'i64'}"
+            f"(dftu_obj_get(config, {_c_str_literal(cn)}), {'0.0' if is_f else '0'});"
+            for cn, is_f in cfgs.items()
+        ]
+    )
     if plan_query is not None:
         out += [
             "static const char* plan_query(void* self) {",
@@ -3300,7 +3346,7 @@ def _emit(
             'extern "C"',
             "#endif",
             "dftu_plugin* dftracer_plugin(const dftu_value* config) {",
-            "    (void)config;",
+            cfg_reads,
             "    g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;",
             "    g_plugin.self = NULL;",
             "    g_plugin.needs = needs;",
@@ -3392,6 +3438,7 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
     join_decls: Dict[str, JoinDecl] = {}
     ports: Dict[str, _Port] = {}
     shared: Dict[str, _Shared] = {}
+    configs: Dict[str, _Config] = {}
     each: List[_EachEvent] = []
     resolves: List[_OnResolve] = []
     for attr, val in vars(cls).items():
@@ -3403,6 +3450,8 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
             ports[attr] = val
         elif isinstance(val, _Shared):
             shared[attr] = val
+        elif isinstance(val, _Config):
+            configs[attr] = val
         elif isinstance(val, _EachEvent):
             each.append(val)
         elif isinstance(val, _OnResolve):
@@ -3427,6 +3476,8 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
     if plan_query is not None and not isinstance(plan_query, str):
         raise JitError("@jit.plugin plan_query must be a query DSL string")
     explicit_needs = _resolve_needs(needs)
+    # {name: is_f64} for config fields, read into a body-visible static.
+    config_f64 = {n: c.dft in ("DFTU_T_F64", "DFTU_T_F32") for n, c in configs.items()}
     fused_groups: List[_FusedGroup] = []
     fused_of: Dict[str, Tuple[str, int, bool]] = {}
     op_defs: List[str] = []
@@ -3450,6 +3501,7 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
             ports=ports,
             shared=shared,
             resolve_flags=builtins.set(resolve_flags),
+            config_fields=config_f64,
         )
         body = compiler.lower(each[0].fn)
         inferred_needs = compiler.needs | explicit_needs
@@ -3479,6 +3531,7 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
         shared,
         resolve_flags,
         resolve_body,
+        config_f64,
     )
     renames = {
         attr: builtins.list(decl.value_names)
