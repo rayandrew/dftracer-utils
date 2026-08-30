@@ -283,6 +283,35 @@ TEST_SUITE("lazyframe") {
         CHECK(gd.names == std::vector<std::string>{"t", "sum"});
         CHECK(gd.num_rows() == 2);  // windows [0,2), [2,4)
         CHECK(gd.column("sum").data<std::int64_t>()[0] == 2);
+
+        // Streaming windowed agg must match eager across a multi-morsel scan,
+        // including a sliding window (period > every). Ascending time.
+        std::vector<std::int64_t> bt(60), bv(60);
+        for (std::int64_t i = 0; i < 60; ++i) {
+            bt[static_cast<std::size_t>(i)] = i;
+            bv[static_cast<std::size_t>(i)] = i * 2;
+        }
+        DataFrame wf;
+        wf.names = {"t", "v"};
+        wf.columns.push_back(Series::flat_i64(bt.data(), 60));
+        wf.columns.push_back(Series::flat_i64(bv.data(), 60));
+        std::vector<GroupAgg> wa{{Agg::Sum, "v", "s", 0.0},
+                                 {Agg::Count, "", "c", 0.0}};
+        DataFrame wl =
+            wf.lazy().group_by_dynamic("t", 5, 12, wa).collect(7);  // sliding
+        DataFrame we = wf.group_by_dynamic("t", 5, 12, wa);
+        REQUIRE(wl.num_rows() == we.num_rows());
+        const std::int64_t* lt = wl.column("t").data<std::int64_t>();
+        const std::int64_t* et = we.column("t").data<std::int64_t>();
+        const std::int64_t* ls = wl.column("s").data<std::int64_t>();
+        const std::int64_t* es = we.column("s").data<std::int64_t>();
+        const std::int64_t* lc = wl.column("c").data<std::int64_t>();
+        const std::int64_t* ec = we.column("c").data<std::int64_t>();
+        for (std::int64_t i = 0; i < wl.num_rows(); ++i) {
+            CHECK(lt[i] == et[i]);
+            CHECK(ls[i] == es[i]);
+            CHECK(lc[i] == ec[i]);
+        }
     }
 
     TEST_CASE("data-dependent schema: pivot / to_dummies / describe") {

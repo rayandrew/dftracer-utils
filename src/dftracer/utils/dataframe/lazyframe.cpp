@@ -79,6 +79,14 @@ bool is_numeric(TypeId t) {
     }
 }
 
+// Round `x` down to a multiple of `m` (toward negative infinity). Matches the
+// eager group_by_dynamic grid.
+std::int64_t floor_to_multiple(std::int64_t x, std::int64_t m) {
+    std::int64_t q = x / m;
+    if ((x % m) != 0 && x < 0) --q;
+    return q * m;
+}
+
 // Read a numeric cell as a double for key comparison (FLAT columns only).
 double read_num(const Series& c, std::int64_t i) {
     switch (c.type()) {
@@ -663,6 +671,129 @@ class GroupByCursor : public Cursor {
     std::vector<std::string> sch_;
     std::string key_;
     std::vector<GroupAgg> aggs_;
+    bool done_ = false;
+};
+
+// Streaming tumbling/sliding time-window aggregation over an ascending Int64
+// time column. Explodes each event into the windows it falls in and feeds one
+// mergeable agg state, so state is bounded by the window count (the output) not
+// the input. Requires ascending time: the grid is anchored on the first event
+// (= the minimum), matching DataFrame::group_by_dynamic.
+class GroupByDynamicCursor : public Cursor {
+   public:
+    GroupByDynamicCursor(std::unique_ptr<Cursor> in,
+                         std::vector<std::string> sch, std::string time_col,
+                         std::int64_t every, std::int64_t period,
+                         std::vector<GroupAgg> aggs, std::int64_t origin,
+                         bool origin_min)
+        : in_(std::move(in)),
+          sch_(std::move(sch)),
+          time_col_(std::move(time_col)),
+          every_(every),
+          period_(period),
+          aggs_(std::move(aggs)),
+          origin_(origin),
+          origin_min_(origin_min) {}
+
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (done_) return std::nullopt;
+        done_ = true;
+        if (every_ <= 0)
+            throw std::invalid_argument("group_by_dynamic: every must be > 0");
+        const std::int64_t period = period_ <= 0 ? every_ : period_;
+
+        const int ti = index_in(sch_, time_col_);
+        if (ti < 0)
+            throw std::out_of_range("group_by_dynamic: no column named " +
+                                    time_col_);
+
+        std::vector<AggSpec> specs;
+        std::vector<int> value_idx;
+        ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
+        specs.reserve(aggs_.size());
+        for (const GroupAgg& a : aggs_) {
+            AggSpec sp;
+            sp.op = to_agg_op(a.op);
+            sp.out = a.out;
+            sp.param = a.param;
+            if (sp.op == AggOp::Count) {
+                sp.value_col = -1;
+            } else {
+                auto it = dedup.find(a.column);
+                if (it != dedup.end()) {
+                    sp.value_col = it->second;
+                } else {
+                    sp.value_col = static_cast<std::int32_t>(value_idx.size());
+                    value_idx.push_back(index_in(sch_, a.column));
+                    dedup.emplace(a.column, sp.value_col);
+                }
+            }
+            specs.push_back(std::move(sp));
+        }
+
+        AggStatePtr state = agg_new(specs);
+        bool anchored = false;
+        std::int64_t start0 = 0, origin = origin_;
+        while (auto m = in_->next(max_rows)) {
+            const Series& tc = m->columns[static_cast<std::size_t>(ti)];
+            if (tc.type() != TypeId::Int64)
+                throw std::invalid_argument("group_by_dynamic: " + time_col_ +
+                                            " must be an Int64 column");
+            const std::int64_t n = m->rows;
+            const std::int64_t* t = tc.data<std::int64_t>();
+            if (!anchored) {
+                for (std::int64_t i = 0; i < n; ++i)
+                    if (!tc.is_null(i)) {
+                        if (origin_min_) origin = t[i];
+                        start0 =
+                            origin + floor_to_multiple(t[i] - origin, every_);
+                        anchored = true;
+                        break;
+                    }
+                if (!anchored) continue;
+            }
+            std::vector<std::int64_t> keyv, rowsv;
+            for (std::int64_t i = 0; i < n; ++i) {
+                if (tc.is_null(i)) continue;
+                const std::int64_t ts = t[i];
+                std::int64_t k = (ts - start0) / every_;
+                for (; k >= 0; --k) {
+                    const std::int64_t s = start0 + k * every_;
+                    if (s <= ts - period) break;
+                    keyv.push_back(s);
+                    rowsv.push_back(i);
+                }
+            }
+            if (keyv.empty()) continue;
+            Series keyc = Series::flat_i64(
+                keyv.data(), static_cast<std::int64_t>(keyv.size()));
+            std::vector<Series> gathered;
+            gathered.reserve(value_idx.size());
+            for (int vi : value_idx)
+                gathered.push_back(
+                    m->columns[static_cast<std::size_t>(vi)].take(rowsv));
+            std::vector<const Series*> values;
+            values.reserve(gathered.size());
+            for (const Series& g : gathered) values.push_back(&g);
+            agg_accumulate(*state, keyc, values);
+        }
+        DataFrame r = agg_finalize(*state, time_col_).sort_by(time_col_, false);
+        return morsel_of(std::move(r));
+    }
+
+   private:
+    static int index_in(const std::vector<std::string>& s,
+                        const std::string& n) {
+        auto it = std::find(s.begin(), s.end(), n);
+        return it == s.end() ? -1 : static_cast<int>(it - s.begin());
+    }
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    std::string time_col_;
+    std::int64_t every_, period_;
+    std::vector<GroupAgg> aggs_;
+    std::int64_t origin_;
+    bool origin_min_;
     bool done_ = false;
 };
 
@@ -1385,12 +1516,9 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                     });
             },
             [&](const GroupByDynamicOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<BufferSinkCursor>(
-                    std::move(in), sch, [o](DataFrame&& f) {
-                        return f.group_by_dynamic(o.time_col, o.every, o.period,
-                                                  o.aggs, o.origin,
-                                                  o.origin_min);
-                    });
+                return std::make_unique<GroupByDynamicCursor>(
+                    std::move(in), sch, o.time_col, o.every, o.period, o.aggs,
+                    o.origin, o.origin_min);
             },
             [&](const PivotOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<BufferSinkCursor>(

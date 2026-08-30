@@ -110,7 +110,9 @@ class LazyFrame {
     LazyFrame is_duplicated() const;
     /// One Bool column: true where the whole row is unique. Buffers input.
     LazyFrame is_unique() const;
-    /// Tumbling/sliding time-window aggregation. Buffers input.
+    /// Tumbling/sliding time-window aggregation over an ascending Int64 time
+    /// column. Streaming: holds one agg state per open window (bounded by the
+    /// window count, not the input). Requires ascending time.
     LazyFrame group_by_dynamic(std::string time_col, std::int64_t every,
                                std::int64_t period, std::vector<GroupAgg> aggs,
                                std::int64_t origin = 0,
