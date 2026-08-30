@@ -310,10 +310,17 @@ TEST_SUITE("lazyframe") {
         CHECK(p.num_rows() == 2);     // i in {0,1}
         CHECK(p.num_columns() == 3);  // i + two k-values
 
-        // describe: some stats rows, non-empty schema after collect.
-        DataFrame ds = make_df().lazy().describe().collect();
-        CHECK(ds.num_rows() > 0);
-        CHECK(!ds.names.empty());
+        // describe: streaming stats must match eager, across small morsels.
+        DataFrame ds = make_df().lazy().describe().collect(2);
+        DataFrame de = make_df().describe();
+        REQUIRE(ds.names == de.names);
+        REQUIRE(ds.num_rows() == de.num_rows());  // 6 statistics
+        for (const std::string& cn : {std::string("a"), std::string("b")}) {
+            const double* s = ds.column(cn).data<double>();
+            const double* e = de.column(cn).data<double>();
+            for (std::int64_t r = 0; r < ds.num_rows(); ++r)
+                CHECK(s[r] == doctest::Approx(e[r]));
+        }
     }
 
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {

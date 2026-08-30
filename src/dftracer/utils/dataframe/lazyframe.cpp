@@ -8,6 +8,7 @@
 #include <dftracer/utils/dataframe/types.h>  // byte_width, buffer_bytes
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -56,6 +57,26 @@ Morsel morsel_of(DataFrame&& f) {
     out.columns.reserve(f.columns.size());
     for (const Series& c : f.columns) out.columns.push_back(c.materialize());
     return out;
+}
+
+// Integer/float column (matches DataFrame::describe's column selection: Bool
+// and variable-width/nested types are excluded).
+bool is_numeric(TypeId t) {
+    switch (t) {
+        case TypeId::Int8:
+        case TypeId::Int16:
+        case TypeId::Int32:
+        case TypeId::Int64:
+        case TypeId::Uint8:
+        case TypeId::Uint16:
+        case TypeId::Uint32:
+        case TypeId::Uint64:
+        case TypeId::Float32:
+        case TypeId::Float64:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // Read a numeric cell as a double for key comparison (FLAT columns only).
@@ -926,8 +947,91 @@ class UniqueCursor : public Cursor {
     ankerl::unordered_dense::set<std::string> seen_;
 };
 
+// Streaming per-column summary statistics, matching DataFrame::describe. One
+// pass with O(numeric columns) state: count/null_count and running min/max plus
+// Welford (mean, M2) for mean/sample-std. Output columns are data-dependent
+// (one per numeric input column), reported via out_names().
+class DescribeCursor : public Cursor {
+   public:
+    DescribeCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch)
+        : in_(std::move(in)), sch_(std::move(sch)) {}
+
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (done_) return std::nullopt;
+        done_ = true;
+        struct Acc {
+            std::int64_t n = 0, nulls = 0;
+            double mean = 0, m2 = 0, mn = 0, mx = 0;
+            bool init = false;
+        };
+        std::vector<int> num_idx;
+        std::vector<Acc> acc;
+        bool first = true;
+        while (auto m = in_->next(max_rows)) {
+            if (first) {
+                first = false;
+                for (std::size_t c = 0; c < m->columns.size(); ++c)
+                    if (is_numeric(m->columns[c].type()))
+                        num_idx.push_back(static_cast<int>(c));
+                acc.resize(num_idx.size());
+            }
+            for (std::size_t j = 0; j < num_idx.size(); ++j) {
+                const Series& col =
+                    m->columns[static_cast<std::size_t>(num_idx[j])];
+                Acc& a = acc[j];
+                for (std::int64_t i = 0; i < m->rows; ++i) {
+                    if (col.is_null(i)) {
+                        ++a.nulls;
+                        continue;
+                    }
+                    const double x = read_num(col, i);
+                    ++a.n;
+                    if (!a.init) {
+                        a.mn = a.mx = x;
+                        a.init = true;
+                    } else {
+                        a.mn = std::min(a.mn, x);
+                        a.mx = std::max(a.mx, x);
+                    }
+                    const double d = x - a.mean;
+                    a.mean += d / static_cast<double>(a.n);
+                    a.m2 += d * (x - a.mean);
+                }
+            }
+        }
+        DataFrame out;
+        out.names.push_back("statistic");
+        out.columns.push_back(Series::strings(
+            {"count", "null_count", "mean", "std", "min", "max"}));
+        for (std::size_t j = 0; j < num_idx.size(); ++j) {
+            const Acc& a = acc[j];
+            const double vals[6] = {
+                static_cast<double>(a.n),
+                static_cast<double>(a.nulls),
+                a.mean,
+                a.n > 1 ? std::sqrt(a.m2 / static_cast<double>(a.n - 1)) : 0.0,
+                a.init ? a.mn : 0.0,
+                a.init ? a.mx : 0.0};
+            out.columns.push_back(Series::flat_f64(vals, 6));
+            out.names.push_back(sch_[static_cast<std::size_t>(num_idx[j])]);
+        }
+        produced_ = out.names;
+        return morsel_of(std::move(out));
+    }
+
+    std::optional<std::vector<std::string>> out_names() const override {
+        return produced_;
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    bool done_ = false;
+    std::vector<std::string> produced_;
+};
+
 // Pipeline breakers that need all rows: buffer the input, apply `fn` once.
-// (pivot/describe/group_by_dynamic; a spillable form is a follow-up.)
+// (pivot/to_dummies/group_by_dynamic; a spillable form is a follow-up.)
 class BufferSinkCursor : public Cursor {
    public:
     BufferSinkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
@@ -1300,9 +1404,7 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                     [o](DataFrame&& f) { return f.to_dummies(o.column); });
             },
             [&](const DescribeOp&) -> std::unique_ptr<Cursor> {
-                return std::make_unique<BufferSinkCursor>(
-                    std::move(in), sch,
-                    [](DataFrame&& f) { return f.describe(); });
+                return std::make_unique<DescribeCursor>(std::move(in), sch);
             }},
         op.node);
 }

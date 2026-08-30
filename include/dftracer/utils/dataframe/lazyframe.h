@@ -125,8 +125,9 @@ class LazyFrame {
     /// One-hot encode `column`. Buffers input; output columns are
     /// data-dependent, so schema() is empty until collect().
     LazyFrame to_dummies(std::string column) const;
-    /// Per-column summary statistics. Buffers input; output columns are
-    /// data-dependent, so schema() is empty until collect().
+    /// Per-column summary statistics (count/null_count/mean/std/min/max).
+    /// Streaming, constant state per column; output columns are data-dependent
+    /// (one per numeric input column), so schema() is empty until collect().
     LazyFrame describe() const;
 
     /// Out-of-core budget for the pipeline breakers (sort/unique/group_by):
