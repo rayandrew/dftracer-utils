@@ -81,14 +81,18 @@ int main(int argc, char** argv) {
 
     std::vector<std::int64_t> k(static_cast<std::size_t>(rows));
     std::vector<std::int64_t> v(static_cast<std::size_t>(rows));
+    std::vector<std::int64_t> s(static_cast<std::size_t>(rows));
     for (std::int64_t i = 0; i < rows; ++i) {
         k[static_cast<std::size_t>(i)] = i % groups;
         v[static_cast<std::size_t>(i)] = i;
+        s[static_cast<std::size_t>(i)] = static_cast<std::int64_t>(
+            (static_cast<std::uint64_t>(i) * 2654435761ULL) % 1000003ULL);
     }
     DataFrame df;
-    df.names = {"k", "v"};
+    df.names = {"k", "v", "s"};
     df.columns.push_back(Series::flat_i64(k.data(), rows));
     df.columns.push_back(Series::flat_i64(v.data(), rows));
+    df.columns.push_back(Series::flat_i64(s.data(), rows));
     std::vector<GroupAgg> aggs{{Agg::Sum, "v", "sum", 0.0},
                                {Agg::Mean, "v", "mean", 0.0},
                                {Agg::Count, "", "cnt", 0.0}};
@@ -176,5 +180,26 @@ int main(int argc, char** argv) {
     };
     const double lz_one = one_morsel();
     std::printf("lazy group_by (1 morsel, runtime): %8.2f ms\n", lz_one);
+
+    // sort_by with the parallel gather (take) enabled.
+    auto time_sort = [&]() {
+        double best = 1e300;
+        for (int r = 0; r < 3; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            DataFrame out = df.sort_by("s");  // scattered key
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(out.num_rows());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    const double sort_ser = time_sort();
+    install_runtime_parallel_backend();
+    const double sort_par = time_sort();
+    std::printf("sort_by: serial %8.2f ms | runtime %8.2f ms (%.2fx)\n",
+                sort_ser, sort_par, sort_ser / sort_par);
     return 0;
 }

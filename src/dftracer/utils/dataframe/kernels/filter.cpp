@@ -4,6 +4,7 @@
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
 #include <dftracer/utils/dataframe/internal/scalar.h>
 #include <dftracer/utils/dataframe/kernels/filter.h>
+#include <dftracer/utils/dataframe/parallel.h>
 
 #include <cstring>
 #include <string>
@@ -244,15 +245,22 @@ static dftu_series* gather_column(const dftu_series& base,
         std::memcpy(dst, src + static_cast<std::size_t>(idx[0]) * width,
                     static_cast<std::size_t>(n) * width);
     } else {
-        for (std::int64_t i = 0; i < n; ++i) {
-            if (idx[i] < 0)  // negative = null: zero the (masked) cell
-                std::memset(dst + static_cast<std::size_t>(i) * width, 0,
-                            width);
-            else
-                std::memcpy(dst + static_cast<std::size_t>(i) * width,
+        // Random gather: disjoint output slices, read-only source. Latency-
+        // bound (random reads), so fanning out hides the misses. Runs serial
+        // below the grain (the seam's dispatch guards small n).
+        dftracer::utils::dataframe::parallel_for(
+            n, std::int64_t{1} << 16, [&](std::int64_t b, std::int64_t e) {
+                for (std::int64_t i = b; i < e; ++i) {
+                    if (idx[i] < 0)  // negative = null: zero the (masked) cell
+                        std::memset(dst + static_cast<std::size_t>(i) * width,
+                                    0, width);
+                    else
+                        std::memcpy(
+                            dst + static_cast<std::size_t>(i) * width,
                             src + static_cast<std::size_t>(idx[i]) * width,
                             width);
-        }
+                }
+            });
     }
     out->validity = gather_validity(base, idx, n, out->null_count);
     return out;
