@@ -754,22 +754,33 @@ typedef enum {
     DFTU_TOK_F64,      /**< double operand, or a double return */
     DFTU_TOK_I32,      /**< int32 flag operand (e.g. a `descending` flag) */
     DFTU_TOK_RANK,     /**< dftu_rank_method operand */
-    DFTU_TOK_ROLLING   /**< dftu_rolling_op operand */
+    DFTU_TOK_ROLLING,  /**< dftu_rolling_op operand */
+    DFTU_TOK_FRAME, /**< a dftu_dataframe operand, or a dftu_dataframe return */
+    DFTU_TOK_STRLIST /**< a (const char* const*, int32 count) string-list
+                        operand */
 } dftu_op_tok;
+
+/** Max operand tokens a signature carries (5-bit fields: a return token plus up
+ * to this many operands pack into one int32). */
+#define DFTU_OP_MAX_ARGS 5
 
 /** Pack a signature from a return token and up to three operand tokens. Pass
  * each token's suffix (e.g. SERIES for DFTU_TOK_SERIES; pad unused operand
  * slots with NONE) - the suffix is pasted onto DFTU_TOK_. Compose new
  * signatures from tokens rather than allocating opaque ordinals; decode with
- * DFTU_OP_SIG_RET / DFTU_OP_SIG_ARG. */
-#define DFTU_OP_SIG(ret, o0, o1, o2)                   \
-    ((int)DFTU_TOK_##ret | ((int)DFTU_TOK_##o0 << 4) | \
-     ((int)DFTU_TOK_##o1 << 8) | ((int)DFTU_TOK_##o2 << 12))
+ * DFTU_OP_SIG_RET / DFTU_OP_SIG_ARG. Use DFTU_OP_SIG6 for a frame op with more
+ * operands. */
+#define DFTU_OP_SIG(ret, o0, o1, o2) DFTU_OP_SIG6(ret, o0, o1, o2, NONE, NONE)
+/** Pack a signature with up to five operand tokens (5-bit fields). */
+#define DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4)                  \
+    ((int)DFTU_TOK_##ret | ((int)DFTU_TOK_##o0 << 5) |         \
+     ((int)DFTU_TOK_##o1 << 10) | ((int)DFTU_TOK_##o2 << 15) | \
+     ((int)DFTU_TOK_##o3 << 20) | ((int)DFTU_TOK_##o4 << 25))
 /** The return token of a signature. */
-#define DFTU_OP_SIG_RET(sig) ((dftu_op_tok)((int)(sig) & 0xF))
-/** Operand token `i` in [0,3); DFTU_TOK_NONE past the last operand. */
+#define DFTU_OP_SIG_RET(sig) ((dftu_op_tok)((int)(sig) & 0x1F))
+/** Operand token `i` in [0, DFTU_OP_MAX_ARGS); DFTU_TOK_NONE past the last. */
 #define DFTU_OP_SIG_ARG(sig, i) \
-    ((dftu_op_tok)(((int)(sig) >> (4 + 4 * (i))) & 0xF))
+    ((dftu_op_tok)(((int)(sig) >> (5 + 5 * (i))) & 0x1F))
 
 /** A packed op signature: build it with DFTU_OP_SIG(ret, o0, o1, o2) at the
  * registration site, and use the same expression as a runner switch-case label
@@ -815,23 +826,33 @@ DFTU_EXPORT const dftu_op_desc* dftu_op_at(uint32_t i);
  * is NULL or the name is already registered (no silent shadowing). */
 DFTU_EXPORT int dftu_op_register(const dftu_op_desc* desc);
 
-/** The non-column operands an op consumes, matching the non-SERIES tokens of
- * its signature in order. Only the fields a given op needs are read (pass NULL
- * when it needs none). One `op_code` field carries whichever enum token the
- * signature has (CMP / PRIM / LOGICAL / REDUCE / DTYPE), since a signature has
- * at most one. */
+/** One operand slot. Only the union member the operand's token names is read:
+ * SCALAR->scalar, I64->i64, F64->f64, CHAR->ch, an enum token (CMP/PRIM/
+ * LOGICAL/DTYPE/REDUCE/I32/RANK/ROLLING)->i32, STR->str, STRLIST->list, and a
+ * frame op's SERIES operand (a mask/column)->series. A SERIES/FRAME operand of
+ * a column/frame op is passed in the runner's in[]/frames[] array, not here. */
+typedef union dftu_op_val {
+    dftu_scalar scalar;
+    int64_t i64;
+    int32_t i32;
+    double f64;
+    char ch;
+    const dftu_series* series;
+    struct {
+        const char* ptr;
+        int32_t len;
+    } str;
+    struct {
+        const char* const* items;
+        int32_t n;
+    } list;
+} dftu_op_val;
+
+/** The operands an op consumes, one slot per operand token in order (args[i]
+ * matches the i-th operand token of the signature). Only the slots a given op
+ * needs are read; pass NULL when it needs none. */
 typedef struct dftu_op_arg {
-    dftu_scalar scalar;  /**< the SCALAR token */
-    int32_t op_code;     /**< the CMP / PRIM / LOGICAL / REDUCE / DTYPE token */
-    const char* s0;      /**< the first STR token (bytes) */
-    int32_t s0_len;      /**< length of s0 */
-    const char* s1;      /**< the second STR token */
-    int32_t s1_len;      /**< length of s1 */
-    int64_t i0;          /**< the first I64 token */
-    int64_t i1;          /**< the second I64 token */
-    char ch;             /**< the CHAR token */
-    double f0;           /**< the F64 token */
-    dftu_scalar scalar2; /**< the second SCALAR token */
+    dftu_op_val args[DFTU_OP_MAX_ARGS];
 } dftu_op_arg;
 
 /** Run a column op (a signature whose return token is SERIES): `in` are `n`
@@ -851,6 +872,15 @@ DFTU_EXPORT dftu_series* dftu_op_run(const dftu_op_desc* op,
 DFTU_EXPORT dftu_scalar dftu_op_run_aggregate(const dftu_op_desc* op,
                                               const dftu_series* v,
                                               const dftu_op_arg* arg, int* ok);
+
+/** Run a frame op (a signature whose return token is FRAME): `frames` are the
+ * `n` borrowed input dftu_dataframe operands (n == dftu_op_arity(op->sig)), and
+ * every other operand (series/scalar/string/list/int) rides `arg`. Returns a
+ * new owned dftu_dataframe (free with dftu_dataframe_free), or NULL on a
+ * NULL/kind/arity/shape mismatch. */
+DFTU_EXPORT dftu_dataframe* dftu_op_run_frame(
+    const dftu_op_desc* op, const dftu_dataframe* const* frames, uint32_t n,
+    const dftu_op_arg* arg);
 
 #ifdef __cplusplus
 } /* extern "C" */

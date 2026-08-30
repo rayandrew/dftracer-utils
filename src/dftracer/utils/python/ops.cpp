@@ -98,14 +98,21 @@ PyObject* op_run(PyObject*, PyObject* args) {
         return nullptr;
     }
 
+    if (dftu_op_kind_of(op->sig) == DFTU_OP_KIND_FRAME) {
+        PyErr_Format(
+            PyExc_NotImplementedError,
+            "op '%s' is a frame op; call the matching DataFrame method", name);
+        return nullptr;
+    }
+
     // Walk the signature's operand tokens in order, pulling each from the next
-    // positional argument: a column into `in`, everything else into `arg`.
+    // positional argument: a column into `in`, every other operand into the
+    // matching args[i] slot.
     const dftu_series* in[2] = {nullptr, nullptr};
     uint32_t n_series = 0;
     dftu_op_arg arg{};
-    int n_str = 0, n_i64 = 0, n_scalar = 0;
     Py_ssize_t next = 1;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < DFTU_OP_MAX_ARGS; ++i) {
         dftu_op_tok t = DFTU_OP_SIG_ARG(op->sig, i);
         if (t == DFTU_TOK_NONE) break;
         if (next >= nargs) {
@@ -114,6 +121,7 @@ PyObject* op_run(PyObject*, PyObject* args) {
             return nullptr;
         }
         PyObject* a = PyTuple_GET_ITEM(args, next++);
+        dftu_op_val& slot = arg.args[i];
         switch (t) {
             case DFTU_TOK_SERIES: {
                 const dataframe::Series* s = unwrap_vec_column(a);
@@ -123,17 +131,16 @@ PyObject* op_run(PyObject*, PyObject* args) {
                                  next - 1);
                     return nullptr;
                 }
-                in[n_series++] = s->handle();
+                if (n_series < 2) in[n_series++] = s->handle();
                 break;
             }
             case DFTU_TOK_SCALAR:
-                if (!to_scalar(a, n_scalar++ == 0 ? &arg.scalar : &arg.scalar2))
-                    return nullptr;
+                if (!to_scalar(a, &slot.scalar)) return nullptr;
                 break;
             case DFTU_TOK_F64: {
                 double d = PyFloat_AsDouble(a);
                 if (d == -1.0 && PyErr_Occurred()) return nullptr;
-                arg.f0 = d;
+                slot.f64 = d;
                 break;
             }
             case DFTU_TOK_CMP:
@@ -144,29 +151,21 @@ PyObject* op_run(PyObject*, PyObject* args) {
             case DFTU_TOK_I32:
             case DFTU_TOK_RANK:
             case DFTU_TOK_ROLLING:
-                arg.op_code = static_cast<int32_t>(PyLong_AsLong(a));
-                if (arg.op_code == -1 && PyErr_Occurred()) return nullptr;
+                slot.i32 = static_cast<int32_t>(PyLong_AsLong(a));
+                if (slot.i32 == -1 && PyErr_Occurred()) return nullptr;
                 break;
             case DFTU_TOK_STR: {
                 Py_ssize_t len = 0;
                 const char* p = PyUnicode_AsUTF8AndSize(a, &len);
                 if (!p) return nullptr;
-                if (n_str++ == 0) {
-                    arg.s0 = p;
-                    arg.s0_len = static_cast<int32_t>(len);
-                } else {
-                    arg.s1 = p;
-                    arg.s1_len = static_cast<int32_t>(len);
-                }
+                slot.str.ptr = p;
+                slot.str.len = static_cast<int32_t>(len);
                 break;
             }
             case DFTU_TOK_I64: {
                 long long v = PyLong_AsLongLong(a);
                 if (v == -1 && PyErr_Occurred()) return nullptr;
-                if (n_i64++ == 0)
-                    arg.i0 = v;
-                else
-                    arg.i1 = v;
+                slot.i64 = v;
                 break;
             }
             case DFTU_TOK_CHAR: {
@@ -178,9 +177,16 @@ PyObject* op_run(PyObject*, PyObject* args) {
                                  "op '%s' expects a single character", name);
                     return nullptr;
                 }
-                arg.ch = p[0];
+                slot.ch = p[0];
                 break;
             }
+            case DFTU_TOK_FRAME:
+            case DFTU_TOK_STRLIST:
+                PyErr_Format(PyExc_NotImplementedError,
+                             "op '%s' takes a frame/list operand not yet "
+                             "runnable via ops.run",
+                             name);
+                return nullptr;
             case DFTU_TOK_NONE:
             case DFTU_TOK_BOOL:
                 break;
