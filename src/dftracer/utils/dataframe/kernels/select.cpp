@@ -11,6 +11,7 @@
 #include <dftracer/utils/dataframe/internal/compare_simd.h>  // pack_flags
 #include <dftracer/utils/dataframe/internal/radix_dedup.h>   // parallel dedup
 #include <dftracer/utils/dataframe/kernels/sort.h>
+#include <dftracer/utils/dataframe/parallel.h>
 #include <dftracer/utils/dataframe/series.h>
 
 #include <algorithm>
@@ -142,11 +143,20 @@ Series is_in_impl(const Series& v, const Series& values) {
     const std::int64_t n = v.length();
     const bool has_nulls = v.null_count() > 0;
     std::vector<char> flags(static_cast<std::size_t>(n), 0);
-    for (std::int64_t i = 0; i < n; ++i) {
-        if (has_nulls && v.is_null(i)) continue;
-        const bool hit = is_str ? str_set.count(std::string(v.string_at(i))) > 0
-                                : num_set.count(read_f64(v, i)) > 0;
-        flags[static_cast<std::size_t>(i)] = hit ? 1 : 0;
+    constexpr std::int64_t GRAIN = 1 << 15;
+    auto probe = [&](std::int64_t b, std::int64_t e) {
+        for (std::int64_t i = b; i < e; ++i) {
+            if (has_nulls && v.is_null(i)) continue;
+            const bool hit =
+                is_str ? str_set.count(std::string(v.string_at(i))) > 0
+                       : num_set.count(read_f64(v, i)) > 0;
+            flags[static_cast<std::size_t>(i)] = hit ? 1 : 0;
+        }
+    };
+    if (parallel_backend_installed() && n > GRAIN) {
+        parallel_for(n, GRAIN, probe);
+    } else {
+        probe(0, n);
     }
     return bool_from_flags(flags);
 }
