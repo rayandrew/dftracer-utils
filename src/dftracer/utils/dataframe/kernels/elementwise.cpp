@@ -210,6 +210,84 @@ void RoundKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
     DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), RoundImpl, a, out, n)
 }
 
+// fillna: out[i] = valid(i) ? in[i] : fill. No validity means all-valid, a
+// plain copy. Otherwise the packed validity bits drive a blend: 64 rows a word
+// at a time, each lanes-wide chunk shifted to bit 0 so LoadMaskBits reads it
+// aligned.
+template <class T>
+void FillImpl(const void* av, const std::uint8_t* valid, dftu_scalar s,
+              void* ov, std::size_t n) {
+    const T* in = static_cast<const T*>(av);
+    T* out = static_cast<T*>(ov);
+    const T fv = scalar_value<T>(s);
+    if (!valid) {
+        if (n) std::memcpy(out, in, n * sizeof(T));
+        return;
+    }
+    const hn::ScalableTag<T> d;
+    const std::size_t lanes = hn::Lanes(d);
+    const auto vfill = hn::Set(d, fv);
+    std::size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        std::uint64_t w;
+        std::memcpy(&w, valid + (i >> 3), 8);
+        for (std::size_t c = 0; c < 64; c += lanes) {
+            std::uint64_t sub = w >> c;
+            const auto m =
+                hn::LoadMaskBits(d, reinterpret_cast<std::uint8_t*>(&sub));
+            hn::StoreU(hn::IfThenElse(m, hn::LoadU(d, in + i + c), vfill), d,
+                       out + i + c);
+        }
+    }
+    for (; i < n; ++i) out[i] = ((valid[i >> 3] >> (i & 7)) & 1) ? in[i] : fv;
+}
+
+// diff over a null-free column: out[0] = 0 (marked null by the caller), and
+// out[i] = in[i] - in[i-1] via a misaligned load pair.
+template <class T>
+void DiffImpl(const void* av, void* ov, std::size_t n) {
+    const T* in = static_cast<const T*>(av);
+    T* out = static_cast<T*>(ov);
+    if (n == 0) return;
+    out[0] = T{0};
+    const hn::ScalableTag<T> d;
+    const std::size_t lanes = hn::Lanes(d);
+    std::size_t i = 1;
+    for (; i + lanes <= n; i += lanes)
+        hn::StoreU(hn::Sub(hn::LoadU(d, in + i), hn::LoadU(d, in + i - 1)), d,
+                   out + i);
+    for (; i < n; ++i) out[i] = static_cast<T>(in[i] - in[i - 1]);
+}
+
+// pct_change over a null-free Float64 column: (in[i] - in[i-1]) / in[i-1], row
+// 0 left 0 (marked null by the caller). Division by zero yields inf/nan exactly
+// as the scalar path does. Other dtypes need a widen and stay scalar.
+void PctF64Impl(const double* in, double* out, std::size_t n) {
+    if (n == 0) return;
+    out[0] = 0.0;
+    const hn::ScalableTag<double> d;
+    const std::size_t lanes = hn::Lanes(d);
+    std::size_t i = 1;
+    for (; i + lanes <= n; i += lanes) {
+        const auto cur = hn::LoadU(d, in + i);
+        const auto prev = hn::LoadU(d, in + i - 1);
+        hn::StoreU(hn::Div(hn::Sub(cur, prev), prev), d, out + i);
+    }
+    for (; i < n; ++i) out[i] = (in[i] - in[i - 1]) / in[i - 1];
+}
+
+void FillKernel(std::int32_t type, const void* a, const std::uint8_t* valid,
+                dftu_scalar s, void* out, std::size_t n) {
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), FillImpl, a, valid, s, out,
+                        n)
+}
+void DiffKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), DiffImpl, a, out, n)
+}
+void PctKernel(const double* in, double* out, std::size_t n) {
+    PctF64Impl(in, out, n);
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace dftracer::utils::dataframe
 HWY_AFTER_NAMESPACE();
@@ -228,6 +306,9 @@ HWY_EXPORT(NegateKernel);
 HWY_EXPORT(SqrtKernel);
 HWY_EXPORT(ExpKernel);
 HWY_EXPORT(LogKernel);
+HWY_EXPORT(FillKernel);
+HWY_EXPORT(DiffKernel);
+HWY_EXPORT(PctKernel);
 
 namespace {
 
@@ -252,17 +333,8 @@ dftu_series* alloc_like(const dftu_series* a, bool keep_validity) {
     return out;
 }
 
-// fillna and cumsum are scalar (null-aware / sequential); one template each,
-// dispatched by type.
-template <class T>
-void fill_one(const dftu_series& a, dftu_scalar s, void* ov) {
-    T* out = static_cast<T*>(ov);
-    const T* in = reinterpret_cast<const T*>(a.data->data());
-    const T fv = scalar_value<T>(s);
-    for (std::int64_t i = 0; i < a.length; ++i)
-        out[i] = is_valid(a, i) ? in[i] : fv;
-}
-
+// cumsum and the running extrema are scalar (sequential prefix scans); one
+// template each, dispatched by type.
 template <class T>
 void cumsum_one(const dftu_series& a, void* ov) {
     T* out = static_cast<T*>(ov);
@@ -524,7 +596,10 @@ dftu_series* dftu_series_fillna(const dftu_series* a, dftu_scalar fill) {
         a->type == TypeId::Bool)
         return nullptr;
     dftu_series* out = alloc_like(a, false);
-    DF_NUMERIC_DISPATCH(a->type, fill_one, *a, fill, out->data->data())
+    HWY_DYNAMIC_DISPATCH(FillKernel)
+    (static_cast<std::int32_t>(a->type), a->data->data(),
+     a->validity ? a->validity->data() : nullptr, fill, out->data->data(),
+     static_cast<std::size_t>(a->length));
     return out;
 }
 
@@ -593,7 +668,19 @@ dftu_series* dftu_series_diff(const dftu_series* a) {
         return nullptr;
     dftu_series* out = alloc_like(a, false);
     auto vbuf = new_bitmap(a->length);
-    DF_NUMERIC_DISPATCH(a->type, diff_one, *a, out->data->data(), vbuf->data())
+    if (!a->validity) {
+        // Null-free: row 0 is null, every later row valid. Set those bits, then
+        // vectorize the subtract.
+        std::uint8_t* vb = vbuf->data();
+        for (std::int64_t i = 1; i < a->length; ++i)
+            vb[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+        HWY_DYNAMIC_DISPATCH(DiffKernel)
+        (static_cast<std::int32_t>(a->type), a->data->data(), out->data->data(),
+         static_cast<std::size_t>(a->length));
+    } else {
+        DF_NUMERIC_DISPATCH(a->type, diff_one, *a, out->data->data(),
+                            vbuf->data())
+    }
     attach_bitmap(out, std::move(vbuf));
     return out;
 }
@@ -611,7 +698,16 @@ dftu_series* dftu_series_pct_change(const dftu_series* a) {
     out->data = Buffer::allocate(buffer_bytes(TypeId::Float64, a->length));
     auto vbuf = new_bitmap(a->length);
     auto* o = reinterpret_cast<double*>(out->data->data());
-    DF_NUMERIC_DISPATCH(a->type, pctchange_one, *a, o, vbuf->data())
+    if (!a->validity && a->type == TypeId::Float64) {
+        std::uint8_t* vb = vbuf->data();
+        for (std::int64_t i = 1; i < a->length; ++i)
+            vb[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+        HWY_DYNAMIC_DISPATCH(PctKernel)
+        (reinterpret_cast<const double*>(a->data->data()), o,
+         static_cast<std::size_t>(a->length));
+    } else {
+        DF_NUMERIC_DISPATCH(a->type, pctchange_one, *a, o, vbuf->data())
+    }
     attach_bitmap(out, std::move(vbuf));
     return out;
 }

@@ -1829,6 +1829,40 @@ TEST_SUITE("vec") {
         CHECK(sq.data<double>()[1] == doctest::Approx(3.0));
         Series lg = dv::log(dv::exp(cq));  // log(exp(x)) == x
         CHECK(lg.data<double>()[2] == doctest::Approx(16.0));
+
+        // Exercise the vectorized null-free diff / pct_change paths (>64 rows).
+        std::vector<std::int64_t> big(100);
+        for (std::size_t i = 0; i < big.size(); ++i)
+            big[i] = static_cast<std::int64_t>(i * 3);
+        Series bd = dv::diff(Series::flat_i64(big.data(), 100));
+        CHECK(bd.is_null(0));
+        CHECK(bd.data<std::int64_t>()[1] == 3);
+        CHECK(bd.data<std::int64_t>()[99] == 3);
+
+        std::vector<double> bf(100);
+        for (std::size_t i = 0; i < bf.size(); ++i)
+            bf[i] = static_cast<double>(i + 1);
+        Series bp = dv::pct_change(Series::flat_f64(bf.data(), 100));
+        CHECK(bp.is_null(0));
+        CHECK(bp.data<double>()[1] == doctest::Approx(1.0));  // (2-1)/1
+        CHECK(bp.data<double>()[99] ==
+              doctest::Approx(1.0 / 99));                     // (100-99)/99
+    }
+
+    TEST_CASE("A2 fillna over the vectorized masked-blend path") {
+        // >64 rows with scattered nulls: the SIMD blend must match the fill.
+        std::vector<std::int64_t> v(100);
+        std::vector<std::uint8_t> bm((100 + 7) / 8, 0);
+        for (std::size_t i = 0; i < v.size(); ++i) {
+            v[i] = static_cast<std::int64_t>(i);
+            if (i % 3 != 0)  // rows not divisible by 3 are valid
+                bm[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+        }
+        Series c = Series::flat_i64(v.data(), 100, bm.data());
+        Series f = c.fillna(dv::to_scalar<std::int64_t>(-7));
+        CHECK(f.null_count() == 0);
+        for (std::int64_t i = 0; i < 100; ++i)
+            CHECK(f.data<std::int64_t>()[i] == (i % 3 == 0 ? -7 : i));
     }
 
     TEST_CASE("A2 predicates: is_nan/is_finite/is_infinite") {
