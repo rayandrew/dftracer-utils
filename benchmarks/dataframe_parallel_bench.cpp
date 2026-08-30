@@ -239,7 +239,7 @@ int main(int argc, char** argv) {
     std::printf("field_stat_reduce: serial %6.2f ms | runtime %6.2f ms (%.2fx)\n",
                 st_ser, st_par, st_ser / st_par);
 
-    // unique: parallel row-key gen + serial dedup (all rows distinct here).
+    // unique: parallel row-key gen + radix-partitioned lock-free dedup.
     auto time_unique = [&](int reps) {
         double best = 1e300;
         for (int r = 0; r < reps; ++r) {
@@ -255,10 +255,21 @@ int main(int argc, char** argv) {
     };
     set_parallel_backend(nullptr, nullptr);
     const double uq_ser = time_unique(3);
+    DataFrame uq_serial_out = df.lazy().unique().collect();
     install_runtime_parallel_backend();
     const double uq_par = time_unique(3);
-    std::printf("unique: serial %8.2f ms | runtime %8.2f ms (%.2fx)\n", uq_ser,
-                uq_par, uq_ser / uq_par);
+    DataFrame uq_par_out = df.lazy().unique().collect();
+    bool uq_ok = uq_serial_out.num_rows() == uq_par_out.num_rows();
+    {
+        const std::int64_t* uv = uq_serial_out.column("v").data<std::int64_t>();
+        const std::int64_t* pv = uq_par_out.column("v").data<std::int64_t>();
+        for (std::int64_t i = 0; uq_ok && i < uq_serial_out.num_rows(); ++i)
+            uq_ok = uv[i] == pv[i];
+    }
+    std::printf("unique (all-distinct): serial %8.2f ms | runtime %8.2f ms "
+                "(%.2fx) correctness: %s\n",
+                uq_ser, uq_par, uq_ser / uq_par, uq_ok ? "OK" : "MISMATCH");
+    ok = ok && uq_ok;
 
     // Duplicate-heavy scenario (single low-cardinality column): the case
     // is_duplicated / is_unique / unique are actually used for, and where the
@@ -270,6 +281,38 @@ int main(int argc, char** argv) {
     auto bit_at = [](const Series& s, std::int64_t idx) -> int {
         return (s.data<std::uint8_t>()[idx >> 3] >> (idx & 7)) & 1;
     };
+
+    auto time_unique_dup = [&](int reps) {
+        double best = 1e300;
+        for (int r = 0; r < reps; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            DataFrame out = dup_df.lazy().unique().collect();
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(out.num_rows());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    const double uqd_ser = time_unique_dup(3);
+    DataFrame uqd_serial_out = dup_df.lazy().unique().collect();
+    install_runtime_parallel_backend();
+    const double uqd_par = time_unique_dup(3);
+    DataFrame uqd_par_out = dup_df.lazy().unique().collect();
+    bool uqd_ok = uqd_serial_out.num_rows() == uqd_par_out.num_rows();
+    {
+        const std::int64_t* uv = uqd_serial_out.column("k").data<std::int64_t>();
+        const std::int64_t* pv = uqd_par_out.column("k").data<std::int64_t>();
+        for (std::int64_t i = 0; uqd_ok && i < uqd_serial_out.num_rows(); ++i)
+            uqd_ok = uv[i] == pv[i];
+    }
+    std::printf("unique (dup-heavy, %lld groups): serial %8.2f ms | runtime "
+                "%8.2f ms (%.2fx) correctness: %s\n",
+                static_cast<long long>(groups), uqd_ser, uqd_par,
+                uqd_ser / uqd_par, uqd_ok ? "OK" : "MISMATCH");
+    ok = ok && uqd_ok;
 
     auto time_isdup = [&](bool want_unique, int reps) {
         double best = 1e300;

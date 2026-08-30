@@ -124,6 +124,46 @@ std::size_t morsel_bytes(const std::vector<Series>& cols) {
     return total;
 }
 
+// Fan-out width for the partitioned first-seen dedup below.
+constexpr std::size_t DEDUP_PARTITIONS = 32;
+
+// Radix-partition `keys` by hash into `seen_p.size()` buckets, each with its
+// own running hash set, and mark keep[i] the first time each key is seen
+// (order-preserving): buckets never overlap, so each is probed by exactly one
+// worker with no lock. `seen_p` carries state across calls, bounded by the
+// distinct-key count rather than the row count. An empty `seen_p` means no
+// parallel backend is installed; the single `seen_serial` set is used instead
+// so the partition bookkeeping is never paid for nothing.
+std::vector<std::uint8_t> first_seen_mask(
+    std::vector<std::string>& keys, std::int64_t n,
+    ankerl::unordered_dense::set<std::string>& seen_serial,
+    std::vector<ankerl::unordered_dense::set<std::string>>& seen_p) {
+    std::vector<std::uint8_t> keep_mask(static_cast<std::size_t>(n), 0);
+    if (seen_p.empty()) {
+        for (std::int64_t i = 0; i < n; ++i)
+            if (seen_serial.insert(std::move(keys[static_cast<std::size_t>(i)]))
+                    .second)
+                keep_mask[static_cast<std::size_t>(i)] = 1;
+        return keep_mask;
+    }
+    const std::size_t p = seen_p.size();
+    std::vector<std::vector<std::int64_t>> buckets(p);
+    for (std::int64_t i = 0; i < n; ++i)
+        buckets[std::hash<std::string>{}(keys[static_cast<std::size_t>(i)]) % p]
+            .push_back(i);
+    parallel_for(
+        static_cast<std::int64_t>(p), 1, [&](std::int64_t pb, std::int64_t pe) {
+            for (std::int64_t g = pb; g < pe; ++g)
+                for (std::int64_t i : buckets[static_cast<std::size_t>(g)])
+                    if (seen_p[static_cast<std::size_t>(g)]
+                            .insert(
+                                std::move(keys[static_cast<std::size_t>(i)]))
+                            .second)
+                        keep_mask[static_cast<std::size_t>(i)] = 1;
+        });
+    return keep_mask;
+}
+
 // ---- cursors ----------------------------------------------------------------
 
 // Reads contiguous chunks off an in-memory frame, materialized FLAT.
@@ -1033,14 +1073,16 @@ class SortMergeCursor : public Cursor {
 class UniqueCursor : public Cursor {
    public:
     UniqueCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch)
-        : in_(std::move(in)), sch_(std::move(sch)) {}
+        : in_(std::move(in)), sch_(std::move(sch)) {
+        if (parallel_backend_installed()) seen_p_.resize(DEDUP_PARTITIONS);
+    }
 
     std::optional<Morsel> next(std::int64_t max_rows) override {
         while (auto m = in_->next(max_rows)) {
             const std::int64_t n = m->rows;
             // Build the exact row keys in parallel (scalar string work, one per
-            // row, independent), then dedupe serially against the running set
-            // to keep first-occurrence order.
+            // row, independent), then dedupe (radix-partitioned when a
+            // parallel backend is installed, else one serial set).
             std::vector<std::string> keys(static_cast<std::size_t>(n));
             parallel_for(n, std::int64_t{1} << 13,
                          [&](std::int64_t b, std::int64_t e) {
@@ -1048,11 +1090,12 @@ class UniqueCursor : public Cursor {
                                  keys[static_cast<std::size_t>(i)] =
                                      row_key(m->columns, i);
                          });
+            std::vector<std::uint8_t> keep_mask =
+                first_seen_mask(keys, n, seen_, seen_p_);
             std::vector<std::int64_t> keep;
+            keep.reserve(static_cast<std::size_t>(n));
             for (std::int64_t i = 0; i < n; ++i)
-                if (seen_.insert(std::move(keys[static_cast<std::size_t>(i)]))
-                        .second)
-                    keep.push_back(i);
+                if (keep_mask[static_cast<std::size_t>(i)]) keep.push_back(i);
             if (keep.empty()) continue;
             DataFrame mf;
             mf.names = sch_;
@@ -1066,6 +1109,7 @@ class UniqueCursor : public Cursor {
     std::unique_ptr<Cursor> in_;
     std::vector<std::string> sch_;
     ankerl::unordered_dense::set<std::string> seen_;
+    std::vector<ankerl::unordered_dense::set<std::string>> seen_p_;
 };
 
 // Streaming per-column summary statistics, matching DataFrame::describe. One
