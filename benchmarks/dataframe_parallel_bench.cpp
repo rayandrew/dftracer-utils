@@ -1251,5 +1251,71 @@ int main(int argc, char** argv) {
                 ewm_ok ? "OK" : "MISMATCH", ewm_max_rel);
     ok = ok && ewm_ok;
 
+    // ewm_std: same data/alpha as ewm_mean above.
+    auto time_ewm_std = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = ewm_col.ewm_std(ewm_alpha);
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series es_serial_out = time_ewm_std(5);
+    double es_ser = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = ewm_col.ewm_std(ewm_alpha);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        es_ser = std::min(
+            es_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series es_par_out = time_ewm_std(5);
+    double es_par = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = ewm_col.ewm_std(ewm_alpha);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        es_par = std::min(
+            es_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool es_ok = es_serial_out.length() == es_par_out.length();
+    double es_max_rel = 0.0;
+    std::int64_t es_valid_mismatch = 0;
+    {
+        const double* a2 = es_serial_out.data<double>();
+        const double* b2 = es_par_out.data<double>();
+        for (std::int64_t i = 0; es_ok && i < es_serial_out.length(); ++i) {
+            const bool na = es_serial_out.is_null(i);
+            const bool nb = es_par_out.is_null(i);
+            if (na != nb) {
+                ++es_valid_mismatch;
+                continue;
+            }
+            if (na) continue;
+            const double denom = std::max(1e-12, std::fabs(a2[i]));
+            const double rel = std::fabs(a2[i] - b2[i]) / denom;
+            es_max_rel = std::max(es_max_rel, rel);
+            if (rel > 1e-6) es_ok = false;
+        }
+        if (es_valid_mismatch > 0) es_ok = false;
+    }
+    std::printf("ewm_std  (alpha=%.2f): serial %8.2f ms | runtime %8.2f ms "
+                "(%.2fx) correctness: %s (max rel err %.3e, valid mismatches "
+                "%lld)\n",
+                ewm_alpha, es_ser, es_par, es_ser / es_par,
+                es_ok ? "OK" : "MISMATCH", es_max_rel,
+                static_cast<long long>(es_valid_mismatch));
+    ok = ok && es_ok;
+
     return ok ? 0 : 1;
 }

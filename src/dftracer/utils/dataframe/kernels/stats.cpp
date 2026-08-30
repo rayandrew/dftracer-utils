@@ -359,55 +359,117 @@ Series rolling_quantile(const Series& v, std::int64_t window, double q) {
     });
 }
 
-// y[i] = alpha*x[i] + beta*y[i-1] (y[0] = x[0]) is a prefix scan of affine
-// maps y -> a*y + c: within a chunk not containing index 0, a is the constant
-// `beta` at every step, so the correction for the chunk's true entering value
-// V is just beta^k * V added to the locally-scanned (entering-seed-0) value -
-// no need to track per-index transforms. Chunk 0 needs no correction: its
-// local scan (seeded at 0) already equals the true answer, since a=0 at i=0
-// erases any dependence on the entering seed.
+// Two chunk-transform composers shared by the EWM family: `y -> a*y + c`
+// applied first, then `y -> a*y + c` applied second, composes to
+// `y -> (a1*a2)*y + (a2*c1 + c2)`.
+using AffineT = std::pair<double, double>;
+
+AffineT affine_compose(AffineT lhs, AffineT rhs) {
+    return AffineT{lhs.first * rhs.first, rhs.first * lhs.second + rhs.second};
+}
+
+// Parallel prefix scan for out[i] = a*out[i-1] + c(i), out[0] = c(0), where
+// the coefficient `a` is the same at every step (ewm_mean's recurrence, and
+// ewm_std's variance recurrence). Chunks scan locally from seed 0, then a
+// single a^k correction folds in the true entering value - cheap because `a`
+// never changes within a chunk. A chunk containing index 0 needs no
+// correction: c(0) fixes the true value outright, independent of any seed.
+template <class C>
+void affine_scan_const_a(std::int64_t n, std::int64_t grain, double a, C&& c,
+                         std::vector<double>& out) {
+    if (n == 0) return;
+    if (!parallel_backend_installed() || n <= grain) {
+        double y = c(0);
+        out[0] = y;
+        for (std::int64_t i = 1; i < n; ++i) {
+            y = a * y + c(i);
+            out[static_cast<std::size_t>(i)] = y;
+        }
+        return;
+    }
+    parallel_prefix_scan<AffineT>(
+        n, grain, AffineT{1.0, 0.0},
+        [&](std::int64_t b, std::int64_t e) -> AffineT {
+            double y = (b == 0) ? c(0) : 0.0;
+            if (b == 0) out[0] = y;
+            std::int64_t i0 = (b == 0) ? 1 : b;
+            for (std::int64_t i = i0; i < e; ++i) {
+                y = a * y + c(i);
+                out[static_cast<std::size_t>(i)] = y;
+            }
+            if (b == 0) return AffineT{0.0, y};
+            return AffineT{std::pow(a, e - b), y};
+        },
+        [&](std::int64_t b, std::int64_t e, AffineT offset) {
+            if (b == 0) return;
+            const double v_pre = offset.second;
+            double p = a;
+            for (std::int64_t i = b; i < e; ++i) {
+                out[static_cast<std::size_t>(i)] += p * v_pre;
+                p *= a;
+            }
+        },
+        affine_compose);
+}
+
+// Parallel prefix scan for out[i] = a(i)*out[i-1] + c(i), out[0] = c(0),
+// where the coefficient may vary by index but is known independent of any
+// other row's value (ewm_std's running mean, whose coefficient depends only
+// on the precomputed cumulative weight). Unlike the constant-a case, a
+// single a^k correction does not exist, so each chunk records its per-index
+// cumulative product of a(i) in `aprod` for the later correction pass to
+// multiply against the true entering value.
+template <class A, class C>
+void affine_scan_var_a(std::int64_t n, std::int64_t grain, A&& a, C&& c,
+                       std::vector<double>& out, std::vector<double>& aprod) {
+    if (n == 0) return;
+    if (!parallel_backend_installed() || n <= grain) {
+        double y = c(0);
+        out[0] = y;
+        for (std::int64_t i = 1; i < n; ++i) {
+            y = a(i) * y + c(i);
+            out[static_cast<std::size_t>(i)] = y;
+        }
+        return;
+    }
+    parallel_prefix_scan<AffineT>(
+        n, grain, AffineT{1.0, 0.0},
+        [&](std::int64_t b, std::int64_t e) -> AffineT {
+            double y = (b == 0) ? c(0) : 0.0;
+            if (b == 0) out[0] = y;
+            std::int64_t i0 = (b == 0) ? 1 : b;
+            double aacc = 1.0;
+            for (std::int64_t i = i0; i < e; ++i) {
+                const double ai = a(i);
+                y = ai * y + c(i);
+                out[static_cast<std::size_t>(i)] = y;
+                aacc *= ai;
+                aprod[static_cast<std::size_t>(i)] = aacc;
+            }
+            if (b == 0) return AffineT{0.0, y};
+            return AffineT{aacc, y};
+        },
+        [&](std::int64_t b, std::int64_t e, AffineT offset) {
+            if (b == 0) return;
+            const double v_pre = offset.second;
+            for (std::int64_t i = b; i < e; ++i)
+                out[static_cast<std::size_t>(i)] +=
+                    aprod[static_cast<std::size_t>(i)] * v_pre;
+        },
+        affine_compose);
+}
+
 Series ewm_mean(const Series& v, double alpha) {
     const std::int64_t n = v.length();
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
     if (n == 0) return Series::flat(TypeId::Float64, out.data(), n);
     const double beta = 1.0 - alpha;
-    constexpr std::int64_t GRAIN = 1 << 14;
-    if (parallel_backend_installed() && n > GRAIN) {
-        using T = std::pair<double, double>;  // (a, c): y -> a*y + c
-        parallel_prefix_scan<T>(
-            n, GRAIN, T{1.0, 0.0},
-            [&](std::int64_t b, std::int64_t e) -> T {
-                double y = (b == 0) ? read_f64(v, 0) : 0.0;
-                if (b == 0) out[0] = y;
-                std::int64_t i0 = (b == 0) ? 1 : b;
-                for (std::int64_t i = i0; i < e; ++i) {
-                    y = alpha * read_f64(v, i) + beta * y;
-                    out[static_cast<std::size_t>(i)] = y;
-                }
-                if (b == 0) return T{0.0, y};
-                return T{std::pow(beta, e - b), y};
-            },
-            [&](std::int64_t b, std::int64_t e, T offset) {
-                if (b == 0) return;
-                const double v_pre = offset.second;
-                double p = beta;
-                for (std::int64_t i = b; i < e; ++i) {
-                    out[static_cast<std::size_t>(i)] += p * v_pre;
-                    p *= beta;
-                }
-            },
-            [](T lhs, T rhs) -> T {
-                return T{lhs.first * rhs.first,
-                         rhs.first * lhs.second + rhs.second};
-            });
-        return Series::flat(TypeId::Float64, out.data(), n);
-    }
-    double y = read_f64(v, 0);
-    out[0] = y;
-    for (std::int64_t i = 1; i < n; ++i) {
-        y = alpha * read_f64(v, i) + beta * y;
-        out[static_cast<std::size_t>(i)] = y;
-    }
+    affine_scan_const_a(
+        n, std::int64_t{1} << 14, beta,
+        [&](std::int64_t i) {
+            return i == 0 ? read_f64(v, 0) : alpha * read_f64(v, i);
+        },
+        out);
     return Series::flat(TypeId::Float64, out.data(), n);
 }
 
@@ -421,6 +483,69 @@ Series ewm_std(const Series& v, double alpha) {
     // sum of squared weights, and s the weighted sum of squared deviations;
     // the debiased sample variance is s / (w_sum - w2_sum / w_sum).
     const double decay = 1.0 - alpha;
+    constexpr std::int64_t GRAIN = 1 << 14;
+    // decay == 1 (alpha == 0) breaks the closed-form geometric sum below
+    // (division by 1 - decay); that case is rare enough to just run serial.
+    if (parallel_backend_installed() && n > GRAIN && alpha > 0.0) {
+        // w_sum[i] and w2_sum[i] solve the same two recurrences as below but
+        // depend only on i, not on any row's value, so each index is a
+        // closed-form geometric sum computable independently in parallel:
+        // w_sum[i] = sum_{k=0}^{i} decay^k, w2_sum[i] = sum_{k=0}^{i} decay^2k.
+        std::vector<double> w_sum(static_cast<std::size_t>(n), 1.0);
+        std::vector<double> w2_sum(static_cast<std::size_t>(n), 1.0);
+        const double decay2 = decay * decay;
+        parallel_for(n, GRAIN, [&](std::int64_t b, std::int64_t e) {
+            for (std::int64_t i = std::max<std::int64_t>(b, 1); i < e; ++i) {
+                w_sum[static_cast<std::size_t>(i)] =
+                    (1.0 - std::pow(decay, i + 1)) / (1.0 - decay);
+                w2_sum[static_cast<std::size_t>(i)] =
+                    (1.0 - std::pow(decay2, i + 1)) / (1.0 - decay2);
+            }
+        });
+
+        // mean[i] = mean[i-1]*(1 - 1/w_sum[i]) + x[i]/w_sum[i]: an affine
+        // scan whose coefficient depends only on i (via w_sum), so it runs
+        // through the variable-coefficient scan above.
+        std::vector<double> mean(static_cast<std::size_t>(n), 0.0);
+        std::vector<double> aprod(static_cast<std::size_t>(n), 0.0);
+        affine_scan_var_a(
+            n, GRAIN,
+            [&](std::int64_t i) {
+                return 1.0 - 1.0 / w_sum[static_cast<std::size_t>(i)];
+            },
+            [&](std::int64_t i) {
+                return i == 0 ? read_f64(v, 0)
+                              : read_f64(v, i) /
+                                    w_sum[static_cast<std::size_t>(i)];
+            },
+            mean, aprod);
+
+        // s[i] = decay*s[i-1] + delta*(x[i]-mean[i]), delta = x[i]-mean[i-1]:
+        // constant coefficient `decay`, so it reuses the ewm_mean-style scan.
+        affine_scan_const_a(
+            n, GRAIN, decay,
+            [&](std::int64_t i) {
+                if (i == 0) return 0.0;
+                const double x = read_f64(v, i);
+                const double delta = x - mean[static_cast<std::size_t>(i - 1)];
+                return delta * (x - mean[static_cast<std::size_t>(i)]);
+            },
+            out);
+
+        parallel_for(n, GRAIN, [&](std::int64_t b, std::int64_t e) {
+            for (std::int64_t i = std::max<std::int64_t>(b, 1); i < e; ++i) {
+                const std::size_t ui = static_cast<std::size_t>(i);
+                const double denom = w_sum[ui] - w2_sum[ui] / w_sum[ui];
+                if (denom > 0.0) {
+                    out[ui] = std::sqrt(out[ui] / denom);
+                    valid[static_cast<std::size_t>(i >> 3)] |= (1u << (i & 7));
+                } else {
+                    out[ui] = 0.0;
+                }
+            }
+        });
+        return Series::flat(TypeId::Float64, out.data(), n, valid.data());
+    }
     double w_sum = 1.0, w2_sum = 1.0, mean = read_f64(v, 0), s = 0.0;
     for (std::int64_t i = 1; i < n; ++i) {
         const double x = read_f64(v, i);
