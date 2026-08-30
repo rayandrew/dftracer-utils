@@ -84,6 +84,30 @@ void BetweenF32(const void* p, std::int64_t n, dftu_scalar lo, dftu_scalar hi,
     between_bits<float>(static_cast<const float*>(p), n, scalar_as<float>(lo),
                         scalar_as<float>(hi), out);
 }
+void BetweenI16(const void* p, std::int64_t n, dftu_scalar lo, dftu_scalar hi,
+                std::uint8_t* out) {
+    between_bits<std::int16_t>(static_cast<const std::int16_t*>(p), n,
+                               scalar_as<std::int16_t>(lo),
+                               scalar_as<std::int16_t>(hi), out);
+}
+void BetweenU16(const void* p, std::int64_t n, dftu_scalar lo, dftu_scalar hi,
+                std::uint8_t* out) {
+    between_bits<std::uint16_t>(static_cast<const std::uint16_t*>(p), n,
+                                scalar_as<std::uint16_t>(lo),
+                                scalar_as<std::uint16_t>(hi), out);
+}
+void BetweenI8(const void* p, std::int64_t n, dftu_scalar lo, dftu_scalar hi,
+               std::uint8_t* out) {
+    between_bits<std::int8_t>(static_cast<const std::int8_t*>(p), n,
+                              scalar_as<std::int8_t>(lo),
+                              scalar_as<std::int8_t>(hi), out);
+}
+void BetweenU8(const void* p, std::int64_t n, dftu_scalar lo, dftu_scalar hi,
+               std::uint8_t* out) {
+    between_bits<std::uint8_t>(static_cast<const std::uint8_t*>(p), n,
+                               scalar_as<std::uint8_t>(lo),
+                               scalar_as<std::uint8_t>(hi), out);
+}
 
 // Two accumulators over a fused multiply-add break the serial dependency of the
 // scalar dot loop; the horizontal ReduceSum folds them at the end.
@@ -118,6 +142,10 @@ HWY_EXPORT(BetweenF64);
 HWY_EXPORT(BetweenI32);
 HWY_EXPORT(BetweenU32);
 HWY_EXPORT(BetweenF32);
+HWY_EXPORT(BetweenI16);
+HWY_EXPORT(BetweenU16);
+HWY_EXPORT(BetweenI8);
+HWY_EXPORT(BetweenU8);
 HWY_EXPORT(dot_f64);
 
 namespace {
@@ -166,8 +194,21 @@ dftu_series* dftu_series_is_between(const dftu_series* v, dftu_scalar lo,
         case TypeId::Float32:
             HWY_DYNAMIC_DISPATCH(BetweenF32)(p, n, lo, hi, bits);
             break;
+        case TypeId::Int16:
+            HWY_DYNAMIC_DISPATCH(BetweenI16)(p, n, lo, hi, bits);
+            break;
+        case TypeId::Uint16:
+            HWY_DYNAMIC_DISPATCH(BetweenU16)(p, n, lo, hi, bits);
+            break;
+        case TypeId::Int8:
+            HWY_DYNAMIC_DISPATCH(BetweenI8)(p, n, lo, hi, bits);
+            break;
+        case TypeId::Uint8:
+            HWY_DYNAMIC_DISPATCH(BetweenU8)(p, n, lo, hi, bits);
+            break;
         default: {
-            // 1/2-byte columns: scalar in the widened double domain.
+            // Any remaining numeric encoding: scalar in the widened double
+            // domain.
             Series c{const_cast<dftu_series*>(v)};
             const double dlo = scalar_as<double>(lo);
             const double dhi = scalar_as<double>(hi);

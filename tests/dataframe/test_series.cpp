@@ -1414,6 +1414,21 @@ TEST_SUITE("vec") {
             Series::flat_f64(a.data(), 4).dot(Series::flat_f64(b.data(), 4));
         CHECK(d.f64() ==
               doctest::Approx(1 * 10 + 2 * 20 + 3 * 30 + 4 * 40));  // 300
+
+        // Narrow (16-bit) type now takes the SIMD between / filter_gt path
+        // instead of the scalar widened-double fallback. Exercise >64 rows.
+        std::vector<std::int16_t> w(100);
+        for (std::size_t i = 0; i < w.size(); ++i)
+            w[i] = static_cast<std::int16_t>(i);
+        Series c16 = Series::flat(TypeId::Int16, w.data(), 100);
+        Series bm = c16.is_between<std::int16_t>(10, 20);
+        const std::uint8_t* bb = bm.data<std::uint8_t>();
+        auto b16 = [&](int i) { return (bb[i >> 3] >> (i & 7)) & 1; };
+        CHECK(b16(9) == 0);
+        CHECK(b16(10) == 1);
+        CHECK(b16(20) == 1);
+        CHECK(b16(21) == 0);
+        CHECK(filter_gt(c16, static_cast<std::int16_t>(89)).length() == 10);
     }
 
     TEST_CASE("batch group_by re-aggregates a materialized batch") {
