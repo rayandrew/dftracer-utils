@@ -197,9 +197,22 @@ int main(int argc, char** argv) {
     };
     set_parallel_backend(nullptr, nullptr);
     const double sort_ser = time_sort();
+    DataFrame sorted_serial = df.sort_by("s");
     install_runtime_parallel_backend();
     const double sort_par = time_sort();
+    DataFrame sorted_par = df.sort_by("s");
     std::printf("sort_by: serial %8.2f ms | runtime %8.2f ms (%.2fx)\n",
                 sort_ser, sort_par, sort_ser / sort_par);
-    return 0;
+
+    // Correctness: parallel sort must equal serial sort element-wise.
+    const std::int64_t* a = sorted_serial.column("s").data<std::int64_t>();
+    const std::int64_t* b = sorted_par.column("s").data<std::int64_t>();
+    const std::int64_t* av = sorted_serial.column("v").data<std::int64_t>();
+    const std::int64_t* bv = sorted_par.column("v").data<std::int64_t>();
+    bool ok = sorted_serial.num_rows() == sorted_par.num_rows();
+    for (std::int64_t i = 0; ok && i < sorted_par.num_rows(); ++i)
+        ok = a[i] == b[i] && av[i] == bv[i];
+    std::printf("sort_by correctness (parallel == serial): %s\n",
+                ok ? "OK" : "MISMATCH");
+    return ok ? 0 : 1;
 }

@@ -25,6 +25,10 @@ using ParallelForFn = void (*)(void* ctx, std::int64_t n, std::int64_t grain,
 /// Install the backend (nullptr restores serial). Set once at startup.
 void set_parallel_backend(ParallelForFn fn, void* ctx);
 
+/// Whether a backend is installed. Lets an op skip a parallel algorithm whose
+/// extra work (a merge pass) is pure overhead when everything would run serial.
+bool parallel_backend_installed();
+
 /// Install a backend that fans work out through the core coroutine runtime's
 /// thread pool (default_runtime()). One call at startup makes the data-parallel
 /// dataframe kernels (group-by, expr eval, ...) run multi-threaded on the C++
