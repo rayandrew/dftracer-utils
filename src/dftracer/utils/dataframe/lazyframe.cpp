@@ -105,6 +105,37 @@ int cmp_cell(const Series& a, std::int64_t ia, const Series& b, std::int64_t ib,
     return descending ? -c : c;
 }
 
+// Exact byte key of row `i` across `cols` (FLAT), for hash-distinct. Each cell
+// contributes a null flag then its raw bytes (length-prefixed for strings), so
+// distinct rows never collide and equal rows always match.
+std::string row_key(const std::vector<Series>& cols, std::int64_t i) {
+    std::string k;
+    for (const Series& c : cols) {
+        if (c.is_null(i)) {
+            k.push_back('\0');
+            continue;
+        }
+        k.push_back('\1');
+        const TypeId t = c.type();
+        if (t == TypeId::String || t == TypeId::Binary) {
+            const std::string_view s = c.string_at(i);
+            const auto len = static_cast<std::uint32_t>(s.size());
+            k.append(reinterpret_cast<const char*>(&len), sizeof(len));
+            k.append(s.data(), s.size());
+        } else if (t == TypeId::Bool) {
+            const std::uint8_t b =
+                (c.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1;
+            k.push_back(static_cast<char>(b));
+        } else {
+            const auto* base =
+                static_cast<const char*>(dftu_series_data(c.handle()));
+            const std::size_t w = byte_width(t);
+            k.append(base + static_cast<std::size_t>(i) * w, w);
+        }
+    }
+    return k;
+}
+
 // Approximate in-memory byte size of a set of FLAT columns (spill trigger).
 std::size_t morsel_bytes(const std::vector<Series>& cols) {
     std::size_t total = 0;
@@ -865,8 +896,38 @@ class SortMergeCursor : public Cursor {
     std::vector<std::int64_t> pos_;
 };
 
+// Streaming distinct (keep first occurrence, original order). Holds only the
+// set of distinct row keys - which is the result itself, materialized by
+// collect anyway - and streams input and output morsel by morsel.
+class UniqueCursor : public Cursor {
+   public:
+    UniqueCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch)
+        : in_(std::move(in)), sch_(std::move(sch)) {}
+
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        while (auto m = in_->next(max_rows)) {
+            const std::int64_t n = m->rows;
+            std::vector<std::int64_t> keep;
+            for (std::int64_t i = 0; i < n; ++i)
+                if (seen_.insert(row_key(m->columns, i)).second)
+                    keep.push_back(i);
+            if (keep.empty()) continue;
+            DataFrame mf;
+            mf.names = sch_;
+            mf.columns = std::move(m->columns);
+            return morsel_of(take(mf, keep));
+        }
+        return std::nullopt;
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    ankerl::unordered_dense::set<std::string> seen_;
+};
+
 // Pipeline breakers that need all rows: buffer the input, apply `fn` once.
-// (unique/pivot/describe/group_by_dynamic; a spillable form is a follow-up.)
+// (pivot/describe/group_by_dynamic; a spillable form is a follow-up.)
 class BufferSinkCursor : public Cursor {
    public:
     BufferSinkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
@@ -1203,9 +1264,7 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                     std::move(in), sch, o.name, o.descending, budget);
             },
             [&](const UniqueOp&) -> std::unique_ptr<Cursor> {
-                return std::make_unique<BufferSinkCursor>(
-                    std::move(in), sch,
-                    [](DataFrame&& f) { return f.unique(); });
+                return std::make_unique<UniqueCursor>(std::move(in), sch);
             },
             [&](const SampleOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<SampleCursor>(std::move(in), sch, o.n,

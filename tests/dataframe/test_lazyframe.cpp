@@ -199,6 +199,21 @@ TEST_SUITE("lazyframe") {
         CHECK(u.num_rows() == 3);
     }
 
+    TEST_CASE("streaming unique matches eager (first occurrence, order)") {
+        // Duplicates spread across morsels; keep-first order must be preserved.
+        std::vector<std::int64_t> x{5, 3, 5, 1, 3, 5, 2, 1};
+        DataFrame df;
+        df.names = {"x"};
+        df.columns.push_back(Series::flat_i64(x.data(), 8));
+        DataFrame lz = df.lazy().unique().collect(3);  // multi-morsel scan
+        DataFrame eg = df.unique();
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* lp = lz.column("x").data<std::int64_t>();
+        const std::int64_t* ep = eg.column("x").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(lp[i] == ep[i]);
+        CHECK(lz.num_rows() == 4);  // {5,3,1,2}
+    }
+
     TEST_CASE("sort_by external merge (spilling) matches eager") {
         // Scrambled keys + a payload column, tiny budget + tiny morsels so the
         // sort spills several runs and k-way merges them back.

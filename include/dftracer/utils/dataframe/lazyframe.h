@@ -95,9 +95,11 @@ class LazyFrame {
     /// Group by `key` and compute each aggregate (streaming: one partial state,
     /// bounded by the group count).
     LazyFrame group_by(std::string key, std::vector<GroupAgg> aggs) const;
-    /// Sort by `name`. Buffers input (external-merge spill is a follow-up).
+    /// Sort by `name`. External merge sort: spills sorted runs past the memory
+    /// budget and k-way merges them, so peak memory stays bounded.
     LazyFrame sort_by(std::string name, bool descending = false) const;
-    /// Distinct rows, first occurrence. Buffers input (spill is a follow-up).
+    /// Distinct rows, first occurrence, in original order. Streams input and
+    /// output; holds only the distinct set (the result itself).
     LazyFrame unique() const;
     /// Alias of unique().
     LazyFrame drop_duplicates() const;
