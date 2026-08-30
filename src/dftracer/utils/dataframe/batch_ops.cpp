@@ -6,6 +6,7 @@
 #include <dftracer/utils/dataframe/containment.h>
 #include <dftracer/utils/dataframe/internal/cell_ops.h>  // shared cell helpers
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_u64
+#include <dftracer/utils/dataframe/internal/radix_dedup.h>  // parallel dedup
 #include <dftracer/utils/dataframe/kernels/field_stat.h>
 #include <dftracer/utils/dataframe/kernels/filter.h>
 #include <dftracer/utils/dataframe/kernels/group_by.h>
@@ -21,7 +22,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace dftracer::utils::dataframe {
 
@@ -480,15 +480,15 @@ std::vector<Series> materialized_columns(const DataFrame& b) {
     return cols;
 }
 
-// Append cell (col, i) to `key` as raw bytes, prefixed by a present/null flag,
-// so the concatenation of a row's cells is a stable composite dedupe key.
-// Composite dedupe key per row over `cols` (already FLAT).
+// Composite dedupe key per row over `cols` (already FLAT), built in parallel
+// (each row's key is independent scalar string work).
 std::vector<std::string> row_keys(const std::vector<Series>& cols,
                                   std::int64_t n) {
     std::vector<std::string> keys(static_cast<std::size_t>(n));
-    for (const Series& c : cols)
-        for (std::int64_t i = 0; i < n; ++i)
-            append_cell(keys[static_cast<std::size_t>(i)], c, i);
+    parallel_for(n, std::int64_t{1} << 13, [&](std::int64_t b, std::int64_t e) {
+        for (std::int64_t i = b; i < e; ++i)
+            keys[static_cast<std::size_t>(i)] = row_key(cols, i);
+    });
     return keys;
 }
 
@@ -542,15 +542,23 @@ Series row_mask(const DataFrame& b, bool want_unique) {
     const std::int64_t n = b.num_rows();
     std::vector<Series> cols = materialized_columns(b);
     std::vector<std::string> keys = row_keys(cols, n);
-    std::unordered_map<std::string, std::int64_t> counts;
-    counts.reserve(static_cast<std::size_t>(n));
-    for (const std::string& k : keys) ++counts[k];
-    std::vector<std::uint8_t> bits(static_cast<std::size_t>((n + 7) / 8), 0);
-    for (std::int64_t i = 0; i < n; ++i) {
-        bool unique = counts[keys[static_cast<std::size_t>(i)]] == 1;
-        if (want_unique == unique)
-            bits[static_cast<std::size_t>(i >> 3)] |= (1u << (i & 7));
-    }
+    std::vector<std::int64_t> counts = radix_key_counts(keys, n);
+    const std::int64_t nbytes = (n + 7) / 8;
+    std::vector<std::uint8_t> bits(static_cast<std::size_t>(nbytes), 0);
+    parallel_for(
+        nbytes, std::int64_t{1} << 10, [&](std::int64_t bb, std::int64_t be) {
+            for (std::int64_t byte = bb; byte < be; ++byte) {
+                const std::int64_t base = byte * 8;
+                const std::int64_t lim = std::min(base + 8, n);
+                std::uint8_t v = 0;
+                for (std::int64_t i = base; i < lim; ++i) {
+                    bool unique = counts[static_cast<std::size_t>(i)] == 1;
+                    if (want_unique == unique)
+                        v |= static_cast<std::uint8_t>(1u << (i - base));
+                }
+                bits[static_cast<std::size_t>(byte)] = v;
+            }
+        });
     return Series{dftu_series_new_flat(static_cast<dftu_dtype>(TypeId::Bool),
                                        bits.data(), n, nullptr)};
 }
@@ -587,12 +595,11 @@ DataFrame unique(const DataFrame& b) {
     const std::int64_t n = b.num_rows();
     std::vector<Series> cols = materialized_columns(b);
     std::vector<std::string> keys = row_keys(cols, n);
-    std::unordered_set<std::string> seen;
-    seen.reserve(static_cast<std::size_t>(n));
+    std::vector<std::uint8_t> keep = radix_first_seen_mask(keys, n);
     std::vector<std::int64_t> idx;
+    idx.reserve(static_cast<std::size_t>(n));
     for (std::int64_t i = 0; i < n; ++i)
-        if (seen.insert(keys[static_cast<std::size_t>(i)]).second)
-            idx.push_back(i);
+        if (keep[static_cast<std::size_t>(i)]) idx.push_back(i);
     return take(b, idx);
 }
 
