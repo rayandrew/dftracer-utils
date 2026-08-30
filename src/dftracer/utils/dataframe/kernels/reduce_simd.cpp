@@ -65,85 +65,6 @@ void SumF64(const void* p, std::int64_t n, dftu_scalar* out) {
     out->value.d = sum_f64(static_cast<const double*>(p), n);
 }
 
-// Explicit two-accumulator sum for 64-bit integers. Same-width lane addition is
-// modular two's complement, so the fold matches the scalar i64/u64 accumulator
-// bit for bit. Narrow ints are not handled here: their scalar path widens to 64
-// bits to avoid overflow, which a same-width SIMD sum would not reproduce.
-template <class T>
-T sum_int64(const T* p, std::int64_t n) {
-    const hn::ScalableTag<T> d;
-    const std::int64_t lanes = static_cast<std::int64_t>(hn::Lanes(d));
-    auto acc0 = hn::Zero(d);
-    auto acc1 = hn::Zero(d);
-    std::int64_t i = 0;
-    for (; i + 2 * lanes <= n; i += 2 * lanes) {
-        acc0 = hn::Add(acc0, hn::LoadU(d, p + i));
-        acc1 = hn::Add(acc1, hn::LoadU(d, p + i + lanes));
-    }
-    for (; i + lanes <= n; i += lanes)
-        acc0 = hn::Add(acc0, hn::LoadU(d, p + i));
-    T s = hn::ReduceSum(d, hn::Add(acc0, acc1));
-    for (; i < n; ++i) s = static_cast<T>(s + p[i]);
-    return s;
-}
-
-void SumI64(const void* p, std::int64_t n, dftu_scalar* out) {
-    out->kind = DFTU_SCALAR_TAG_I64;
-    out->value.i =
-        sum_int64<std::int64_t>(static_cast<const std::int64_t*>(p), n);
-}
-void SumU64(const void* p, std::int64_t n, dftu_scalar* out) {
-    out->kind = DFTU_SCALAR_TAG_U64;
-    out->value.u =
-        sum_int64<std::uint64_t>(static_cast<const std::uint64_t*>(p), n);
-}
-
-// Sum skipping nulls: the packed validity bits zero out invalid lanes (adding 0
-// contributes nothing), so the fold sums exactly the valid values. Processes 64
-// rows per word so LoadMaskBits reads a byte-aligned chunk shifted to bit 0.
-template <class T>
-T sum_masked(const T* p, const std::uint8_t* valid, std::int64_t n) {
-    const hn::ScalableTag<T> d;
-    const std::size_t lanes = hn::Lanes(d);
-    auto acc = hn::Zero(d);
-    std::int64_t i = 0;
-    for (; i + 64 <= n; i += 64) {
-        std::uint64_t w;
-        std::memcpy(&w, valid + (i >> 3), 8);
-        for (std::size_t c = 0; c < 64; c += lanes) {
-            std::uint64_t sub = w >> c;
-            const auto m =
-                hn::LoadMaskBits(d, reinterpret_cast<std::uint8_t*>(&sub));
-            acc = hn::Add(
-                acc,
-                hn::IfThenElseZero(
-                    m, hn::LoadU(d, p + i + static_cast<std::int64_t>(c))));
-        }
-    }
-    T s = hn::ReduceSum(d, acc);
-    for (; i < n; ++i)
-        if ((valid[i >> 3] >> (i & 7)) & 1) s = static_cast<T>(s + p[i]);
-    return s;
-}
-
-void SumMaskedF64(const void* p, const std::uint8_t* valid, std::int64_t n,
-                  dftu_scalar* out) {
-    out->kind = DFTU_SCALAR_TAG_F64;
-    out->value.d = sum_masked<double>(static_cast<const double*>(p), valid, n);
-}
-void SumMaskedI64(const void* p, const std::uint8_t* valid, std::int64_t n,
-                  dftu_scalar* out) {
-    out->kind = DFTU_SCALAR_TAG_I64;
-    out->value.i =
-        sum_masked<std::int64_t>(static_cast<const std::int64_t*>(p), valid, n);
-}
-void SumMaskedU64(const void* p, const std::uint8_t* valid, std::int64_t n,
-                  dftu_scalar* out) {
-    out->kind = DFTU_SCALAR_TAG_U64;
-    out->value.u = sum_masked<std::uint64_t>(
-        static_cast<const std::uint64_t*>(p), valid, n);
-}
-
 // First index whose value equals `target`, scanned SIMD (FindFirstTrue gives
 // the earliest set lane in a block), so arg_min/arg_max resolve ties to the
 // earliest index. Two-pass with `minmax`: find the extreme, then its first
@@ -310,11 +231,6 @@ HWY_AFTER_NAMESPACE();
 namespace dftracer::utils::dataframe {
 
 HWY_EXPORT(SumF64);
-HWY_EXPORT(SumI64);
-HWY_EXPORT(SumU64);
-HWY_EXPORT(SumMaskedF64);
-HWY_EXPORT(SumMaskedI64);
-HWY_EXPORT(SumMaskedU64);
 HWY_EXPORT(MinMaxI64);
 HWY_EXPORT(MinMaxU64);
 HWY_EXPORT(MinMaxF64);
@@ -337,41 +253,20 @@ HWY_EXPORT(ProdU64);
 HWY_EXPORT(ProdF64);
 
 bool reduce(const dftu_series& v, std::int32_t op, dftu_scalar& out) {
+    if (v.validity) return false;  // null-skip breaks vectorization; use scalar
     if (v.length == 0) return false;
     const void* p = v.data->data();
     std::int64_t n = v.length;
 
     if (op == DFTU_REDUCE_SUM) {
-        // Float64 and the 64-bit integers get an explicit kernel, with a
-        // masked variant that skips nulls; narrow ints widen to 64 bits in the
-        // scalar path (a same-width SIMD sum would overflow differently) and
-        // f32 accumulates in double there for precision.
-        const std::uint8_t* valid = v.validity ? v.validity->data() : nullptr;
-        switch (v.type) {
-            case TypeId::Float64:
-                if (valid)
-                    HWY_DYNAMIC_DISPATCH(SumMaskedF64)(p, valid, n, &out);
-                else
-                    HWY_DYNAMIC_DISPATCH(SumF64)(p, n, &out);
-                return true;
-            case TypeId::Int64:
-                if (valid)
-                    HWY_DYNAMIC_DISPATCH(SumMaskedI64)(p, valid, n, &out);
-                else
-                    HWY_DYNAMIC_DISPATCH(SumI64)(p, n, &out);
-                return true;
-            case TypeId::Uint64:
-                if (valid)
-                    HWY_DYNAMIC_DISPATCH(SumMaskedU64)(p, valid, n, &out);
-                else
-                    HWY_DYNAMIC_DISPATCH(SumU64)(p, n, &out);
-                return true;
-            default:
-                return false;
+        // Only Float64 needs help; integer sums already auto-vectorize and f32
+        // sum accumulates in double (scalar) to hold precision.
+        if (v.type == TypeId::Float64) {
+            HWY_DYNAMIC_DISPATCH(SumF64)(p, n, &out);
+            return true;
         }
+        return false;
     }
-    // Remaining reducers still take the scalar path when nulls are present.
-    if (v.validity) return false;
     if (op != DFTU_REDUCE_MIN && op != DFTU_REDUCE_MAX) return false;
     bool is_max = (op == DFTU_REDUCE_MAX);
     switch (v.type) {

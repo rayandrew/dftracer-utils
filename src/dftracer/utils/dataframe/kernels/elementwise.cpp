@@ -243,40 +243,6 @@ void FillImpl(const void* av, const std::uint8_t* valid, dftu_scalar s,
     for (; i < n; ++i) out[i] = ((valid[i >> 3] >> (i & 7)) & 1) ? in[i] : fv;
 }
 
-// diff over a null-free column: out[0] = 0 (marked null by the caller), and
-// out[i] = in[i] - in[i-1] via a misaligned load pair.
-template <class T>
-void DiffImpl(const void* av, void* ov, std::size_t n) {
-    const T* in = static_cast<const T*>(av);
-    T* out = static_cast<T*>(ov);
-    if (n == 0) return;
-    out[0] = T{0};
-    const hn::ScalableTag<T> d;
-    const std::size_t lanes = hn::Lanes(d);
-    std::size_t i = 1;
-    for (; i + lanes <= n; i += lanes)
-        hn::StoreU(hn::Sub(hn::LoadU(d, in + i), hn::LoadU(d, in + i - 1)), d,
-                   out + i);
-    for (; i < n; ++i) out[i] = static_cast<T>(in[i] - in[i - 1]);
-}
-
-// pct_change over a null-free Float64 column: (in[i] - in[i-1]) / in[i-1], row
-// 0 left 0 (marked null by the caller). Division by zero yields inf/nan exactly
-// as the scalar path does. Other dtypes need a widen and stay scalar.
-void PctF64Impl(const double* in, double* out, std::size_t n) {
-    if (n == 0) return;
-    out[0] = 0.0;
-    const hn::ScalableTag<double> d;
-    const std::size_t lanes = hn::Lanes(d);
-    std::size_t i = 1;
-    for (; i + lanes <= n; i += lanes) {
-        const auto cur = hn::LoadU(d, in + i);
-        const auto prev = hn::LoadU(d, in + i - 1);
-        hn::StoreU(hn::Div(hn::Sub(cur, prev), prev), d, out + i);
-    }
-    for (; i < n; ++i) out[i] = (in[i] - in[i - 1]) / in[i - 1];
-}
-
 // One log-step of an inclusive in-vector scan: fold in the vector shifted up by
 // S lanes, with the vacated low S lanes filled with the op identity. S must be
 // a compile-time distance, so the caller recurses over 1,2,4,...; the guard
@@ -305,12 +271,25 @@ HWY_INLINE V inclusive_scan(D d, V v, OpF op, V id) {
 // running carry (the previous block's last lane) into every lane. The op is
 // associative, so integer sum/product and every min/max match the scalar result
 // exactly; only float sum/product reassociate (ULP-level difference).
+// The log-step in-vector scan only pays off on wide vectors (its per-block
+// horizontal shifts + ExtractLane are fixed overhead); on narrow targets a
+// plain scalar carry wins. On a fixed-width target Lanes(d) is a compile-time
+// constant so this gate folds away and the dead branch is eliminated per
+// target.
+constexpr std::size_t SCAN_SIMD_MIN_LANES = 8;
+
 template <class T>
 void CumSumImpl(const void* av, void* ov, std::size_t n) {
     const T* in = static_cast<const T*>(av);
     T* out = static_cast<T*>(ov);
     const hn::ScalableTag<T> d;
     const std::size_t lanes = hn::Lanes(d);
+    if (lanes < SCAN_SIMD_MIN_LANES) {
+        T carry = T{0};
+        for (std::size_t i = 0; i < n; ++i)
+            out[i] = carry = static_cast<T>(carry + in[i]);
+        return;
+    }
     const auto add = [](auto a, auto b) { return hn::Add(a, b); };
     const auto vid = hn::Zero(d);
     T carry = T{0};
@@ -330,6 +309,12 @@ void CumProdImpl(const void* av, void* ov, std::size_t n) {
     T* out = static_cast<T*>(ov);
     const hn::ScalableTag<T> d;
     const std::size_t lanes = hn::Lanes(d);
+    if (lanes < SCAN_SIMD_MIN_LANES) {
+        T carry = T{1};
+        for (std::size_t i = 0; i < n; ++i)
+            out[i] = carry = static_cast<T>(carry * in[i]);
+        return;
+    }
     const auto mul = [](auto a, auto b) { return hn::Mul(a, b); };
     const auto vid = hn::Set(d, T{1});
     T carry = T{1};
@@ -351,6 +336,15 @@ void CumExtremeImpl(const void* av, void* ov, std::size_t n) {
     const std::size_t lanes = hn::Lanes(d);
     const T ident = IS_MAX ? std::numeric_limits<T>::lowest()
                            : std::numeric_limits<T>::max();
+    if (lanes < SCAN_SIMD_MIN_LANES) {
+        T carry = ident;
+        for (std::size_t i = 0; i < n; ++i) {
+            carry = IS_MAX ? (in[i] > carry ? in[i] : carry)
+                           : (in[i] < carry ? in[i] : carry);
+            out[i] = carry;
+        }
+        return;
+    }
     const auto op = [](auto a, auto b) {
         return IS_MAX ? hn::Max(a, b) : hn::Min(a, b);
     };
@@ -397,12 +391,6 @@ void FillKernel(std::int32_t type, const void* a, const std::uint8_t* valid,
     DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), FillImpl, a, valid, s, out,
                         n)
 }
-void DiffKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
-    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), DiffImpl, a, out, n)
-}
-void PctKernel(const double* in, double* out, std::size_t n) {
-    PctF64Impl(in, out, n);
-}
 
 }  // namespace HWY_NAMESPACE
 }  // namespace dftracer::utils::dataframe
@@ -423,8 +411,6 @@ HWY_EXPORT(SqrtKernel);
 HWY_EXPORT(ExpKernel);
 HWY_EXPORT(LogKernel);
 HWY_EXPORT(FillKernel);
-HWY_EXPORT(DiffKernel);
-HWY_EXPORT(PctKernel);
 HWY_EXPORT(CumSumKernel);
 HWY_EXPORT(CumProdKernel);
 HWY_EXPORT(CumMaxKernel);
@@ -538,6 +524,39 @@ void pctchange_one(const dftu_series& a, double* out, std::uint8_t* valid) {
     }
 }
 
+// Null-free data-only variants: no per-row validity branch, so the compiler
+// auto-vectorizes the subtract/divide. The caller fills validity in bulk (all
+// rows valid except row 0). This is what makes diff/pct fast on a dense column.
+template <class T>
+void diff_data_one(const dftu_series& a, void* ov) {
+    T* out = static_cast<T*>(ov);
+    const T* in = reinterpret_cast<const T*>(a.data->data());
+    if (a.length > 0) out[0] = T{0};
+    for (std::int64_t i = 1; i < a.length; ++i)
+        out[i] = static_cast<T>(in[i] - in[i - 1]);
+}
+
+template <class T>
+void pctchange_data_one(const dftu_series& a, double* out) {
+    const T* in = reinterpret_cast<const T*>(a.data->data());
+    if (a.length > 0) out[0] = 0.0;
+    for (std::int64_t i = 1; i < a.length; ++i)
+        out[i] = (static_cast<double>(in[i]) - static_cast<double>(in[i - 1])) /
+                 static_cast<double>(in[i - 1]);
+}
+
+// Mark every row valid except row 0 (diff/pct's only structural null on a
+// dense column), a byte fill instead of a per-row bit set. Trailing bits past
+// length are cleared so the buffer stays canonical.
+void fill_valid_except_first(std::uint8_t* v, std::int64_t n) {
+    if (n <= 0) return;
+    const std::size_t nbytes = static_cast<std::size_t>((n + 7) / 8);
+    std::memset(v, 0xFF, nbytes);
+    v[0] &= static_cast<std::uint8_t>(~1u);  // row 0 is null
+    const std::size_t tail = static_cast<std::size_t>(n & 7);
+    if (tail) v[nbytes - 1] &= static_cast<std::uint8_t>((1u << tail) - 1);
+}
+
 // Widen any numeric column to a double buffer (scalar cast; nulls read as-is).
 template <class T>
 void widen_f64(const dftu_series& a, double* out) {
@@ -555,10 +574,13 @@ std::shared_ptr<Buffer> new_bitmap(std::int64_t n) {
     return buf;
 }
 void attach_bitmap(dftu_series* out, std::shared_ptr<Buffer> vbuf) {
+    // Count set bits a byte at a time with popcount. Trailing bits past
+    // `length` are always 0 (new_bitmap zeroes the buffer and only rows <
+    // length are set), so whole-byte popcount is exact.
     std::int64_t valid = 0;
     const std::uint8_t* b = vbuf->data();
-    for (std::int64_t i = 0; i < out->length; ++i)
-        if (b[i >> 3] & (1u << (i & 7))) ++valid;
+    const std::size_t nbytes = static_cast<std::size_t>((out->length + 7) / 8);
+    for (std::size_t i = 0; i < nbytes; ++i) valid += __builtin_popcount(b[i]);
     out->validity = std::move(vbuf);
     out->null_count = out->length - valid;
 }
@@ -813,19 +835,17 @@ dftu_series* dftu_series_diff(const dftu_series* a) {
     dftu_series* out = alloc_like(a, false);
     auto vbuf = new_bitmap(a->length);
     if (!a->validity) {
-        // Null-free: row 0 is null, every later row valid. Set those bits, then
-        // vectorize the subtract.
-        std::uint8_t* vb = vbuf->data();
-        for (std::int64_t i = 1; i < a->length; ++i)
-            vb[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
-        HWY_DYNAMIC_DISPATCH(DiffKernel)
-        (static_cast<std::int32_t>(a->type), a->data->data(), out->data->data(),
-         static_cast<std::size_t>(a->length));
+        // Dense column: fill validity in bulk and let the branch-free data-only
+        // diff auto-vectorize. null_count is exactly 1 (row 0).
+        fill_valid_except_first(vbuf->data(), a->length);
+        DF_NUMERIC_DISPATCH(a->type, diff_data_one, *a, out->data->data())
+        out->validity = std::move(vbuf);
+        out->null_count = a->length > 0 ? 1 : 0;
     } else {
         DF_NUMERIC_DISPATCH(a->type, diff_one, *a, out->data->data(),
                             vbuf->data())
+        attach_bitmap(out, std::move(vbuf));
     }
-    attach_bitmap(out, std::move(vbuf));
     return out;
 }
 
@@ -842,17 +862,17 @@ dftu_series* dftu_series_pct_change(const dftu_series* a) {
     out->data = Buffer::allocate(buffer_bytes(TypeId::Float64, a->length));
     auto vbuf = new_bitmap(a->length);
     auto* o = reinterpret_cast<double*>(out->data->data());
-    if (!a->validity && a->type == TypeId::Float64) {
-        std::uint8_t* vb = vbuf->data();
-        for (std::int64_t i = 1; i < a->length; ++i)
-            vb[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
-        HWY_DYNAMIC_DISPATCH(PctKernel)
-        (reinterpret_cast<const double*>(a->data->data()), o,
-         static_cast<std::size_t>(a->length));
+    if (!a->validity) {
+        // Dense column: bulk validity + branch-free data-only pct_change (any
+        // numeric type widens to double). null_count is exactly 1 (row 0).
+        fill_valid_except_first(vbuf->data(), a->length);
+        DF_NUMERIC_DISPATCH(a->type, pctchange_data_one, *a, o)
+        out->validity = std::move(vbuf);
+        out->null_count = a->length > 0 ? 1 : 0;
     } else {
         DF_NUMERIC_DISPATCH(a->type, pctchange_one, *a, o, vbuf->data())
+        attach_bitmap(out, std::move(vbuf));
     }
-    attach_bitmap(out, std::move(vbuf));
     return out;
 }
 

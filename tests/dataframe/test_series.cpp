@@ -426,12 +426,11 @@ TEST_SUITE("vec") {
         CHECK(scalar_value<double>(max(fc)) == doctest::Approx(ref_max));
 
         Series ic = Series::flat_i64(vi.data(), n);
-        CHECK(scalar_value<std::int64_t>(sum(ic)) ==
-              isum);  // explicit i64 kernel
+        CHECK(scalar_value<std::int64_t>(sum(ic)) == isum);  // i64 sum
         CHECK(scalar_value<std::int64_t>(min(ic)) == imin);
         CHECK(scalar_value<std::int64_t>(max(ic)) == imax);
 
-        // Null-present sum takes the masked SIMD path: every 4th row is null.
+        // Null-present sum, every 4th row null: exact skip-nulls result.
         std::vector<std::uint8_t> bm(static_cast<std::size_t>((n + 7) / 8), 0);
         std::int64_t isum_valid = 0;
         double fsum_valid = 0.0;

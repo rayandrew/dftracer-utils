@@ -198,30 +198,55 @@ Series rolling(const Series& v, std::int64_t window, RollingOp op) {
     if (window < 1) window = 1;
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
     std::vector<std::uint8_t> valid(static_cast<std::size_t>((n + 7) / 8), 0);
-    auto mark = [&](std::int64_t i) {
-        valid[static_cast<std::size_t>(i >> 3)] |= (1u << (i & 7));
-    };
+    // Every full window (rows [window-1, n)) is valid; set that contiguous run
+    // in bulk (byte memset for the interior) instead of one bit per row.
+    {
+        std::int64_t a = window - 1;
+        if (a < 0) a = 0;
+        std::int64_t i = a;
+        for (; i < n && (i & 7); ++i)
+            valid[static_cast<std::size_t>(i >> 3)] |= (1u << (i & 7));
+        const std::int64_t full_end = n & ~std::int64_t{7};
+        if (i < full_end) {
+            std::memset(&valid[static_cast<std::size_t>(i >> 3)], 0xFF,
+                        static_cast<std::size_t>((full_end - i) / 8));
+            i = full_end;
+        }
+        for (; i < n; ++i)
+            valid[static_cast<std::size_t>(i >> 3)] |= (1u << (i & 7));
+    }
+
+    // Widen the whole column to double once (SIMD cast for the dense case), so
+    // the window loop indexes a plain array instead of paying a per-element
+    // read_f64 type-dispatch twice per row.
+    std::vector<double> vals;
+    if (n > 0 && v.null_count() == 0 && v.encoding() == Encoding::Flat) {
+        vals = nonnull_values(v);
+    } else {
+        vals.resize(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i)
+            vals[static_cast<std::size_t>(i)] = read_f64(v, i);
+    }
+    const double* p = vals.data();
 
     if (op == RollingOp::Sum || op == RollingOp::Mean) {
         double run = 0.0;
         for (std::int64_t i = 0; i < n; ++i) {
-            run += read_f64(v, i);
-            if (i >= window) run -= read_f64(v, i - window);
-            if (i >= window - 1) {
+            run += p[i];
+            if (i >= window) run -= p[i - window];
+            if (i >= window - 1)
                 out[static_cast<std::size_t>(i)] =
                     op == RollingOp::Mean ? run / static_cast<double>(window)
                                           : run;
-                mark(i);
-            }
         }
     } else {
         // Monotonic deque of indices: front holds the window extreme.
         const bool is_max = op == RollingOp::Max;
         std::deque<std::int64_t> dq;
         for (std::int64_t i = 0; i < n; ++i) {
-            double x = read_f64(v, i);
+            const double x = p[i];
             while (!dq.empty()) {
-                double b = read_f64(v, dq.back());
+                const double b = p[dq.back()];
                 if (is_max ? (b <= x) : (b >= x))
                     dq.pop_back();
                 else
@@ -229,10 +254,8 @@ Series rolling(const Series& v, std::int64_t window, RollingOp op) {
             }
             dq.push_back(i);
             if (dq.front() <= i - window) dq.pop_front();
-            if (i >= window - 1) {
-                out[static_cast<std::size_t>(i)] = read_f64(v, dq.front());
-                mark(i);
-            }
+            if (i >= window - 1)
+                out[static_cast<std::size_t>(i)] = p[dq.front()];
         }
     }
     return Series::flat(TypeId::Float64, out.data(), n, valid.data());
