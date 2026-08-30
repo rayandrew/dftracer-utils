@@ -60,6 +60,8 @@ struct GroupAgg {
     double param = 0.0;  ///< Pct: the quantile level q in [0, 1]
 };
 
+class LazyFrame;         // dataframe/lazyframe.h
+
 /// A named ordered set of columns (the RecordBatch / DataChunk analogue). The
 /// eager methods return a new DataFrame (move-only); projection ops share the
 /// underlying column buffers zero-copy, row ops build new columns.
@@ -76,6 +78,9 @@ struct DataFrame {
     std::int64_t column_index(std::string_view name) const;
     /// A column by name, sharing its buffers zero-copy; invalid if absent.
     Series column(std::string_view name) const;
+
+    /// Begin a deferred query over this frame; include dataframe/lazyframe.h.
+    LazyFrame lazy() const;
 
     DataFrame take(const std::vector<std::int64_t>& indices) const;
     DataFrame filter(const Series& mask) const;
