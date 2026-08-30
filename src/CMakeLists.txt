@@ -1232,9 +1232,6 @@ install(
 # They must be installed to their mirrored public destination so the installed
 # public headers are self-contained against the install prefix alone.
 set(DFTRACER_UTILS_SRC_PUBLIC_HEADERS
-    core/common/format_detector.h
-    trace/indexing/queries/queries.h
-    utilities/indexer/internal/common/gzip_member_scanner.h
     utilities/indexer/internal/helpers.h)
 
 foreach(hdr ${DFTRACER_UTILS_SRC_PUBLIC_HEADERS})
