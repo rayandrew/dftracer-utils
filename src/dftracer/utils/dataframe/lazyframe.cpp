@@ -1038,9 +1038,20 @@ class UniqueCursor : public Cursor {
     std::optional<Morsel> next(std::int64_t max_rows) override {
         while (auto m = in_->next(max_rows)) {
             const std::int64_t n = m->rows;
+            // Build the exact row keys in parallel (scalar string work, one per
+            // row, independent), then dedupe serially against the running set
+            // to keep first-occurrence order.
+            std::vector<std::string> keys(static_cast<std::size_t>(n));
+            parallel_for(n, std::int64_t{1} << 13,
+                         [&](std::int64_t b, std::int64_t e) {
+                             for (std::int64_t i = b; i < e; ++i)
+                                 keys[static_cast<std::size_t>(i)] =
+                                     row_key(m->columns, i);
+                         });
             std::vector<std::int64_t> keep;
             for (std::int64_t i = 0; i < n; ++i)
-                if (seen_.insert(row_key(m->columns, i)).second)
+                if (seen_.insert(std::move(keys[static_cast<std::size_t>(i)]))
+                        .second)
                     keep.push_back(i);
             if (keep.empty()) continue;
             DataFrame mf;

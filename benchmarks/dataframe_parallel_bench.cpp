@@ -238,5 +238,26 @@ int main(int argc, char** argv) {
     const double st_par = time_stat();
     std::printf("field_stat_reduce: serial %6.2f ms | runtime %6.2f ms (%.2fx)\n",
                 st_ser, st_par, st_ser / st_par);
+
+    // unique: parallel row-key gen + serial dedup (all rows distinct here).
+    auto time_unique = [&](int reps) {
+        double best = 1e300;
+        for (int r = 0; r < reps; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            DataFrame out = df.lazy().unique().collect();
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(out.num_rows());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    const double uq_ser = time_unique(3);
+    install_runtime_parallel_backend();
+    const double uq_par = time_unique(3);
+    std::printf("unique: serial %8.2f ms | runtime %8.2f ms (%.2fx)\n", uq_ser,
+                uq_par, uq_ser / uq_par);
     return ok ? 0 : 1;
 }
