@@ -1,6 +1,7 @@
 #include <dftracer/utils/binaries/common_cli.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/logging.h>
+#include <dftracer/utils/core/common/memory_budget.h>  // NO_SPILL_BUDGET
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/pipeline/pipeline.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
@@ -894,10 +895,11 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         if (!agg_specs.empty()) v = v.agg(agg_specs);
         if (cli->agg_numeric_args) v = v.agg_numeric_args();
         if (!cli->select.empty()) v = v.select(split_csv(cli->select));
-        if (cli->memory_budget > 0)
+        if (cli->no_spill)
+            v = v.memory_budget(NO_SPILL_BUDGET);
+        else if (cli->memory_budget > 0)
             v = v.memory_budget(cli->memory_budget);
-        else if (!cli->no_spill)
-            v = v.auto_spill();
+        // else: leave the plan default (0), which resolves to auto (~1/3 RAM).
         if (cli->offset > 0) v = v.offset(cli->offset);
         if (cli->limit > 0) v = v.limit(cli->limit);
         return v;

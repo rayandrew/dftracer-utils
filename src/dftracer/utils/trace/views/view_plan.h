@@ -81,8 +81,10 @@ struct ViewPlan {
     /// aggregate_partial: when a worker's in-memory group map grows past this
     /// many bytes it spills to a sorted temp run; the runs are k-way merged at
     /// the end, so the scan/merge peak stays bounded regardless of group
-    /// cardinality. 0 = pure in-memory (never spill). collect() still
-    /// materializes the final table, so this bounds intermediate memory only.
+    /// cardinality. 0 (the default) means "auto": ~1/3 of available memory (see
+    /// resolve_spill_budget). Set NO_SPILL_BUDGET to disable spilling.
+    /// collect() still materializes the final table, so this bounds
+    /// intermediate memory only.
     std::uint64_t memory_budget = 0;
     std::vector<std::string> select;
 

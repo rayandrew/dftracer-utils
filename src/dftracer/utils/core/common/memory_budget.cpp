@@ -158,6 +158,15 @@ std::size_t compute_memory_budget(std::size_t user_override_bytes) {
     return std::max(budget, MIN_MEMORY_BUDGET_BYTES);
 }
 
+std::uint64_t resolve_spill_budget(std::uint64_t configured) {
+    if (configured == 0) {
+        const std::uint64_t b =
+            static_cast<std::uint64_t>(detect_available_memory() / 3);
+        return b < MIN_MEMORY_BUDGET_BYTES ? MIN_MEMORY_BUDGET_BYTES : b;
+    }
+    return configured;  // explicit bytes, or NO_SPILL_BUDGET passthrough
+}
+
 std::size_t estimate_per_file_bytes(const std::vector<std::size_t> &file_sizes,
                                     std::size_t user_override_bytes) {
     if (user_override_bytes > 0) return user_override_bytes;

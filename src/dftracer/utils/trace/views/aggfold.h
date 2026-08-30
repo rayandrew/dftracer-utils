@@ -2,6 +2,7 @@
 #define DFTRACER_UTILS_TRACE_VIEWS_AGGFOLD_H
 
 #include <dftracer/utils/core/common/filesystem.h>
+#include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/views/agg_fold.h>
@@ -60,7 +61,7 @@ class AggFold : public Fold {
             bool apply_query = false)
         : plan_(&plan),
           intern_(&intern),
-          budget_(plan.memory_budget),
+          budget_(resolve_spill_budget(plan.memory_budget)),
           phase_target_(phase_target(plan)),
           apply_query_(apply_query && plan.query.has_value()),
           want_ranks_(std::any_of(plan.group_by.begin(), plan.group_by.end(),
@@ -265,7 +266,10 @@ class AggFold : public Fold {
     }
 
     void maybe_spill() {
-        if (budget_ > 0 && approx_bytes(map_) > budget_) spill_map();
+        // budget_ is resolved (auto/explicit/NO_SPILL); NO_SPILL is so large
+        // approx_bytes never reaches it, so no separate "never" guard is
+        // needed.
+        if (approx_bytes(map_) > budget_) spill_map();
     }
 
     void spill_map() {
