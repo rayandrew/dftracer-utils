@@ -3501,6 +3501,9 @@ _VFOLD_TOP_FIELDS = frozenset({"name", "cat", "pid", "tid", "ts", "dur", "ph", "
 # Numeric top-level columns build_row_frame emits as flat UInt64, so a keyed
 # fold can read them directly as a uint64 buffer.
 _VFOLD_NUMERIC = frozenset({"pid", "tid", "ts", "dur"})
+# String top-level columns; a keyed fold groups by them and re-interns each
+# distinct value for a DFTU_T_STR map key.
+_VFOLD_STRING_FIELDS = frozenset({"name", "cat"})
 
 
 def _vfold_df_field(node: ast.expr) -> str:
@@ -3548,9 +3551,19 @@ def _compile_vfold(
             if attr not in maps:
                 raise JitError(f"@jit.vfold: '{attr}' is not a declared jit.map")
             keyfield = _vfold_df_field(_unwrap_index(tgt.slice))
-            if keyfield not in _VFOLD_NUMERIC:
+            keytype = maps[attr].key_types[0].dft
+            if keyfield in _VFOLD_STRING_FIELDS:
+                keycat = "str"
+                if keytype != "DFTU_T_STR":
+                    raise JitError(f"@jit.vfold: string key '{keyfield}' needs a jit.str_ map key")
+            elif keyfield in _VFOLD_NUMERIC:
+                keycat = "num"
+                if keytype == "DFTU_T_STR":
+                    raise JitError(f"@jit.vfold: numeric key '{keyfield}' needs an integer map key")
+            else:
                 raise JitError(
-                    f"@jit.vfold: key field '{keyfield}' must be numeric (pid/tid/ts/dur)"
+                    f"@jit.vfold: key field '{keyfield}' must be numeric "
+                    "(pid/tid/ts/dur) or a string (name/cat)"
                 )
             rhs = stmt.value
             vfield: str | None = None
@@ -3564,13 +3577,21 @@ def _compile_vfold(
                         f"@jit.vfold: value field '{vfield}' must be numeric (pid/tid/ts/dur)"
                     )
                 fields.add(vfield)
+            mon = maps[attr].values[0]
+            fam = mon.dft.split("_")[2] if len(mon.dft.split("_")) > 2 else ""
+            if keycat == "str" and (const is not None or fam not in ("SUM", "MIN", "MAX")):
+                raise JitError(
+                    f"@jit.vfold: a string key ('{keyfield}') supports only "
+                    "sum/min/max over a value column for now"
+                )
             fields.add(keyfield)
             ops.append(
                 {
                     "kind": "keyed",
                     "attr": attr,
-                    "mon": maps[attr].values[0],
-                    "keytype": maps[attr].key_types[0].dft,
+                    "mon": mon,
+                    "keytype": keytype,
+                    "keycat": keycat,
                     "keyfield": keyfield,
                     "vfield": vfield,
                     "const": const,
@@ -3710,9 +3731,10 @@ def _emit_vfold(
         # batch with a single SIMD pass and fold each distinct key. COUNTER/MEAN
         # (and a constant value) do not compose that way - fold row by row and
         # let the monoid accumulate per sample.
+        keycat = cast(str, opd["keycat"])
         if read_val and group_flag is not None:
             perkey = "(double)gv[i]" if f64 else "(uint64_t)gv[i]"
-            out += [
+            head = [
                 "    {",
                 f"        dftu_series* kc = dftu_dataframe_column(df, {_c_str_literal(keyfield)});",
                 f"        dftu_series* vc = dftu_dataframe_column(df, {_c_str_literal(cast(str, vfield))});",
@@ -3722,25 +3744,51 @@ def _emit_vfold(
                 f"            int32_t nout = dftu_dataframe_group_by(kc, vc, {group_flag}, &ok, ov, 1);",
                 "            if (nout >= 1 && ok && ov[0]) {",
                 "                int64_t g = dftu_series_length(ok);",
-                "                const uint64_t* gk = (const uint64_t*)dftu_series_data(ok);",
                 "                const uint64_t* gv = (const uint64_t*)dftu_series_data(ov[0]);",
                 f"                const dftu_type kt[1] = {{{keytype}}};",
                 f"                dftu_map* m = map->map_new(host->h, {_c_str_literal(attr)}, kt, 1, {mon.dft});",
-                "                if (gk && gv) {",
-                "                    for (int64_t i = 0; i < g; i++) {",
-                "                        int64_t key[1];",
-                "                        key[0] = (int64_t)gk[i];",
-                f"                        map->{add_fn}(host->h, m, key, {perkey});",
-                "                    }",
-                "                }",
-                "            }",
-                "            if (ok) dftu_series_free(ok);",
-                "            if (ov[0]) dftu_series_free(ov[0]);",
-                "            dftu_series_free(kc);",
-                "            dftu_series_free(vc);",
-                "        }",
-                "    }",
             ]
+            if keycat == "str":
+                # Re-intern each distinct group key for the DFTU_T_STR map key; the
+                # host resolves the ids back to strings at finalize.
+                body = [
+                    "                dftu_series* okf = dftu_series_materialize(ok);",
+                    "                const int32_t* off = okf ? dftu_series_offsets(okf) : 0;",
+                    "                const char* kb = okf ? (const char*)dftu_series_data(okf) : 0;",
+                    "                if (off && kb && gv) {",
+                    "                    for (int64_t i = 0; i < g; i++) {",
+                    "                        int64_t key[1];",
+                    "                        key[0] = (int64_t)host->intern(host->h, kb + off[i],",
+                    "                                                       (uint32_t)(off[i + 1] - off[i]));",
+                    f"                        map->{add_fn}(host->h, m, key, {perkey});",
+                    "                    }",
+                    "                }",
+                    "                if (okf) dftu_series_free(okf);",
+                ]
+            else:
+                body = [
+                    "                const uint64_t* gk = (const uint64_t*)dftu_series_data(ok);",
+                    "                if (gk && gv) {",
+                    "                    for (int64_t i = 0; i < g; i++) {",
+                    "                        int64_t key[1];",
+                    "                        key[0] = (int64_t)gk[i];",
+                    f"                        map->{add_fn}(host->h, m, key, {perkey});",
+                    "                    }",
+                    "                }",
+                ]
+            out += (
+                head
+                + body
+                + [
+                    "            }",
+                    "            if (ok) dftu_series_free(ok);",
+                    "            if (ov[0]) dftu_series_free(ov[0]);",
+                    "            dftu_series_free(kc);",
+                    "            dftu_series_free(vc);",
+                    "        }",
+                    "    }",
+                ]
+            )
             continue
         # Row-fold path: per-key counter/mean, or a constant value.
         perrow = (

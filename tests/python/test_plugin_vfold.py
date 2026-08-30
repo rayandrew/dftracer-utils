@@ -92,6 +92,32 @@ def test_vfold_keyed_sum_per_pid(tmp_path):
 
 
 @_needs_cxx
+def test_vfold_keyed_sum_per_name(tmp_path):
+    @jit.vfold
+    class ByName:
+        dur = jit.map(key=jit.str_, value=jit.sum())
+
+        @jit.each_batch
+        def step(self, df):
+            self.dur[df["name"]] += df["dur"]
+
+    names = ["read", "write", "read", "write", "read"]
+    durs = [10, 100, 20, 200, 30]
+    with gzip.open(str(tmp_path / "t.pfw.gz"), "wt", encoding="utf-8") as f:
+        for i, (nm, d) in enumerate(zip(names, durs)):
+            f.write(
+                f'{{"name":"{nm}","cat":"POSIX","pid":1,"tid":1,'
+                f'"ts":{1000 + i},"dur":{d},"ph":"X","args":{{}}}}\n'
+            )
+    host = PluginHost()
+    host.load(ByName)
+    host.resolve()
+    tbl = pa.table(host.run(str(tmp_path))["dur"])
+    got = dict(zip(tbl.column(0).to_pylist(), tbl.column("value").to_pylist()))
+    assert got == {"read": 60.0, "write": 300.0}
+
+
+@_needs_cxx
 def test_vfold_keyed_max_per_pid(tmp_path):
     @jit.vfold
     class Peak:
