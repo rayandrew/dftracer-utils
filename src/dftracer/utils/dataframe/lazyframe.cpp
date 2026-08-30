@@ -1,3 +1,5 @@
+#include <ankerl/unordered_dense.h>
+#include <dftracer/utils/dataframe/agg.h>        // streaming group-by state
 #include <dftracer/utils/dataframe/batch_ops.h>  // concat_columns
 #include <dftracer/utils/dataframe/lazyframe.h>
 
@@ -410,6 +412,107 @@ class TopkCursor : public Cursor {
     bool done_ = false;
 };
 
+AggOp to_agg_op(Agg a) {
+    switch (a) {
+        case Agg::Sum:
+            return AggOp::Sum;
+        case Agg::Min:
+            return AggOp::Min;
+        case Agg::Max:
+            return AggOp::Max;
+        case Agg::Count:
+            return AggOp::Count;
+        case Agg::Mean:
+            return AggOp::Mean;
+        case Agg::Var:
+            return AggOp::Var;
+        case Agg::Std:
+            return AggOp::Std;
+        case Agg::Skew:
+            return AggOp::Skew;
+        case Agg::Kurt:
+            return AggOp::Kurt;
+        case Agg::First:
+            return AggOp::First;
+        case Agg::Last:
+            return AggOp::Last;
+        case Agg::Pct:
+            return AggOp::Pct;
+        case Agg::Hist:
+            return AggOp::Hist;
+    }
+    return AggOp::Count;
+}
+
+// Streaming group-by: fold every morsel into one mergeable AggState (bounded by
+// the group count), finalize once. No materialize-all.
+class GroupByCursor : public Cursor {
+   public:
+    GroupByCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                  std::string key, std::vector<GroupAgg> aggs)
+        : in_(std::move(in)),
+          sch_(std::move(sch)),
+          key_(std::move(key)),
+          aggs_(std::move(aggs)) {}
+
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (done_) return std::nullopt;
+        done_ = true;
+
+        const int key_idx = index_in(sch_, key_);
+        std::vector<AggSpec> specs;
+        std::vector<int> value_idx;  // sch indices of the deduped value columns
+        ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
+        specs.reserve(aggs_.size());
+        for (const GroupAgg& a : aggs_) {
+            AggSpec sp;
+            sp.op = to_agg_op(a.op);
+            sp.out = a.out;
+            sp.param = a.param;
+            if (sp.op == AggOp::Count) {
+                sp.value_col = -1;
+            } else {
+                auto it = dedup.find(a.column);
+                if (it != dedup.end()) {
+                    sp.value_col = it->second;
+                } else {
+                    sp.value_col = static_cast<std::int32_t>(value_idx.size());
+                    value_idx.push_back(index_in(sch_, a.column));
+                    dedup.emplace(a.column, sp.value_col);
+                }
+            }
+            specs.push_back(std::move(sp));
+        }
+
+        AggStatePtr state = agg_new(specs);
+        while (auto m = in_->next(max_rows)) {
+            std::vector<const Series*> values;
+            values.reserve(value_idx.size());
+            for (int vi : value_idx) values.push_back(&m->columns[vi]);
+            agg_accumulate(*state, m->columns[key_idx], values);
+        }
+        DataFrame r = agg_finalize(*state, key_);
+        Morsel out;
+        out.rows = r.num_rows();
+        out.columns.reserve(r.columns.size());
+        for (const Series& c : r.columns)
+            out.columns.push_back(c.materialize());
+        return out;
+    }
+
+   private:
+    static int index_in(const std::vector<std::string>& s,
+                        const std::string& n) {
+        auto it = std::find(s.begin(), s.end(), n);
+        return it == s.end() ? -1 : static_cast<int>(it - s.begin());
+    }
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    std::string key_;
+    std::vector<GroupAgg> aggs_;
+    bool done_ = false;
+};
+
 // ---- plan ops (tagged union) ------------------------------------------------
 
 struct FilterOp {
@@ -452,6 +555,10 @@ struct TopkOp {
     std::int64_t k;
     bool largest;
 };
+struct GroupByOp {
+    std::string key;
+    std::vector<GroupAgg> aggs;
+};
 
 template <class... Ts>
 struct overloaded : Ts... {
@@ -468,7 +575,7 @@ class LazyOp {
    public:
     std::variant<FilterOp, SelectOp, WithColumnOp, RenameOp, SliceOp, TailOp,
                  DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp,
-                 ExplodeOp, UnpivotOp, TopkOp>
+                 ExplodeOp, UnpivotOp, TopkOp, GroupByOp>
         node;
 };
 
@@ -510,6 +617,11 @@ std::vector<std::string> out_schema(const LazyOp& op,
                        s.push_back("variable");
                        s.push_back("value");
                        return s;
+                   },
+                   [&](const GroupByOp& o) {
+                       std::vector<std::string> s{o.key};
+                       for (const GroupAgg& a : o.aggs) s.push_back(a.out);
+                       return s;
                    }},
         op.node);
 }
@@ -533,7 +645,8 @@ std::string describe(const LazyOp& op) {
             [](const NullCountOp&) { return std::string("null_count"); },
             [](const ExplodeOp& o) { return "explode " + o.column; },
             [](const UnpivotOp&) { return std::string("unpivot"); },
-            [](const TopkOp& o) { return "topk " + o.name; }},
+            [](const TopkOp& o) { return "topk " + o.name; },
+            [](const GroupByOp& o) { return "group_by " + o.key; }},
         op.node);
 }
 
@@ -642,6 +755,10 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             [&](const TopkOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<TopkCursor>(std::move(in), sch, o.name,
                                                     o.k, o.largest);
+            },
+            [&](const GroupByOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<GroupByCursor>(std::move(in), sch,
+                                                       o.key, o.aggs);
             }},
         op.node);
 }
@@ -746,6 +863,14 @@ LazyFrame LazyFrame::topk(std::string name, std::int64_t k,
     auto ops = ops_;
     ops.push_back(
         std::make_shared<LazyOp>(LazyOp{TopkOp{std::move(name), k, largest}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::group_by(std::string key,
+                              std::vector<GroupAgg> aggs) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(
+        LazyOp{GroupByOp{std::move(key), std::move(aggs)}}));
     return LazyFrame(source_, std::move(ops));
 }
 

@@ -7,9 +7,11 @@
 #include <cstdint>
 #include <vector>
 
+using dftracer::utils::dataframe::Agg;
 using dftracer::utils::dataframe::col;
 using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::eval;
+using dftracer::utils::dataframe::GroupAgg;
 using dftracer::utils::dataframe::LazyFrame;
 using dftracer::utils::dataframe::Series;
 
@@ -150,6 +152,37 @@ TEST_SUITE("lazyframe") {
         DataFrame up = make_df().lazy().unpivot({"a"}, {"b"}).collect(2);
         CHECK(up.names == std::vector<std::string>{"a", "variable", "value"});
         CHECK(up.num_rows() == 6);
+    }
+
+    TEST_CASE("streaming group_by matches eager (mergeable across morsels)") {
+        std::vector<std::int64_t> g{0, 1, 0, 1, 0, 1};
+        std::vector<std::int64_t> v{1, 2, 3, 4, 5, 6};
+        DataFrame df;
+        df.names = {"g", "v"};
+        df.columns.push_back(Series::flat_i64(g.data(), 6));
+        df.columns.push_back(Series::flat_i64(v.data(), 6));
+        std::vector<GroupAgg> aggs{{Agg::Sum, "v", "sum", 0.0},
+                                   {Agg::Mean, "v", "mean", 0.0},
+                                   {Agg::Count, "", "count", 0.0}};
+
+        // Small morsel size: mean must NOT be a mean-of-means.
+        DataFrame r = df.lazy().group_by("g", aggs).collect(2);
+        REQUIRE(r.num_rows() == 2);
+        const std::int64_t* gk = r.column("g").data<std::int64_t>();
+        const std::int64_t* sum = r.column("sum").data<std::int64_t>();
+        const double* mean = r.column("mean").data<double>();
+        const std::int64_t* cnt = r.column("count").data<std::int64_t>();
+        for (std::int64_t i = 0; i < 2; ++i) {
+            if (gk[i] == 0) {
+                CHECK(sum[i] == 9);  // 1+3+5
+                CHECK(mean[i] == doctest::Approx(3.0));
+                CHECK(cnt[i] == 3);
+            } else {
+                CHECK(sum[i] == 12);  // 2+4+6
+                CHECK(mean[i] == doctest::Approx(4.0));
+                CHECK(cnt[i] == 3);
+            }
+        }
     }
 
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {

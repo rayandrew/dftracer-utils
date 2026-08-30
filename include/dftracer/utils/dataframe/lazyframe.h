@@ -86,6 +86,9 @@ class LazyFrame {
                       std::vector<std::string> value_vars) const;
     /// The `k` rows with the largest (or smallest) `name` values.
     LazyFrame topk(std::string name, std::int64_t k, bool largest = true) const;
+    /// Group by `key` and compute each aggregate (streaming: one partial state,
+    /// bounded by the group count).
+    LazyFrame group_by(std::string key, std::vector<GroupAgg> aggs) const;
 
     /// Output column names without running the query.
     std::vector<std::string> schema() const;
