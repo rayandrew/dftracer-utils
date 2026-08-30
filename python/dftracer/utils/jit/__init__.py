@@ -109,6 +109,7 @@ __all__ = [
     "each_event",
     "vfold",
     "each_batch",
+    "series",
     "on_resolve",
     # numeric primitives
     "ilog2",
@@ -3913,6 +3914,39 @@ def vfold(cls: type) -> type:
     columnar on_batch seam, so each batch is folded in-scan; run it through
     :class:`dftracer.utils.plugins.PluginHost` like any other jit plugin."""
     return _build_vfold(cls)
+
+
+def series(fn: Callable[..., object]) -> Callable[..., object]:
+    """Author a reusable column op from an expression over its arguments.
+
+    The body builds a lazy column expression from its Series arguments using the
+    columnar DSL (arithmetic, comparisons, clip/cast/fillna, prims), e.g.::
+
+        @jit.series
+        def doubled(dur):
+            return dur * 2
+
+    It registers under the function name in dftracer.utils.jit.ops and returns a
+    callable, so both ``doubled(s)`` and ``ops.doubled(s)`` apply it via the
+    engine's Expr evaluator - no compile step, and it fuses with built-in Expr
+    math. Arguments are positional column operands."""
+    from ..columnar import Expr, col
+    from . import ops as _ops
+
+    name = getattr(fn, "__name__", None)
+    if not isinstance(name, str):
+        raise JitError("@jit.series must decorate a named function")
+    params = builtins.list(inspect.signature(fn).parameters.values())
+    if any(p.kind not in (p.POSITIONAL_OR_KEYWORD, p.POSITIONAL_ONLY) for p in params):
+        raise JitError("@jit.series takes only positional column arguments")
+    n = len(params)
+    if n == 0:
+        raise JitError("@jit.series needs at least one column argument")
+    built = fn(*[col(f"__x{i}__") for i in range(n)])
+    if not isinstance(built, Expr):
+        raise JitError("@jit.series body must return a column expression built from its arguments")
+    _ops._register_user(name, n, built)
+    return _ops.get(name)
 
 
 @overload
