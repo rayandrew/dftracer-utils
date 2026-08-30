@@ -1,13 +1,17 @@
 #include <ankerl/unordered_dense.h>
 #include <dftracer/utils/core/common/hash/splitmix64.h>  // sample row keys
+#include <dftracer/utils/core/common/memory_budget.h>  // compute_memory_budget
 #include <dftracer/utils/dataframe/agg.h>        // streaming group-by state
 #include <dftracer/utils/dataframe/batch_ops.h>  // concat_columns, take, concat
+#include <dftracer/utils/dataframe/internal/spill.h>  // external-merge spill
 #include <dftracer/utils/dataframe/lazyframe.h>
+#include <dftracer/utils/dataframe/types.h>  // byte_width, buffer_bytes
 
 #include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -52,6 +56,69 @@ Morsel morsel_of(DataFrame&& f) {
     out.columns.reserve(f.columns.size());
     for (const Series& c : f.columns) out.columns.push_back(c.materialize());
     return out;
+}
+
+// Read a numeric cell as a double for key comparison (FLAT columns only).
+double read_num(const Series& c, std::int64_t i) {
+    switch (c.type()) {
+        case TypeId::Bool:
+            return (c.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1;
+        case TypeId::Int8:
+            return c.data<std::int8_t>()[i];
+        case TypeId::Int16:
+            return c.data<std::int16_t>()[i];
+        case TypeId::Int32:
+            return c.data<std::int32_t>()[i];
+        case TypeId::Int64:
+            return static_cast<double>(c.data<std::int64_t>()[i]);
+        case TypeId::Uint8:
+            return c.data<std::uint8_t>()[i];
+        case TypeId::Uint16:
+            return c.data<std::uint16_t>()[i];
+        case TypeId::Uint32:
+            return c.data<std::uint32_t>()[i];
+        case TypeId::Uint64:
+            return static_cast<double>(c.data<std::uint64_t>()[i]);
+        case TypeId::Float32:
+            return static_cast<double>(c.data<float>()[i]);
+        case TypeId::Float64:
+            return c.data<double>()[i];
+        default:
+            return 0.0;
+    }
+}
+
+// Three-way compare of two key cells for a merge, honoring `descending`. Nulls
+// always sort last (both directions), matching argsort.
+int cmp_cell(const Series& a, std::int64_t ia, const Series& b, std::int64_t ib,
+             bool descending) {
+    const bool na = a.is_null(ia), nb = b.is_null(ib);
+    if (na || nb) return na && nb ? 0 : (na ? 1 : -1);
+    int c;
+    if (a.type() == TypeId::String) {
+        const std::string_view x = a.string_at(ia), y = b.string_at(ib);
+        c = x < y ? -1 : (x > y ? 1 : 0);
+    } else {
+        const double x = read_num(a, ia), y = read_num(b, ib);
+        c = x < y ? -1 : (x > y ? 1 : 0);
+    }
+    return descending ? -c : c;
+}
+
+// Approximate in-memory byte size of a set of FLAT columns (spill trigger).
+std::size_t morsel_bytes(const std::vector<Series>& cols) {
+    std::size_t total = 0;
+    for (const Series& c : cols) {
+        const std::int64_t n = c.length();
+        if (byte_width(c.type()) == 0) {  // String / Binary
+            const std::int32_t* offs = dftu_series_offsets(c.handle());
+            total += static_cast<std::size_t>(n + 1) * sizeof(std::int32_t) +
+                     (n > 0 ? static_cast<std::size_t>(offs[n]) : 0);
+        } else {
+            total += buffer_bytes(c.type(), n);
+        }
+    }
+    return total;
 }
 
 // ---- cursors ----------------------------------------------------------------
@@ -547,9 +614,6 @@ class GroupByCursor : public Cursor {
     bool done_ = false;
 };
 
-// Pipeline breakers that need all rows: buffer the input, apply `fn` once. A
-// spillable form (external merge for sort, spill hash for unique/pivot) is a
-// follow-up.
 // Streaming min-hash reservoir: keep the n rows with the smallest
 // mix64(global_row_index + seed) keys, matching DataFrame::sample. Bounded to n
 // rows (plus one morsel) regardless of input size; emits them in original row
@@ -629,6 +693,180 @@ class SampleCursor : public Cursor {
     bool done_ = false;
 };
 
+// External merge sort. Generates sorted runs bounded by `budget` bytes (spilled
+// to disk; budget 0 keeps one in-memory run), then k-way range-merges them into
+// a sorted stream. Peak memory is O(budget + one output morsel) when spilling.
+class SortMergeCursor : public Cursor {
+   public:
+    SortMergeCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                    std::string key, bool descending, std::uint64_t budget)
+        : in_(std::move(in)),
+          sch_(std::move(sch)),
+          key_(std::move(key)),
+          descending_(descending),
+          budget_(budget) {}
+
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (!built_) build(max_rows);
+
+        std::vector<std::vector<Series>> pieces;
+        std::int64_t out_rows = 0;
+        while (out_rows < max_rows) {
+            const int winner = pick(-1, false);
+            if (winner < 0) break;
+            const int bnd = pick(winner, true);
+            Morsel& wm = *cur_[static_cast<std::size_t>(winner)];
+            const Series& kw = wm.columns[static_cast<std::size_t>(key_idx_)];
+            std::int64_t pos = pos_[static_cast<std::size_t>(winner)];
+            const std::int64_t end =
+                std::min(wm.rows, pos + (max_rows - out_rows));
+            std::int64_t limit;
+            if (bnd < 0) {
+                limit = end;
+            } else {
+                const Morsel& bm = *cur_[static_cast<std::size_t>(bnd)];
+                const Series& kb =
+                    bm.columns[static_cast<std::size_t>(key_idx_)];
+                const std::int64_t bpos = pos_[static_cast<std::size_t>(bnd)];
+                limit = pos;
+                while (limit < end &&
+                       cmp_cell(kw, limit, kb, bpos, descending_) <= 0)
+                    ++limit;
+            }
+            Morsel piece = slice_morsel(wm, pos, limit - pos);
+            pieces.push_back(std::move(piece.columns));
+            out_rows += limit - pos;
+            pos_[static_cast<std::size_t>(winner)] = limit;
+            if (limit >= wm.rows) advance(winner, max_rows);
+        }
+        if (pieces.empty()) return std::nullopt;
+        Morsel out;
+        out.rows = out_rows;
+        const std::size_t ncols = pieces.front().size();
+        out.columns.reserve(ncols);
+        for (std::size_t c = 0; c < ncols; ++c) {
+            std::vector<const Series*> parts;
+            parts.reserve(pieces.size());
+            for (auto& pc : pieces) parts.push_back(&pc[c]);
+            out.columns.push_back(concat_columns(parts));
+        }
+        return out;
+    }
+
+   private:
+    // Index of the active run whose current key is most "before" the rest;
+    // `exclude` skips one run (for the boundary), returns -1 if none active.
+    int pick(int exclude, bool /*is_boundary*/) const {
+        int best = -1;
+        for (std::size_t k = 0; k < cur_.size(); ++k) {
+            if (static_cast<int>(k) == exclude) continue;
+            if (!cur_[k] || pos_[k] >= cur_[k]->rows) continue;
+            if (best < 0) {
+                best = static_cast<int>(k);
+                continue;
+            }
+            const Series& kk =
+                cur_[k]->columns[static_cast<std::size_t>(key_idx_)];
+            const Series& kb =
+                cur_[static_cast<std::size_t>(best)]
+                    ->columns[static_cast<std::size_t>(key_idx_)];
+            if (cmp_cell(kk, pos_[k], kb, pos_[static_cast<std::size_t>(best)],
+                         descending_) < 0)
+                best = static_cast<int>(k);
+        }
+        return best;
+    }
+
+    void advance(int k, std::int64_t max_rows) {
+        cur_[static_cast<std::size_t>(k)] =
+            runs_[static_cast<std::size_t>(k)]->next(max_rows);
+        pos_[static_cast<std::size_t>(k)] = 0;
+    }
+
+    DataFrame concat_pending(std::vector<std::vector<Series>>& pending) const {
+        DataFrame buf;
+        buf.names = sch_;
+        buf.columns.reserve(sch_.size());
+        for (std::size_t c = 0; c < sch_.size(); ++c) {
+            std::vector<const Series*> parts;
+            parts.reserve(pending.size());
+            for (auto& ch : pending) parts.push_back(&ch[c]);
+            buf.columns.push_back(concat_columns(parts));
+        }
+        return buf;
+    }
+
+    void spill_run(std::vector<std::vector<Series>>& pending, int id,
+                   std::int64_t chunk) {
+        DataFrame sorted = concat_pending(pending).sort_by(key_, descending_);
+        spill::Writer w(dir_.run_path(id));
+        const std::int64_t total = sorted.num_rows();
+        for (std::int64_t off = 0; off < total; off += chunk) {
+            const std::int64_t len = std::min(chunk, total - off);
+            DataFrame s = sorted.slice(off, len);
+            std::vector<Series> cols;
+            cols.reserve(s.columns.size());
+            for (const Series& c : s.columns) cols.push_back(c.materialize());
+            w.write(cols, len);
+        }
+        w.close();
+    }
+
+    void build(std::int64_t max_rows) {
+        key_idx_ = static_cast<int>(std::distance(
+            sch_.begin(), std::find(sch_.begin(), sch_.end(), key_)));
+        if (key_idx_ >= static_cast<int>(sch_.size()))
+            throw std::out_of_range("sort_by: no column named " + key_);
+
+        std::vector<std::vector<Series>> pending;
+        std::size_t pend_bytes = 0;
+        int run_id = 0;
+        while (auto m = in_->next(max_rows)) {
+            pend_bytes += morsel_bytes(m->columns);
+            pending.push_back(std::move(m->columns));
+            if (budget_ > 0 && pend_bytes > budget_) {
+                spill_run(pending, run_id++, max_rows);
+                pending.clear();
+                pend_bytes = 0;
+            }
+        }
+
+        if (run_id == 0) {  // everything fits in memory: one sorted run
+            DataFrame buf =
+                pending.empty() ? DataFrame{} : concat_pending(pending);
+            if (pending.empty()) buf.names = sch_;
+            DataFrame sorted = buf.num_rows() ? buf.sort_by(key_, descending_)
+                                              : std::move(buf);
+            runs_.push_back(std::make_unique<InMemoryCursor>(
+                std::make_shared<const DataFrame>(std::move(sorted))));
+        } else {
+            if (!pending.empty()) spill_run(pending, run_id++, max_rows);
+            for (int id = 0; id < run_id; ++id)
+                runs_.push_back(
+                    std::make_unique<spill::Reader>(dir_.run_path(id)));
+        }
+        cur_.resize(runs_.size());
+        pos_.assign(runs_.size(), 0);
+        for (std::size_t k = 0; k < runs_.size(); ++k)
+            cur_[k] = runs_[k]->next(max_rows);
+        built_ = true;
+    }
+
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    std::string key_;
+    bool descending_;
+    std::uint64_t budget_;
+    bool built_ = false;
+    int key_idx_ = 0;
+    spill::Dir dir_;
+    std::vector<std::unique_ptr<Cursor>> runs_;
+    std::vector<std::optional<Morsel>> cur_;
+    std::vector<std::int64_t> pos_;
+};
+
+// Pipeline breakers that need all rows: buffer the input, apply `fn` once.
+// (unique/pivot/describe/group_by_dynamic; a spillable form is a follow-up.)
 class BufferSinkCursor : public Cursor {
    public:
     BufferSinkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
@@ -903,7 +1141,8 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
 // op's input schema).
 std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                     std::unique_ptr<Cursor> in,
-                                    const std::vector<std::string>& sch) {
+                                    const std::vector<std::string>& sch,
+                                    std::uint64_t budget) {
     return std::visit(
         overloaded{
             [&](const FilterOp& o) -> std::unique_ptr<Cursor> {
@@ -960,10 +1199,8 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                                        o.key, o.aggs);
             },
             [&](const SortByOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<BufferSinkCursor>(
-                    std::move(in), sch, [o](DataFrame&& f) {
-                        return f.sort_by(o.name, o.descending);
-                    });
+                return std::make_unique<SortMergeCursor>(
+                    std::move(in), sch, o.name, o.descending, budget);
             },
             [&](const UniqueOp&) -> std::unique_ptr<Cursor> {
                 return std::make_unique<BufferSinkCursor>(
@@ -1029,33 +1266,33 @@ LazyFrame LazyFrame::scan(std::shared_ptr<const Source> source) {
 LazyFrame LazyFrame::select(std::vector<std::string> names) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{SelectOp{std::move(names)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::filter(Expr predicate) const {
     auto ops = ops_;
     ops.push_back(
         std::make_shared<LazyOp>(LazyOp{FilterOp{std::move(predicate)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::with_column(std::string name, Expr expr) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(
         LazyOp{WithColumnOp{std::move(name), std::move(expr)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::rename(std::vector<std::string> names) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{RenameOp{std::move(names)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::slice(std::int64_t offset, std::int64_t len) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{SliceOp{offset, len}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::head(std::int64_t n) const { return slice(0, n); }
@@ -1063,39 +1300,39 @@ LazyFrame LazyFrame::head(std::int64_t n) const { return slice(0, n); }
 LazyFrame LazyFrame::tail(std::int64_t n) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{TailOp{n}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::drop_nulls() const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{DropNullsOp{}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::fill_null(dftu_scalar value) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{FillNullOp{value}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::with_row_index(std::string name) const {
     auto ops = ops_;
     ops.push_back(
         std::make_shared<LazyOp>(LazyOp{WithRowIndexOp{std::move(name)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::null_count() const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{NullCountOp{}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::explode(std::string column) const {
     auto ops = ops_;
     ops.push_back(
         std::make_shared<LazyOp>(LazyOp{ExplodeOp{std::move(column)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::unpivot(std::vector<std::string> id_vars,
@@ -1103,7 +1340,7 @@ LazyFrame LazyFrame::unpivot(std::vector<std::string> id_vars,
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(
         LazyOp{UnpivotOp{std::move(id_vars), std::move(value_vars)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::topk(std::string name, std::int64_t k,
@@ -1111,7 +1348,7 @@ LazyFrame LazyFrame::topk(std::string name, std::int64_t k,
     auto ops = ops_;
     ops.push_back(
         std::make_shared<LazyOp>(LazyOp{TopkOp{std::move(name), k, largest}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::group_by(std::string key,
@@ -1119,20 +1356,20 @@ LazyFrame LazyFrame::group_by(std::string key,
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(
         LazyOp{GroupByOp{std::move(key), std::move(aggs)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::sort_by(std::string name, bool descending) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(
         LazyOp{SortByOp{std::move(name), descending}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::unique() const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{UniqueOp{}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::drop_duplicates() const { return unique(); }
@@ -1140,19 +1377,19 @@ LazyFrame LazyFrame::drop_duplicates() const { return unique(); }
 LazyFrame LazyFrame::sample(std::int64_t n, std::uint64_t seed) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{SampleOp{n, seed}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::is_duplicated() const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{IsDupOp{false}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::is_unique() const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{IsDupOp{true}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::group_by_dynamic(std::string time_col, std::int64_t every,
@@ -1164,7 +1401,7 @@ LazyFrame LazyFrame::group_by_dynamic(std::string time_col, std::int64_t every,
     ops.push_back(std::make_shared<LazyOp>(
         LazyOp{GroupByDynamicOp{std::move(time_col), every, period,
                                 std::move(aggs), origin, origin_min}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::melt(std::vector<std::string> id_vars,
@@ -1177,20 +1414,20 @@ LazyFrame LazyFrame::pivot(std::string index, std::string on,
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{PivotOp{
         std::move(index), std::move(on), std::move(values), std::move(agg)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::to_dummies(std::string column) const {
     auto ops = ops_;
     ops.push_back(
         std::make_shared<LazyOp>(LazyOp{ToDummiesOp{std::move(column)}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::describe() const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{DescribeOp{}}));
-    return LazyFrame(source_, std::move(ops));
+    return with_ops(std::move(ops));
 }
 
 std::vector<std::string> LazyFrame::schema() const {
@@ -1206,12 +1443,23 @@ std::string LazyFrame::explain() const {
     return s;
 }
 
+LazyFrame LazyFrame::memory_budget(std::uint64_t bytes) const {
+    return LazyFrame(source_, ops_, bytes);
+}
+
+LazyFrame LazyFrame::auto_spill() const {
+    // Same policy as the default (0) and as View: ~1/3 of available memory.
+    return LazyFrame(source_, ops_, resolve_spill_budget(0));
+}
+
 DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
     auto ops = pushdown_predicates(source_->names(), ops_);
     std::unique_ptr<Cursor> cur = source_->open();
     std::vector<std::string> sch = source_->names();
+    // 0 resolves to auto (~1/3 RAM), same policy as View.
+    const std::uint64_t budget = resolve_spill_budget(memory_budget_);
     for (const auto& op : ops) {
-        cur = make_cursor(*op, std::move(cur), sch);
+        cur = make_cursor(*op, std::move(cur), sch, budget);
         sch = out_schema(*op, std::move(sch));
     }
     DataFrame out = drain_to_frame(*cur, sch, morsel_rows);

@@ -127,6 +127,16 @@ class LazyFrame {
     /// data-dependent, so schema() is empty until collect().
     LazyFrame describe() const;
 
+    /// Out-of-core budget for the pipeline breakers (sort/unique/group_by):
+    /// when a sink's in-memory state grows past this many bytes it spills to a
+    /// sorted temp run, k-way merged at the end, so peak memory stays bounded.
+    /// 0 (the default) means "auto": ~1/3 of available memory. Pass
+    /// NO_SPILL_BUDGET to disable spilling. Same knob and policy as View.
+    LazyFrame memory_budget(std::uint64_t bytes) const;
+    /// Explicitly set the budget to ~1/3 of available memory (same as the
+    /// default); sugar for readers who want spilling stated at the call site.
+    LazyFrame auto_spill() const;
+
     /// Output column names without running the query. Empty for a plan ending
     /// in a data-dependent op (pivot/to_dummies/describe).
     std::vector<std::string> schema() const;
@@ -141,10 +151,18 @@ class LazyFrame {
 
    private:
     LazyFrame(std::shared_ptr<const Source> source,
-              std::vector<std::shared_ptr<const LazyOp>> ops)
-        : source_(std::move(source)), ops_(std::move(ops)) {}
+              std::vector<std::shared_ptr<const LazyOp>> ops,
+              std::uint64_t memory_budget = 0)
+        : source_(std::move(source)),
+          ops_(std::move(ops)),
+          memory_budget_(memory_budget) {}
+    // Clone with a new op list, preserving the source and budget.
+    LazyFrame with_ops(std::vector<std::shared_ptr<const LazyOp>> ops) const {
+        return LazyFrame(source_, std::move(ops), memory_budget_);
+    }
     std::shared_ptr<const Source> source_;
     std::vector<std::shared_ptr<const LazyOp>> ops_;
+    std::uint64_t memory_budget_ = 0;
 };
 
 /// Free-function form of DataFrame::lazy(), for `lazy(df)` call sites.

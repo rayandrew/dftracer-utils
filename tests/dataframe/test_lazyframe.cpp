@@ -185,7 +185,7 @@ TEST_SUITE("lazyframe") {
         }
     }
 
-    TEST_CASE("sort_by and unique (buffering sinks)") {
+    TEST_CASE("sort_by (in-memory) and unique") {
         DataFrame s = make_df().lazy().sort_by("a", true).collect(2);
         CHECK(s.num_rows() == 6);
         CHECK(s.column("a").data<std::int64_t>()[0] == 6);
@@ -197,6 +197,37 @@ TEST_SUITE("lazyframe") {
         df.columns.push_back(Series::flat_i64(d.data(), 5));
         DataFrame u = df.lazy().unique().collect(2);
         CHECK(u.num_rows() == 3);
+    }
+
+    TEST_CASE("sort_by external merge (spilling) matches eager") {
+        // Scrambled keys + a payload column, tiny budget + tiny morsels so the
+        // sort spills several runs and k-way merges them back.
+        std::vector<std::int64_t> k(200), v(200);
+        for (std::int64_t i = 0; i < 200; ++i) {
+            k[static_cast<std::size_t>(i)] =
+                (i * 73 + 11) % 200;  // permutation
+            v[static_cast<std::size_t>(i)] = i;
+        }
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(Series::flat_i64(k.data(), 200));
+        df.columns.push_back(Series::flat_i64(v.data(), 200));
+
+        for (bool desc : {false, true}) {
+            DataFrame lz = df.lazy()
+                               .memory_budget(1024)  // force spilling
+                               .sort_by("k", desc)
+                               .collect(16);
+            DataFrame eg = df.sort_by("k", desc);
+            REQUIRE(lz.num_rows() == 200);
+            const std::int64_t* lk = lz.column("k").data<std::int64_t>();
+            const std::int64_t* ek = eg.column("k").data<std::int64_t>();
+            for (std::int64_t i = 0; i < 200; ++i) CHECK(lk[i] == ek[i]);
+            // Keys are a permutation (all distinct), so the payload aligns too.
+            const std::int64_t* lv = lz.column("v").data<std::int64_t>();
+            const std::int64_t* ev = eg.column("v").data<std::int64_t>();
+            for (std::int64_t i = 0; i < 200; ++i) CHECK(lv[i] == ev[i]);
+        }
     }
 
     TEST_CASE("sample / is_duplicated / group_by_dynamic") {
