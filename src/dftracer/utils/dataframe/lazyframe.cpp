@@ -22,6 +22,10 @@ namespace dftracer::utils::dataframe {
 
 namespace {
 
+// Rebuilds a fresh cursor over the same upstream (source + prior ops). Two-pass
+// sinks (is_duplicated/to_dummies) use it to re-scan the input in order.
+using CursorFactory = std::function<std::unique_ptr<Cursor>()>;
+
 std::vector<const Series*> column_ptrs(const std::vector<Series>& cols) {
     std::vector<const Series*> in;
     in.reserve(cols.size());
@@ -1161,8 +1165,55 @@ class DescribeCursor : public Cursor {
     std::vector<std::string> produced_;
 };
 
+// Two-pass per-row mask: pass 1 counts each row key over all input; pass 2
+// re-scans the input (via the rebuild factory) in order, emitting count>1
+// (is_duplicated) or count==1 (is_unique) as one Bool column per morsel. Order-
+// preserving; state is the count map, bounded by the distinct row count.
+class IsDupCursor : public Cursor {
+   public:
+    IsDupCursor(std::unique_ptr<Cursor> in, CursorFactory rebuild, bool unique)
+        : first_(std::move(in)),
+          rebuild_(std::move(rebuild)),
+          unique_(unique) {}
+
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (!counted_) {
+            while (auto m = first_->next(max_rows))
+                for (std::int64_t i = 0; i < m->rows; ++i)
+                    ++counts_[row_key(m->columns, i)];
+            first_.reset();
+            pass2_ = rebuild_();
+            counted_ = true;
+        }
+        while (auto m = pass2_->next(max_rows)) {
+            const std::int64_t n = m->rows;
+            std::vector<std::uint8_t> bits(
+                static_cast<std::size_t>((n + 7) / 8), 0);
+            for (std::int64_t i = 0; i < n; ++i) {
+                auto it = counts_.find(row_key(m->columns, i));
+                const std::int64_t c = it != counts_.end() ? it->second : 0;
+                if (unique_ ? c == 1 : c > 1)
+                    bits[static_cast<std::size_t>(i >> 3)] |=
+                        static_cast<std::uint8_t>(1u << (i & 7));
+            }
+            Morsel out;
+            out.rows = n;
+            out.columns.push_back(Series::flat(TypeId::Bool, bits.data(), n));
+            return out;
+        }
+        return std::nullopt;
+    }
+
+   private:
+    std::unique_ptr<Cursor> first_, pass2_;
+    CursorFactory rebuild_;
+    bool unique_;
+    bool counted_ = false;
+    ankerl::unordered_dense::map<std::string, std::int64_t> counts_;
+};
+
 // Pipeline breakers that need all rows: buffer the input, apply `fn` once.
-// (pivot/to_dummies/group_by_dynamic; a spillable form is a follow-up.)
+// (pivot/to_dummies; a spillable form is a follow-up.)
 class BufferSinkCursor : public Cursor {
    public:
     BufferSinkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
@@ -1438,7 +1489,8 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
 std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                     std::unique_ptr<Cursor> in,
                                     const std::vector<std::string>& sch,
-                                    std::uint64_t budget) {
+                                    std::uint64_t budget,
+                                    const CursorFactory& rebuild) {
     return std::visit(
         overloaded{
             [&](const FilterOp& o) -> std::unique_ptr<Cursor> {
@@ -1506,14 +1558,8 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                                                       o.seed);
             },
             [&](const IsDupOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<BufferSinkCursor>(
-                    std::move(in), sch, [o](DataFrame&& f) {
-                        DataFrame r;
-                        r.names = {o.unique ? "is_unique" : "is_duplicated"};
-                        r.columns.push_back(o.unique ? f.is_unique()
-                                                     : f.is_duplicated());
-                        return r;
-                    });
+                return std::make_unique<IsDupCursor>(std::move(in), rebuild,
+                                                     o.unique);
             },
             [&](const GroupByDynamicOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<GroupByDynamicCursor>(
@@ -1743,12 +1789,22 @@ LazyFrame LazyFrame::auto_spill() const {
 
 DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
     auto ops = pushdown_predicates(source_->names(), ops_);
-    std::unique_ptr<Cursor> cur = source_->open();
-    std::vector<std::string> sch = source_->names();
     // 0 resolves to auto (~1/3 RAM), same policy as View.
     const std::uint64_t budget = resolve_spill_budget(memory_budget_);
+    std::shared_ptr<const Source> src = source_;
+    CursorFactory upstream = [src]() { return src->open(); };
+    std::unique_ptr<Cursor> cur = src->open();
+    std::vector<std::string> sch = src->names();
     for (const auto& op : ops) {
-        cur = make_cursor(*op, std::move(cur), sch, budget);
+        cur = make_cursor(*op, std::move(cur), sch, budget, upstream);
+        // Extend the rebuild factory to include this op, so a later two-pass
+        // sink can re-scan through it.
+        CursorFactory prev = upstream;
+        std::shared_ptr<const LazyOp> opp = op;
+        std::vector<std::string> sch_copy = sch;
+        upstream = [prev, opp, sch_copy, budget]() {
+            return make_cursor(*opp, prev(), sch_copy, budget, prev);
+        };
         sch = out_schema(*op, std::move(sch));
     }
     DataFrame out = drain_to_frame(*cur, sch, morsel_rows);

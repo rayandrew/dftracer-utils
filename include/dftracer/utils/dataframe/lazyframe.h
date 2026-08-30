@@ -106,9 +106,11 @@ class LazyFrame {
     /// A deterministic n-row sample (mix64 min-hash). Streaming: bounded to n
     /// rows regardless of input size.
     LazyFrame sample(std::int64_t n, std::uint64_t seed = 0) const;
-    /// One Bool column: true where the whole row is duplicated. Buffers input.
+    /// One Bool column: true where the whole row is duplicated. Two-pass
+    /// (count, then per-row mask in input order); state is the count map.
     LazyFrame is_duplicated() const;
-    /// One Bool column: true where the whole row is unique. Buffers input.
+    /// One Bool column: true where the whole row is unique. Two-pass, as
+    /// is_duplicated.
     LazyFrame is_unique() const;
     /// Tumbling/sliding time-window aggregation over an ascending Int64 time
     /// column. Streaming: holds one agg state per open window (bounded by the

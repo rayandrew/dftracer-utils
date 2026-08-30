@@ -265,13 +265,27 @@ TEST_SUITE("lazyframe") {
         const std::int64_t* ep = eg.column("x").data<std::int64_t>();
         for (std::int64_t i = 0; i < 7; ++i) CHECK(lp[i] == ep[i]);
 
-        std::vector<std::int64_t> d{1, 1, 2};
+        // is_duplicated / is_unique: two-pass, per-row mask in input order.
+        // Must match eager across a multi-morsel scan.
+        std::vector<std::int64_t> d{1, 1, 2, 3, 2, 1};
         DataFrame df;
         df.names = {"x"};
-        df.columns.push_back(Series::flat_i64(d.data(), 3));
-        DataFrame du = df.lazy().is_duplicated().collect();
+        df.columns.push_back(Series::flat_i64(d.data(), 6));
+        auto bit = [](const Series& s, std::int64_t i) {
+            return (s.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1;
+        };
+        DataFrame du = df.lazy().is_duplicated().collect(2);
         CHECK(du.names == std::vector<std::string>{"is_duplicated"});
-        CHECK(du.num_rows() == 3);
+        REQUIRE(du.num_rows() == 6);
+        Series ed = df.is_duplicated();
+        for (std::int64_t i = 0; i < 6; ++i)
+            CHECK(bit(du.column("is_duplicated"), i) == bit(ed, i));
+
+        DataFrame uq = df.lazy().is_unique().collect(2);
+        CHECK(uq.names == std::vector<std::string>{"is_unique"});
+        Series eu = df.is_unique();
+        for (std::int64_t i = 0; i < 6; ++i)
+            CHECK(bit(uq.column("is_unique"), i) == bit(eu, i));
 
         std::vector<std::int64_t> t{0, 1, 2, 3}, v{1, 1, 1, 1};
         DataFrame tf;
