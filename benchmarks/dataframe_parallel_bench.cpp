@@ -11,6 +11,8 @@
 //   dataframe_parallel_bench [rows] [groups]
 
 #include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/field_stat.h>
+#include <dftracer/utils/dataframe/kernels/field_stat.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/dataframe/parallel.h>
 #include <dftracer/utils/dataframe/series.h>
@@ -214,5 +216,27 @@ int main(int argc, char** argv) {
         ok = a[i] == b[i] && av[i] == bv[i];
     std::printf("sort_by correctness (parallel == serial): %s\n",
                 ok ? "OK" : "MISMATCH");
+
+    // Parallel reduction atom: field_stat_reduce over a 20M column.
+    auto time_stat = [&]() {
+        double best = 1e300;
+        FieldStat fs;
+        for (int r = 0; r < 5; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            fs = field_stat_reduce(df.column("v"), 0, rows);
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(fs.sum);
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    const double st_ser = time_stat();
+    install_runtime_parallel_backend();
+    const double st_par = time_stat();
+    std::printf("field_stat_reduce: serial %6.2f ms | runtime %6.2f ms (%.2fx)\n",
+                st_ser, st_par, st_ser / st_par);
     return ok ? 0 : 1;
 }

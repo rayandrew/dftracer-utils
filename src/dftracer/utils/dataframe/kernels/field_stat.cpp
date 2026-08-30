@@ -1,6 +1,7 @@
 #include <dftracer/utils/dataframe/internal/column_read.h>
 #include <dftracer/utils/dataframe/internal/field_stat_simd.h>
 #include <dftracer/utils/dataframe/kernels/field_stat.h>
+#include <dftracer/utils/dataframe/parallel.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -133,9 +134,8 @@ void scalar_reduce(FieldStat& fs, const Series& c, std::int64_t b,
 
 }  // namespace
 
-FieldStat field_stat_reduce(const Series& col, std::int64_t begin,
-                            std::int64_t end) {
-    if (end < 0) end = col.length();
+static FieldStat field_stat_reduce_serial(const Series& col, std::int64_t begin,
+                                          std::int64_t end) {
     FieldStat fs;
     if (begin >= end) return fs;
     const TypeId t = col.type();
@@ -173,6 +173,27 @@ FieldStat field_stat_reduce(const Series& col, std::int64_t begin,
     }
     scalar_reduce(fs, col, begin, end);
     return fs;
+}
+
+FieldStat field_stat_reduce(const Series& col, std::int64_t begin,
+                            std::int64_t end) {
+    if (end < 0) end = col.length();
+    const std::int64_t n = end - begin;
+    // The per-range reduction is SIMD; for a large full-column reduction with a
+    // backend, split into chunks and merge the mergeable FieldStats (raw power
+    // sums, so the merge is associative). Small n / no backend runs serial.
+    constexpr std::int64_t GRAIN = std::int64_t{1} << 18;
+    if (n <= GRAIN || !parallel_backend_installed())
+        return field_stat_reduce_serial(col, begin, end);
+    return parallel_reduce<FieldStat>(
+        n, GRAIN, FieldStat{},
+        [&](std::int64_t b, std::int64_t e) {
+            return field_stat_reduce_serial(col, begin + b, begin + e);
+        },
+        [](FieldStat a, const FieldStat& b) {
+            a.merge(b);
+            return a;
+        });
 }
 
 }  // namespace dftracer::utils::dataframe
