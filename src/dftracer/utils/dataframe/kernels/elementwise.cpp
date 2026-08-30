@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <type_traits>
 
@@ -276,6 +277,121 @@ void PctF64Impl(const double* in, double* out, std::size_t n) {
     for (; i < n; ++i) out[i] = (in[i] - in[i - 1]) / in[i - 1];
 }
 
+// One log-step of an inclusive in-vector scan: fold in the vector shifted up by
+// S lanes, with the vacated low S lanes filled with the op identity. S must be
+// a compile-time distance, so the caller recurses over 1,2,4,...; the guard
+// stops once S covers the widest possible vector for this target.
+template <int S, class D, class V, class OpF>
+HWY_INLINE void scan_step(D d, V& v, OpF op, V id) {
+    if constexpr (S < HWY_MAX_LANES_D(D)) {
+        const V sh =
+            hn::IfThenElse(hn::FirstN(d, S), id, hn::ShiftLeftLanes<S>(d, v));
+        v = op(v, sh);
+    }
+}
+
+template <class D, class V, class OpF>
+HWY_INLINE V inclusive_scan(D d, V v, OpF op, V id) {
+    scan_step<1>(d, v, op, id);
+    scan_step<2>(d, v, op, id);
+    scan_step<4>(d, v, op, id);
+    scan_step<8>(d, v, op, id);
+    scan_step<16>(d, v, op, id);
+    scan_step<32>(d, v, op, id);
+    return v;
+}
+
+// Prefix scan over a null-free column: scan each block in-vector, then fold the
+// running carry (the previous block's last lane) into every lane. The op is
+// associative, so integer sum/product and every min/max match the scalar result
+// exactly; only float sum/product reassociate (ULP-level difference).
+template <class T>
+void CumSumImpl(const void* av, void* ov, std::size_t n) {
+    const T* in = static_cast<const T*>(av);
+    T* out = static_cast<T*>(ov);
+    const hn::ScalableTag<T> d;
+    const std::size_t lanes = hn::Lanes(d);
+    const auto add = [](auto a, auto b) { return hn::Add(a, b); };
+    const auto vid = hn::Zero(d);
+    T carry = T{0};
+    std::size_t i = 0;
+    for (; i + lanes <= n; i += lanes) {
+        auto v = inclusive_scan(d, hn::LoadU(d, in + i), add, vid);
+        v = hn::Add(v, hn::Set(d, carry));
+        hn::StoreU(v, d, out + i);
+        carry = hn::ExtractLane(v, lanes - 1);
+    }
+    for (; i < n; ++i) out[i] = carry = static_cast<T>(carry + in[i]);
+}
+
+template <class T>
+void CumProdImpl(const void* av, void* ov, std::size_t n) {
+    const T* in = static_cast<const T*>(av);
+    T* out = static_cast<T*>(ov);
+    const hn::ScalableTag<T> d;
+    const std::size_t lanes = hn::Lanes(d);
+    const auto mul = [](auto a, auto b) { return hn::Mul(a, b); };
+    const auto vid = hn::Set(d, T{1});
+    T carry = T{1};
+    std::size_t i = 0;
+    for (; i + lanes <= n; i += lanes) {
+        auto v = inclusive_scan(d, hn::LoadU(d, in + i), mul, vid);
+        v = hn::Mul(v, hn::Set(d, carry));
+        hn::StoreU(v, d, out + i);
+        carry = hn::ExtractLane(v, lanes - 1);
+    }
+    for (; i < n; ++i) out[i] = carry = static_cast<T>(carry * in[i]);
+}
+
+template <class T, bool IS_MAX>
+void CumExtremeImpl(const void* av, void* ov, std::size_t n) {
+    const T* in = static_cast<const T*>(av);
+    T* out = static_cast<T*>(ov);
+    const hn::ScalableTag<T> d;
+    const std::size_t lanes = hn::Lanes(d);
+    const T ident = IS_MAX ? std::numeric_limits<T>::lowest()
+                           : std::numeric_limits<T>::max();
+    const auto op = [](auto a, auto b) {
+        return IS_MAX ? hn::Max(a, b) : hn::Min(a, b);
+    };
+    const auto vid = hn::Set(d, ident);
+    T carry = ident;
+    std::size_t i = 0;
+    for (; i + lanes <= n; i += lanes) {
+        auto v = inclusive_scan(d, hn::LoadU(d, in + i), op, vid);
+        v = IS_MAX ? hn::Max(v, hn::Set(d, carry))
+                   : hn::Min(v, hn::Set(d, carry));
+        hn::StoreU(v, d, out + i);
+        carry = hn::ExtractLane(v, lanes - 1);
+    }
+    for (; i < n; ++i) {
+        carry = IS_MAX ? (in[i] > carry ? in[i] : carry)
+                       : (in[i] < carry ? in[i] : carry);
+        out[i] = carry;
+    }
+}
+template <class T>
+void CumMaxImpl(const void* av, void* ov, std::size_t n) {
+    CumExtremeImpl<T, true>(av, ov, n);
+}
+template <class T>
+void CumMinImpl(const void* av, void* ov, std::size_t n) {
+    CumExtremeImpl<T, false>(av, ov, n);
+}
+
+void CumSumKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumSumImpl, a, out, n)
+}
+void CumProdKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumProdImpl, a, out, n)
+}
+void CumMaxKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumMaxImpl, a, out, n)
+}
+void CumMinKernel(std::int32_t type, const void* a, void* out, std::size_t n) {
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), CumMinImpl, a, out, n)
+}
+
 void FillKernel(std::int32_t type, const void* a, const std::uint8_t* valid,
                 dftu_scalar s, void* out, std::size_t n) {
     DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), FillImpl, a, valid, s, out,
@@ -309,6 +425,10 @@ HWY_EXPORT(LogKernel);
 HWY_EXPORT(FillKernel);
 HWY_EXPORT(DiffKernel);
 HWY_EXPORT(PctKernel);
+HWY_EXPORT(CumSumKernel);
+HWY_EXPORT(CumProdKernel);
+HWY_EXPORT(CumMaxKernel);
+HWY_EXPORT(CumMinKernel);
 
 namespace {
 
@@ -609,7 +729,13 @@ dftu_series* dftu_series_cumsum(const dftu_series* a) {
         a->type == TypeId::Bool)
         return nullptr;
     dftu_series* out = alloc_like(a, false);
-    DF_NUMERIC_DISPATCH(a->type, cumsum_one, *a, out->data->data())
+    if (!a->validity) {
+        HWY_DYNAMIC_DISPATCH(CumSumKernel)
+        (static_cast<std::int32_t>(a->type), a->data->data(), out->data->data(),
+         static_cast<std::size_t>(a->length));
+    } else {
+        DF_NUMERIC_DISPATCH(a->type, cumsum_one, *a, out->data->data())
+    }
     return out;
 }
 
@@ -619,7 +745,13 @@ dftu_series* dftu_series_cummax(const dftu_series* a) {
         a->type == TypeId::Bool)
         return nullptr;
     dftu_series* out = alloc_like(a, false);
-    DF_NUMERIC_DISPATCH(a->type, cummax_one, *a, out->data->data())
+    if (!a->validity) {
+        HWY_DYNAMIC_DISPATCH(CumMaxKernel)
+        (static_cast<std::int32_t>(a->type), a->data->data(), out->data->data(),
+         static_cast<std::size_t>(a->length));
+    } else {
+        DF_NUMERIC_DISPATCH(a->type, cummax_one, *a, out->data->data())
+    }
     return out;
 }
 
@@ -629,7 +761,13 @@ dftu_series* dftu_series_cummin(const dftu_series* a) {
         a->type == TypeId::Bool)
         return nullptr;
     dftu_series* out = alloc_like(a, false);
-    DF_NUMERIC_DISPATCH(a->type, cummin_one, *a, out->data->data())
+    if (!a->validity) {
+        HWY_DYNAMIC_DISPATCH(CumMinKernel)
+        (static_cast<std::int32_t>(a->type), a->data->data(), out->data->data(),
+         static_cast<std::size_t>(a->length));
+    } else {
+        DF_NUMERIC_DISPATCH(a->type, cummin_one, *a, out->data->data())
+    }
     return out;
 }
 
@@ -639,7 +777,13 @@ dftu_series* dftu_series_cum_prod(const dftu_series* a) {
         a->type == TypeId::Bool)
         return nullptr;
     dftu_series* out = alloc_like(a, false);
-    DF_NUMERIC_DISPATCH(a->type, cumprod_one, *a, out->data->data())
+    if (!a->validity) {
+        HWY_DYNAMIC_DISPATCH(CumProdKernel)
+        (static_cast<std::int32_t>(a->type), a->data->data(), out->data->data(),
+         static_cast<std::size_t>(a->length));
+    } else {
+        DF_NUMERIC_DISPATCH(a->type, cumprod_one, *a, out->data->data())
+    }
     return out;
 }
 

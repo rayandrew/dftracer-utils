@@ -1883,6 +1883,51 @@ TEST_SUITE("vec") {
               doctest::Approx(1.0 / 99));                     // (100-99)/99
     }
 
+    TEST_CASE("A2 prefix scans (SIMD) match a scalar reference") {
+        // 250 rows: multiple full vector blocks (carry propagation) plus a
+        // scalar tail. Compare every scan against an independent scalar fold.
+        const std::int64_t n = 250;
+        std::vector<std::int64_t> vi(n);
+        std::vector<double> vf(n);
+        for (std::int64_t i = 0; i < n; ++i) {
+            vi[i] = (i * 7) % 13 - 6;  // small, mixed sign; sums stay exact
+            vf[i] = static_cast<double>((i * 5) % 11) - 5.0 + 0.5;
+        }
+        Series ci = Series::flat_i64(vi.data(), n);
+        Series cf = Series::flat_f64(vf.data(), n);
+
+        Series csum = dv::cumsum(ci), cmax = dv::cummax(ci),
+               cmin = dv::cummin(ci);
+        std::int64_t racc = 0, rmax = INT64_MIN, rmin = INT64_MAX;
+        for (std::int64_t i = 0; i < n; ++i) {
+            racc += vi[i];
+            rmax = vi[i] > rmax ? vi[i] : rmax;
+            rmin = vi[i] < rmin ? vi[i] : rmin;
+            CHECK(csum.data<std::int64_t>()[i] == racc);
+            CHECK(cmax.data<std::int64_t>()[i] == rmax);
+            CHECK(cmin.data<std::int64_t>()[i] == rmin);
+        }
+
+        // Integer cumulative product stays small (values in [-6,6], reset via
+        // zeros keeps it bounded); compare exactly.
+        std::vector<std::int64_t> vp(n);
+        for (std::int64_t i = 0; i < n; ++i) vp[i] = (i % 5 == 0) ? 0 : (i % 3);
+        Series cprod = dv::cum_prod(Series::flat_i64(vp.data(), n));
+        std::int64_t rp = 1;
+        for (std::int64_t i = 0; i < n; ++i) {
+            rp *= vp[i];
+            CHECK(cprod.data<std::int64_t>()[i] == rp);
+        }
+
+        // Float cumsum reassociates, so compare with a tolerance.
+        Series fsum = dv::cumsum(cf);
+        double facc = 0.0;
+        for (std::int64_t i = 0; i < n; ++i) {
+            facc += vf[i];
+            CHECK(fsum.data<double>()[i] == doctest::Approx(facc));
+        }
+    }
+
     TEST_CASE("A2 fillna over the vectorized masked-blend path") {
         // >64 rows with scattered nulls: the SIMD blend must match the fill.
         std::vector<std::int64_t> v(100);
