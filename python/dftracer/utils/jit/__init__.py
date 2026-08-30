@@ -3695,17 +3695,59 @@ def _emit_vfold(
                 "    }",
             ]
             continue
-        # keyed: per-batch group by reading the key/value columns, folding each
-        # row into the monoid-valued map (the map does the grouping across rows
-        # and merges across worker slices).
         keyfield = cast(str, opd["keyfield"])
         keytype = cast(str, opd["keytype"])
         vfield = opd["vfield"]
         read_val = vfield is not None
-        if read_val:
-            perrow = "(double)vd[i]" if f64 else "(uint64_t)vd[i]"
-        else:
-            perrow = f"(double){opd['const']}" if f64 else f"(uint64_t){opd['const']}"
+        parts = mon.dft.split("_")
+        fam = parts[2] if len(parts) > 2 else ""
+        group_flag = {
+            "SUM": "DFTU_REDUCE_SUM",
+            "MIN": "DFTU_REDUCE_MIN",
+            "MAX": "DFTU_REDUCE_MAX",
+        }.get(fam)
+        # SUM/MIN/MAX of a column compose as one per-key aggregate, so group the
+        # batch with a single SIMD pass and fold each distinct key. COUNTER/MEAN
+        # (and a constant value) do not compose that way - fold row by row and
+        # let the monoid accumulate per sample.
+        if read_val and group_flag is not None:
+            perkey = "(double)gv[i]" if f64 else "(uint64_t)gv[i]"
+            out += [
+                "    {",
+                f"        dftu_series* kc = dftu_dataframe_column(df, {_c_str_literal(keyfield)});",
+                f"        dftu_series* vc = dftu_dataframe_column(df, {_c_str_literal(cast(str, vfield))});",
+                "        if (kc && vc) {",
+                "            dftu_series* ok = 0;",
+                "            dftu_series* ov[1] = {0};",
+                f"            int32_t nout = dftu_dataframe_group_by(kc, vc, {group_flag}, &ok, ov, 1);",
+                "            if (nout >= 1 && ok && ov[0]) {",
+                "                int64_t g = dftu_series_length(ok);",
+                "                const uint64_t* gk = (const uint64_t*)dftu_series_data(ok);",
+                "                const uint64_t* gv = (const uint64_t*)dftu_series_data(ov[0]);",
+                f"                const dftu_type kt[1] = {{{keytype}}};",
+                f"                dftu_map* m = map->map_new(host->h, {_c_str_literal(attr)}, kt, 1, {mon.dft});",
+                "                if (gk && gv) {",
+                "                    for (int64_t i = 0; i < g; i++) {",
+                "                        int64_t key[1];",
+                "                        key[0] = (int64_t)gk[i];",
+                f"                        map->{add_fn}(host->h, m, key, {perkey});",
+                "                    }",
+                "                }",
+                "            }",
+                "            if (ok) dftu_series_free(ok);",
+                "            if (ov[0]) dftu_series_free(ov[0]);",
+                "            dftu_series_free(kc);",
+                "            dftu_series_free(vc);",
+                "        }",
+                "    }",
+            ]
+            continue
+        # Row-fold path: per-key counter/mean, or a constant value.
+        perrow = (
+            ("(double)vd[i]" if f64 else "(uint64_t)vd[i]")
+            if read_val
+            else (f"(double){opd['const']}" if f64 else f"(uint64_t){opd['const']}")
+        )
         block = [
             "    {",
             f"        dftu_series* kc = dftu_dataframe_column(df, {_c_str_literal(keyfield)});",

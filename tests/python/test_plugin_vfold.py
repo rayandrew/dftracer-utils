@@ -92,6 +92,25 @@ def test_vfold_keyed_sum_per_pid(tmp_path):
 
 
 @_needs_cxx
+def test_vfold_keyed_max_per_pid(tmp_path):
+    @jit.vfold
+    class Peak:
+        hi = jit.map(key=jit.i64, value=jit.max())
+
+        @jit.each_batch
+        def step(self, df):
+            self.hi[df["pid"]] += df["dur"]
+
+    _write_trace(str(tmp_path / "t.pfw.gz"), [10, 90, 30, 40], [1, 2, 1, 2])
+    host = PluginHost()
+    host.load(Peak)
+    host.resolve()
+    tbl = pa.table(host.run(str(tmp_path))["hi"])
+    got = dict(zip(tbl.column(0).to_pylist(), tbl.column("value").to_pylist()))
+    assert got == {1: 30, 2: 90}  # per-pid max via SIMD group-by
+
+
+@_needs_cxx
 def test_vfold_keyed_count_per_pid(tmp_path):
     @jit.vfold
     class Hits:
