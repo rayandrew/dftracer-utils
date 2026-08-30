@@ -65,6 +65,39 @@ void SumF64(const void* p, std::int64_t n, dftu_scalar* out) {
     out->value.d = sum_f64(static_cast<const double*>(p), n);
 }
 
+// Explicit two-accumulator sum for 64-bit integers. Same-width lane addition is
+// modular two's complement, so the fold matches the scalar i64/u64 accumulator
+// bit for bit. Narrow ints are not handled here: their scalar path widens to 64
+// bits to avoid overflow, which a same-width SIMD sum would not reproduce.
+template <class T>
+T sum_int64(const T* p, std::int64_t n) {
+    const hn::ScalableTag<T> d;
+    const std::int64_t lanes = static_cast<std::int64_t>(hn::Lanes(d));
+    auto acc0 = hn::Zero(d);
+    auto acc1 = hn::Zero(d);
+    std::int64_t i = 0;
+    for (; i + 2 * lanes <= n; i += 2 * lanes) {
+        acc0 = hn::Add(acc0, hn::LoadU(d, p + i));
+        acc1 = hn::Add(acc1, hn::LoadU(d, p + i + lanes));
+    }
+    for (; i + lanes <= n; i += lanes)
+        acc0 = hn::Add(acc0, hn::LoadU(d, p + i));
+    T s = hn::ReduceSum(d, hn::Add(acc0, acc1));
+    for (; i < n; ++i) s = static_cast<T>(s + p[i]);
+    return s;
+}
+
+void SumI64(const void* p, std::int64_t n, dftu_scalar* out) {
+    out->kind = DFTU_SCALAR_TAG_I64;
+    out->value.i =
+        sum_int64<std::int64_t>(static_cast<const std::int64_t*>(p), n);
+}
+void SumU64(const void* p, std::int64_t n, dftu_scalar* out) {
+    out->kind = DFTU_SCALAR_TAG_U64;
+    out->value.u =
+        sum_int64<std::uint64_t>(static_cast<const std::uint64_t*>(p), n);
+}
+
 // First index whose value equals `target`, scanned SIMD (FindFirstTrue gives
 // the earliest set lane in a block), so arg_min/arg_max resolve ties to the
 // earliest index. Two-pass with `minmax`: find the extreme, then its first
@@ -231,6 +264,8 @@ HWY_AFTER_NAMESPACE();
 namespace dftracer::utils::dataframe {
 
 HWY_EXPORT(SumF64);
+HWY_EXPORT(SumI64);
+HWY_EXPORT(SumU64);
 HWY_EXPORT(MinMaxI64);
 HWY_EXPORT(MinMaxU64);
 HWY_EXPORT(MinMaxF64);
@@ -259,13 +294,23 @@ bool reduce(const dftu_series& v, std::int32_t op, dftu_scalar& out) {
     std::int64_t n = v.length;
 
     if (op == DFTU_REDUCE_SUM) {
-        // Only Float64 needs help; integer sums already auto-vectorize and f32
-        // sum accumulates in double (scalar) to hold precision.
-        if (v.type == TypeId::Float64) {
-            HWY_DYNAMIC_DISPATCH(SumF64)(p, n, &out);
-            return true;
+        // Float64 and the 64-bit integers get an explicit kernel; narrow ints
+        // widen to 64 bits in the scalar path (a same-width SIMD sum would
+        // overflow differently) and f32 accumulates in double there for
+        // precision.
+        switch (v.type) {
+            case TypeId::Float64:
+                HWY_DYNAMIC_DISPATCH(SumF64)(p, n, &out);
+                return true;
+            case TypeId::Int64:
+                HWY_DYNAMIC_DISPATCH(SumI64)(p, n, &out);
+                return true;
+            case TypeId::Uint64:
+                HWY_DYNAMIC_DISPATCH(SumU64)(p, n, &out);
+                return true;
+            default:
+                return false;
         }
-        return false;
     }
     if (op != DFTU_REDUCE_MIN && op != DFTU_REDUCE_MAX) return false;
     bool is_max = (op == DFTU_REDUCE_MAX);

@@ -409,7 +409,7 @@ TEST_SUITE("vec") {
         std::vector<double> fd(n);
         std::vector<std::int64_t> vi(n);
         double ref_sum = 0.0, ref_min = 1e18, ref_max = -1e18;
-        std::int64_t imin = INT64_MAX, imax = INT64_MIN;
+        std::int64_t imin = INT64_MAX, imax = INT64_MIN, isum = 0;
         for (std::int64_t i = 0; i < n; ++i) {
             fd[i] = static_cast<double>((i * 37) % 101) - 50.0 + 0.25;
             vi[i] = (i * 91) % 200 - 100;
@@ -418,6 +418,7 @@ TEST_SUITE("vec") {
             ref_max = fd[i] > ref_max ? fd[i] : ref_max;
             imin = vi[i] < imin ? vi[i] : imin;
             imax = vi[i] > imax ? vi[i] : imax;
+            isum += vi[i];
         }
         Series fc = Series::flat_f64(fd.data(), n);
         CHECK(scalar_value<double>(sum(fc)) == doctest::Approx(ref_sum));
@@ -425,6 +426,8 @@ TEST_SUITE("vec") {
         CHECK(scalar_value<double>(max(fc)) == doctest::Approx(ref_max));
 
         Series ic = Series::flat_i64(vi.data(), n);
+        CHECK(scalar_value<std::int64_t>(sum(ic)) ==
+              isum);  // explicit i64 kernel
         CHECK(scalar_value<std::int64_t>(min(ic)) == imin);
         CHECK(scalar_value<std::int64_t>(max(ic)) == imax);
     }
