@@ -109,6 +109,14 @@ bool is_sorted_impl(const Series& v, bool descending) {
 }
 
 Series is_in_impl(const Series& v, const Series& values) {
+    // FLAT Float64 with a small needle set: SIMD broadcast-compare.
+    {
+        const std::int64_t n = v.length();
+        std::vector<std::uint8_t> packed(static_cast<std::size_t>((n + 7) / 8),
+                                         0);
+        if (is_in_f64_simd(*v.handle(), *values.handle(), packed.data()))
+            return Series::flat(TypeId::Bool, packed.data(), n);
+    }
     const bool is_str = v.type() == TypeId::String;
     std::unordered_set<double> num_set;
     std::unordered_set<std::string> str_set;

@@ -217,6 +217,38 @@ std::int32_t SortedU8(const void* p, std::int64_t n, std::int32_t desc) {
     return sorted_impl<std::uint8_t>(p, n, desc);
 }
 
+// is_in over a small needle set: each row is set if it equals any needle. Per
+// block, OR the equality masks of every needle, packed 64 bits at a time. Small
+// nn keeps the O(n * nn) broadcast cheaper than a hash probe.
+void is_in_f64(const double* p, std::int64_t n, const double* needles, int nn,
+               std::uint8_t* out) {
+    const hn::ScalableTag<double> d;
+    const std::size_t lanes = hn::Lanes(d);
+    const std::uint64_t lane_mask =
+        lanes >= 64 ? ~std::uint64_t{0} : ((std::uint64_t{1} << lanes) - 1);
+    std::int64_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        std::uint64_t bits = 0;
+        for (std::size_t c = 0; c < 64; c += lanes) {
+            const auto v = hn::LoadU(d, p + i + static_cast<std::int64_t>(c));
+            auto m = hn::Eq(v, hn::Set(d, needles[0]));
+            for (int k = 1; k < nn; ++k)
+                m = hn::Or(m, hn::Eq(v, hn::Set(d, needles[k])));
+            std::uint64_t cb = 0;
+            hn::StoreMaskBits(d, m, reinterpret_cast<std::uint8_t*>(&cb));
+            bits |= (cb & lane_mask) << c;
+        }
+        std::memcpy(out + (i >> 3), &bits, 8);
+    }
+    for (; i < n; ++i) {
+        for (int k = 0; k < nn; ++k)
+            if (p[i] == needles[k]) {
+                out[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+                break;
+            }
+    }
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace dftracer::utils::dataframe
 HWY_AFTER_NAMESPACE();
@@ -245,9 +277,29 @@ HWY_EXPORT(SortedI16);
 HWY_EXPORT(SortedU16);
 HWY_EXPORT(SortedI8);
 HWY_EXPORT(SortedU8);
+HWY_EXPORT(is_in_f64);
 
 void pack_flags(const char* flags, std::int64_t n, std::uint8_t* out) {
     if (n > 0) HWY_DYNAMIC_DISPATCH(PackFlags)(flags, n, out);
+}
+
+bool is_in_f64_simd(const dftu_series& v, const dftu_series& values,
+                    std::uint8_t* out) {
+    // Only the clean case: both FLAT Float64 with no nulls (read_f64 is
+    // identity there, so equality is exact), and a small needle set worth
+    // broadcasting.
+    if (v.encoding != Encoding::Flat || v.type != TypeId::Float64 || v.validity)
+        return false;
+    if (values.encoding != Encoding::Flat || values.type != TypeId::Float64 ||
+        values.validity)
+        return false;
+    const std::int64_t nn = values.length;
+    if (nn <= 0 || nn > 32) return false;
+    HWY_DYNAMIC_DISPATCH(is_in_f64)
+    (reinterpret_cast<const double*>(v.data->data()), v.length,
+     reinterpret_cast<const double*>(values.data->data()), static_cast<int>(nn),
+     out);
+    return true;
 }
 
 bool is_sorted_numeric(const dftu_series& v, bool descending, bool* out) {

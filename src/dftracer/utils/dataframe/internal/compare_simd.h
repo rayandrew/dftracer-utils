@@ -27,6 +27,13 @@ void pack_flags(const char* flags, std::int64_t n, std::uint8_t* out);
 /// non-flat columns so the caller takes the scalar path.
 bool is_sorted_numeric(const dftu_series& v, bool descending, bool* out);
 
+/// is_in for the FLAT Float64 case: sets the packed bool bitmap `out` (which
+/// the caller zeroed) with a small-needle broadcast. Returns true if handled;
+/// returns false for other types, nulls, or a needle set too large to broadcast
+/// (caller takes the hash-based scalar path).
+bool is_in_f64_simd(const dftu_series& v, const dftu_series& values,
+                    std::uint8_t* out);
+
 }  // namespace dftracer::utils::dataframe
 
 #endif  // DFTRACER_UTILS_DATAFRAME_INTERNAL_COMPARE_SIMD_H

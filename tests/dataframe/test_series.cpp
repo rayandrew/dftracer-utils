@@ -2049,6 +2049,20 @@ TEST_SUITE("vec") {
         std::vector<bool> exp{false, true, false, true, false};
         for (std::int64_t i = 0; i < 5; ++i)
             CHECK(mask_bit(m, i) == exp[static_cast<std::size_t>(i)]);
+
+        // FLAT Float64 + small needle set takes the SIMD broadcast path; check
+        // parity against a scalar reference over >64 rows.
+        const std::int64_t n = 200;
+        std::vector<double> fv(n);
+        for (std::int64_t i = 0; i < n; ++i) fv[i] = static_cast<double>(i % 7);
+        std::vector<double> needles{1.0, 4.0, 6.0};
+        Series fm = Series::flat_f64(fv.data(), n)
+                        .is_in(Series::flat_f64(needles.data(), 3));
+        for (std::int64_t i = 0; i < n; ++i) {
+            const double x = fv[static_cast<std::size_t>(i)];
+            const bool want = (x == 1.0 || x == 4.0 || x == 6.0);
+            CHECK(mask_bit(fm, i) == want);
+        }
     }
 
     TEST_CASE("A2 sort / head / tail / reverse") {
