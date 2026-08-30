@@ -89,6 +89,12 @@ class LazyFrame {
     /// Group by `key` and compute each aggregate (streaming: one partial state,
     /// bounded by the group count).
     LazyFrame group_by(std::string key, std::vector<GroupAgg> aggs) const;
+    /// Sort by `name`. Buffers input (external-merge spill is a follow-up).
+    LazyFrame sort_by(std::string name, bool descending = false) const;
+    /// Distinct rows, first occurrence. Buffers input (spill is a follow-up).
+    LazyFrame unique() const;
+    /// Alias of unique().
+    LazyFrame drop_duplicates() const;
 
     /// Output column names without running the query.
     std::vector<std::string> schema() const;

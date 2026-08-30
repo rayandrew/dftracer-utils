@@ -185,6 +185,20 @@ TEST_SUITE("lazyframe") {
         }
     }
 
+    TEST_CASE("sort_by and unique (buffering sinks)") {
+        DataFrame s = make_df().lazy().sort_by("a", true).collect(2);
+        CHECK(s.num_rows() == 6);
+        CHECK(s.column("a").data<std::int64_t>()[0] == 6);
+        CHECK(s.column("a").data<std::int64_t>()[5] == 1);
+
+        std::vector<std::int64_t> d{1, 1, 2, 2, 3};
+        DataFrame df;
+        df.names = {"x"};
+        df.columns.push_back(Series::flat_i64(d.data(), 5));
+        DataFrame u = df.lazy().unique().collect(2);
+        CHECK(u.num_rows() == 3);
+    }
+
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {
         // Filter on 'c' (col 2, the added column) must NOT move up.
         auto lf = make_df()

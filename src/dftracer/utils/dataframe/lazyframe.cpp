@@ -20,6 +20,33 @@ std::vector<const Series*> column_ptrs(const std::vector<Series>& cols) {
     return in;
 }
 
+// Drain a cursor to a single DataFrame, concatenating its morsels under
+// `names`.
+DataFrame drain_to_frame(Cursor& in, const std::vector<std::string>& names,
+                         std::int64_t max_rows) {
+    std::vector<std::vector<Series>> chunks;
+    while (auto m = in.next(max_rows)) chunks.push_back(std::move(m->columns));
+    DataFrame out;
+    out.names = names;
+    const std::size_t ncols = names.size();
+    out.columns.reserve(ncols);
+    for (std::size_t c = 0; c < ncols; ++c) {
+        std::vector<const Series*> parts;
+        parts.reserve(chunks.size());
+        for (auto& ch : chunks) parts.push_back(&ch[c]);
+        out.columns.push_back(concat_columns(parts));
+    }
+    return out;
+}
+
+Morsel morsel_of(DataFrame&& f) {
+    Morsel out;
+    out.rows = f.num_rows();
+    out.columns.reserve(f.columns.size());
+    for (const Series& c : f.columns) out.columns.push_back(c.materialize());
+    return out;
+}
+
 // ---- cursors ----------------------------------------------------------------
 
 // Reads contiguous chunks off an in-memory frame, materialized FLAT.
@@ -513,6 +540,48 @@ class GroupByCursor : public Cursor {
     bool done_ = false;
 };
 
+// Pipeline breakers that need all rows. They buffer the input then apply the
+// eager op; a spillable form (external merge for sort, spill hash for unique)
+// is a follow-up.
+class SortByCursor : public Cursor {
+   public:
+    SortByCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                 std::string name, bool descending)
+        : in_(std::move(in)),
+          sch_(std::move(sch)),
+          name_(std::move(name)),
+          descending_(descending) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (done_) return std::nullopt;
+        done_ = true;
+        return morsel_of(
+            drain_to_frame(*in_, sch_, max_rows).sort_by(name_, descending_));
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    std::string name_;
+    bool descending_;
+    bool done_ = false;
+};
+
+class UniqueCursor : public Cursor {
+   public:
+    UniqueCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch)
+        : in_(std::move(in)), sch_(std::move(sch)) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (done_) return std::nullopt;
+        done_ = true;
+        return morsel_of(drain_to_frame(*in_, sch_, max_rows).unique());
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    bool done_ = false;
+};
+
 // ---- plan ops (tagged union) ------------------------------------------------
 
 struct FilterOp {
@@ -559,6 +628,11 @@ struct GroupByOp {
     std::string key;
     std::vector<GroupAgg> aggs;
 };
+struct SortByOp {
+    std::string name;
+    bool descending;
+};
+struct UniqueOp {};
 
 template <class... Ts>
 struct overloaded : Ts... {
@@ -575,7 +649,7 @@ class LazyOp {
    public:
     std::variant<FilterOp, SelectOp, WithColumnOp, RenameOp, SliceOp, TailOp,
                  DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp,
-                 ExplodeOp, UnpivotOp, TopkOp, GroupByOp>
+                 ExplodeOp, UnpivotOp, TopkOp, GroupByOp, SortByOp, UniqueOp>
         node;
 };
 
@@ -622,7 +696,9 @@ std::vector<std::string> out_schema(const LazyOp& op,
                        std::vector<std::string> s{o.key};
                        for (const GroupAgg& a : o.aggs) s.push_back(a.out);
                        return s;
-                   }},
+                   },
+                   [&](const SortByOp&) { return in; },
+                   [&](const UniqueOp&) { return in; }},
         op.node);
 }
 
@@ -646,7 +722,9 @@ std::string describe(const LazyOp& op) {
             [](const ExplodeOp& o) { return "explode " + o.column; },
             [](const UnpivotOp&) { return std::string("unpivot"); },
             [](const TopkOp& o) { return "topk " + o.name; },
-            [](const GroupByOp& o) { return "group_by " + o.key; }},
+            [](const GroupByOp& o) { return "group_by " + o.key; },
+            [](const SortByOp& o) { return "sort_by " + o.name; },
+            [](const UniqueOp&) { return std::string("unique"); }},
         op.node);
 }
 
@@ -759,6 +837,13 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             [&](const GroupByOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<GroupByCursor>(std::move(in), sch,
                                                        o.key, o.aggs);
+            },
+            [&](const SortByOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<SortByCursor>(std::move(in), sch,
+                                                      o.name, o.descending);
+            },
+            [&](const UniqueOp&) -> std::unique_ptr<Cursor> {
+                return std::make_unique<UniqueCursor>(std::move(in), sch);
             }},
         op.node);
 }
@@ -874,6 +959,21 @@ LazyFrame LazyFrame::group_by(std::string key,
     return LazyFrame(source_, std::move(ops));
 }
 
+LazyFrame LazyFrame::sort_by(std::string name, bool descending) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(
+        LazyOp{SortByOp{std::move(name), descending}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::unique() const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{UniqueOp{}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::drop_duplicates() const { return unique(); }
+
 std::vector<std::string> LazyFrame::schema() const {
     std::vector<std::string> s = source_->names();
     for (const auto& op : ops_) s = out_schema(*op, std::move(s));
@@ -895,22 +995,7 @@ DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
         cur = make_cursor(*op, std::move(cur), sch);
         sch = out_schema(*op, std::move(sch));
     }
-
-    std::vector<std::vector<Series>> chunks;
-    while (auto m = cur->next(morsel_rows))
-        chunks.push_back(std::move(m->columns));
-
-    DataFrame out;
-    out.names = std::move(sch);
-    const std::size_t ncols = out.names.size();
-    out.columns.reserve(ncols);
-    for (std::size_t c = 0; c < ncols; ++c) {
-        std::vector<const Series*> parts;
-        parts.reserve(chunks.size());
-        for (auto& ch : chunks) parts.push_back(&ch[c]);
-        out.columns.push_back(concat_columns(parts));
-    }
-    return out;
+    return drain_to_frame(*cur, sch, morsel_rows);
 }
 
 LazyFrame DataFrame::lazy() const {
