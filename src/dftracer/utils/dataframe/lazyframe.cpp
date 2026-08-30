@@ -8,7 +8,8 @@
 #include <dftracer/utils/dataframe/internal/spill.h>     // external-merge spill
 #include <dftracer/utils/dataframe/kernels/field_stat.h>  // field_stat_reduce (SIMD)
 #include <dftracer/utils/dataframe/lazyframe.h>
-#include <dftracer/utils/dataframe/types.h>  // byte_width, buffer_bytes
+#include <dftracer/utils/dataframe/parallel.h>  // parallel_for (parallel sinks)
+#include <dftracer/utils/dataframe/types.h>     // byte_width, buffer_bytes
 
 #include <algorithm>
 #include <cstdint>
@@ -588,11 +589,47 @@ class GroupByCursor : public Cursor {
         }
 
         AggStatePtr state = agg_new(specs);
-        while (auto m = in_->next(max_rows)) {
-            std::vector<const Series*> values;
-            values.reserve(value_idx.size());
-            for (int vi : value_idx) values.push_back(&m->columns[vi]);
-            agg_accumulate(*state, m->columns[key_idx], values);
+        // Bounded parallel sink: pull a batch of morsels, accumulate each into
+        // its own partial AggState in parallel (the mergeable agg IR), then
+        // merge the partials into the running state. Memory stays bounded to
+        // one batch; a serial-pull single morsel skips the fan-out.
+        constexpr std::size_t BATCH = 32;
+        std::vector<Morsel> batch;
+        batch.reserve(BATCH);
+        bool eof = false;
+        while (!eof) {
+            batch.clear();
+            for (std::size_t b = 0; b < BATCH; ++b) {
+                auto m = in_->next(max_rows);
+                if (!m) {
+                    eof = true;
+                    break;
+                }
+                batch.push_back(std::move(*m));
+            }
+            if (batch.empty()) break;
+            auto accumulate = [&](AggState& st, const Morsel& m) {
+                std::vector<const Series*> values;
+                values.reserve(value_idx.size());
+                for (int vi : value_idx) values.push_back(&m.columns[vi]);
+                agg_accumulate(st, m.columns[key_idx], values);
+            };
+            if (batch.size() == 1) {
+                accumulate(*state, batch[0]);
+                continue;
+            }
+            std::vector<AggStatePtr> partials(batch.size());
+            parallel_for(
+                static_cast<std::int64_t>(batch.size()), 1,
+                [&](std::int64_t bi, std::int64_t ei) {
+                    for (std::int64_t j = bi; j < ei; ++j) {
+                        auto st = agg_new(specs);
+                        accumulate(*st, batch[static_cast<std::size_t>(j)]);
+                        partials[static_cast<std::size_t>(j)] = std::move(st);
+                    }
+                });
+            for (auto& p : partials)
+                if (p) agg_merge(*state, *p);
         }
         DataFrame r = agg_finalize(*state, key_);
         Morsel out;

@@ -11,9 +11,11 @@
 //   dataframe_parallel_bench [rows] [groups]
 
 #include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/dataframe/parallel.h>
 #include <dftracer/utils/dataframe/series.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -110,5 +112,26 @@ int main(int argc, char** argv) {
     install_runtime_parallel_backend();
     const double rt = time_group_by(df, aggs, 5);
     std::printf("  runtime backend : %8.2f ms  (%.2fx)\n", rt, serial / rt);
+
+    // Lazy group_by (GroupByCursor bounded parallel sink) over the same data.
+    auto time_lazy = [&](int reps) {
+        double best = 1e300;
+        for (int r = 0; r < reps; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            DataFrame out = df.lazy().group_by("k", aggs).collect();
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(out.num_rows());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    const double lz_ser = time_lazy(5);
+    install_runtime_parallel_backend();
+    const double lz_par = time_lazy(5);
+    std::printf("lazy group_by: serial %8.2f ms | runtime %8.2f ms (%.2fx)\n",
+                lz_ser, lz_par, lz_ser / lz_par);
     return 0;
 }
