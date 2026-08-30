@@ -11,6 +11,7 @@
 #include <dftracer/utils/python/json.h>
 #include <dftracer/utils/python/memoryview_batch.h>
 #include <dftracer/utils/python/op_runner.h>
+#include <dftracer/utils/python/ops.h>
 #include <dftracer/utils/python/plugin_host.h>
 #include <dftracer/utils/python/py_errors.h>
 #include <dftracer/utils/python/py_method.h>
@@ -159,6 +160,7 @@ PyMODINIT_FUNC PyInit_dftracer_utils_ext(void) {
     if (dftracer::utils::python::init_trace_viewer(m) < 0) return NULL;
     if (dftracer::utils::python::init_plugin_host(m) < 0) return NULL;
     if (dftracer::utils::python::init_op_runner(m) < 0) return NULL;
+    if (dftracer::utils::python::init_ops(m) < 0) return NULL;
     if (dftracer::utils::python::init_index_database(m) < 0) return NULL;
     if (dftracer::utils::python::init_sst_distribution(m) < 0) return NULL;
     if (dftracer::utils::python::init_series(m) < 0) return NULL;

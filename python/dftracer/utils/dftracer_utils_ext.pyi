@@ -1141,6 +1141,19 @@ def jit_run_op(so_path: str, in_bytes: bytes, out_size: int) -> bytes:
     """
     ...
 
+def op_list() -> List[str]:
+    """The names of every registered dataframe op."""
+    ...
+
+def op_info(name: str) -> Dict[str, object]:
+    """``{name, kind, arity, signature}`` for a registered op."""
+    ...
+
+def op_run(name: str, *args: object) -> Union[_Series, int, float]:
+    """Run a registered op by name: columns are ``_Series``, other operands
+    follow the op's signature. Returns a ``_Series`` or a Python scalar."""
+    ...
+
 def memory_budget_advice(required_bytes: int, available_bytes: int = ...) -> Dict[str, object]:
     """Whether an aggregated workload of `required_bytes` fits in process.
 

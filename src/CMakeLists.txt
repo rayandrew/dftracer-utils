@@ -1543,6 +1543,8 @@ if(DFTRACER_UTILS_BUILD_PYTHON)
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/plugin_host.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/op_runner.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/ops.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/ops.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/plugin_host.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/runtime.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/runtime.h
