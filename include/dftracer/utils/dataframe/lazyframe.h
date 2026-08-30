@@ -101,7 +101,8 @@ class LazyFrame {
     LazyFrame unique() const;
     /// Alias of unique().
     LazyFrame drop_duplicates() const;
-    /// A deterministic n-row sample. Buffers input (reservoir is a follow-up).
+    /// A deterministic n-row sample (mix64 min-hash). Streaming: bounded to n
+    /// rows regardless of input size.
     LazyFrame sample(std::int64_t n, std::uint64_t seed = 0) const;
     /// One Bool column: true where the whole row is duplicated. Buffers input.
     LazyFrame is_duplicated() const;

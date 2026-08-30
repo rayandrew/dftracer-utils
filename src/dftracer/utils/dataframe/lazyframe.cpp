@@ -1,11 +1,14 @@
 #include <ankerl/unordered_dense.h>
+#include <dftracer/utils/core/common/hash/splitmix64.h>  // sample row keys
 #include <dftracer/utils/dataframe/agg.h>        // streaming group-by state
-#include <dftracer/utils/dataframe/batch_ops.h>  // concat_columns
+#include <dftracer/utils/dataframe/batch_ops.h>  // concat_columns, take, concat
 #include <dftracer/utils/dataframe/lazyframe.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <functional>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <variant>
@@ -547,6 +550,85 @@ class GroupByCursor : public Cursor {
 // Pipeline breakers that need all rows: buffer the input, apply `fn` once. A
 // spillable form (external merge for sort, spill hash for unique/pivot) is a
 // follow-up.
+// Streaming min-hash reservoir: keep the n rows with the smallest
+// mix64(global_row_index + seed) keys, matching DataFrame::sample. Bounded to n
+// rows (plus one morsel) regardless of input size; emits them in original row
+// order.
+class SampleCursor : public Cursor {
+   public:
+    SampleCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                 std::int64_t n, std::uint64_t seed)
+        : in_(std::move(in)),
+          sch_(std::move(sch)),
+          n_(std::max<std::int64_t>(n, 0)),
+          seed_(seed) {}
+
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (done_) return std::nullopt;
+        done_ = true;
+        DataFrame best;                   // <= n_ rows
+        std::vector<std::uint64_t> keys;  // parallel to best's rows
+        std::vector<std::int64_t> idx;    // original global row indices
+        std::int64_t off = 0;
+        while (auto m = in_->next(max_rows)) {
+            const std::int64_t mrows = m->rows;
+            DataFrame mf;
+            mf.names = sch_;
+            mf.columns = std::move(m->columns);
+            DataFrame combined =
+                best.num_rows() == 0
+                    ? std::move(mf)
+                    : concat({&best, &mf}, ConcatHow::Vertical);
+            keys.reserve(keys.size() + static_cast<std::size_t>(mrows));
+            idx.reserve(idx.size() + static_cast<std::size_t>(mrows));
+            for (std::int64_t i = 0; i < mrows; ++i) {
+                keys.push_back(hash::splitmix64(
+                    static_cast<std::uint64_t>(off + i) + seed_));
+                idx.push_back(off + i);
+            }
+            off += mrows;
+            const std::int64_t total = combined.num_rows();
+            const std::int64_t keep = std::min(n_, total);
+            std::vector<std::int64_t> sel(static_cast<std::size_t>(total));
+            std::iota(sel.begin(), sel.end(), std::int64_t{0});
+            if (keep < total)
+                std::nth_element(sel.begin(), sel.begin() + keep, sel.end(),
+                                 [&](std::int64_t a, std::int64_t b) {
+                                     return keys[static_cast<std::size_t>(a)] <
+                                            keys[static_cast<std::size_t>(b)];
+                                 });
+            sel.resize(static_cast<std::size_t>(keep));
+            best = take(combined, sel);
+            std::vector<std::uint64_t> nk(static_cast<std::size_t>(keep));
+            std::vector<std::int64_t> ni(static_cast<std::size_t>(keep));
+            for (std::int64_t j = 0; j < keep; ++j) {
+                nk[static_cast<std::size_t>(j)] = keys[static_cast<std::size_t>(
+                    sel[static_cast<std::size_t>(j)])];
+                ni[static_cast<std::size_t>(j)] = idx[static_cast<std::size_t>(
+                    sel[static_cast<std::size_t>(j)])];
+            }
+            keys = std::move(nk);
+            idx = std::move(ni);
+        }
+        // DataFrame::sample returns survivors in original row order.
+        std::vector<std::int64_t> ord(
+            static_cast<std::size_t>(best.num_rows()));
+        std::iota(ord.begin(), ord.end(), std::int64_t{0});
+        std::sort(ord.begin(), ord.end(), [&](std::int64_t a, std::int64_t b) {
+            return idx[static_cast<std::size_t>(a)] <
+                   idx[static_cast<std::size_t>(b)];
+        });
+        return morsel_of(take(best, ord));
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    std::int64_t n_;
+    std::uint64_t seed_;
+    bool done_ = false;
+};
+
 class BufferSinkCursor : public Cursor {
    public:
     BufferSinkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
@@ -889,9 +971,8 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                     [](DataFrame&& f) { return f.unique(); });
             },
             [&](const SampleOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<BufferSinkCursor>(
-                    std::move(in), sch,
-                    [o](DataFrame&& f) { return f.sample(o.n, o.seed); });
+                return std::make_unique<SampleCursor>(std::move(in), sch, o.n,
+                                                      o.seed);
             },
             [&](const IsDupOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<BufferSinkCursor>(

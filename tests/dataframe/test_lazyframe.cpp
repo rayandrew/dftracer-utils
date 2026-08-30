@@ -203,6 +203,22 @@ TEST_SUITE("lazyframe") {
         DataFrame s = make_df().lazy().sample(3, 42).collect(2);
         CHECK(s.num_rows() == 3);
 
+        // Streaming min-hash sample must match eager DataFrame::sample exactly,
+        // across a multi-morsel scan (bounded state, same survivors + order).
+        std::vector<std::int64_t> big(100);
+        for (std::int64_t i = 0; i < 100; ++i)
+            big[static_cast<std::size_t>(i)] = i;
+        DataFrame bf;
+        bf.names = {"x"};
+        bf.columns.push_back(Series::flat_i64(big.data(), 100));
+        DataFrame lz = bf.lazy().sample(7, 123).collect(8);  // morsel 8
+        DataFrame eg = bf.sample(7, 123);
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        REQUIRE(lz.num_rows() == 7);
+        const std::int64_t* lp = lz.column("x").data<std::int64_t>();
+        const std::int64_t* ep = eg.column("x").data<std::int64_t>();
+        for (std::int64_t i = 0; i < 7; ++i) CHECK(lp[i] == ep[i]);
+
         std::vector<std::int64_t> d{1, 1, 2};
         DataFrame df;
         df.names = {"x"};
