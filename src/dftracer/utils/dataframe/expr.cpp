@@ -62,6 +62,19 @@ std::int32_t expr_col_index(const Expr& e) {
     const auto& n = e.node();
     return n && n->kind == ExprKind::Col ? n->i : -1;
 }
+
+namespace {
+bool node_references(const std::shared_ptr<const ExprNode>& n,
+                     std::int32_t index) {
+    if (!n) return false;
+    if (n->kind == ExprKind::Col) return n->i == index;
+    return node_references(n->a, index) || node_references(n->b, index);
+}
+}  // namespace
+
+bool expr_references(const Expr& e, std::int32_t index) {
+    return node_references(e.node(), index);
+}
 Expr expr_lit(std::int64_t value) {
     dftu_scalar s{};
     s.kind = DFTU_SCALAR_TAG_I64;

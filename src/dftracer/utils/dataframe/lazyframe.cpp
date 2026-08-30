@@ -140,7 +140,82 @@ class LazyOp {
         }
         return in;
     }
+
+    std::string describe() const;
 };
+
+namespace {
+
+// Predicate pushdown: bubble each Filter left past any WithColumn whose output
+// column it does not read, so a filter runs before (and shrinks the input of)
+// the with_column that would otherwise compute over rows it discards. A
+// WithColumn appends (or replaces in place), so moving a filter that skips its
+// output column past it never invalidates the filter's column indices. Filters
+// do not cross a Select (which reindexes columns).
+std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
+    const std::vector<std::string>& source_names,
+    const std::vector<std::shared_ptr<const LazyOp>>& ops) {
+    struct Node {
+        std::shared_ptr<const LazyOp> op;
+        int write_idx;  // WithColumn's output column index; -1 otherwise
+    };
+    std::vector<Node> nodes;
+    nodes.reserve(ops.size());
+    std::vector<std::string> sch = source_names;
+    for (const auto& op : ops) {
+        int w = -1;
+        if (op->kind == LazyOp::Kind::WithColumn) {
+            auto it = std::find(sch.begin(), sch.end(), op->name);
+            w = it == sch.end() ? static_cast<int>(sch.size())
+                                : static_cast<int>(it - sch.begin());
+        }
+        nodes.push_back({op, w});
+        sch = op->out_schema(std::move(sch));
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (std::size_t i = 1; i < nodes.size(); ++i) {
+            const Node& prev = nodes[i - 1];
+            const Node& cur = nodes[i];
+            if (cur.op->kind == LazyOp::Kind::Filter &&
+                prev.op->kind == LazyOp::Kind::WithColumn &&
+                !expr_references(cur.op->expr, prev.write_idx)) {
+                std::swap(nodes[i - 1], nodes[i]);
+                changed = true;
+            }
+        }
+    }
+
+    std::vector<std::shared_ptr<const LazyOp>> out;
+    out.reserve(nodes.size());
+    for (Node& n : nodes) out.push_back(std::move(n.op));
+    return out;
+}
+
+std::string join_names(const std::vector<std::string>& v) {
+    std::string s;
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        if (i) s += ", ";
+        s += v[i];
+    }
+    return s;
+}
+
+}  // namespace
+
+std::string LazyOp::describe() const {
+    switch (kind) {
+        case Kind::Filter:
+            return "filter";
+        case Kind::Select:
+            return "select [" + join_names(names) + "]";
+        case Kind::WithColumn:
+            return "with_column " + name;
+    }
+    return {};
+}
 
 InMemorySource::InMemorySource(DataFrame frame)
     : frame_(std::make_shared<const DataFrame>(std::move(frame))) {}
@@ -189,12 +264,21 @@ std::vector<std::string> LazyFrame::schema() const {
     return s;
 }
 
+std::string LazyFrame::explain() const {
+    std::string s = "scan [" + join_names(source_->names()) + "]";
+    for (const auto& op : pushdown_predicates(source_->names(), ops_))
+        s += "\n" + op->describe();
+    return s;
+}
+
 DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
-    // Build the cursor chain: source reader wrapped by each op, tracking the
-    // schema so a Select resolves names to indices.
+    // Optimize (predicate pushdown) then build the cursor chain: source reader
+    // wrapped by each op, tracking the schema so a Select resolves names to
+    // indices.
+    auto ops = pushdown_predicates(source_->names(), ops_);
     std::unique_ptr<Cursor> cur = source_->open();
     std::vector<std::string> sch = source_->names();
-    for (const auto& op : ops_) {
+    for (const auto& op : ops) {
         switch (op->kind) {
             case LazyOp::Kind::Filter:
                 cur = std::make_unique<FilterCursor>(std::move(cur), op->expr);

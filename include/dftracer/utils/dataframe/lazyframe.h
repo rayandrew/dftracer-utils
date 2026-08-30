@@ -68,6 +68,10 @@ class LazyFrame {
     /// Output column names without running the query.
     std::vector<std::string> schema() const;
 
+    /// The optimized plan as text (source then one op per line), for
+    /// introspection and tests.
+    std::string explain() const;
+
     /// Run the pipeline and materialize the surviving rows; `morsel_rows` is
     /// the scan chunk size.
     DataFrame collect(std::int64_t morsel_rows = 65536) const;

@@ -71,4 +71,39 @@ TEST_SUITE("lazyframe") {
         CHECK(all.num_columns() == 2);
         CHECK(all.column("b").data<std::int64_t>()[5] == 60);
     }
+
+    TEST_CASE(
+        "predicate pushdown moves an independent filter before with_column") {
+        // Filter on 'a' (col 0) is independent of the added 'c', so it moves
+        // up.
+        auto lf = make_df()
+                      .lazy()
+                      .with_column("c", col(0) + col(1))
+                      .filter(col(0) > std::int64_t{3});
+        const std::string plan = lf.explain();
+        const auto fpos = plan.find("filter");
+        const auto wpos = plan.find("with_column");
+        CHECK(fpos != std::string::npos);
+        CHECK(wpos != std::string::npos);
+        CHECK(fpos < wpos);  // filter reordered before with_column
+
+        DataFrame r = lf.collect();
+        CHECK(r.num_rows() == 3);
+        CHECK(r.column("c").data<std::int64_t>()[0] == 44);  // 4 + 40
+    }
+
+    TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {
+        // Filter on 'c' (col 2, the added column) must NOT move up.
+        auto lf = make_df()
+                      .lazy()
+                      .with_column("c", col(0) + col(1))
+                      .filter(col(2) > std::int64_t{50});  // c > 50
+        const std::string plan = lf.explain();
+        CHECK(plan.find("with_column") < plan.find("filter"));
+
+        DataFrame r = lf.collect();
+        // c = a+b in {11,22,33,44,55,66}; c > 50 -> rows 5,6 (c=55,66).
+        CHECK(r.num_rows() == 2);
+        CHECK(r.column("c").data<std::int64_t>()[0] == 55);
+    }
 }

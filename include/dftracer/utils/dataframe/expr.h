@@ -46,6 +46,10 @@ Expr expr_col(std::int32_t index);
 /// caller take the input column directly (e.g. a string group key) instead of
 /// routing it through the numeric evaluator.
 std::int32_t expr_col_index(const Expr& e);
+
+/// True if `e` reads input column `index` anywhere in its tree. Lets the query
+/// planner tell whether a predicate depends on a given column.
+bool expr_references(const Expr& e, std::int32_t index);
 Expr expr_lit(std::int64_t value);
 Expr expr_lit(double value);
 Expr expr_binary(BinaryOp op, const Expr& a, const Expr& b);
