@@ -1235,7 +1235,6 @@ set(DFTRACER_UTILS_SRC_PUBLIC_HEADERS
     core/common/format_detector.h
     core/utils/timer.h
     dataframe/batch_ops.h
-    dataframe/field_stat.h
     trace/indexing/queries/queries.h
     trace/views/fold_event.h
     trace/views/view_aggregate.h
