@@ -1,9 +1,10 @@
 #include <dftracer/utils/dataframe/abi.h>                   // dftu_series_data
+#include <dftracer/utils/dataframe/field_stat.h>            // FieldStat
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_f64
-#include <dftracer/utils/dataframe/internal/moments_simd.h>  // sum_f64, central_moments
-#include <dftracer/utils/dataframe/kernels/cast.h>           // cast_simd
-#include <dftracer/utils/dataframe/kernels/filter.h>  // take
-#include <dftracer/utils/dataframe/kernels/sort.h>    // argsort
+#include <dftracer/utils/dataframe/kernels/cast.h>          // cast_simd
+#include <dftracer/utils/dataframe/kernels/field_stat.h>    // field_stat_reduce
+#include <dftracer/utils/dataframe/kernels/filter.h>        // take
+#include <dftracer/utils/dataframe/kernels/sort.h>          // argsort
 #include <dftracer/utils/dataframe/kernels/stats.h>
 #include <hwy/contrib/sort/vqsort.h>
 
@@ -50,24 +51,6 @@ std::vector<double> nonnull_values(const Series& v) {
     return out;
 }
 
-// Central moments m2..m4 of `x` about its mean, plus n.
-struct Moments {
-    std::size_t n = 0;
-    double mean = 0, m2 = 0, m3 = 0, m4 = 0;
-};
-Moments moments(const std::vector<double>& x) {
-    Moments r;
-    r.n = x.size();
-    if (r.n == 0) return r;
-    r.mean = sum_f64(x.data(), r.n) / static_cast<double>(r.n);
-    double cm[3];
-    central_moments(x.data(), r.n, r.mean, cm);
-    r.m2 = cm[0];
-    r.m3 = cm[1];
-    r.m4 = cm[2];
-    return r;
-}
-
 bool equal_at(const Series& v, std::int64_t a, std::int64_t b) {
     if (v.type() == TypeId::String) return v.string_at(a) == v.string_at(b);
     return read_f64(v, a) == read_f64(v, b);
@@ -76,28 +59,19 @@ bool equal_at(const Series& v, std::int64_t a, std::int64_t b) {
 }  // namespace
 
 double variance(const Series& v, bool sample) {
-    Moments m = moments(nonnull_values(v));
-    std::size_t denom_n = sample ? (m.n > 1 ? m.n - 1 : 0) : m.n;
-    if (denom_n == 0) return 0.0;
-    return m.m2 / static_cast<double>(denom_n);
+    return field_stat_reduce(v, 0, v.length()).variance(sample);
 }
 
 double stddev(const Series& v, bool sample) {
-    return std::sqrt(variance(v, sample));
+    return field_stat_reduce(v, 0, v.length()).stddev(sample);
 }
 
 double skewness(const Series& v) {
-    Moments m = moments(nonnull_values(v));
-    if (m.n < 2 || m.m2 == 0.0) return 0.0;
-    double var_p = m.m2 / static_cast<double>(m.n);
-    return (m.m3 / static_cast<double>(m.n)) / std::pow(var_p, 1.5);
+    return field_stat_reduce(v, 0, v.length()).skewness();
 }
 
 double kurtosis(const Series& v) {
-    Moments m = moments(nonnull_values(v));
-    if (m.n < 2 || m.m2 == 0.0) return 0.0;
-    double var_p = m.m2 / static_cast<double>(m.n);
-    return (m.m4 / static_cast<double>(m.n)) / (var_p * var_p) - 3.0;
+    return field_stat_reduce(v, 0, v.length()).kurtosis();
 }
 
 double quantile(const Series& v, double q) {
