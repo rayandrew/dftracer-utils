@@ -78,6 +78,14 @@ class LazyFrame {
     LazyFrame with_row_index(std::string name) const;
     /// A one-row frame of each column's null count.
     LazyFrame null_count() const;
+    /// Expand a List `column`: each element becomes its own row.
+    LazyFrame explode(std::string column) const;
+    /// Reshape wide -> long: keep `id_vars`, stack `value_vars` into a
+    /// variable/value column pair.
+    LazyFrame unpivot(std::vector<std::string> id_vars,
+                      std::vector<std::string> value_vars) const;
+    /// The `k` rows with the largest (or smallest) `name` values.
+    LazyFrame topk(std::string name, std::int64_t k, bool largest = true) const;
 
     /// Output column names without running the query.
     std::vector<std::string> schema() const;

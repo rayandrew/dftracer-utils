@@ -141,6 +141,17 @@ TEST_SUITE("lazyframe") {
         CHECK(nc.column("a").data<std::int64_t>()[0] == 1);
     }
 
+    TEST_CASE("lazy topk and unpivot") {
+        DataFrame tk = make_df().lazy().topk("a", 2).collect(2);  // largest 2 a
+        CHECK(tk.num_rows() == 2);
+        const std::int64_t* a = tk.column("a").data<std::int64_t>();
+        CHECK(((a[0] == 6 && a[1] == 5) || (a[0] == 5 && a[1] == 6)));
+
+        DataFrame up = make_df().lazy().unpivot({"a"}, {"b"}).collect(2);
+        CHECK(up.names == std::vector<std::string>{"a", "variable", "value"});
+        CHECK(up.num_rows() == 6);
+    }
+
     TEST_CASE("predicate pushdown keeps a dependent filter after with_column") {
         // Filter on 'c' (col 2, the added column) must NOT move up.
         auto lf = make_df()

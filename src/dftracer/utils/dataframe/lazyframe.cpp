@@ -306,6 +306,110 @@ class NullCountCursor : public Cursor {
     bool done_ = false;
 };
 
+// Wrap a morsel's columns in a DataFrame with real `names`, apply `fn`, return
+// the result materialized FLAT.
+template <class Fn>
+Morsel frame_op(Morsel&& m, const std::vector<std::string>& names, Fn&& fn) {
+    DataFrame tmp;
+    tmp.names = names;
+    for (Series& c : m.columns) tmp.columns.push_back(std::move(c));
+    DataFrame r = fn(std::move(tmp));
+    Morsel out;
+    out.rows = r.num_rows();
+    out.columns.reserve(r.columns.size());
+    for (const Series& c : r.columns) out.columns.push_back(c.materialize());
+    return out;
+}
+
+// Explodes a List column per morsel (streaming).
+class ExplodeCursor : public Cursor {
+   public:
+    ExplodeCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                  std::string column)
+        : in_(std::move(in)),
+          sch_(std::move(sch)),
+          column_(std::move(column)) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        auto m = in_->next(max_rows);
+        if (!m) return std::nullopt;
+        return frame_op(std::move(*m), sch_,
+                        [&](DataFrame f) { return f.explode(column_); });
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    std::string column_;
+};
+
+// Reshapes wide->long per morsel (streaming).
+class UnpivotCursor : public Cursor {
+   public:
+    UnpivotCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                  std::vector<std::string> id, std::vector<std::string> val)
+        : in_(std::move(in)),
+          sch_(std::move(sch)),
+          id_(std::move(id)),
+          val_(std::move(val)) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        auto m = in_->next(max_rows);
+        if (!m) return std::nullopt;
+        return frame_op(std::move(*m), sch_,
+                        [&](DataFrame f) { return f.unpivot(id_, val_); });
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_, id_, val_;
+};
+
+// The k rows with the largest/smallest `name`: keep a running best of <= k
+// rows, re-topk after each morsel (bounded state), emit once. Streaming
+// ingestion.
+class TopkCursor : public Cursor {
+   public:
+    TopkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+               std::string name, std::int64_t k, bool largest)
+        : in_(std::move(in)),
+          sch_(std::move(sch)),
+          name_(std::move(name)),
+          k_(k),
+          largest_(largest) {}
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (done_) return std::nullopt;
+        done_ = true;
+        DataFrame best;
+        bool has = false;
+        while (auto m = in_->next(max_rows)) {
+            DataFrame cur;
+            cur.names = sch_;
+            for (Series& c : m->columns) cur.columns.push_back(std::move(c));
+            if (!has) {
+                best = cur.topk(name_, k_, largest_);
+                has = true;
+            } else {
+                DataFrame u = concat({&best, &cur});
+                best = u.topk(name_, k_, largest_);
+            }
+        }
+        if (!has) return std::nullopt;
+        Morsel out;
+        out.rows = best.num_rows();
+        out.columns.reserve(best.columns.size());
+        for (const Series& c : best.columns)
+            out.columns.push_back(c.materialize());
+        return out;
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    std::vector<std::string> sch_;
+    std::string name_;
+    std::int64_t k_;
+    bool largest_;
+    bool done_ = false;
+};
+
 // ---- plan ops (tagged union) ------------------------------------------------
 
 struct FilterOp {
@@ -336,6 +440,18 @@ struct WithRowIndexOp {
     std::string name;
 };
 struct NullCountOp {};
+struct ExplodeOp {
+    std::string column;
+};
+struct UnpivotOp {
+    std::vector<std::string> id_vars;
+    std::vector<std::string> value_vars;
+};
+struct TopkOp {
+    std::string name;
+    std::int64_t k;
+    bool largest;
+};
 
 template <class... Ts>
 struct overloaded : Ts... {
@@ -351,7 +467,8 @@ overloaded(Ts...) -> overloaded<Ts...>;
 class LazyOp {
    public:
     std::variant<FilterOp, SelectOp, WithColumnOp, RenameOp, SliceOp, TailOp,
-                 DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp>
+                 DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp,
+                 ExplodeOp, UnpivotOp, TopkOp>
         node;
 };
 
@@ -385,7 +502,15 @@ std::vector<std::string> out_schema(const LazyOp& op,
                        in.insert(in.begin(), o.name);
                        return in;
                    },
-                   [&](const NullCountOp&) { return in; }},
+                   [&](const NullCountOp&) { return in; },
+                   [&](const ExplodeOp&) { return in; },
+                   [&](const TopkOp&) { return in; },
+                   [&](const UnpivotOp& o) {
+                       std::vector<std::string> s = o.id_vars;
+                       s.push_back("variable");
+                       s.push_back("value");
+                       return s;
+                   }},
         op.node);
 }
 
@@ -405,7 +530,10 @@ std::string describe(const LazyOp& op) {
             [](const DropNullsOp&) { return std::string("drop_nulls"); },
             [](const FillNullOp&) { return std::string("fill_null"); },
             [](const WithRowIndexOp& o) { return "with_row_index " + o.name; },
-            [](const NullCountOp&) { return std::string("null_count"); }},
+            [](const NullCountOp&) { return std::string("null_count"); },
+            [](const ExplodeOp& o) { return "explode " + o.column; },
+            [](const UnpivotOp&) { return std::string("unpivot"); },
+            [](const TopkOp& o) { return "topk " + o.name; }},
         op.node);
 }
 
@@ -502,6 +630,18 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             },
             [&](const NullCountOp&) -> std::unique_ptr<Cursor> {
                 return std::make_unique<NullCountCursor>(std::move(in));
+            },
+            [&](const ExplodeOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<ExplodeCursor>(std::move(in), sch,
+                                                       o.column);
+            },
+            [&](const UnpivotOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<UnpivotCursor>(std::move(in), sch,
+                                                       o.id_vars, o.value_vars);
+            },
+            [&](const TopkOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<TopkCursor>(std::move(in), sch, o.name,
+                                                    o.k, o.largest);
             }},
         op.node);
 }
@@ -583,6 +723,29 @@ LazyFrame LazyFrame::with_row_index(std::string name) const {
 LazyFrame LazyFrame::null_count() const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{NullCountOp{}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::explode(std::string column) const {
+    auto ops = ops_;
+    ops.push_back(
+        std::make_shared<LazyOp>(LazyOp{ExplodeOp{std::move(column)}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::unpivot(std::vector<std::string> id_vars,
+                             std::vector<std::string> value_vars) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(
+        LazyOp{UnpivotOp{std::move(id_vars), std::move(value_vars)}}));
+    return LazyFrame(source_, std::move(ops));
+}
+
+LazyFrame LazyFrame::topk(std::string name, std::int64_t k,
+                          bool largest) const {
+    auto ops = ops_;
+    ops.push_back(
+        std::make_shared<LazyOp>(LazyOp{TopkOp{std::move(name), k, largest}}));
     return LazyFrame(source_, std::move(ops));
 }
 
