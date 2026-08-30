@@ -541,7 +541,7 @@ std::vector<std::string> glob_trace_files(const std::string& dir,
         suffix = suffix.substr(star + 1);
     std::vector<std::string> out;
     std::error_code ec;
-    std::filesystem::recursive_directory_iterator it(dir, ec), end;
+    fs::recursive_directory_iterator it(dir, ec), end;
     for (; !ec && it != end; it.increment(ec)) {
         if (!it->is_regular_file()) continue;
         const std::string s = it->path().string();

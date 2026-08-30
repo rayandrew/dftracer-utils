@@ -3,7 +3,8 @@
 #include <dftracer/utils/core/common/memory_budget.h>  // compute_memory_budget
 #include <dftracer/utils/dataframe/agg.h>        // streaming group-by state
 #include <dftracer/utils/dataframe/batch_ops.h>  // concat_columns, take, concat
-#include <dftracer/utils/dataframe/internal/spill.h>  // external-merge spill
+#include <dftracer/utils/dataframe/internal/cell_ops.h>  // row_key, cell_to_string
+#include <dftracer/utils/dataframe/internal/spill.h>     // external-merge spill
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/dataframe/types.h>  // byte_width, buffer_bytes
 
@@ -58,34 +59,6 @@ Morsel morsel_of(DataFrame&& f) {
     return out;
 }
 
-// Integer/float column (matches DataFrame::describe's column selection: Bool
-// and variable-width/nested types are excluded).
-bool is_numeric(TypeId t) {
-    switch (t) {
-        case TypeId::Int8:
-        case TypeId::Int16:
-        case TypeId::Int32:
-        case TypeId::Int64:
-        case TypeId::Uint8:
-        case TypeId::Uint16:
-        case TypeId::Uint32:
-        case TypeId::Uint64:
-        case TypeId::Float32:
-        case TypeId::Float64:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// Round `x` down to a multiple of `m` (toward negative infinity). Matches the
-// eager group_by_dynamic grid.
-std::int64_t floor_to_multiple(std::int64_t x, std::int64_t m) {
-    std::int64_t q = x / m;
-    if ((x % m) != 0 && x < 0) --q;
-    return q * m;
-}
-
 // Read a numeric cell as a double for key comparison (FLAT columns only).
 double read_num(const Series& c, std::int64_t i) {
     switch (c.type()) {
@@ -131,71 +104,6 @@ int cmp_cell(const Series& a, std::int64_t ia, const Series& b, std::int64_t ib,
         c = x < y ? -1 : (x > y ? 1 : 0);
     }
     return descending ? -c : c;
-}
-
-// Exact byte key of row `i` across `cols` (FLAT), for hash-distinct. Each cell
-// contributes a null flag then its raw bytes (length-prefixed for strings), so
-// distinct rows never collide and equal rows always match.
-std::string row_key(const std::vector<Series>& cols, std::int64_t i) {
-    std::string k;
-    for (const Series& c : cols) {
-        if (c.is_null(i)) {
-            k.push_back('\0');
-            continue;
-        }
-        k.push_back('\1');
-        const TypeId t = c.type();
-        if (t == TypeId::String || t == TypeId::Binary) {
-            const std::string_view s = c.string_at(i);
-            const auto len = static_cast<std::uint32_t>(s.size());
-            k.append(reinterpret_cast<const char*>(&len), sizeof(len));
-            k.append(s.data(), s.size());
-        } else if (t == TypeId::Bool) {
-            const std::uint8_t b =
-                (c.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1;
-            k.push_back(static_cast<char>(b));
-        } else {
-            const auto* base =
-                static_cast<const char*>(dftu_series_data(c.handle()));
-            const std::size_t w = byte_width(t);
-            k.append(base + static_cast<std::size_t>(i) * w, w);
-        }
-    }
-    return k;
-}
-
-// String form of a cell, matching DataFrame::to_dummies/pivot column naming.
-std::string cell_to_string(const Series& c, std::int64_t i) {
-    switch (c.type()) {
-        case TypeId::String:
-        case TypeId::Binary:
-            return std::string(c.string_at(i));
-        case TypeId::Bool:
-            return ((c.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1) ? "true"
-                                                                     : "false";
-        case TypeId::Int8:
-            return std::to_string(c.data<std::int8_t>()[i]);
-        case TypeId::Int16:
-            return std::to_string(c.data<std::int16_t>()[i]);
-        case TypeId::Int32:
-            return std::to_string(c.data<std::int32_t>()[i]);
-        case TypeId::Int64:
-            return std::to_string(c.data<std::int64_t>()[i]);
-        case TypeId::Uint8:
-            return std::to_string(c.data<std::uint8_t>()[i]);
-        case TypeId::Uint16:
-            return std::to_string(c.data<std::uint16_t>()[i]);
-        case TypeId::Uint32:
-            return std::to_string(c.data<std::uint32_t>()[i]);
-        case TypeId::Uint64:
-            return std::to_string(c.data<std::uint64_t>()[i]);
-        case TypeId::Float32:
-            return std::to_string(c.data<float>()[i]);
-        case TypeId::Float64:
-            return std::to_string(c.data<double>()[i]);
-        default:
-            return std::string();
-    }
 }
 
 // Approximate in-memory byte size of a set of FLAT columns (spill trigger).

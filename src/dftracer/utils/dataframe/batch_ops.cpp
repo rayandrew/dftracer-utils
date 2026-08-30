@@ -4,6 +4,7 @@
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/dataframe/containment.h>
+#include <dftracer/utils/dataframe/internal/cell_ops.h>  // shared cell helpers
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_u64
 #include <dftracer/utils/dataframe/kernels/filter.h>
 #include <dftracer/utils/dataframe/kernels/group_by.h>
@@ -480,30 +481,6 @@ std::vector<Series> materialized_columns(const DataFrame& b) {
 
 // Append cell (col, i) to `key` as raw bytes, prefixed by a present/null flag,
 // so the concatenation of a row's cells is a stable composite dedupe key.
-void append_cell(std::string& key, const Series& c, std::int64_t i) {
-    if (c.is_null(i)) {
-        key.push_back('\0');
-        return;
-    }
-    key.push_back('\1');
-    const TypeId t = c.type();
-    if (t == TypeId::String || t == TypeId::Binary) {
-        std::string_view s = c.string_at(i);
-        std::int32_t len = static_cast<std::int32_t>(s.size());
-        key.append(reinterpret_cast<const char*>(&len), sizeof(len));
-        key.append(s.data(), s.size());
-        return;
-    }
-    const std::uint8_t* d = c.data<std::uint8_t>();
-    if (t == TypeId::Bool) {
-        key.push_back((d[i >> 3] >> (i & 7)) & 1 ? '\1' : '\0');
-        return;
-    }
-    const std::size_t w = byte_width(t);
-    key.append(
-        reinterpret_cast<const char*>(d + static_cast<std::size_t>(i) * w), w);
-}
-
 // Composite dedupe key per row over `cols` (already FLAT).
 std::vector<std::string> row_keys(const std::vector<Series>& cols,
                                   std::int64_t n) {
@@ -585,24 +562,6 @@ double scalar_to_double(dftu_scalar s) {
             return static_cast<double>(s.value.u);
         default:
             return static_cast<double>(s.value.i);
-    }
-}
-
-bool is_numeric_type(TypeId t) {
-    switch (t) {
-        case TypeId::Int8:
-        case TypeId::Int16:
-        case TypeId::Int32:
-        case TypeId::Int64:
-        case TypeId::Uint8:
-        case TypeId::Uint16:
-        case TypeId::Uint32:
-        case TypeId::Uint64:
-        case TypeId::Float32:
-        case TypeId::Float64:
-            return true;
-        default:
-            return false;
     }
 }
 
@@ -735,7 +694,7 @@ DataFrame describe(const DataFrame& b) {
     out.columns.push_back(Series::strings(stat_names));
     for (std::size_t i = 0; i < b.columns.size(); ++i) {
         const Series& c = b.columns[i];
-        if (!is_numeric_type(c.type())) continue;
+        if (!is_numeric(c.type())) continue;
         double vals[6];
         vals[0] = static_cast<double>(c.count());
         vals[1] = static_cast<double>(c.null_count());
@@ -804,40 +763,6 @@ Series flat_copy(const Series& c) {
 
 // Human-readable rendering of cell (c, i) for a dummy column label. `c` is
 // FLAT.
-std::string cell_to_string(const Series& c, std::int64_t i) {
-    switch (c.type()) {
-        case TypeId::String:
-        case TypeId::Binary:
-            return std::string(c.string_at(i));
-        case TypeId::Bool: {
-            const std::uint8_t* b = c.data<std::uint8_t>();
-            return ((b[i >> 3] >> (i & 7)) & 1) ? "true" : "false";
-        }
-        case TypeId::Int8:
-            return std::to_string(c.data<std::int8_t>()[i]);
-        case TypeId::Int16:
-            return std::to_string(c.data<std::int16_t>()[i]);
-        case TypeId::Int32:
-            return std::to_string(c.data<std::int32_t>()[i]);
-        case TypeId::Int64:
-            return std::to_string(c.data<std::int64_t>()[i]);
-        case TypeId::Uint8:
-            return std::to_string(c.data<std::uint8_t>()[i]);
-        case TypeId::Uint16:
-            return std::to_string(c.data<std::uint16_t>()[i]);
-        case TypeId::Uint32:
-            return std::to_string(c.data<std::uint32_t>()[i]);
-        case TypeId::Uint64:
-            return std::to_string(c.data<std::uint64_t>()[i]);
-        case TypeId::Float32:
-            return std::to_string(c.data<float>()[i]);
-        case TypeId::Float64:
-            return std::to_string(c.data<double>()[i]);
-        default:
-            return std::string();
-    }
-}
-
 bool is_float_type(TypeId t) {
     return t == TypeId::Float32 || t == TypeId::Float64;
 }
@@ -866,7 +791,7 @@ DataFrame unpivot(const DataFrame& b, const std::vector<std::string>& id_vars,
         TypeId t = b.columns[static_cast<std::size_t>(vi)].type();
         if (t != first) all_same = false;
         if (is_float_type(t)) any_float = true;
-        if (!is_numeric_type(t)) all_numeric = false;
+        if (!is_numeric(t)) all_numeric = false;
     }
     TypeId common;
     if (all_same) {
@@ -993,13 +918,6 @@ PivotMode pivot_mode_of(const std::string& agg, AggOp& op) {
     if (agg == "last") return PivotMode::Last;
     op = agg_op_of(agg);  // sum|min|max|mean (and the other AggOps)
     return PivotMode::Reduce;
-}
-
-// Floor `x` to a multiple of `m` (m > 0), toward negative infinity.
-std::int64_t floor_to_multiple(std::int64_t x, std::int64_t m) {
-    std::int64_t q = x / m;
-    if ((x % m) != 0 && x < 0) --q;
-    return q * m;
 }
 
 }  // namespace
