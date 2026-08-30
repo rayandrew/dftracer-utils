@@ -126,7 +126,8 @@ class LazyFrame {
     /// (one per distinct `on` value), so schema() is empty until collect().
     LazyFrame pivot(std::string index, std::string on, std::string values,
                     std::string agg = "first") const;
-    /// One-hot encode `column`. Buffers input; output columns are
+    /// One-hot encode `column`. Two-pass (distinct values, then stream-encode);
+    /// state is bounded by the value cardinality. Output columns are
     /// data-dependent, so schema() is empty until collect().
     LazyFrame to_dummies(std::string column) const;
     /// Per-column summary statistics (count/null_count/mean/std/min/max).

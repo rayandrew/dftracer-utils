@@ -335,11 +335,16 @@ TEST_SUITE("lazyframe") {
         gf.names = {"g"};
         gf.columns.push_back(Series::flat_i64(g.data(), 3));
         LazyFrame dl = gf.lazy().to_dummies("g");
-        CHECK(dl.schema().empty());   // unknown until run
+        CHECK(dl.schema().empty());    // unknown until run
         DataFrame d = dl.collect(2);
-        CHECK(d.num_rows() == 3);
-        CHECK(d.num_columns() == 2);  // g_0, g_1
-        CHECK(!d.names.empty());
+        DataFrame dd = gf.to_dummies("g");
+        REQUIRE(d.names == dd.names);  // g_0, g_1 in ascending order
+        REQUIRE(d.num_rows() == dd.num_rows());
+        for (const std::string& cn : d.names) {
+            const std::int8_t* a = d.column(cn).data<std::int8_t>();
+            const std::int8_t* b = dd.column(cn).data<std::int8_t>();
+            for (std::int64_t r = 0; r < d.num_rows(); ++r) CHECK(a[r] == b[r]);
+        }
 
         // pivot: rows = distinct index, one value column per distinct "on".
         std::vector<std::int64_t> i{0, 0, 1, 1}, k{10, 20, 10, 20},

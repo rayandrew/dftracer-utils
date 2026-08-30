@@ -169,6 +169,40 @@ std::string row_key(const std::vector<Series>& cols, std::int64_t i) {
     return k;
 }
 
+// String form of a cell, matching DataFrame::to_dummies/pivot column naming.
+std::string cell_to_string(const Series& c, std::int64_t i) {
+    switch (c.type()) {
+        case TypeId::String:
+        case TypeId::Binary:
+            return std::string(c.string_at(i));
+        case TypeId::Bool:
+            return ((c.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1) ? "true"
+                                                                     : "false";
+        case TypeId::Int8:
+            return std::to_string(c.data<std::int8_t>()[i]);
+        case TypeId::Int16:
+            return std::to_string(c.data<std::int16_t>()[i]);
+        case TypeId::Int32:
+            return std::to_string(c.data<std::int32_t>()[i]);
+        case TypeId::Int64:
+            return std::to_string(c.data<std::int64_t>()[i]);
+        case TypeId::Uint8:
+            return std::to_string(c.data<std::uint8_t>()[i]);
+        case TypeId::Uint16:
+            return std::to_string(c.data<std::uint16_t>()[i]);
+        case TypeId::Uint32:
+            return std::to_string(c.data<std::uint32_t>()[i]);
+        case TypeId::Uint64:
+            return std::to_string(c.data<std::uint64_t>()[i]);
+        case TypeId::Float32:
+            return std::to_string(c.data<float>()[i]);
+        case TypeId::Float64:
+            return std::to_string(c.data<double>()[i]);
+        default:
+            return std::string();
+    }
+}
+
 // Approximate in-memory byte size of a set of FLAT columns (spill trigger).
 std::size_t morsel_bytes(const std::vector<Series>& cols) {
     std::size_t total = 0;
@@ -1212,8 +1246,109 @@ class IsDupCursor : public Cursor {
     ankerl::unordered_dense::map<std::string, std::int64_t> counts_;
 };
 
+// Two-pass one-hot encode. Pass 1 collects the distinct non-null values of
+// `column` (bounded by cardinality); pass 2 re-scans, replacing that column in
+// place with one Int8 column per distinct value (ascending, named
+// "<column>_<value>"), matching DataFrame::to_dummies. Output columns are
+// data-dependent, reported via out_names().
+class ToDummiesCursor : public Cursor {
+   public:
+    ToDummiesCursor(std::unique_ptr<Cursor> in, CursorFactory rebuild,
+                    std::vector<std::string> sch, std::string column)
+        : first_(std::move(in)),
+          rebuild_(std::move(rebuild)),
+          sch_(std::move(sch)),
+          column_(std::move(column)) {}
+
+    std::optional<Morsel> next(std::int64_t max_rows) override {
+        if (!built_) build(max_rows);
+        auto m = pass2_->next(max_rows);
+        if (!m) return std::nullopt;
+        const Series& col = m->columns[static_cast<std::size_t>(ci_)];
+        const std::int64_t n = m->rows;
+        std::vector<Series> one;
+        one.push_back(col.share());
+        std::vector<std::vector<std::int8_t>> dummies(
+            uniq_idx_.size(),
+            std::vector<std::int8_t>(static_cast<std::size_t>(n), 0));
+        for (std::int64_t i = 0; i < n; ++i) {
+            if (col.is_null(i)) continue;
+            auto it = uniq_idx_.find(row_key(one, i));
+            if (it != uniq_idx_.end())
+                dummies[static_cast<std::size_t>(it->second)]
+                       [static_cast<std::size_t>(i)] = 1;
+        }
+        Morsel out;
+        out.rows = n;
+        for (std::size_t k = 0; k < m->columns.size(); ++k) {
+            if (static_cast<int>(k) != ci_) {
+                out.columns.push_back(m->columns[k].share());
+                continue;
+            }
+            for (auto& col_bits : dummies)
+                out.columns.push_back(
+                    Series::flat(TypeId::Int8, col_bits.data(), n));
+        }
+        return out;
+    }
+
+    std::optional<std::vector<std::string>> out_names() const override {
+        return produced_;
+    }
+
+   private:
+    void build(std::int64_t max_rows) {
+        ci_ = static_cast<int>(std::distance(
+            sch_.begin(), std::find(sch_.begin(), sch_.end(), column_)));
+        if (ci_ >= static_cast<int>(sch_.size()))
+            throw std::out_of_range("to_dummies: no column named " + column_);
+
+        ankerl::unordered_dense::set<std::string> seen;
+        std::vector<Series> chunks;
+        while (auto m = first_->next(max_rows)) {
+            const Series& col = m->columns[static_cast<std::size_t>(ci_)];
+            std::vector<Series> one;
+            one.push_back(col.share());
+            std::vector<std::int64_t> keep;
+            for (std::int64_t i = 0; i < m->rows; ++i)
+                if (!col.is_null(i) && seen.insert(row_key(one, i)).second)
+                    keep.push_back(i);
+            if (!keep.empty()) chunks.push_back(col.take(keep));
+        }
+        first_.reset();
+        // Distinct values, ascending (Series::unique sorts), matching eager.
+        Series uniq;
+        if (!chunks.empty())
+            uniq = concat_columns(column_ptrs(chunks)).unique().materialize();
+        const std::int64_t d = uniq.length();
+        std::vector<Series> one;
+        one.push_back(uniq.share());
+        for (std::int64_t u = 0; u < d; ++u)
+            uniq_idx_.emplace(row_key(one, u), static_cast<int>(u));
+        for (std::size_t k = 0; k < sch_.size(); ++k) {
+            if (static_cast<int>(k) != ci_) {
+                produced_.push_back(sch_[k]);
+                continue;
+            }
+            for (std::int64_t u = 0; u < d; ++u)
+                produced_.push_back(column_ + "_" + cell_to_string(uniq, u));
+        }
+        pass2_ = rebuild_();
+        built_ = true;
+    }
+
+    std::unique_ptr<Cursor> first_, pass2_;
+    CursorFactory rebuild_;
+    std::vector<std::string> sch_;
+    std::string column_;
+    bool built_ = false;
+    int ci_ = 0;
+    ankerl::unordered_dense::map<std::string, int> uniq_idx_;
+    std::vector<std::string> produced_;
+};
+
 // Pipeline breakers that need all rows: buffer the input, apply `fn` once.
-// (pivot/to_dummies; a spillable form is a follow-up.)
+// (pivot only; a spillable form is a follow-up.)
 class BufferSinkCursor : public Cursor {
    public:
     BufferSinkCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
@@ -1573,9 +1708,8 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                     });
             },
             [&](const ToDummiesOp& o) -> std::unique_ptr<Cursor> {
-                return std::make_unique<BufferSinkCursor>(
-                    std::move(in), sch,
-                    [o](DataFrame&& f) { return f.to_dummies(o.column); });
+                return std::make_unique<ToDummiesCursor>(std::move(in), rebuild,
+                                                         sch, o.column);
             },
             [&](const DescribeOp&) -> std::unique_ptr<Cursor> {
                 return std::make_unique<DescribeCursor>(std::move(in), sch);
