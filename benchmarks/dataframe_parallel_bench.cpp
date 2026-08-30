@@ -889,5 +889,295 @@ int main(int argc, char** argv) {
                 cx_ser, cx_par, cx_ser / cx_par, cx_ok ? "OK" : "MISMATCH");
     ok = ok && cx_ok;
 
+    // Elementwise add: two 20M Float64 columns. Bandwidth-bound - measure
+    // whether parallel_for over row ranges actually wins on this machine.
+    std::vector<double> f1(static_cast<std::size_t>(rows)),
+        f2(static_cast<std::size_t>(rows));
+    for (std::int64_t i = 0; i < rows; ++i) {
+        f1[static_cast<std::size_t>(i)] = static_cast<double>(i);
+        f2[static_cast<std::size_t>(i)] = static_cast<double>(rows - i);
+    }
+    Series fa = Series::flat_f64(f1.data(), rows);
+    Series fb = Series::flat_f64(f2.data(), rows);
+    auto time_add = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = fa + fb;
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series add_serial_out = time_add(5);
+    double add_ser = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = fa + fb;
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        add_ser = std::min(
+            add_ser,
+            std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series add_par_out = time_add(5);
+    double add_par = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = fa + fb;
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        add_par = std::min(
+            add_par,
+            std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool add_ok = add_serial_out.length() == add_par_out.length();
+    {
+        const double* a2 = add_serial_out.data<double>();
+        const double* b2 = add_par_out.data<double>();
+        for (std::int64_t i = 0; add_ok && i < add_serial_out.length(); ++i)
+            add_ok = a2[i] == b2[i];
+    }
+    std::printf("add (2x20M f64): serial %8.2f ms | runtime %8.2f ms (%.2fx) "
+                "correctness: %s\n",
+                add_ser, add_par, add_ser / add_par, add_ok ? "OK" : "MISMATCH");
+    ok = ok && add_ok;
+
+    // Cast i64 -> f64 over 20M rows: bandwidth-bound single-pass convert.
+    auto time_cast = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = df.column("v").cast(TypeId::Float64);
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series cast_serial_out = time_cast(5);
+    double cast_ser = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = df.column("v").cast(TypeId::Float64);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        cast_ser = std::min(
+            cast_ser,
+            std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series cast_par_out = time_cast(5);
+    double cast_par = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = df.column("v").cast(TypeId::Float64);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        cast_par = std::min(
+            cast_par,
+            std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool cast_ok = cast_serial_out.length() == cast_par_out.length();
+    {
+        const double* a2 = cast_serial_out.data<double>();
+        const double* b2 = cast_par_out.data<double>();
+        for (std::int64_t i = 0; cast_ok && i < cast_serial_out.length(); ++i)
+            cast_ok = a2[i] == b2[i];
+    }
+    std::printf("cast i64->f64 (20M): serial %8.2f ms | runtime %8.2f ms "
+                "(%.2fx) correctness: %s\n",
+                cast_ser, cast_par, cast_ser / cast_par,
+                cast_ok ? "OK" : "MISMATCH");
+    ok = ok && cast_ok;
+
+    // concat_columns: many large parts, each a disjoint memcpy destination.
+    const std::int64_t nparts = 256;
+    const std::int64_t part_len = rows / nparts;
+    std::vector<Series> parts;
+    parts.reserve(static_cast<std::size_t>(nparts));
+    for (std::int64_t p = 0; p < nparts; ++p)
+        parts.push_back(
+            Series::flat_i64(v.data() + p * part_len, part_len));
+    std::vector<const Series*> part_ptrs;
+    for (const Series& part : parts) part_ptrs.push_back(&part);
+    auto time_concat = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = concat_columns(part_ptrs);
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series ccat_serial_out = time_concat(5);
+    double ccat_ser = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = concat_columns(part_ptrs);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        ccat_ser = std::min(
+            ccat_ser,
+            std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series ccat_par_out = time_concat(5);
+    double ccat_par = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = concat_columns(part_ptrs);
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        ccat_par = std::min(
+            ccat_par,
+            std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool ccat_ok = ccat_serial_out.length() == ccat_par_out.length();
+    {
+        const std::int64_t* a2 = ccat_serial_out.data<std::int64_t>();
+        const std::int64_t* b2 = ccat_par_out.data<std::int64_t>();
+        for (std::int64_t i = 0; ccat_ok && i < ccat_serial_out.length(); ++i)
+            ccat_ok = a2[i] == b2[i];
+    }
+    std::printf("concat_columns (%lld parts): serial %8.2f ms | runtime "
+                "%8.2f ms (%.2fx) correctness: %s\n",
+                static_cast<long long>(nparts), ccat_ser, ccat_par,
+                ccat_ser / ccat_par, ccat_ok ? "OK" : "MISMATCH");
+    ok = ok && ccat_ok;
+
+    // interpolate: nulls every 32 rows create many independent short runs.
+    std::vector<double> interp_v(static_cast<std::size_t>(rows));
+    std::vector<std::uint8_t> interp_valid(
+        static_cast<std::size_t>((rows + 7) / 8), 0xFF);
+    for (std::int64_t i = 0; i < rows; ++i) {
+        interp_v[static_cast<std::size_t>(i)] = static_cast<double>(i % 1000);
+        if (i % 32 != 0)
+            interp_valid[static_cast<std::size_t>(i >> 3)] &=
+                ~(1u << (i & 7));
+    }
+    Series interp_col =
+        Series::flat(TypeId::Float64, interp_v.data(), rows, interp_valid.data());
+    auto time_interp = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = interp_col.interpolate();
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series interp_serial_out = time_interp(5);
+    double interp_ser = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = interp_col.interpolate();
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        interp_ser = std::min(
+            interp_ser,
+            std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series interp_par_out = time_interp(5);
+    double interp_par = 1e300;
+    for (int i = 0; i < 5; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = interp_col.interpolate();
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        interp_par = std::min(
+            interp_par,
+            std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    bool interp_ok = interp_serial_out.length() == interp_par_out.length();
+    {
+        const double* a2 = interp_serial_out.data<double>();
+        const double* b2 = interp_par_out.data<double>();
+        for (std::int64_t i = 0; interp_ok && i < interp_serial_out.length();
+            ++i) {
+            const bool na = interp_serial_out.is_null(i);
+            const bool nb = interp_par_out.is_null(i);
+            interp_ok = na == nb && (na || a2[i] == b2[i]);
+        }
+    }
+    std::printf("interpolate (null every 32): serial %8.2f ms | runtime "
+                "%8.2f ms (%.2fx) correctness: %s\n",
+                interp_ser, interp_par, interp_ser / interp_par,
+                interp_ok ? "OK" : "MISMATCH");
+    ok = ok && interp_ok;
+
+    // dictionary_encode: 5M low-cardinality strings (1261 distinct values).
+    auto time_dictenc = [&](int reps) {
+        double best = 1e300;
+        Series r;
+        for (int i = 0; i < reps; ++i) {
+            const auto tt0 = std::chrono::steady_clock::now();
+            r = str_col.dictionary_encode();
+            const auto tt1 = std::chrono::steady_clock::now();
+            do_not_optimize(r.length());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+        }
+        return r;
+    };
+    set_parallel_backend(nullptr, nullptr);
+    Series de_serial_out = time_dictenc(3);
+    double de_ser = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = str_col.dictionary_encode();
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        de_ser = std::min(
+            de_ser, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    install_runtime_parallel_backend();
+    Series de_par_out = time_dictenc(3);
+    double de_par = 1e300;
+    for (int i = 0; i < 3; ++i) {
+        const auto tt0 = std::chrono::steady_clock::now();
+        Series r = str_col.dictionary_encode();
+        const auto tt1 = std::chrono::steady_clock::now();
+        do_not_optimize(r.length());
+        de_par = std::min(
+            de_par, std::chrono::duration<double, std::milli>(tt1 - tt0).count());
+    }
+    // Dictionary encoding must match exactly: same first-seen dict order and
+    // same per-row codes, so decode both back to plain strings and compare
+    // row-by-row (materialize() turns Dictionary back into a FLAT column).
+    Series de_serial_mat = de_serial_out.materialize();
+    Series de_par_mat = de_par_out.materialize();
+    bool de_ok = de_serial_mat.length() == de_par_mat.length();
+    for (std::int64_t i = 0; de_ok && i < de_serial_mat.length(); ++i)
+        de_ok = de_serial_mat.string_at(i) == de_par_mat.string_at(i);
+    std::printf("dictionary_encode (5M, 1261 distinct): serial %8.2f ms | "
+                "runtime %8.2f ms (%.2fx) correctness: %s\n",
+                de_ser, de_par, de_ser / de_par, de_ok ? "OK" : "MISMATCH");
+    ok = ok && de_ok;
+
     return ok ? 0 : 1;
 }

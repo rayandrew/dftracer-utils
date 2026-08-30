@@ -3,6 +3,7 @@
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
 #include <dftracer/utils/dataframe/internal/scalar.h>
 #include <dftracer/utils/dataframe/kernels/arithmetic.h>
+#include <dftracer/utils/dataframe/parallel.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -106,9 +107,31 @@ void DivSImpl(const void* av, dftu_scalar sc, void* ov, std::size_t n) {
     }
 }
 
+// EXPERIMENT (op 2 measurement, see benchmarks/dataframe_parallel_bench.cpp):
+// fan the add out across row ranges via parallel_for to measure whether a
+// bandwidth-bound elementwise op is worth parallelizing on this machine.
+constexpr std::size_t ADD_PARALLEL_GRAIN = 1 << 20;
+template <class T>
+void AddParallelImpl(const void* av, const void* bv, void* ov, std::size_t n) {
+    if (!parallel_backend_installed() || n < ADD_PARALLEL_GRAIN) {
+        AddImpl<T>(av, bv, ov, n);
+        return;
+    }
+    const T* a = static_cast<const T*>(av);
+    const T* b = static_cast<const T*>(bv);
+    T* out = static_cast<T*>(ov);
+    parallel_for(static_cast<std::int64_t>(n),
+                 static_cast<std::int64_t>(ADD_PARALLEL_GRAIN),
+                 [&](std::int64_t beg, std::int64_t end) {
+                     AddImpl<T>(a + beg, b + beg, out + beg,
+                                static_cast<std::size_t>(end - beg));
+                 });
+}
+
 void AddKernel(std::int32_t type, const void* a, const void* b, void* out,
                std::size_t n) {
-    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), AddImpl, a, b, out, n)
+    DF_NUMERIC_DISPATCH(static_cast<TypeId>(type), AddParallelImpl, a, b, out,
+                        n)
 }
 void SubKernel(std::int32_t type, const void* a, const void* b, void* out,
                std::size_t n) {
