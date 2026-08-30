@@ -72,11 +72,8 @@ def _abi_fingerprint(include: str) -> str:
 
 
 def source_digest(source: str, include: str, cxx: str) -> str:
-    return hashlib.sha256(
-        "\0".join(
-            [source, include, cxx, sys.platform, _abi_fingerprint(include)]
-        ).encode("utf-8")
-    ).hexdigest()[:16]
+    parts = [source, include, cxx, sys.platform, _abi_fingerprint(include)]
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 def build_shared(src: str, out: str | None = None, name: str | None = None) -> str:
