@@ -726,22 +726,39 @@ DataFrame value_counts(const Series& v) {
                      ? v.share()
                      : Series{dftu_series_materialize(v.handle())};
     const std::int64_t n = mat.length();
-    std::unordered_map<std::string, std::int64_t> idx_of;
+    const bool has_nulls = mat.null_count() > 0;
+
+    std::vector<std::int64_t> nonnull_idx;
+    if (has_nulls) {
+        nonnull_idx.reserve(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i)
+            if (!mat.is_null(i)) nonnull_idx.push_back(i);
+    }
+    const std::int64_t m =
+        has_nulls ? static_cast<std::int64_t>(nonnull_idx.size()) : n;
+    auto idx_at = [&](std::int64_t j) {
+        return has_nulls ? nonnull_idx[static_cast<std::size_t>(j)] : j;
+    };
+    auto key_of = [&](std::int64_t j) {
+        std::string k;
+        append_cell(k, mat, idx_at(j));
+        return k;
+    };
+
+    // Radix-partitioned first-occurrence detection + counting: the same
+    // shape as unique()/row_mask(), so distinct values fan out through
+    // disjoint hash buckets instead of one serial map.
+    std::vector<std::uint8_t> keep =
+        radix_first_seen_by<std::string>(m, key_of);
+    std::vector<std::int64_t> cnts = radix_counts_by<std::string>(m, key_of);
+
     std::vector<std::int64_t> first_index;
     std::vector<std::int64_t> counts;
-    for (std::int64_t i = 0; i < n; ++i) {
-        if (mat.is_null(i)) continue;
-        std::string key;
-        append_cell(key, mat, i);
-        auto [it, ins] = idx_of.try_emplace(
-            std::move(key), static_cast<std::int64_t>(first_index.size()));
-        if (ins) {
-            first_index.push_back(i);
-            counts.push_back(1);
-        } else {
-            ++counts[static_cast<std::size_t>(it->second)];
+    for (std::int64_t j = 0; j < m; ++j)
+        if (keep[static_cast<std::size_t>(j)]) {
+            first_index.push_back(idx_at(j));
+            counts.push_back(cnts[static_cast<std::size_t>(j)]);
         }
-    }
     DataFrame df;
     df.names = {"value", "count"};
     df.columns.push_back(mat.take(first_index));
