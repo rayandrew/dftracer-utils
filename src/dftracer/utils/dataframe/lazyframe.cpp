@@ -34,54 +34,54 @@ std::vector<const Series*> column_ptrs(const std::vector<Series>& cols) {
 // Default scan chunk when the caller does not set one (morsel_rows <= 0).
 constexpr std::int64_t DEFAULT_MORSEL_ROWS = 65536;
 
-// Drain a cursor to a single DataFrame, concatenating its morsels under
-// `names`.
-coro::CoroTask<DataFrame> drain_to_frame(Cursor& in,
-                                         const std::vector<std::string>& names,
-                                         std::int64_t max_rows) {
-    auto first = co_await in.next(max_rows);
-    if (first && !first->name_ids.empty()) {
-        // Per-morsel schema: reconcile by name instead of positionally.
-        std::vector<DataFrame> parts;
-        for (auto m = std::move(first); m; m = co_await in.next(max_rows)) {
-            DataFrame df;
-            df.columns = std::move(m->columns);
-            df.names.reserve(m->name_ids.size());
-            for (std::uint32_t id : m->name_ids)
-                df.names.emplace_back(m->intern->resolve(id));
-            parts.push_back(std::move(df));
-        }
-        if (parts.empty()) co_return DataFrame{};
-        std::vector<const DataFrame*> ptrs;
-        ptrs.reserve(parts.size());
-        for (const DataFrame& p : parts) ptrs.push_back(&p);
-        co_return concat(ptrs, ConcatHow::Diagonal);
-    }
-    std::vector<std::vector<Series>> chunks;
-    if (first) chunks.push_back(std::move(first->columns));
-    while (auto m = co_await in.next(max_rows))
-        chunks.push_back(std::move(m->columns));
+// Build one standalone DataFrame from a morsel. Names come from the morsel's
+// own schema (streaming, self-describing), else the cursor's data-dependent
+// out_names(), else the static plan schema.
+DataFrame frame_from_morsel(
+    Morsel&& m, const std::vector<std::string>& static_names,
+    const std::optional<std::vector<std::string>>& out_names) {
     DataFrame out;
-    out.names = names;
-    // Trust the produced column count over `names`: a data-dependent sink emits
-    // more (or fewer) columns than the static schema, and the caller relabels.
-    const std::size_t ncols =
-        chunks.empty() ? names.size() : chunks.front().size();
-    out.columns.reserve(ncols);
-    for (std::size_t c = 0; c < ncols; ++c) {
-        // A single chunk needs no merge - concat_columns cannot rejoin a
-        // nested (List/Struct) column, which a single already-complete chunk
-        // (e.g. a resident source's one morsel) may carry.
-        if (chunks.size() == 1) {
-            out.columns.push_back(std::move(chunks.front()[c]));
-            continue;
-        }
-        std::vector<const Series*> parts;
-        parts.reserve(chunks.size());
-        for (auto& ch : chunks) parts.push_back(&ch[c]);
-        out.columns.push_back(concat_columns(parts));
+    out.columns = std::move(m.columns);
+    if (!m.name_ids.empty()) {
+        out.names.reserve(m.name_ids.size());
+        for (std::uint32_t id : m.name_ids)
+            out.names.emplace_back(m.intern->resolve(id));
+    } else if (out_names) {
+        out.names = *out_names;
+    } else {
+        out.names = static_names;
     }
-    co_return out;
+    return out;
+}
+
+// Drain a chunk generator to a single DataFrame.
+coro::CoroTask<DataFrame> drain_stream(coro::AsyncGenerator<DataFrame> gen) {
+    std::vector<DataFrame> parts;
+    while (auto df = co_await gen.next()) parts.push_back(std::move(*df));
+    if (parts.empty()) co_return DataFrame{};
+    // A single chunk needs no merge - concat cannot rejoin a nested
+    // (List/Struct) column, which a single already-complete chunk (e.g. a
+    // resident source's one morsel) may carry.
+    if (parts.size() == 1) co_return std::move(parts[0]);
+
+    bool uniform = true;
+    for (std::size_t i = 1; i < parts.size() && uniform; ++i) {
+        if (parts[i].names != parts[0].names ||
+            parts[i].columns.size() != parts[0].columns.size()) {
+            uniform = false;
+            break;
+        }
+        for (std::size_t c = 0; c < parts[0].columns.size(); ++c) {
+            if (parts[i].columns[c].type() != parts[0].columns[c].type()) {
+                uniform = false;
+                break;
+            }
+        }
+    }
+    std::vector<const DataFrame*> ptrs;
+    ptrs.reserve(parts.size());
+    for (const DataFrame& p : parts) ptrs.push_back(&p);
+    co_return concat(ptrs, uniform ? ConcatHow::Vertical : ConcatHow::Diagonal);
 }
 
 Morsel morsel_of(DataFrame&& f) {
@@ -2379,15 +2379,31 @@ LazyFrame LazyFrame::auto_spill() const {
     return LazyFrame(source_, ops_, resolve_spill_budget(0));
 }
 
-coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
+coro::AsyncGenerator<DataFrame> LazyFrame::stream(
+    std::int64_t morsel_rows) const {
     auto ops = pushdown_projections(
         source_->names(), pushdown_predicates(source_->names(), ops_));
     // 0 resolves to auto (~1/3 RAM), same policy as View.
     const std::uint64_t budget = resolve_spill_budget(memory_budget_);
+    const std::int64_t eff_rows =
+        morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
+    std::unique_ptr<Cursor> cur = source_->open(budget);
+    std::vector<std::string> sch = source_->names();
+    for (const auto& op : ops) {
+        cur = make_cursor(*op, std::move(cur), sch, budget);
+        sch = out_schema(*op, std::move(sch));
+    }
+    while (auto m = co_await cur->next(eff_rows))
+        co_yield frame_from_morsel(std::move(*m), sch, cur->out_names());
+}
+
+coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
     // A resident source runs whole-column, matching eager. An explicit
     // morsel_rows or memory_budget asks to stream/spill instead.
     if (morsel_rows <= 0 && memory_budget_ == 0) {
         if (const DataFrame* f = source_->as_frame()) {
+            auto ops = pushdown_projections(
+                source_->names(), pushdown_predicates(source_->names(), ops_));
             DataFrame start;
             start.names = f->names;
             start.columns.reserve(f->columns.size());
@@ -2397,19 +2413,7 @@ coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
                 co_return std::move(*out);
         }
     }
-    const std::int64_t eff_rows =
-        morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
-    std::unique_ptr<Cursor> cur = source_->open(budget);
-    std::vector<std::string> sch = source_->names();
-    for (const auto& op : ops) {
-        cur = make_cursor(*op, std::move(cur), sch, budget);
-        sch = out_schema(*op, std::move(sch));
-    }
-    DataFrame out = co_await drain_to_frame(*cur, sch, eff_rows);
-    // A data-dependent terminal (pivot/to_dummies/describe) knows its true
-    // schema only after running; prefer it over the static plan schema.
-    if (auto n = cur->out_names()) out.names = std::move(*n);
-    co_return out;
+    co_return co_await drain_stream(stream(morsel_rows));
 }
 
 LazyFrame DataFrame::lazy() const {

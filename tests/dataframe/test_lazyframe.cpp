@@ -1,7 +1,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/string_intern.h>
+#include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
@@ -30,6 +32,28 @@ namespace {
 
 DataFrame run(CoroTask<DataFrame> t) {
     return dftracer::utils::default_runtime().submit(std::move(t)).get();
+}
+
+CoroTask<std::pair<std::vector<std::int64_t>, DataFrame>> probe_stream(
+    dftracer::utils::coro::AsyncGenerator<DataFrame> gen) {
+    std::vector<std::int64_t> chunk_rows;
+    std::vector<DataFrame> chunks;
+    while (auto df = co_await gen.next()) {
+        chunk_rows.push_back(df->num_rows());
+        chunks.push_back(std::move(*df));
+    }
+    std::vector<const DataFrame*> ptrs;
+    for (const DataFrame& c : chunks) ptrs.push_back(&c);
+    DataFrame merged = dftracer::utils::dataframe::concat(
+        ptrs, dftracer::utils::dataframe::ConcatHow::Vertical);
+    co_return std::make_pair(std::move(chunk_rows), std::move(merged));
+}
+
+std::pair<std::vector<std::int64_t>, DataFrame> run_stream_probe(
+    dftracer::utils::coro::AsyncGenerator<DataFrame> gen) {
+    return dftracer::utils::default_runtime()
+        .submit(probe_stream(std::move(gen)))
+        .get();
 }
 
 DataFrame make_df() {
@@ -602,5 +626,25 @@ TEST_SUITE("lazyframe") {
         CHECK(c.is_null(1));
         CHECK_FALSE(c.is_null(2));
         CHECK(c.string_at(2) == "x");
+    }
+
+    TEST_CASE("stream() yields morsels and collect() equals draining it") {
+        auto lf = make_df().lazy().filter(col(0) > std::int64_t{3});
+
+        auto [chunk_rows, streamed] = run_stream_probe(lf.stream(2));
+
+        DataFrame collected = run(lf.collect(2));
+
+        REQUIRE(chunk_rows.size() == 2);
+        CHECK(chunk_rows[0] == 1);
+        CHECK(chunk_rows[1] == 2);
+        REQUIRE(streamed.num_rows() == 3);
+        REQUIRE(streamed.num_rows() == collected.num_rows());
+        REQUIRE(streamed.column_index("a") >= 0);
+        const Series& a =
+            streamed
+                .columns[static_cast<std::size_t>(streamed.column_index("a"))];
+        CHECK(a.data<std::int64_t>()[0] == 4);
+        CHECK(a.data<std::int64_t>()[2] == 6);
     }
 }

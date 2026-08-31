@@ -2,6 +2,7 @@
 #define DFTRACER_UTILS_DATAFRAME_LAZYFRAME_H
 
 #include <dftracer/utils/core/common/string_intern.h>
+#include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
@@ -169,6 +170,12 @@ class LazyFrame {
     /// The optimized plan as text (source then one op per line), for
     /// introspection and tests.
     std::string explain() const;
+
+    /// Pull-based chunk generator: the streaming terminal. Each yielded
+    /// DataFrame is standalone, carrying its own schema. One-shot: re-run
+    /// from the LazyFrame to restart. `morsel_rows` is the scan chunk size;
+    /// <= 0 means auto. collect() drains this.
+    coro::AsyncGenerator<DataFrame> stream(std::int64_t morsel_rows = 0) const;
 
     /// Run the pipeline and materialize the surviving rows. `morsel_rows` is
     /// the scan chunk size; <= 0 (the default) means auto; one pass over a
