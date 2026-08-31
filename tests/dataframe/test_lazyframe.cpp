@@ -68,6 +68,26 @@ TEST_SUITE("lazyframe") {
         CHECK(cc[2] == 66);
     }
 
+    TEST_CASE("fused map (in-memory engine) matches the eager path") {
+        // collect() with no morsel size runs the whole-column in-memory engine,
+        // which fuses filter+with_column+select into one pass. Result must
+        // equal the eager chain.
+        auto lf = make_df()
+                      .lazy()
+                      .filter(col(1) > std::int64_t{20})
+                      .with_column("c", col(0) + col(1))
+                      .select({"a", "c"});
+        DataFrame r = lf.collect();  // in-memory, fused
+        CHECK(r.names == std::vector<std::string>{"a", "c"});
+        CHECK(r.num_rows() == 4);    // b in {30,40,50,60} -> a in {3,4,5,6}
+        const std::int64_t* a = r.column("a").data<std::int64_t>();
+        const std::int64_t* c = r.column("c").data<std::int64_t>();
+        CHECK(a[0] == 3);
+        CHECK(c[0] == 33);  // 3 + 30
+        CHECK(a[3] == 6);
+        CHECK(c[3] == 66);  // 6 + 60
+    }
+
     TEST_CASE("lazy(df) free function and full-scan roundtrip") {
         DataFrame all = dftracer::utils::dataframe::lazy(make_df()).collect();
         CHECK(all.num_rows() == 6);

@@ -1770,15 +1770,10 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
         sch = out_schema(*op, std::move(sch));
     }
 
-    // Hoist each filter as early as possible. A filter is row-local and
-    // indexes its columns by position, so it commutes with any preceding op
-    // that neither drops the rows it reads nor renumbers those columns:
-    //  - with_column, unless the predicate reads the column it writes;
-    //  - sort_by, which only reorders rows (filter-before-sort is the big win:
-    //    the sort then runs on the surviving rows only);
-    //  - rename, which only relabels columns (positions unchanged).
-    // Both endpoints keep the same schema width, so a hoisted filter's column
-    // indices and every with_column's output index stay valid.
+    // Hoist a filter past a preceding op that keeps its columns' positions and
+    // rows: with_column (unless the predicate reads the written column),
+    // sort_by, rename. filter-before-sort is the big win - the sort runs on
+    // survivors.
     bool changed = true;
     while (changed) {
         changed = false;
@@ -1831,14 +1826,13 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_projections(
 
     const int nsrc = static_cast<int>(source_names.size());
     std::vector<char> need(static_cast<std::size_t>(nsrc), 0);
-    // Final output columns.
     for (const std::string& nm : std::get<SelectOp>(ops[last]->node).names) {
         int c = col_index(source_names, nm);
         if (c < 0) return ops;
         need[static_cast<std::size_t>(c)] = 1;
     }
-    // Columns each op reads. Every op here preserves the source schema by
-    // position, so a predicate's indices are source indices.
+    // These ops preserve the source schema by position, so predicate indices
+    // are source indices.
     for (std::size_t i = 0; i < last; ++i) {
         const auto& n = ops[i]->node;
         if (const auto* f = std::get_if<FilterOp>(&n)) {
@@ -1854,7 +1848,6 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_projections(
         }
     }
 
-    // Live source columns, in source order, plus the old->new index map.
     std::vector<std::string> live;
     std::vector<std::int32_t> old_to_new(static_cast<std::size_t>(nsrc), -1);
     for (int c = 0; c < nsrc; ++c)
@@ -1879,12 +1872,107 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_projections(
     return out;
 }
 
-// Whole-column execution of an optimized plan over a resident frame: each op
-// runs as its eager kernel, matching the eager path (no per-morsel gather +
-// concat tax). nullopt when an op has no whole-column form (a reshaping or
-// data-dependent op), so collect() falls back to the streaming engine.
+// Fuse [filter]* [with_column]* [select] into one pass: one AND-ed mask, gather
+// only the columns the outputs read, one CSE-fused eval_many - no intermediate
+// frame. nullopt for any other shape, or a with_column that replaces a column
+// or reads another with_column; the caller then runs op-by-op.
+std::optional<DataFrame> try_fuse_map(
+    const DataFrame& src,
+    const std::vector<std::shared_ptr<const LazyOp>>& ops) {
+    std::vector<const FilterOp*> filters;
+    std::vector<const WithColumnOp*> withs;
+    const SelectOp* sel = nullptr;
+    for (const auto& op : ops) {
+        const auto& n = op->node;
+        if (const auto* f = std::get_if<FilterOp>(&n)) {
+            if (!withs.empty() || sel) return std::nullopt;
+            filters.push_back(f);
+        } else if (const auto* w = std::get_if<WithColumnOp>(&n)) {
+            if (sel) return std::nullopt;
+            withs.push_back(w);
+        } else if (const auto* s = std::get_if<SelectOp>(&n)) {
+            if (sel) return std::nullopt;
+            sel = s;
+        } else {
+            return std::nullopt;
+        }
+    }
+    if (!sel) return std::nullopt;
+
+    const std::int32_t nsrc = static_cast<std::int32_t>(src.columns.size());
+    // Only append-new with_columns that read source columns; see the contract.
+    for (const WithColumnOp* w : withs) {
+        if (col_index(src.names, w->name) >= 0) return std::nullopt;
+        for (std::int32_t j = nsrc;
+             j < nsrc + static_cast<std::int32_t>(withs.size()); ++j)
+            if (expr_references(w->expr, j)) return std::nullopt;
+    }
+
+    std::vector<Expr> outs;
+    outs.reserve(sel->names.size());
+    for (const std::string& nm : sel->names) {
+        const Expr* we = nullptr;
+        for (const WithColumnOp* w : withs)
+            if (w->name == nm) we = &w->expr;
+        if (we) {
+            outs.push_back(*we);
+        } else {
+            int c = col_index(src.names, nm);
+            if (c < 0) return std::nullopt;
+            outs.push_back(expr_col(c));
+        }
+    }
+
+    std::vector<char> need(static_cast<std::size_t>(nsrc), 0);
+    for (const Expr& e : outs)
+        for (std::int32_t c = 0; c < nsrc; ++c)
+            if (expr_references(e, c)) need[static_cast<std::size_t>(c)] = 1;
+    std::vector<std::int32_t> old_to_new(static_cast<std::size_t>(nsrc), -1);
+    DataFrame sub;
+    for (std::int32_t c = 0; c < nsrc; ++c)
+        if (need[static_cast<std::size_t>(c)]) {
+            old_to_new[static_cast<std::size_t>(c)] =
+                static_cast<std::int32_t>(sub.columns.size());
+            sub.names.push_back(src.names[static_cast<std::size_t>(c)]);
+            sub.columns.push_back(
+                src.columns[static_cast<std::size_t>(c)].share());
+        }
+
+    if (!filters.empty()) {
+        Expr pred = filters[0]->pred;
+        for (std::size_t i = 1; i < filters.size(); ++i)
+            pred = expr_logical(DFTU_LOGICAL_AND, pred, filters[i]->pred);
+        sub = sub.filter(eval(pred, column_ptrs(src.columns)));
+    }
+
+    // Compute only the derived outputs; a bare column passes through zero-copy.
+    std::vector<Expr> computed;
+    for (const Expr& e : outs)
+        if (expr_col_index(e) < 0)
+            computed.push_back(expr_remap_cols(e, old_to_new));
+    std::vector<Series> comp =
+        computed.empty() ? std::vector<Series>{}
+                         : eval_many(computed, column_ptrs(sub.columns));
+    DataFrame out;
+    out.names = sel->names;
+    out.columns.reserve(outs.size());
+    std::size_t ci = 0;
+    for (const Expr& e : outs) {
+        const std::int32_t c = expr_col_index(e);
+        if (c >= 0)
+            out.columns.push_back(
+                sub.columns[static_cast<std::size_t>(old_to_new[c])].share());
+        else
+            out.columns.push_back(std::move(comp[ci++]));
+    }
+    return out;
+}
+
+// Whole-column execution over a resident frame (map plans fuse via
+// try_fuse_map). nullopt for an op with no whole-column form; caller streams.
 std::optional<DataFrame> run_ops_in_memory(
     DataFrame df, const std::vector<std::shared_ptr<const LazyOp>>& ops) {
+    if (auto fused = try_fuse_map(df, ops)) return fused;
     for (const auto& op : ops) {
         bool ok = true;
         DataFrame next = std::visit(
