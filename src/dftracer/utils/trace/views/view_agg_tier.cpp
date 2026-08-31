@@ -4,6 +4,7 @@
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 
 #include <dftracer/utils/core/common/filesystem.h>
+#include <dftracer/utils/core/common/no_destructor.h>
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/core/rocksdb/db_manager.h>
@@ -338,14 +339,15 @@ std::shared_ptr<const TierCache> build_tier_cache(const std::string& index_path,
 
 std::shared_mutex g_tier_mtx;
 
-// Leaked intentionally: entries hold open RocksDB handles, and running this
-// map's destructor at process exit races RocksDB's own static teardown
-// (SyncPoint) -> heap-use-after-free. clear_tier_cache() (a rocksdb pre-exit
-// hook) empties it cleanly during orderly shutdown instead.
+// Never destructed: entries hold open RocksDB handles, and running this map's
+// destructor at process exit races RocksDB's own static teardown (SyncPoint)
+// -> heap-use-after-free. clear_tier_cache() (a rocksdb pre-exit hook) empties
+// it cleanly during orderly shutdown instead.
 std::unordered_map<std::string, std::shared_ptr<const TierCache>>&
 tier_cache_map() {
-    static auto* m =
-        new std::unordered_map<std::string, std::shared_ptr<const TierCache>>();
+    static dftracer::utils::NoDestructor<
+        std::unordered_map<std::string, std::shared_ptr<const TierCache>>>
+        m;
     return *m;
 }
 
