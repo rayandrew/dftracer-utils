@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     import pyarrow as pa  # ty: ignore[unresolved-import]
 
     from .columnar import Agg, ColumnExpr, Expr, GroupBy
+    from .lazyframe import LazyFrame
     from .runtime import Runtime
 
 # Matches WINDOW_UNBOUNDED (int64 max): a frame bound of None means that side of
@@ -526,6 +527,13 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
 
     def drop_duplicates(self) -> "DataFrame":
         return _wrap(self._native.drop_duplicates())
+
+    def lazy(self) -> "LazyFrame":
+        """Start a deferred query over this batch. Ops are recorded and nothing
+        runs until :meth:`LazyFrame.collect`."""
+        from .lazyframe import LazyFrame
+
+        return LazyFrame(self._native.lazy())
 
     def sort_by_multi(self, names: "list[str]", descending: bool = False) -> "DataFrame":
         return _wrap(self._native.sort_by_multi(_unwrap(names), _unwrap(descending)))

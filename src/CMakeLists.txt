@@ -1528,6 +1528,8 @@ if(DFTRACER_UTILS_BUILD_PYTHON)
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/dataframe.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/dataframe.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/lazyframe.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/lazyframe.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/columnar_eval.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/columnar_eval.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/py_scalar_helpers.h

@@ -55,6 +55,7 @@ from .indexer import (  # noqa: F401
     Indexer,
     IndexStatus,
 )
+from .lazyframe import LazyFrame, lazy  # noqa: F401
 from .query import Expr, Field, resolved  # noqa: F401
 from .runtime import Runtime, TaskHandle  # noqa: F401
 from .series import Series  # noqa: F401
@@ -148,6 +149,8 @@ __all__ = [
     "SessionView",
     "Handle",
     "DataFrame",
+    "LazyFrame",
+    "lazy",
     "Series",
     "Runtime",
     "TaskHandle",
