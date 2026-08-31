@@ -1,5 +1,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/dataframe/agg.h>
+#include <dftracer/utils/dataframe/agg_expr.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/sketch.h>
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 using dftracer::utils::dataframe::Agg;
@@ -342,6 +344,150 @@ TEST_CASE("group_agg first/last is exact across the parallel-chunk merge") {
         const std::int64_t kk = key[r];
         CHECK(f[r] == kk);  // first v with v%3==kk is kk
         CHECK(l[r] == kk + 3 * ((n - 1 - kk) / 3));  // largest such v < n
+    }
+}
+
+TEST_CASE("DataFrame group_by sumsq matches FieldStat::sumsq") {
+    DataFrame df;
+    df.names = {"k", "v"};
+    df.columns.push_back(i64({1, 2, 1, 2, 1}));
+    df.columns.push_back(i64({10, 5, 20, 7, 30}));
+    namespace df_ns = dftracer::utils::dataframe;
+    DataFrame g = df.group_by("k", {GroupAgg{df_ns::Agg::SumSq, "v", "ssq"}});
+    REQUIRE(g.num_rows() == 2);
+    const std::int64_t* key = g.column("k").data<std::int64_t>();
+    const double* ssq = g.column("ssq").data<double>();
+    for (std::int64_t r = 0; r < 2; ++r) {
+        if (key[r] == 1)
+            CHECK(ssq[r] == doctest::Approx(10.0 * 10 + 20.0 * 20 + 30.0 * 30));
+        else
+            CHECK(ssq[r] == doctest::Approx(5.0 * 5 + 7.0 * 7));
+    }
+}
+
+TEST_CASE("DataFrame group_by argmax picks the repr at the max by-value") {
+    namespace df_ns = dftracer::utils::dataframe;
+    DataFrame df;
+    df.names = {"k", "name", "dur"};
+    df.columns.push_back(i64({1, 1, 1, 2, 2}));
+    df.columns.push_back(Series::strings({"a", "b", "c", "x", "y"}));
+    df.columns.push_back(i64({10, 30, 20, 5, 8}));
+    GroupAgg spec{df_ns::Agg::ArgMax, "name", "argmax_name"};
+    spec.by = "dur";
+    DataFrame g = df.group_by("k", {spec});
+    REQUIRE(g.num_rows() == 2);
+    const std::int64_t* key = g.column("k").data<std::int64_t>();
+    const Series& out = g.column("argmax_name");
+    CHECK(out.type() == df_ns::TypeId::String);
+    for (std::int64_t r = 0; r < 2; ++r) {
+        if (key[r] == 1)
+            CHECK(out.string_at(r) == "b");  // dur=30 is the max for key 1
+        else
+            CHECK(out.string_at(r) == "y");  // dur=8 is the max for key 2
+    }
+}
+
+TEST_CASE("DataFrame group_by set_union sorts and joins distinct values") {
+    namespace df_ns = dftracer::utils::dataframe;
+    DataFrame df;
+    df.names = {"k", "tag"};
+    df.columns.push_back(i64({1, 1, 1, 2}));
+    df.columns.push_back(Series::strings({"posix", "stdio", "posix", "mpi"}));
+    DataFrame g =
+        df.group_by("k", {GroupAgg{df_ns::Agg::SetUnion, "tag", "tags"}});
+    REQUIRE(g.num_rows() == 2);
+    const std::int64_t* key = g.column("k").data<std::int64_t>();
+    const Series& out = g.column("tags");
+    const std::string sep(1, '\x1e');
+    for (std::int64_t r = 0; r < 2; ++r) {
+        if (key[r] == 1)
+            CHECK(out.string_at(r) == "posix" + sep + "stdio");
+        else
+            CHECK(out.string_at(r) == "mpi");
+    }
+}
+
+TEST_CASE("group_agg argmax/sumsq/set_union merge and serialize round-trip") {
+    namespace df = dftracer::utils::dataframe;
+    // Two chunks accumulated into separate partials, one round-tripped through
+    // serialize/deserialize, then merged - must equal one direct accumulation.
+    std::vector<std::int64_t> k(2000), by(2000);
+    std::vector<std::string> names(2000), tags(2000);
+    for (std::int64_t i = 0; i < 2000; ++i) {
+        const auto si = static_cast<std::size_t>(i);
+        k[si] = i % 2;
+        by[si] = (i * 37) % 500;
+        names[si] = "n" + std::to_string(i % 17);
+        tags[si] = "t" + std::to_string(i % 5);
+    }
+    Series key = Series::flat_i64(k.data(), 2000);
+    Series by_col = Series::flat_i64(by.data(), 2000);
+    Series name_col = Series::strings(names);
+    Series tag_col = Series::strings(tags);
+    std::vector<const Series*> vals{&name_col, &by_col, &tag_col};
+
+    df::AggSpec argmax_spec{df::AggOp::ArgMax, 0, "am", 0.0, 1};
+    df::AggSpec set_spec{df::AggOp::SetUnion, 2, "su"};
+    df::AggSpec sumsq_spec{df::AggOp::SumSq, 1, "ssq"};
+    std::vector<df::AggSpec> specs{argmax_spec, set_spec, sumsq_spec};
+
+    auto st1 = df::agg_new(specs);
+    df::agg_accumulate(*st1, key, vals, 0, 1000);
+    auto st2 = df::agg_new(specs);
+    df::agg_accumulate(*st2, key, vals, 1000, 2000);
+
+    std::string blob = df::agg_serialize(*st2);
+    auto st2b = df::agg_deserialize(blob);
+    df::agg_merge(*st1, *st2b);
+    DataFrame merged = df::agg_finalize(*st1, "k");
+
+    auto full = df::agg_new(specs);
+    df::agg_accumulate(*full, key, vals);
+    DataFrame direct = df::agg_finalize(*full, "k");
+
+    REQUIRE(merged.num_rows() == direct.num_rows());
+    for (std::int64_t r = 0; r < merged.num_rows(); ++r) {
+        CHECK(merged.column("am").string_at(r) ==
+              direct.column("am").string_at(r));
+        CHECK(merged.column("su").string_at(r) ==
+              direct.column("su").string_at(r));
+        CHECK(merged.column("ssq").data<double>()[r] ==
+              doctest::Approx(direct.column("ssq").data<double>()[r]));
+    }
+}
+
+TEST_CASE("group_agg_expr argmax/sumsq/set_union via the expression builders") {
+    namespace df = dftracer::utils::dataframe;
+    DataFrame b;
+    b.names = {"k", "name", "dur", "tag"};
+    b.columns.push_back(i64({1, 1, 1, 2, 2}));
+    b.columns.push_back(Series::strings({"a", "b", "c", "x", "y"}));
+    b.columns.push_back(i64({10, 30, 20, 5, 8}));
+    b.columns.push_back(Series::strings({"p", "q", "p", "r", "r"}));
+    std::vector<const Series*> inputs;
+    for (const Series& c : b.columns) inputs.push_back(&c);
+
+    std::vector<df::AggExprSpec> specs{
+        df::agg_argmax(df::expr_col(1), df::expr_col(2), "argmax_name"),
+        df::agg_sumsq(df::expr_col(2), "sumsq_dur"),
+        df::agg_set_union(df::expr_col(3), "tags"),
+    };
+    DataFrame g = df::group_agg_expr(df::expr_col(0), specs, inputs, "k");
+    REQUIRE(g.num_rows() == 2);
+    const std::int64_t* key = g.column("k").data<std::int64_t>();
+    for (std::int64_t r = 0; r < 2; ++r) {
+        if (key[r] == 1) {
+            CHECK(g.column("argmax_name").string_at(r) == "b");
+            CHECK(g.column("sumsq_dur").data<double>()[r] ==
+                  doctest::Approx(10.0 * 10 + 30.0 * 30 + 20.0 * 20));
+            CHECK(g.column("tags").string_at(r) ==
+                  "p" + std::string(1, '\x1e') + "q");
+        } else {
+            CHECK(g.column("argmax_name").string_at(r) == "y");
+            CHECK(g.column("sumsq_dur").data<double>()[r] ==
+                  doctest::Approx(5.0 * 5 + 8.0 * 8));
+            CHECK(g.column("tags").string_at(r) == "r");
+        }
     }
 }
 

@@ -7,6 +7,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -71,6 +72,25 @@ void fs_add(FieldStat& fs, const Series& c, std::int64_t i, FieldStatDomain d) {
     }
 }
 
+// Generic string form of a cell, for ArgMax's repr and SetUnion's values:
+// matches the View's to_str (std::to_string for numbers, the raw text for a
+// String column) so the two engines agree on ArgMax/SetUnion output.
+std::string cell_repr(const Series& c, std::int64_t i) {
+    if (c.type() == TypeId::String) return std::string(c.string_at(i));
+    switch (col_domain(c.type())) {
+        case FieldStatDomain::F64:
+            return std::to_string(read_f64(c, i));
+        case FieldStatDomain::U64:
+            return std::to_string(read_u64(c, i));
+        default:
+            return std::to_string(read_i64(c, i));
+    }
+}
+
+// Separator joining a SetUnion group's distinct values into one text cell;
+// matches views/view_aggregate.h SET_SEP so the two engines agree.
+constexpr char AGG_SET_SEP = '\x1e';
+
 }  // namespace
 
 // Groups fold by distinct value column, not by spec: sum(dur), mean(dur) and
@@ -114,6 +134,27 @@ class AggState {
     std::vector<int> field_sketch;
     std::vector<DDSketch> sketches;
 
+    // ArgMax: one slot per ArgMax spec (no field-level dedup, mirroring the
+    // View's AggSchema - a slot tracks the max `by_col` seen and the repr of
+    // `value_col` at that row). `argmax_by_col`/`argmax_val_col` are raw
+    // indices into the `values` array passed to accumulate.
+    bool has_argmax = false;
+    std::size_t n_argmax = 0;
+    std::vector<int> spec_argmax;   // spec -> argmax slot, or -1
+    std::vector<std::int32_t> argmax_by_col;
+    std::vector<std::int32_t> argmax_val_col;
+    std::vector<double> argmax_by;  // groups * n_argmax
+    std::vector<char> argmax_has;   // groups * n_argmax
+    std::vector<std::string> argmax_repr;
+
+    // SetUnion: one slot per SetUnion spec (no field-level dedup, mirroring the
+    // View's AggSchema). `set_val_col` is a raw index into `values`.
+    bool has_set = false;
+    std::size_t n_set = 0;
+    std::vector<int> spec_set;                // spec -> set slot, or -1
+    std::vector<std::int32_t> set_val_col;
+    std::vector<std::set<std::string>> sets;  // groups * n_set
+
     std::size_t nspecs() const { return specs.size(); }
     std::int64_t ngroups() const {
         return static_cast<std::int64_t>(key_string ? skeys.size()
@@ -127,7 +168,9 @@ class AggState {
         std::unordered_map<std::int32_t, int> seen;
         for (std::size_t s = 0; s < specs.size(); ++s) {
             const AggSpec& sp = specs[s];
-            if (sp.op == AggOp::Count || sp.value_col < 0) continue;
+            if (sp.op == AggOp::Count || sp.op == AggOp::ArgMax ||
+                sp.op == AggOp::SetUnion || sp.value_col < 0)
+                continue;
             auto it = seen.find(sp.value_col);
             if (it == seen.end()) {
                 int fi = static_cast<int>(field_vc.size());
@@ -156,6 +199,26 @@ class AggState {
                     static_cast<int>(n_sketch++);
         }
         has_sketch = n_sketch > 0;
+
+        spec_argmax.assign(specs.size(), -1);
+        argmax_by_col.clear();
+        argmax_val_col.clear();
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].op != AggOp::ArgMax) continue;
+            spec_argmax[s] = static_cast<int>(n_argmax++);
+            argmax_by_col.push_back(specs[s].by_col);
+            argmax_val_col.push_back(specs[s].value_col);
+        }
+        has_argmax = n_argmax > 0;
+
+        spec_set.assign(specs.size(), -1);
+        set_val_col.clear();
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].op != AggOp::SetUnion) continue;
+            spec_set[s] = static_cast<int>(n_set++);
+            set_val_col.push_back(specs[s].value_col);
+        }
+        has_set = n_set > 0;
     }
 
     void grow_group() {
@@ -170,6 +233,12 @@ class AggState {
             fl_last_idx.resize(fl_last_idx.size() + nf, -1);
         }
         if (has_sketch) sketches.resize(sketches.size() + n_sketch);
+        if (has_argmax) {
+            argmax_by.resize(argmax_by.size() + n_argmax, 0.0);
+            argmax_has.resize(argmax_has.size() + n_argmax, 0);
+            argmax_repr.resize(argmax_repr.size() + n_argmax);
+        }
+        if (has_set) sets.resize(sets.size() + n_set);
     }
     std::int64_t group_of_i64(std::int64_t k) {
         auto it = imap.find(k);
@@ -280,6 +349,35 @@ void agg_accumulate(AggState& st, const Series& key,
                 }
             }
         }
+        if (st.has_argmax) {
+            for (std::size_t slot = 0; slot < st.n_argmax; ++slot) {
+                const Series* byc =
+                    values[static_cast<std::size_t>(st.argmax_by_col[slot])];
+                if (byc->is_null(i)) continue;
+                const double byv =
+                    read_as_double(*byc, i, col_domain(byc->type()));
+                const std::size_t as =
+                    static_cast<std::size_t>(g) * st.n_argmax + slot;
+                if (!st.argmax_has[as] || byv > st.argmax_by[as]) {
+                    st.argmax_by[as] = byv;
+                    st.argmax_has[as] = 1;
+                    const Series* vc = values[static_cast<std::size_t>(
+                        st.argmax_val_col[slot])];
+                    st.argmax_repr[as] = cell_repr(*vc, i);
+                }
+            }
+        }
+        if (st.has_set) {
+            for (std::size_t slot = 0; slot < st.n_set; ++slot) {
+                const Series* vc =
+                    values[static_cast<std::size_t>(st.set_val_col[slot])];
+                if (vc->is_null(i)) continue;
+                std::string v = cell_repr(*vc, i);
+                if (!v.empty())
+                    st.sets[static_cast<std::size_t>(g) * st.n_set + slot]
+                        .insert(std::move(v));
+            }
+        }
     }
 }
 
@@ -296,6 +394,15 @@ void agg_merge(AggState& into, const AggState& other) {
         into.has_sketch = other.has_sketch;
         into.n_sketch = other.n_sketch;
         into.field_sketch = other.field_sketch;
+        into.has_argmax = other.has_argmax;
+        into.n_argmax = other.n_argmax;
+        into.spec_argmax = other.spec_argmax;
+        into.argmax_by_col = other.argmax_by_col;
+        into.argmax_val_col = other.argmax_val_col;
+        into.has_set = other.has_set;
+        into.n_set = other.n_set;
+        into.spec_set = other.spec_set;
+        into.set_val_col = other.set_val_col;
         into.key_string = other.key_string;
         into.inited = true;
     }
@@ -334,6 +441,26 @@ void agg_merge(AggState& into, const AggState& other) {
             const std::size_t ss = static_cast<std::size_t>(j) * into.n_sketch;
             for (std::size_t sk = 0; sk < into.n_sketch; ++sk)
                 into.sketches[ds + sk].merge(other.sketches[ss + sk]);
+        }
+        if (into.has_argmax) {
+            const std::size_t da = static_cast<std::size_t>(g) * into.n_argmax;
+            const std::size_t sa = static_cast<std::size_t>(j) * into.n_argmax;
+            for (std::size_t slot = 0; slot < into.n_argmax; ++slot) {
+                if (!other.argmax_has[sa + slot]) continue;
+                if (!into.argmax_has[da + slot] ||
+                    other.argmax_by[sa + slot] > into.argmax_by[da + slot]) {
+                    into.argmax_by[da + slot] = other.argmax_by[sa + slot];
+                    into.argmax_has[da + slot] = 1;
+                    into.argmax_repr[da + slot] = other.argmax_repr[sa + slot];
+                }
+            }
+        }
+        if (into.has_set) {
+            const std::size_t ds = static_cast<std::size_t>(g) * into.n_set;
+            const std::size_t ss = static_cast<std::size_t>(j) * into.n_set;
+            for (std::size_t slot = 0; slot < into.n_set; ++slot)
+                into.sets[ds + slot].insert(other.sets[ss + slot].begin(),
+                                            other.sets[ss + slot].end());
         }
     }
 }
@@ -435,6 +562,40 @@ DataFrame agg_finalize(const AggState& st, const std::string& key_name) {
                         std::bit_cast<std::int64_t>(bits[slot(g)]);
                 out.columns.push_back(Series::flat_i64(v.data(), ng));
             }
+        } else if (sp.op == AggOp::SumSq) {
+            std::vector<double> v(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g)
+                v[static_cast<std::size_t>(g)] = fs_at(g).sumsq;
+            out.columns.push_back(Series::flat_f64(v.data(), ng));
+        } else if (sp.op == AggOp::ArgMax) {
+            const int slot = st.spec_argmax[s];
+            std::vector<std::string> v(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g) {
+                if (slot < 0) continue;
+                const std::size_t as =
+                    static_cast<std::size_t>(g) * st.n_argmax +
+                    static_cast<std::size_t>(slot);
+                if (st.argmax_has[as])
+                    v[static_cast<std::size_t>(g)] = st.argmax_repr[as];
+            }
+            out.columns.push_back(Series::strings(v));
+        } else if (sp.op == AggOp::SetUnion) {
+            const int slot = st.spec_set[s];
+            std::vector<std::string> v(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g) {
+                std::string joined;
+                if (slot >= 0) {
+                    const std::set<std::string>& gset =
+                        st.sets[static_cast<std::size_t>(g) * st.n_set +
+                                static_cast<std::size_t>(slot)];
+                    for (const std::string& x : gset) {
+                        if (!joined.empty()) joined.push_back(AGG_SET_SEP);
+                        joined += x;
+                    }
+                }
+                v[static_cast<std::size_t>(g)] = std::move(joined);
+            }
+            out.columns.push_back(Series::strings(v));
         } else if (sp.op == AggOp::Count) {
             std::vector<std::int64_t> v(static_cast<std::size_t>(ng));
             for (std::int64_t g = 0; g < ng; ++g)
@@ -540,6 +701,7 @@ std::string agg_serialize(const AggState& st) {
         put(s, sp.value_col);
         put_bytes(s, sp.out);
         put(s, sp.param);
+        put(s, sp.by_col);
     }
     put(s, static_cast<std::uint32_t>(st.nf));
     for (FieldStatDomain d : st.field_domain)
@@ -573,6 +735,19 @@ std::string agg_serialize(const AggState& st) {
             s.append(reinterpret_cast<const char*>(blob.data()), blob.size());
         }
     }
+    put(s, static_cast<std::uint8_t>(st.has_argmax ? 1 : 0));
+    if (st.has_argmax) {
+        for (double b : st.argmax_by) put(s, b);
+        for (char h : st.argmax_has) put(s, static_cast<std::uint8_t>(h));
+        for (const std::string& r : st.argmax_repr) put_bytes(s, r);
+    }
+    put(s, static_cast<std::uint8_t>(st.has_set ? 1 : 0));
+    if (st.has_set) {
+        for (const std::set<std::string>& gset : st.sets) {
+            put(s, static_cast<std::uint32_t>(gset.size()));
+            for (const std::string& v : gset) put_bytes(s, v);
+        }
+    }
     return s;
 }
 
@@ -587,6 +762,7 @@ AggStatePtr agg_deserialize(const std::string& blob) {
         st->specs[i].value_col = r.get<std::int32_t>();
         st->specs[i].out = r.get_bytes();
         st->specs[i].param = r.get<double>();
+        st->specs[i].by_col = r.get<std::int32_t>();
     }
     st->init_layout();
     const std::uint32_t nf = r.get<std::uint32_t>();
@@ -647,6 +823,27 @@ AggStatePtr agg_deserialize(const std::string& blob) {
             st->sketches.push_back(DDSketch::deserialize(
                 reinterpret_cast<const std::uint8_t*>(r.p), blen));
             r.p += blen;
+        }
+    }
+    st->has_argmax = r.get<std::uint8_t>() != 0;
+    if (st->has_argmax) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_argmax;
+        st->argmax_by.resize(sz);
+        st->argmax_has.resize(sz);
+        st->argmax_repr.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i) st->argmax_by[i] = r.get<double>();
+        for (std::size_t i = 0; i < sz; ++i)
+            st->argmax_has[i] = static_cast<char>(r.get<std::uint8_t>());
+        for (std::size_t i = 0; i < sz; ++i) st->argmax_repr[i] = r.get_bytes();
+    }
+    st->has_set = r.get<std::uint8_t>() != 0;
+    if (st->has_set) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_set;
+        st->sets.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i) {
+            const std::uint32_t cnt = r.get<std::uint32_t>();
+            for (std::uint32_t j = 0; j < cnt; ++j)
+                st->sets[i].insert(r.get_bytes());
         }
     }
     st->inited = true;

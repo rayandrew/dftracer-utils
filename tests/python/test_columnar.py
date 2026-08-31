@@ -806,6 +806,75 @@ def test_group_by_hist():
         assert sum(b["count"] for b in bins) == (300 if cat == "x" else 200)
 
 
+def test_group_by_sumsq():
+    # sumsq is a straight finalize of FieldStat::sumsq: sum(x**2) per group.
+    from dftracer.utils.columnar import F
+
+    tbl = pa.table(
+        {
+            "cat": ["x", "y", "x", "y", "x"],
+            "v": pa.array([10, 5, 20, 7, 30], pa.int64()),
+        }
+    )
+    batch = _dataframe_from_arrow(tbl)
+    out = batch.group_by("cat").agg(F.v.sumsq().alias("ssq")).to_pandas()
+    out = out.set_index("cat")
+    assert out.loc["x", "ssq"] == pytest.approx(10.0**2 + 20.0**2 + 30.0**2)
+    assert out.loc["y", "ssq"] == pytest.approx(5.0**2 + 7.0**2)
+
+    # String-spec form via the legacy "sumsq:col" surface.
+    legacy = batch.group_by("cat", "sumsq:v").to_pandas().set_index("cat")
+    assert legacy.loc["x", "sumsq_v"] == pytest.approx(out.loc["x", "ssq"])
+
+
+def test_group_by_argmax():
+    # argmax(value, by) is the String repr of `value` at the row maximizing
+    # `by`, matching pandas' idxmax-then-lookup.
+    pd = pytest.importorskip("pandas")
+    from dftracer.utils.columnar import F
+
+    tbl = pa.table(
+        {
+            "cat": ["x", "x", "x", "y", "y"],
+            "name": ["a", "b", "c", "p", "q"],
+            "dur": pa.array([10, 30, 20, 5, 8], pa.int64()),
+        }
+    )
+    batch = _dataframe_from_arrow(tbl)
+    out = batch.group_by("cat").agg(F.name.argmax(F.dur).alias("am")).to_pandas()
+    out = out.set_index("cat")
+
+    df = pd.DataFrame(
+        {
+            "cat": ["x", "x", "x", "y", "y"],
+            "name": ["a", "b", "c", "p", "q"],
+            "dur": [10, 30, 20, 5, 8],
+        }
+    )
+    exp = df.loc[df.groupby("cat")["dur"].idxmax()].set_index("cat")["name"]
+    assert out.loc["x", "am"] == exp.loc["x"]
+    assert out.loc["y", "am"] == exp.loc["y"]
+
+
+def test_group_by_set_union():
+    # set_union is the sorted, distinct String values of a field, joined by the
+    # engine's separator (matching a sorted-unique-join reference).
+    from dftracer.utils.columnar import F
+
+    tbl = pa.table(
+        {
+            "cat": ["x", "x", "x", "y"],
+            "tag": ["posix", "stdio", "posix", "mpi"],
+        }
+    )
+    batch = _dataframe_from_arrow(tbl)
+    out = batch.group_by("cat").agg(F.tag.set_union().alias("tags")).to_pandas()
+    out = out.set_index("cat")
+    sep = "\x1e"
+    assert out.loc["x", "tags"] == sep.join(sorted({"posix", "stdio"}))
+    assert out.loc["y", "tags"] == "mpi"
+
+
 def test_group_by_agg_expressions():
     # Aggregate over expressions (Polars-style), both the two-step .agg() and the
     # one-shot form, plus legacy strings - all through the CSE group_agg_expr.

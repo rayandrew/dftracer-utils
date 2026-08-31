@@ -30,7 +30,11 @@ enum class AggOp {
     First = 9,  ///< first non-null value in row order (order-independent merge)
     Last = 10,  ///< last non-null value in row order
     Pct = 11,   ///< a DDSketch quantile (level in AggSpec::param), mergeable
-    Hist = 12   ///< the DDSketch histogram, a list<struct{lo,hi,count}> column
+    Hist = 12,  ///< the DDSketch histogram, a list<struct{lo,hi,count}> column
+    ArgMax =
+        13,  ///< the String repr of `value_col` at the row maximizing `by_col`
+    SumSq = 14,    ///< sum of squares (Float64), from the shared FieldStat
+    SetUnion = 15  ///< distinct String values of `value_col`, sorted and joined
 };
 
 /// One aggregate: `op` over the value column at index `value_col` in the values
@@ -39,7 +43,9 @@ struct AggSpec {
     AggOp op;
     std::int32_t value_col = -1;
     std::string out;
-    double param = 0.0;  ///< Pct: the quantile level q in [0, 1]
+    double param = 0.0;        ///< Pct: the quantile level q in [0, 1]
+    std::int32_t by_col = -1;  ///< ArgMax: the column maximized (value_col is
+                               ///< the represented field); unused otherwise
 };
 
 class AggState;  // opaque, mergeable partial group state (defined in agg.cpp)

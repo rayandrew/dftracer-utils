@@ -47,6 +47,9 @@ AggOp agg_op_of(const std::string& op) {
     if (op == "last") return AggOp::Last;
     if (op == "pct") return AggOp::Pct;
     if (op == "hist") return AggOp::Hist;
+    if (op == "argmax") return AggOp::ArgMax;
+    if (op == "sumsq") return AggOp::SumSq;
+    if (op == "set_union") return AggOp::SetUnion;
     throw std::out_of_range("group_by: unknown aggregate op " + op);
 }
 
@@ -80,6 +83,12 @@ const char* to_string(Agg agg) noexcept {
             return "pct";
         case Agg::Hist:
             return "hist";
+        case Agg::ArgMax:
+            return "argmax";
+        case Agg::SumSq:
+            return "sumsq";
+        case Agg::SetUnion:
+            return "set_union";
     }
     return "count";
 }
@@ -98,6 +107,9 @@ Agg agg_from_string(std::string_view name) {
     if (name == "last") return Agg::Last;
     if (name == "pct") return Agg::Pct;
     if (name == "hist") return Agg::Hist;
+    if (name == "argmax") return Agg::ArgMax;
+    if (name == "sumsq") return Agg::SumSq;
+    if (name == "set_union") return Agg::SetUnion;
     throw std::out_of_range("agg_from_string: unknown aggregate op " +
                             std::string(name));
 }
@@ -279,6 +291,17 @@ DataFrame group_by(const DataFrame& b, const std::string& key,
     // (deduped), all aggregates computed in one parallel pass over the batch.
     std::vector<const Series*> values;
     std::map<std::string, std::int32_t> col_idx;
+    auto resolve = [&](const std::string& name) -> std::int32_t {
+        auto it = col_idx.find(name);
+        if (it != col_idx.end()) return it->second;
+        std::int64_t vi = index_of(b, name);
+        if (vi < 0)
+            throw std::out_of_range("group_by: no column named " + name);
+        const std::int32_t idx = static_cast<std::int32_t>(values.size());
+        values.push_back(&b.columns[static_cast<std::size_t>(vi)]);
+        col_idx.emplace(name, idx);
+        return idx;
+    };
     std::vector<AggSpec> specs;
     specs.reserve(aggs.size());
     for (const GroupAgg& a : aggs) {
@@ -286,22 +309,8 @@ DataFrame group_by(const DataFrame& b, const std::string& key,
         sp.op = agg_op_of(to_string(a.op));
         sp.out = a.out;
         sp.param = a.param;
-        if (sp.op == AggOp::Count) {
-            sp.value_col = -1;
-        } else {
-            auto it = col_idx.find(a.column);
-            if (it != col_idx.end()) {
-                sp.value_col = it->second;
-            } else {
-                std::int64_t vi = index_of(b, a.column);
-                if (vi < 0)
-                    throw std::out_of_range("group_by: no column named " +
-                                            a.column);
-                sp.value_col = static_cast<std::int32_t>(values.size());
-                values.push_back(&b.columns[static_cast<std::size_t>(vi)]);
-                col_idx.emplace(a.column, sp.value_col);
-            }
-        }
+        sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
+        if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
         specs.push_back(std::move(sp));
     }
     return group_agg(key_col, values, std::move(specs), key);
@@ -1193,29 +1202,27 @@ DataFrame group_by_dynamic(const DataFrame& b, const std::string& time_col,
     std::vector<Series> gathered;
     std::vector<AggSpec> specs;
     std::map<std::string, std::int32_t> col_idx;
+    auto resolve = [&](const std::string& name) -> std::int32_t {
+        auto it = col_idx.find(name);
+        if (it != col_idx.end()) return it->second;
+        std::int64_t vidx = index_of(b, name);
+        if (vidx < 0)
+            throw std::out_of_range("group_by_dynamic: no column named " +
+                                    name);
+        const std::int32_t idx = static_cast<std::int32_t>(gathered.size());
+        gathered.push_back(
+            b.columns[static_cast<std::size_t>(vidx)].take(rowsv));
+        col_idx.emplace(name, idx);
+        return idx;
+    };
     specs.reserve(aggs.size());
     for (const GroupAgg& a : aggs) {
         AggSpec sp;
         sp.op = agg_op_of(to_string(a.op));
         sp.out = a.out;
         sp.param = a.param;
-        if (sp.op == AggOp::Count) {
-            sp.value_col = -1;
-        } else {
-            auto it = col_idx.find(a.column);
-            if (it != col_idx.end()) {
-                sp.value_col = it->second;
-            } else {
-                std::int64_t vidx = index_of(b, a.column);
-                if (vidx < 0)
-                    throw std::out_of_range(
-                        "group_by_dynamic: no column named " + a.column);
-                sp.value_col = static_cast<std::int32_t>(gathered.size());
-                gathered.push_back(
-                    b.columns[static_cast<std::size_t>(vidx)].take(rowsv));
-                col_idx.emplace(a.column, sp.value_col);
-            }
-        }
+        sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
+        if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
         specs.push_back(std::move(sp));
     }
     std::vector<const Series*> values;

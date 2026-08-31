@@ -564,9 +564,10 @@ PyObject* DataFrame_hash_partition(PyObject* self, PyObject* args) {
 }
 
 // _group_agg_expr(key, specs): the expression-aggregate workhorse. `specs` is a
-// list of (op_int, value_ast_or_None, out_name); value ASTs reference this
-// batch's columns by index. All value expressions compile in one CSE'd, pruned
-// pass (dataframe::group_agg_expr). The Python GroupBy serializes to this.
+// list of (op_int, value_ast_or_None, out_name[, param[, by_ast]]); value ASTs
+// reference this batch's columns by index. `by_ast` is ArgMax's maximized
+// value. All value expressions compile in one CSE'd, pruned pass
+// (dataframe::group_agg_expr). The Python GroupBy serializes to this.
 PyObject* DataFrame_group_agg_expr(PyObject* self, PyObject* args) {
     DataFrameObject* b = as_dataframe(self);
     if (!b) return nullptr;
@@ -595,16 +596,16 @@ PyObject* DataFrame_group_agg_expr(PyObject* self, PyObject* args) {
     for (Py_ssize_t i = 0; i < ns; ++i) {
         PyObject* t = PySequence_Fast_GET_ITEM(seq, i);
         const Py_ssize_t tn = PyTuple_Check(t) ? PyTuple_GET_SIZE(t) : 0;
-        if (tn != 3 && tn != 4) {
+        if (tn != 3 && tn != 4 && tn != 5) {
             Py_DECREF(seq);
             PyErr_SetString(PyExc_TypeError,
-                            "each spec is (op, ast, out[, param])");
+                            "each spec is (op, ast, out[, param[, by_ast]])");
             return nullptr;
         }
         dataframe::AggExprSpec s;
         s.op = static_cast<dataframe::AggOp>(
             PyLong_AsLong(PyTuple_GET_ITEM(t, 0)));
-        if (tn == 4) {
+        if (tn >= 4) {
             s.param = PyFloat_AsDouble(PyTuple_GET_ITEM(t, 3));
             if (s.param == -1.0 && PyErr_Occurred()) {
                 Py_DECREF(seq);
@@ -619,6 +620,18 @@ PyObject* DataFrame_group_agg_expr(PyObject* self, PyObject* args) {
                 return nullptr;
             }
             s.value = std::move(v);
+        }
+        if (tn == 5) {
+            PyObject* by_ast = PyTuple_GET_ITEM(t, 4);
+            if (by_ast != Py_None) {
+                dataframe::Expr by;
+                if (!dftracer::utils::python::build_expr_from_ast(by_ast,
+                                                                  &by)) {
+                    Py_DECREF(seq);
+                    return nullptr;
+                }
+                s.by = std::move(by);
+            }
         }
         const char* out = PyUnicode_AsUTF8(PyTuple_GET_ITEM(t, 2));
         if (!out) {
@@ -1184,8 +1197,8 @@ PyMethodDef DataFrame_methods[] = {
      "expressions (F.x.sum(), ...); no aggs returns a GroupBy for .agg(...)."},
     {"_group_agg_expr", DataFrame_group_agg_expr, METH_VARARGS,
      "_group_agg_expr(key, specs) -> DataFrame; specs is a list of "
-     "(op_int, value_ast|None, out_name). Internal: the GroupBy expression "
-     "path (CSE across value expressions + pruner)."},
+     "(op_int, value_ast|None, out_name[, param[, by_ast]]). Internal: the "
+     "GroupBy expression path (CSE across value expressions + pruner)."},
     {"join", DFTU_PYCFUNCTION(DataFrame_join), METH_VARARGS | METH_KEYWORDS,
      "join(other, how='inner', on=1) -> DataFrame equi-joined on the first "
      "`on` "

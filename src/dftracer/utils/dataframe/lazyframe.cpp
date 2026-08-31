@@ -614,6 +614,12 @@ AggOp to_agg_op(Agg a) {
             return AggOp::Pct;
         case Agg::Hist:
             return AggOp::Hist;
+        case Agg::ArgMax:
+            return AggOp::ArgMax;
+        case Agg::SumSq:
+            return AggOp::SumSq;
+        case Agg::SetUnion:
+            return AggOp::SetUnion;
     }
     return AggOp::Count;
 }
@@ -637,24 +643,23 @@ class GroupByCursor : public Cursor {
         std::vector<AggSpec> specs;
         std::vector<int> value_idx;  // sch indices of the deduped value columns
         ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
+        auto resolve = [&](const std::string& name) -> std::int32_t {
+            auto it = dedup.find(name);
+            if (it != dedup.end()) return it->second;
+            const std::int32_t idx =
+                static_cast<std::int32_t>(value_idx.size());
+            value_idx.push_back(index_in(sch_, name));
+            dedup.emplace(name, idx);
+            return idx;
+        };
         specs.reserve(aggs_.size());
         for (const GroupAgg& a : aggs_) {
             AggSpec sp;
             sp.op = to_agg_op(a.op);
             sp.out = a.out;
             sp.param = a.param;
-            if (sp.op == AggOp::Count) {
-                sp.value_col = -1;
-            } else {
-                auto it = dedup.find(a.column);
-                if (it != dedup.end()) {
-                    sp.value_col = it->second;
-                } else {
-                    sp.value_col = static_cast<std::int32_t>(value_idx.size());
-                    value_idx.push_back(index_in(sch_, a.column));
-                    dedup.emplace(a.column, sp.value_col);
-                }
-            }
+            sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
+            if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
             specs.push_back(std::move(sp));
         }
 
@@ -759,24 +764,23 @@ class GroupByDynamicCursor : public Cursor {
         std::vector<AggSpec> specs;
         std::vector<int> value_idx;
         ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
+        auto resolve = [&](const std::string& name) -> std::int32_t {
+            auto it = dedup.find(name);
+            if (it != dedup.end()) return it->second;
+            const std::int32_t idx =
+                static_cast<std::int32_t>(value_idx.size());
+            value_idx.push_back(index_in(sch_, name));
+            dedup.emplace(name, idx);
+            return idx;
+        };
         specs.reserve(aggs_.size());
         for (const GroupAgg& a : aggs_) {
             AggSpec sp;
             sp.op = to_agg_op(a.op);
             sp.out = a.out;
             sp.param = a.param;
-            if (sp.op == AggOp::Count) {
-                sp.value_col = -1;
-            } else {
-                auto it = dedup.find(a.column);
-                if (it != dedup.end()) {
-                    sp.value_col = it->second;
-                } else {
-                    sp.value_col = static_cast<std::int32_t>(value_idx.size());
-                    value_idx.push_back(index_in(sch_, a.column));
-                    dedup.emplace(a.column, sp.value_col);
-                }
-            }
+            sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
+            if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
             specs.push_back(std::move(sp));
         }
 

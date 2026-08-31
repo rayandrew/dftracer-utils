@@ -144,6 +144,9 @@ _AGG_CODE = {
     "last": 10,
     "pct": 11,
     "hist": 12,
+    "argmax": 13,
+    "sumsq": 14,
+    "set_union": 15,
 }
 
 _NOT_PUSHABLE = (
@@ -288,6 +291,11 @@ class Expr:
         column (mergeable, relative-error buckets)."""
         return Agg("hist", self)
 
+    def argmax(self, by: "Expr") -> "Agg":
+        """The String repr of this expression at the row maximizing ``by``,
+        per group (an :class:`Agg`)."""
+        return Agg("argmax", self, by=by)
+
     if TYPE_CHECKING:
         # Prims/unary math (dispatched via __getattr__) and aggs (installed by
         # setattr below), declared so consumers get precise types not Any.
@@ -320,6 +328,8 @@ class Expr:
         def kurt(self) -> "Agg": ...
         def first(self) -> "Agg": ...
         def last(self) -> "Agg": ...
+        def sumsq(self) -> "Agg": ...
+        def set_union(self) -> "Agg": ...
 
     # Runtime prim-method seam; hidden from the checker so unknown attributes
     # are type errors, not Any (the real methods are declared above).
@@ -772,14 +782,16 @@ class Agg:
         value: "Expr | None",
         out: "str | None" = None,
         param: float = 0.0,
+        by: "Expr | None" = None,
     ) -> None:
         self.op = op
         self.value = value
         self._out = out
         self.param = param
+        self.by = by
 
     def alias(self, name: str) -> "Agg":
-        return Agg(self.op, self.value, name, self.param)
+        return Agg(self.op, self.value, name, self.param, self.by)
 
     @property
     def out(self) -> str:
@@ -799,7 +811,11 @@ class Agg:
             return (code, None, self.out, self.param)
         ast: List[tuple] = []
         _emit_ast(self.value, names.index, ast)
-        return (code, ast, self.out, self.param)
+        if self.by is None:
+            return (code, ast, self.out, self.param)
+        by_ast: List[tuple] = []
+        _emit_ast(self.by, names.index, by_ast)
+        return (code, ast, self.out, self.param, by_ast)
 
 
 def count() -> Agg:
@@ -816,7 +832,20 @@ def _make_agg_method(op: str) -> "Callable[[Expr], Agg]":
     return method
 
 
-for _op in ("sum", "min", "max", "mean", "var", "std", "skew", "kurt", "first", "last"):
+for _op in (
+    "sum",
+    "min",
+    "max",
+    "mean",
+    "var",
+    "std",
+    "skew",
+    "kurt",
+    "first",
+    "last",
+    "sumsq",
+    "set_union",
+):
     setattr(Expr, _op, _make_agg_method(_op))
 
 

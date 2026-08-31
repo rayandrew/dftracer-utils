@@ -22,6 +22,8 @@ struct AggExprSpec {
     Expr value;
     std::string out;
     double param = 0.0;  ///< Pct: the quantile level q in [0, 1]
+    Expr by;             ///< ArgMax: the value maximized (value is the field
+                         ///< represented); unused otherwise
 
     /// Rename the output column (fluent), e.g. `agg_sum(a + b).as("sum_ab")`.
     AggExprSpec as(std::string name) const {
@@ -48,6 +50,12 @@ AggExprSpec agg_kurt(Expr value, std::string out = "kurt");
 AggExprSpec agg_pct(Expr value, double q, std::string out = "pct");
 /// The DDSketch histogram of `value`, a list<struct{lo,hi,count}> per group.
 AggExprSpec agg_hist(Expr value, std::string out = "hist");
+/// Sum of squares of `value` (Float64), from the shared FieldStat.
+AggExprSpec agg_sumsq(Expr value, std::string out = "sumsq");
+/// The String repr of `value` at the row maximizing `by`, per group.
+AggExprSpec agg_argmax(Expr value, Expr by, std::string out = "argmax");
+/// Distinct String values of `value`, sorted and joined (see AggOp::SetUnion).
+AggExprSpec agg_set_union(Expr value, std::string out = "set_union");
 
 /// Group `inputs` by `key` and compute each spec, evaluating the key and value
 /// expressions in one fused, CSE'd, pruned pass. Identical value expressions
@@ -79,17 +87,22 @@ enum {
     DFTU_AGG_FIRST = 9,
     DFTU_AGG_LAST = 10,
     DFTU_AGG_PCT = 11,
-    DFTU_AGG_HIST = 12
+    DFTU_AGG_HIST = 12,
+    DFTU_AGG_ARGMAX = 13,
+    DFTU_AGG_SUMSQ = 14,
+    DFTU_AGG_SET_UNION = 15
 };
 
 /** One aggregate: `op` is a DFTU_AGG_* code, `value` the value expression
  * (borrowed; NULL for COUNT), `out` the result column name (borrowed), `param`
- * the quantile level for DFTU_AGG_PCT (0 otherwise). */
+ * the quantile level for DFTU_AGG_PCT (0 otherwise), `by` the value maximized
+ * for DFTU_AGG_ARGMAX (borrowed; NULL otherwise). */
 typedef struct dftu_agg_spec {
     int32_t op;
     const dftu_expr* value;
     const char* out;
     double param;
+    const dftu_expr* by;
 } dftu_agg_spec;
 
 dftu_agg_spec dftu_agg_count(const char* out);
@@ -105,6 +118,10 @@ dftu_agg_spec dftu_agg_first(const dftu_expr* value, const char* out);
 dftu_agg_spec dftu_agg_last(const dftu_expr* value, const char* out);
 dftu_agg_spec dftu_agg_pct(const dftu_expr* value, double q, const char* out);
 dftu_agg_spec dftu_agg_hist(const dftu_expr* value, const char* out);
+dftu_agg_spec dftu_agg_sumsq(const dftu_expr* value, const char* out);
+dftu_agg_spec dftu_agg_argmax(const dftu_expr* value, const dftu_expr* by,
+                              const char* out);
+dftu_agg_spec dftu_agg_set_union(const dftu_expr* value, const char* out);
 
 /** Group `n_inputs` columns by `key` (an expression; a bare column ref, e.g. a
  * string category, is taken directly) and compute each of `n_specs` aggregates.

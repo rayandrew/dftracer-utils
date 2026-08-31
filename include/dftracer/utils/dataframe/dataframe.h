@@ -41,7 +41,10 @@ enum class Agg {
     First,
     Last,
     Pct,
-    Hist
+    Hist,
+    ArgMax,
+    SumSq,
+    SetUnion
 };
 
 /// Canonical lowercase name of `agg` (the string the C ABI accepts).
@@ -59,6 +62,7 @@ struct GroupAgg {
     std::string column;
     std::string out;
     double param = 0.0;  ///< Pct: the quantile level q in [0, 1]
+    std::string by;      ///< ArgMax: the column maximized; unused otherwise
 };
 
 class LazyFrame;         // dataframe/lazyframe.h
