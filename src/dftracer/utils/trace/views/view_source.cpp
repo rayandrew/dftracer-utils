@@ -17,15 +17,38 @@
 
 namespace dftracer::utils::trace::views {
 
+bool ViewCursor::has_nested_column() const {
+    if (!nested_) {
+        nested_ = std::any_of(
+            buf_->columns.begin(), buf_->columns.end(),
+            [](const dftracer::utils::dataframe::Series& c) {
+                return c.type() == dftracer::utils::dataframe::TypeId::List ||
+                       c.type() == dftracer::utils::dataframe::TypeId::Struct;
+            });
+    }
+    return *nested_;
+}
+
 coro::CoroTask<std::optional<dftracer::utils::dataframe::Morsel>>
-ViewCursor::next(std::int64_t /*max_rows*/) {
-    if (done_) co_return std::nullopt;
-    done_ = true;
+ViewCursor::next(std::int64_t max_rows) {
+    const std::int64_t nrows = buf_->num_rows();
+    if (offset_ >= nrows) co_return std::nullopt;
+
+    if (has_nested_column() || max_rows <= 0) {
+        dftracer::utils::dataframe::Morsel m;
+        m.rows = nrows;
+        m.columns.reserve(buf_->columns.size());
+        for (const dftracer::utils::dataframe::Series& c : buf_->columns)
+            m.columns.push_back(c.share());
+        offset_ = nrows;
+        co_return m;
+    }
+
+    dftracer::utils::dataframe::DataFrame part = buf_->slice(offset_, max_rows);
     dftracer::utils::dataframe::Morsel m;
-    m.rows = buf_->num_rows();
-    m.columns.reserve(buf_->columns.size());
-    for (const dftracer::utils::dataframe::Series& c : buf_->columns)
-        m.columns.push_back(c.share());
+    m.rows = part.num_rows();
+    m.columns = std::move(part.columns);
+    offset_ += m.rows;
     co_return m;
 }
 

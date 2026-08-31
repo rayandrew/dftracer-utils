@@ -12,9 +12,10 @@
 
 namespace dftracer::utils::trace::views {
 
-/// Cursor over a View's buffered scan result: hands out the whole buffer as
-/// one morsel, zero-copy (no max_rows chunking - concat_columns can't rejoin
-/// a nested/List column, which a histogram agg produces).
+/// Cursor over a View's buffered scan result: yields max_rows-sized slices of
+/// the buffer, zero-copy. A buffer with any nested (List/Struct) column
+/// - a histogram agg produces one - is handed out as a single whole morsel
+/// instead, since concat_columns can't rejoin a nested column across chunks.
 class ViewCursor : public dftracer::utils::dataframe::Cursor {
    public:
     explicit ViewCursor(
@@ -25,8 +26,11 @@ class ViewCursor : public dftracer::utils::dataframe::Cursor {
         std::int64_t max_rows) override;
 
    private:
+    bool has_nested_column() const;
+
     std::shared_ptr<const dftracer::utils::dataframe::DataFrame> buf_;
-    bool done_ = false;
+    std::int64_t offset_ = 0;
+    mutable std::optional<bool> nested_;
 };
 
 /// Adapts a View as a LazyFrame Source, so View::collect() can build a

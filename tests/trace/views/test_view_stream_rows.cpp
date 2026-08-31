@@ -132,4 +132,53 @@ TEST_SUITE("View - streaming row query") {
         CHECK(via_lazy.columns.size() == 2);
         CHECK(row_key_set(via_lazy) == row_key_set(via_eager));
     }
+
+    TEST_CASE(
+        "View::stream() bounds a buffered select-plan into multiple chunks") {
+        const auto& s = shared_trace();  // 50 rows
+        View v = View::from_file(s.gz, s.idx)
+                     .metadata(false)
+                     .select({"cat", "name"});
+
+        auto [chunks, rows] =
+            dftracer::utils::default_runtime()
+                .submit([](const View& vv)
+                            -> coro::CoroTask<
+                                std::pair<std::size_t, std::int64_t>> {
+                    std::size_t n = 0;
+                    std::int64_t rows = 0;
+                    auto gen = vv.stream(10);
+                    while (auto chunk = co_await gen.next()) {
+                        ++n;
+                        rows += chunk->num_rows();
+                    }
+                    co_return std::make_pair(n, rows);
+                }(v))
+                .get();
+
+        dataframe::DataFrame via_collect = run(v.collect().collect());
+        CHECK(chunks > 1);
+        CHECK(rows == via_collect.num_rows());
+    }
+
+    TEST_CASE("View::stream() over a histogram aggregation yields one chunk") {
+        TestEnvironment env(200);
+        std::string gz = create_mixed_arg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        View v = View::from_file(gz, idx)
+                     .group_by({GroupKey::cat()})
+                     .agg({{AggOp::Hist, "dur", "h"}});
+
+        std::size_t chunks =
+            dftracer::utils::default_runtime()
+                .submit([](const View& vv) -> coro::CoroTask<std::size_t> {
+                    std::size_t n = 0;
+                    auto gen = vv.stream(1);
+                    while (auto chunk = co_await gen.next()) ++n;
+                    co_return n;
+                }(v))
+                .get();
+
+        CHECK(chunks == 1);
+    }
 }

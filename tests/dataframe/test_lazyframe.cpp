@@ -647,4 +647,30 @@ TEST_SUITE("lazyframe") {
         CHECK(a.data<std::int64_t>()[0] == 4);
         CHECK(a.data<std::int64_t>()[2] == 6);
     }
+
+    TEST_CASE("DataFrame::stream() yields fixed-size row slices") {
+        DataFrame df = make_df().slice(0, 5);  // 6 rows -> a 5-row prefix
+
+        auto [chunk_rows, streamed] = run_stream_probe(df.stream(2));
+
+        REQUIRE(chunk_rows.size() == 3);
+        CHECK(chunk_rows[0] == 2);
+        CHECK(chunk_rows[1] == 2);
+        CHECK(chunk_rows[2] == 1);
+        REQUIRE(streamed.num_rows() == 5);
+        const Series& a =
+            streamed
+                .columns[static_cast<std::size_t>(streamed.column_index("a"))];
+        const Series& orig_a =
+            df.columns[static_cast<std::size_t>(df.column_index("a"))];
+        for (std::int64_t i = 0; i < 5; ++i)
+            CHECK(a.data<std::int64_t>()[i] == orig_a.data<std::int64_t>()[i]);
+    }
+
+    TEST_CASE("DataFrame::stream() yields nothing for an empty frame") {
+        DataFrame df = make_df().slice(0, 0);
+        auto [chunk_rows, streamed] = run_stream_probe(df.stream(2));
+        CHECK(chunk_rows.empty());
+        CHECK(streamed.num_columns() == 0);
+    }
 }

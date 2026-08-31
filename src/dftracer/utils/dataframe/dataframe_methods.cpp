@@ -10,6 +10,11 @@
 // not shadowed by the same-named DataFrame members.
 namespace dfops = dftracer::utils::dataframe;
 
+namespace {
+// Mirrors LazyFrame's file-local default in lazyframe.cpp.
+constexpr std::int64_t DEFAULT_MORSEL_ROWS = 65536;
+}  // namespace
+
 namespace dftracer::utils::dataframe {
 
 std::int64_t DataFrame::column_index(std::string_view name) const {
@@ -38,6 +43,15 @@ DataFrame DataFrame::head(std::int64_t n) const {
 }
 DataFrame DataFrame::tail(std::int64_t n) const {
     return dfops::tail(*this, n);
+}
+
+coro::AsyncGenerator<DataFrame> DataFrame::stream(
+    std::int64_t morsel_rows) const {
+    const std::int64_t eff_rows =
+        morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
+    const std::int64_t nrows = num_rows();
+    for (std::int64_t offset = 0; offset < nrows; offset += eff_rows)
+        co_yield dfops::slice(*this, offset, eff_rows);
 }
 DataFrame DataFrame::reverse() const { return dfops::reverse(*this); }
 DataFrame DataFrame::sort_by(const std::string& name, bool descending) const {

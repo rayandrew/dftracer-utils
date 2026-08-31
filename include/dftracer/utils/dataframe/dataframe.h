@@ -2,6 +2,7 @@
 #define DFTRACER_UTILS_DATAFRAME_DATAFRAME_H
 
 #include <dftracer/utils/core/common/config.h>
+#include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/dataframe/types.h>
 #include <dftracer/utils/query/query.h>
@@ -81,6 +82,10 @@ struct DataFrame {
 
     /// Begin a deferred query over this frame; include dataframe/lazyframe.h.
     LazyFrame lazy() const;
+
+    /// Yield fixed-size row slices of this frame (0 = DEFAULT_MORSEL_ROWS).
+    /// Zero-copy: each chunk shares this frame's column buffers.
+    coro::AsyncGenerator<DataFrame> stream(std::int64_t morsel_rows = 0) const;
 
     DataFrame take(const std::vector<std::int64_t>& indices) const;
     DataFrame filter(const Series& mask) const;
