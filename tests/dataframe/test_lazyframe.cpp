@@ -93,7 +93,8 @@ class RaggedCursor : public Cursor {
 class RaggedSource : public Source {
    public:
     std::vector<std::string> names() const override { return {"a"}; }
-    std::unique_ptr<Cursor> open() const override {
+    std::unique_ptr<Cursor> open(
+        std::uint64_t /*memory_budget*/) const override {
         auto intern = std::make_shared<StringIntern>();
         return std::make_unique<RaggedCursor>(std::move(intern));
     }

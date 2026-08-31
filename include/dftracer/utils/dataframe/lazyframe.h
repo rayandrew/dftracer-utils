@@ -51,7 +51,10 @@ class Source {
    public:
     virtual ~Source() = default;
     virtual std::vector<std::string> names() const = 0;
-    virtual std::unique_ptr<Cursor> open() const = 0;
+    /// `memory_budget` is the resolved LazyFrame budget (bytes); a source
+    /// that streams may use it to bound its own in-flight buffering. Most
+    /// sources ignore it.
+    virtual std::unique_ptr<Cursor> open(std::uint64_t memory_budget) const = 0;
     /// The resident frame when this source is already in memory, else nullptr
     /// (rows produced only by streaming). collect() runs a resident source
     /// whole-column, matching the eager path instead of paying the morsel tax.
@@ -63,7 +66,7 @@ class InMemorySource : public Source {
    public:
     explicit InMemorySource(DataFrame frame);
     std::vector<std::string> names() const override;
-    std::unique_ptr<Cursor> open() const override;
+    std::unique_ptr<Cursor> open(std::uint64_t memory_budget) const override;
     const DataFrame* as_frame() const override { return frame_.get(); }
 
    private:

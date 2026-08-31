@@ -299,6 +299,7 @@ class Deferred {
 };
 
 class View;
+class ViewSource;
 
 /// The two handles a single containment branch yields from one buffered fold.
 struct ContainmentHandles {
@@ -657,6 +658,10 @@ class View {
     /// collect() otherwise.
     coro::CoroTask<dftracer::utils::dataframe::DataFrame> collect_frame() const;
 
+    /// True when collect() answers a raw-event row query (no group_by/agg),
+    /// as opposed to an aggregation. Public for ViewSource.
+    bool is_row_query() const;
+
     /// Containment terminals over one scan. `partition` names the lane keys;
     /// `ts`/`dur`/`name` name the interval and label fields (any field - a POD
     /// scalar reads natively, an arg/nested field is captured). call_tree
@@ -808,6 +813,7 @@ class View {
 
    private:
     friend class ViewSession;
+    friend class ViewSource;
     explicit View(std::shared_ptr<const detail::ViewPlan> plan);
 };
 

@@ -185,6 +185,7 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/view_resolver.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/view_scan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/native_row_fold.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/stream_row_fold.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/containment_fold.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/hash_table_dictionary.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/dict_fold.cpp

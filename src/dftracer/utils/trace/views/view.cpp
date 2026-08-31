@@ -536,7 +536,8 @@ coro::CoroTask<ExportStats> View::export_trace(TraceWriteOptions opts) const {
 }
 
 dataframe::LazyFrame View::collect() const {
-    return dataframe::LazyFrame::scan(std::make_shared<ViewSource>(*this));
+    return dataframe::LazyFrame::scan(std::make_shared<ViewSource>(*this))
+        .memory_budget(plan_->memory_budget);
 }
 
 coro::CoroTask<dataframe::DataFrame> View::collect_frame() const {
@@ -546,6 +547,8 @@ coro::CoroTask<dataframe::DataFrame> View::collect_frame() const {
     detail::GroupMap m = co_await detail::run_collect(*plan_);
     co_return detail::finalize_collect_batch(m, *plan_);
 }
+
+bool View::is_row_query() const { return detail::is_row_query(*plan_); }
 
 coro::CoroTask<dataframe::DataFrame> View::call_tree(
     std::vector<std::string> partition, std::string ts, std::string dur,

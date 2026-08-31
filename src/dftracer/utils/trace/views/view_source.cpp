@@ -1,6 +1,18 @@
+#include <dftracer/utils/core/coro/async_semaphore.h>
+#include <dftracer/utils/core/coro/channel.h>
+#include <dftracer/utils/core/coro/coro.h>
+#include <dftracer/utils/core/pipeline/executor.h>
+#include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/trace/views/stream_row_fold.h>
+#include <dftracer/utils/trace/views/view_plan.h>
 #include <dftracer/utils/trace/views/view_source.h>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <future>
+#include <memory>
+#include <optional>
 #include <utility>
 
 namespace dftracer::utils::trace::views {
@@ -15,6 +27,140 @@ ViewCursor::next(std::int64_t /*max_rows*/) {
     for (const dftracer::utils::dataframe::Series& c : buf_->columns)
         m.columns.push_back(c.share());
     co_return m;
+}
+
+namespace {
+
+coro::Coro run_detached(coro::CoroTask<void> task,
+                        std::shared_ptr<std::promise<void>> done) {
+    try {
+        co_await std::move(task);
+        done->set_value();
+    } catch (...) {
+        done->set_exception(std::current_exception());
+    }
+}
+
+// Enqueues onto Executor::current() rather than default_runtime(), so the
+// producer shares whatever is pulling the cursor - a real pool, or the ad hoc
+// RunLoop a bare CoroTask::get() stands up, which cannot wait across pools.
+std::shared_future<void> spawn_on_current_executor(coro::CoroTask<void> task) {
+    dftracer::utils::Executor* exec = dftracer::utils::Executor::current();
+    if (!exec) exec = dftracer::utils::default_runtime().executor();
+    if (task.handle()) task.handle().promise().set_executor(exec);
+    auto done = std::make_shared<std::promise<void>>();
+    std::shared_future<void> fut = done->get_future().share();
+    coro::Coro c = run_detached(std::move(task), std::move(done));
+    exec->enqueue(c.release());
+    return fut;
+}
+
+// Pulls morsels off the channel, releasing each one's share of `budget_` back
+// to the fold's producers once it is handed off; surfaces the producer's
+// exception, if any, once the channel drains.
+class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
+   public:
+    StreamViewCursor(
+        std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>>
+            channel,
+        std::shared_ptr<coro::CoroSemaphore> budget,
+        std::shared_future<void> producer)
+        : channel_(std::move(channel)),
+          budget_(std::move(budget)),
+          producer_(std::move(producer)) {}
+
+    coro::CoroTask<std::optional<dftracer::utils::dataframe::Morsel>> next(
+        std::int64_t /*max_rows*/) override {
+        auto item = co_await channel_->receive();
+        if (item)
+            budget_->release(detail::morsel_bytes(*item));
+        else
+            producer_.get();
+        co_return item;
+    }
+
+   private:
+    std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>> channel_;
+    std::shared_ptr<coro::CoroSemaphore> budget_;
+    std::shared_future<void> producer_;
+};
+
+}  // namespace
+
+bool ViewSource::can_stream_rows() const {
+    if (!view_.is_row_query()) return false;
+    const detail::ViewPlan& p = *view_.plan_;
+    return p.sort_col.empty() && p.topk_col.empty() && p.offset == 0 &&
+           p.limit == 0 && p.select.empty();
+}
+
+// Matches build_row_frame's own empty-select order (fixed top-level fields,
+// fhash/hhash if present, then sorted args), from index metadata rather than
+// a scan - best-effort, may omit an arg key not yet indexed.
+std::vector<std::string> ViewSource::row_schema() const {
+    static const char* const TOP_LEVEL[] = {"name", "cat", "pid", "tid",
+                                            "ts",   "dur", "ph"};
+    std::vector<std::string> out(std::begin(TOP_LEVEL), std::end(TOP_LEVEL));
+
+    std::vector<std::string> cols = view_.columns();  // sorted
+    const bool has_fhash =
+        std::binary_search(cols.begin(), cols.end(), std::string("fhash"));
+    const bool has_hhash =
+        std::binary_search(cols.begin(), cols.end(), std::string("hhash"));
+    if (has_fhash) out.push_back("fhash");
+    if (has_hhash) out.push_back("hhash");
+
+    for (std::string& c : cols) {
+        if (c == "pid" || c == "tid" || c == "ts" || c == "dur" ||
+            c == "name" || c == "cat" || c == "fhash" || c == "hhash")
+            continue;
+        if (c.find('.') != std::string::npos) continue;  // nested/resolved.*
+        out.push_back(std::move(c));
+    }
+    return out;
+}
+
+std::vector<std::string> ViewSource::names() const {
+    if (can_stream_rows()) return row_schema();
+    return buffer()->names;
+}
+
+const dftracer::utils::dataframe::DataFrame* ViewSource::as_frame() const {
+    if (can_stream_rows()) return nullptr;
+    return buffer().get();
+}
+
+std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open(
+    std::uint64_t memory_budget) const {
+    if (!can_stream_rows()) return std::make_unique<ViewCursor>(buffer());
+
+    // Capacity 0 = an effectively unbounded ring (see Channel's ctor); the
+    // shared budget semaphore is the sole backpressure, acquired before send
+    // and released once the cursor hands a morsel off.
+    auto channel = coro::make_channel<dftracer::utils::dataframe::Morsel>(0);
+    auto budget = std::make_shared<coro::CoroSemaphore>(memory_budget);
+    auto intern = std::make_shared<dftracer::utils::StringIntern>();
+    const double time_scale = view_.plan_->time_scale;
+
+    // Empty select: each batch discovers its own columns from the actual
+    // scanned events, so morsels can differ batch to batch; name_ids lets
+    // drain_to_frame reconcile them.
+    auto task =
+        [](View view, double time_scale,
+           std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>>
+               channel,
+           std::shared_ptr<coro::CoroSemaphore> budget,
+           std::shared_ptr<dftracer::utils::StringIntern> intern)
+        -> coro::CoroTask<void> {
+        detail::StreamRowFold fold(channel, budget, intern, {}, time_scale);
+        std::array<detail::Fold*, 1> folds{&fold};
+        co_await view.run_folds(folds, *intern);
+    }(view_, time_scale, channel, budget, intern);
+
+    std::shared_future<void> producer =
+        spawn_on_current_executor(std::move(task));
+    return std::make_unique<StreamViewCursor>(
+        std::move(channel), std::move(budget), std::move(producer));
 }
 
 }  // namespace dftracer::utils::trace::views

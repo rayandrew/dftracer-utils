@@ -2180,7 +2180,8 @@ InMemorySource::InMemorySource(DataFrame frame)
 
 std::vector<std::string> InMemorySource::names() const { return frame_->names; }
 
-std::unique_ptr<Cursor> InMemorySource::open() const {
+std::unique_ptr<Cursor> InMemorySource::open(
+    std::uint64_t /*memory_budget*/) const {
     return std::make_unique<InMemoryCursor>(frame_);
 }
 
@@ -2398,7 +2399,7 @@ coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
     }
     const std::int64_t eff_rows =
         morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
-    std::unique_ptr<Cursor> cur = source_->open();
+    std::unique_ptr<Cursor> cur = source_->open(budget);
     std::vector<std::string> sch = source_->names();
     for (const auto& op : ops) {
         cur = make_cursor(*op, std::move(cur), sch, budget);
