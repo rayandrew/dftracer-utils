@@ -34,18 +34,10 @@
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/common/string_arena.h>
-#include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
-#include <dftracer/utils/json/parser.h>
 #include <dftracer/utils/python/arrow_helpers.h>
 #include <dftracer/utils/python/batch_byte_size.h>
 #include <dftracer/utils/python/streaming_iterator.h>
-#include <dftracer/utils/trace/views/fold_event.h>
-#include <dftracer/utils/trace/views/native_row_fold.h>
-#include <dftracer/utils/trace/views/view_resolver.h>
-#include <dftracer/utils/utilities/common/arrow/column_builder.h>
-#include <dftracer/utils/utilities/reader/internal/arrow_row_builder.h>
-#include <simdjson.h>
 #endif
 
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
@@ -2046,77 +2038,37 @@ PyObject* tv_export(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
 }
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
-// Each scan slot owns its parser/intern/buffer (single-threaded per slot) and
-// builds a native DataFrame chunk every `batch_size` events - the events cross
-// no Arrow. push() blocks the slot when the bounded queue is full; the Python
-// consumer drains it with the GIL released, converting to Arrow only if it
-// calls .to_arrow() on a chunk.
+// Drives View::stream() (raw-event morsels via LazyFrame's streaming cursor)
+// into the StreamingState queue. push() blocks when the bounded queue is
+// full; the Python consumer drains it with the GIL released, converting to
+// Arrow only if it calls .to_arrow() on a chunk.
 dftracer::utils::coro::CoroTask<void> run_viewer_stream(
     dftracer::utils::CoroScope& scope,
     std::shared_ptr<
         dftracer::utils::python::StreamingState<dataframe::DataFrame>>
         state,
     std::vector<std::string> files, std::string index_dir, ViewerPlan plan,
-    std::size_t num_slots, std::size_t batch_size, bool normalize,
-    bool dict_strings) {
-    namespace views = dftracer::utils::trace::views;
-    using dftracer::utils::trace::RecordPhase;
+    std::int64_t batch_size) {
     (void)scope;
-    (void)normalize;
-    (void)dict_strings;
     try {
-        View v = build_view_from_data(files, index_dir, plan);
-        const std::vector<std::string>& select = plan.select;
-        // resolved.*/r.* columns need the index name tables; build the resolver
-        // once (shared, read-only) only when the projection asks for one.
-        std::shared_ptr<const views::detail::GroupResolver> resolver;
-        if (views::detail::select_needs_resolver(select)) {
-            std::vector<std::string> index_paths;
-            index_paths.reserve(files.size());
-            for (const auto& fp : files)
-                index_paths.push_back(
-                    dftint::determine_index_path(fp, index_dir));
-            resolver = std::make_shared<const views::detail::GroupResolver>(
-                index_paths);
-        }
-        std::vector<simdjson::dom::parser> parsers(num_slots);
-        std::vector<dftracer::utils::StringIntern> interns(num_slots);
-        std::vector<std::vector<views::detail::FoldEvent>> bufs(num_slots);
+        View v = build_view_from_data(files, index_dir, plan, /*aggregate=*/
+                                      false);
+        if (!plan.select.empty()) v = v.select(plan.select);
+        if (!plan.sort_col.empty())
+            v = v.sort_by(plan.sort_col, plan.sort_desc);
+        if (!plan.topk_col.empty())
+            v = v.topk(plan.topk_col, plan.topk_k, plan.topk_largest);
+        if (plan.limit) v = v.limit(plan.limit);
+        if (plan.offset) v = v.offset(plan.offset);
 
-        auto flush = [&](std::size_t slot) -> bool {
-            if (bufs[slot].empty()) return true;
-            dataframe::DataFrame df = views::detail::build_row_frame(
-                bufs[slot], interns[slot], select, plan.time_scale,
-                resolver.get());
-            bufs[slot].clear();
+        auto gen = v.stream(batch_size);
+        while (auto df = co_await gen.next()) {
+            if (state->cancelled()) break;
             const std::size_t bytes =
-                static_cast<std::size_t>(df.num_rows()) *
-                static_cast<std::size_t>(df.num_columns() + 1) * 16;
-            return state->push(std::move(df), bytes);
-        };
-
-        co_await v.for_each_batch(
-            [&](std::size_t slot, const std::vector<std::string_view>& events) {
-                if (slot >= num_slots || state->cancelled()) return;
-                for (auto ev : events) {
-                    if (state->cancelled()) return;
-                    simdjson::padded_string padded(ev);
-                    simdjson::dom::element root;
-                    if (parsers[slot].parse(padded).get(root)) continue;
-                    views::detail::FoldEvent fe =
-                        views::detail::extract_fold_event(root, interns[slot],
-                                                          /*needs_args=*/true);
-                    if (fe.phase == RecordPhase::METADATA ||
-                        fe.phase == RecordPhase::UNKNOWN)
-                        continue;
-                    bufs[slot].push_back(std::move(fe));
-                    if (bufs[slot].size() >= batch_size && !flush(slot)) return;
-                }
-            },
-            num_slots, plan.limit);
-
-        for (std::size_t s = 0; s < num_slots && !state->cancelled(); ++s)
-            if (!flush(s)) break;
+                static_cast<std::size_t>(df->num_rows()) *
+                static_cast<std::size_t>(df->num_columns() + 1) * 16;
+            if (!state->push(std::move(*df), bytes)) break;
+        }
         state->complete();
     } catch (...) {
         state->fail(std::current_exception());
@@ -2142,10 +2094,9 @@ PyObject* tv_stream(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
         return nullptr;
     if (batch_size <= 0) batch_size = 65536;
     Runtime* rt = resolve_runtime(self);
-    // Match the scan fan-out to the executor that will run it.
-    std::size_t num_slots = workers > 0
-                                ? (std::size_t)workers
-                                : std::max<std::size_t>(1, rt->threads());
+    (void)workers;
+    (void)normalize;
+    (void)dict_strings;
 
     std::vector<std::string> files = extract_files(self);
     std::string index_dir = extract_index_dir(self);
@@ -2175,8 +2126,7 @@ PyObject* tv_stream(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
     Py_BEGIN_ALLOW_THREADS rt->submit(
         dftracer::utils::run_coro_scope(
             rt->executor(), run_viewer_stream, state, std::move(files),
-            std::move(index_dir), std::move(plan), num_slots,
-            (std::size_t)batch_size, normalize != 0, dict_strings != 0),
+            std::move(index_dir), std::move(plan), (std::int64_t)batch_size),
         "trace_viewer_stream");
     Py_END_ALLOW_THREADS return (PyObject*)iter_obj;
 #endif
