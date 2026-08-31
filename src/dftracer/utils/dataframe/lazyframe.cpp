@@ -31,6 +31,9 @@ std::vector<const Series*> column_ptrs(const std::vector<Series>& cols) {
     return in;
 }
 
+// Default scan chunk when the caller does not set one (morsel_rows <= 0).
+constexpr std::int64_t DEFAULT_MORSEL_ROWS = 65536;
+
 // Drain a cursor to a single DataFrame, concatenating its morsels under
 // `names`.
 DataFrame drain_to_frame(Cursor& in, const std::vector<std::string>& names,
@@ -166,7 +169,7 @@ std::vector<std::uint8_t> first_seen_mask(
 
 // ---- cursors ----------------------------------------------------------------
 
-// Reads contiguous chunks off an in-memory frame, materialized FLAT.
+// Reads contiguous chunks off an in-memory frame as zero-copy offset views.
 class InMemoryCursor : public Cursor {
    public:
     explicit InMemoryCursor(std::shared_ptr<const DataFrame> frame)
@@ -181,8 +184,7 @@ class InMemoryCursor : public Cursor {
         Morsel m;
         m.rows = len;
         m.columns.reserve(chunk.columns.size());
-        for (const Series& c : chunk.columns)
-            m.columns.push_back(c.materialize());
+        for (Series& c : chunk.columns) m.columns.push_back(std::move(c));
         return m;
     }
 
@@ -1804,6 +1806,126 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
     return out;
 }
 
+// Projection pushdown: for a schema-preserving plan (filter/sort_by/slice/tail/
+// topk/sample) that ends in a select, insert a projection after the source
+// keeping only the columns the output and ops read, renumbering the filters
+// into it. Any other op leaves the plan unchanged; pushdown is an optimization,
+// so bailing is always correct. Biggest payoff is a scan source that then reads
+// only the kept columns.
+std::vector<std::shared_ptr<const LazyOp>> pushdown_projections(
+    const std::vector<std::string>& source_names,
+    const std::vector<std::shared_ptr<const LazyOp>>& ops) {
+    if (ops.size() < 2) return ops;  // need a select plus something before it
+    const std::size_t last = ops.size() - 1;
+    if (!std::holds_alternative<SelectOp>(ops[last]->node)) return ops;
+    for (std::size_t i = 0; i < last; ++i) {
+        const auto& n = ops[i]->node;
+        if (!(std::holds_alternative<FilterOp>(n) ||
+              std::holds_alternative<SortByOp>(n) ||
+              std::holds_alternative<SliceOp>(n) ||
+              std::holds_alternative<TailOp>(n) ||
+              std::holds_alternative<TopkOp>(n) ||
+              std::holds_alternative<SampleOp>(n)))
+            return ops;  // changes the schema or reads whole rows: bail
+    }
+
+    const int nsrc = static_cast<int>(source_names.size());
+    std::vector<char> need(static_cast<std::size_t>(nsrc), 0);
+    // Final output columns.
+    for (const std::string& nm : std::get<SelectOp>(ops[last]->node).names) {
+        int c = col_index(source_names, nm);
+        if (c < 0) return ops;
+        need[static_cast<std::size_t>(c)] = 1;
+    }
+    // Columns each op reads. Every op here preserves the source schema by
+    // position, so a predicate's indices are source indices.
+    for (std::size_t i = 0; i < last; ++i) {
+        const auto& n = ops[i]->node;
+        if (const auto* f = std::get_if<FilterOp>(&n)) {
+            for (int c = 0; c < nsrc; ++c)
+                if (expr_references(f->pred, c))
+                    need[static_cast<std::size_t>(c)] = 1;
+        } else if (const auto* s = std::get_if<SortByOp>(&n)) {
+            int c = col_index(source_names, s->name);
+            if (c >= 0) need[static_cast<std::size_t>(c)] = 1;
+        } else if (const auto* t = std::get_if<TopkOp>(&n)) {
+            int c = col_index(source_names, t->name);
+            if (c >= 0) need[static_cast<std::size_t>(c)] = 1;
+        }
+    }
+
+    // Live source columns, in source order, plus the old->new index map.
+    std::vector<std::string> live;
+    std::vector<std::int32_t> old_to_new(static_cast<std::size_t>(nsrc), -1);
+    for (int c = 0; c < nsrc; ++c)
+        if (need[static_cast<std::size_t>(c)]) {
+            old_to_new[static_cast<std::size_t>(c)] =
+                static_cast<std::int32_t>(live.size());
+            live.push_back(source_names[static_cast<std::size_t>(c)]);
+        }
+    if (static_cast<int>(live.size()) == nsrc) return ops;  // nothing to prune
+
+    std::vector<std::shared_ptr<const LazyOp>> out;
+    out.reserve(ops.size() + 1);
+    out.push_back(std::make_shared<LazyOp>(LazyOp{SelectOp{live}}));
+    for (const auto& op : ops) {
+        if (const auto* f = std::get_if<FilterOp>(&op->node)) {
+            out.push_back(std::make_shared<LazyOp>(
+                LazyOp{FilterOp{expr_remap_cols(f->pred, old_to_new)}}));
+        } else {
+            out.push_back(op);  // sort/slice/tail/topk/sample/select: by name
+        }
+    }
+    return out;
+}
+
+// Whole-column execution of an optimized plan over a resident frame: each op
+// runs as its eager kernel, matching the eager path (no per-morsel gather +
+// concat tax). nullopt when an op has no whole-column form (a reshaping or
+// data-dependent op), so collect() falls back to the streaming engine.
+std::optional<DataFrame> run_ops_in_memory(
+    DataFrame df, const std::vector<std::shared_ptr<const LazyOp>>& ops) {
+    for (const auto& op : ops) {
+        bool ok = true;
+        DataFrame next = std::visit(
+            overloaded{
+                [&](const FilterOp& o) {
+                    return df.filter(eval(o.pred, column_ptrs(df.columns)));
+                },
+                [&](const WithColumnOp& o) {
+                    return df.with_column(
+                        o.name, eval(o.expr, column_ptrs(df.columns)));
+                },
+                [&](const SelectOp& o) { return df.select(o.names); },
+                [&](const RenameOp& o) { return df.rename(o.names); },
+                [&](const SliceOp& o) { return df.slice(o.offset, o.len); },
+                [&](const TailOp& o) { return df.tail(o.n); },
+                [&](const DropNullsOp&) { return df.drop_nulls(); },
+                [&](const FillNullOp& o) { return df.fill_null(o.value); },
+                [&](const SortByOp& o) {
+                    return df.sort_by(o.name, o.descending);
+                },
+                [&](const UniqueOp&) { return df.unique(); },
+                [&](const SampleOp& o) { return df.sample(o.n, o.seed); },
+                [&](const TopkOp& o) {
+                    return df.topk(o.name, o.k, o.largest);
+                },
+                [&](const WithRowIndexOp& o) {
+                    return df.with_row_index(o.name);
+                },
+                [&](const NullCountOp&) { return df.null_count(); },
+                [&](const GroupByOp& o) { return df.group_by(o.key, o.aggs); },
+                [&](const auto&) {
+                    ok = false;
+                    return DataFrame{};
+                }},
+            op->node);
+        if (!ok) return std::nullopt;
+        df = std::move(next);
+    }
+    return df;
+}
+
 // Build the cursor for one op over `in`, resolving names against `sch` (the
 // op's input schema).
 std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
@@ -2089,7 +2211,8 @@ std::vector<std::string> LazyFrame::schema() const {
 
 std::string LazyFrame::explain() const {
     std::string s = "scan [" + join_names(source_->names()) + "]";
-    for (const auto& op : pushdown_predicates(source_->names(), ops_))
+    for (const auto& op : pushdown_projections(
+             source_->names(), pushdown_predicates(source_->names(), ops_)))
         s += "\n" + describe_op(*op);
     return s;
 }
@@ -2104,16 +2227,32 @@ LazyFrame LazyFrame::auto_spill() const {
 }
 
 DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
-    auto ops = pushdown_predicates(source_->names(), ops_);
+    auto ops = pushdown_projections(
+        source_->names(), pushdown_predicates(source_->names(), ops_));
     // 0 resolves to auto (~1/3 RAM), same policy as View.
     const std::uint64_t budget = resolve_spill_budget(memory_budget_);
+    // A resident source runs whole-column, matching eager. An explicit
+    // morsel_rows or memory_budget asks to stream/spill instead.
+    if (morsel_rows <= 0 && memory_budget_ == 0) {
+        if (const DataFrame* f = source_->as_frame()) {
+            DataFrame start;
+            start.names = f->names;
+            start.columns.reserve(f->columns.size());
+            for (const Series& c : f->columns)
+                start.columns.push_back(c.share());  // zero-copy, move-only
+            if (auto out = run_ops_in_memory(std::move(start), ops))
+                return std::move(*out);
+        }
+    }
+    const std::int64_t eff_rows =
+        morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
     std::unique_ptr<Cursor> cur = source_->open();
     std::vector<std::string> sch = source_->names();
     for (const auto& op : ops) {
         cur = make_cursor(*op, std::move(cur), sch, budget);
         sch = out_schema(*op, std::move(sch));
     }
-    DataFrame out = drain_to_frame(*cur, sch, morsel_rows);
+    DataFrame out = drain_to_frame(*cur, sch, eff_rows);
     // A data-dependent terminal (pivot/to_dummies/describe) knows its true
     // schema only after running; prefer it over the static plan schema.
     if (auto n = cur->out_names()) out.names = std::move(*n);

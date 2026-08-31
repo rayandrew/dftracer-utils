@@ -1366,5 +1366,44 @@ int main(int argc, char** argv) {
         sf_eager, sf_lazy, sf_eager / sf_lazy, sf_ok ? "OK" : "MISMATCH");
     ok = ok && sf_ok;
 
+    // Parity check: a cheap map pipeline where the optimizer has nothing to
+    // reorder. Lazy must at least match eager here - if it is far slower, the
+    // execution path is copying data it should not. filter (~50%) then a
+    // derived column then a projection, over the 3-column df.
+    dftu_scalar half{};
+    half.kind = DFTU_SCALAR_TAG_I64;
+    half.value.i = rows / 2;
+    Expr vpos = expr_cmp(DFTU_CMP_GT, expr_col(1), half);       // v > rows/2
+    Expr kv = expr_binary(BinaryOp::Add, expr_col(0), expr_col(1));  // k + v
+    auto eager_map = [&]() {
+        Series m = df.column("v") > (rows / 2);
+        DataFrame f = df.filter(m);
+        DataFrame w = f.with_column("kv", f.column("k") + f.column("v"));
+        return w.select({"k", "kv"});
+    };
+    auto lazy_map = [&]() {
+        return df.lazy()
+            .filter(vpos)
+            .with_column("kv", kv)
+            .select({"k", "kv"})
+            .collect();
+    };
+    const double mp_eager = time_it(eager_map, 5);
+    const double mp_lazy = time_it(lazy_map, 5);
+    DataFrame mp_e = eager_map();
+    DataFrame mp_l = lazy_map();
+    bool mp_ok = mp_e.num_rows() == mp_l.num_rows() && mp_l.num_columns() == 2;
+    if (mp_ok) {
+        const std::int64_t* ek = mp_e.column("kv").data<std::int64_t>();
+        const std::int64_t* lk = mp_l.column("kv").data<std::int64_t>();
+        for (std::int64_t i = 0; mp_ok && i < mp_e.num_rows(); ++i)
+            mp_ok = ek[i] == lk[i];
+    }
+    std::printf(
+        "filter+with_column+select (parity): eager %8.2f ms | lazy %8.2f ms "
+        "(%.2fx) correctness: %s\n",
+        mp_eager, mp_lazy, mp_eager / mp_lazy, mp_ok ? "OK" : "MISMATCH");
+    ok = ok && mp_ok;
+
     return ok ? 0 : 1;
 }

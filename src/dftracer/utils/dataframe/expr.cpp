@@ -75,6 +75,33 @@ bool node_references(const std::shared_ptr<const ExprNode>& n,
 bool expr_references(const Expr& e, std::int32_t index) {
     return node_references(e.node(), index);
 }
+
+namespace {
+std::shared_ptr<const ExprNode> node_remap(
+    const std::shared_ptr<const ExprNode>& n,
+    const std::vector<std::int32_t>& old_to_new) {
+    if (!n) return nullptr;
+    if (n->kind == ExprKind::Col) {
+        const bool in_range =
+            n->i >= 0 && static_cast<std::size_t>(n->i) < old_to_new.size();
+        auto c = std::make_shared<ExprNode>(*n);
+        c->i = in_range ? old_to_new[static_cast<std::size_t>(n->i)] : n->i;
+        return c;
+    }
+    auto a = node_remap(n->a, old_to_new);
+    auto b = node_remap(n->b, old_to_new);
+    if (a == n->a && b == n->b) return n;  // unchanged subtree: share it
+    auto c = std::make_shared<ExprNode>(*n);
+    c->a = std::move(a);
+    c->b = std::move(b);
+    return c;
+}
+}  // namespace
+
+Expr expr_remap_cols(const Expr& e,
+                     const std::vector<std::int32_t>& old_to_new) {
+    return Expr{node_remap(e.node(), old_to_new)};
+}
 Expr expr_lit(std::int64_t value) {
     dftu_scalar s{};
     s.kind = DFTU_SCALAR_TAG_I64;

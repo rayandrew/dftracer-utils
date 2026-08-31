@@ -50,6 +50,13 @@ std::int32_t expr_col_index(const Expr& e);
 /// True if `e` reads input column `index` anywhere in its tree. Lets the query
 /// planner tell whether a predicate depends on a given column.
 bool expr_references(const Expr& e, std::int32_t index);
+
+/// Rewrite every column reference `col(i)` to `col(old_to_new[i])`, leaving an
+/// out-of-range index unchanged. Lets the planner renumber a predicate after
+/// columns are dropped or reordered (projection pushdown). Returns a new Expr;
+/// unchanged subtrees are shared.
+Expr expr_remap_cols(const Expr& e,
+                     const std::vector<std::int32_t>& old_to_new);
 Expr expr_lit(std::int64_t value);
 Expr expr_lit(double value);
 Expr expr_binary(BinaryOp op, const Expr& a, const Expr& b);

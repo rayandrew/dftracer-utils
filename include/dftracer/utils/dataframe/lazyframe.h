@@ -45,6 +45,10 @@ class Source {
     virtual ~Source() = default;
     virtual std::vector<std::string> names() const = 0;
     virtual std::unique_ptr<Cursor> open() const = 0;
+    /// The resident frame when this source is already in memory, else nullptr
+    /// (rows produced only by streaming). collect() runs a resident source
+    /// whole-column, matching the eager path instead of paying the morsel tax.
+    virtual const DataFrame* as_frame() const { return nullptr; }
 };
 
 /// A Source over an already-materialized in-memory frame.
@@ -53,6 +57,7 @@ class InMemorySource : public Source {
     explicit InMemorySource(DataFrame frame);
     std::vector<std::string> names() const override;
     std::unique_ptr<Cursor> open() const override;
+    const DataFrame* as_frame() const override { return frame_.get(); }
 
    private:
     std::shared_ptr<const DataFrame> frame_;
@@ -155,9 +160,10 @@ class LazyFrame {
     /// introspection and tests.
     std::string explain() const;
 
-    /// Run the pipeline and materialize the surviving rows; `morsel_rows` is
-    /// the scan chunk size.
-    DataFrame collect(std::int64_t morsel_rows = 65536) const;
+    /// Run the pipeline and materialize the surviving rows. `morsel_rows` is
+    /// the scan chunk size; <= 0 (the default) means auto; one pass over a
+    /// resident source, the bounded streaming default otherwise.
+    DataFrame collect(std::int64_t morsel_rows = 0) const;
 
    private:
     LazyFrame(std::shared_ptr<const Source> source,

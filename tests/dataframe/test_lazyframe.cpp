@@ -117,6 +117,40 @@ TEST_SUITE("lazyframe") {
         CHECK(a[2] == 4);
     }
 
+    TEST_CASE("projection pushdown drops unread source columns") {
+        // 'b' is neither read by the filter nor in the output, so a projection
+        // to [a] is inserted right after the source, ahead of the filter.
+        auto lf =
+            make_df().lazy().filter(col(0) > std::int64_t{2}).select({"a"});
+        const std::string plan = lf.explain();
+        const auto proj = plan.find("select [a]");
+        const auto filt = plan.find("filter");
+        CHECK(proj != std::string::npos);
+        CHECK(filt != std::string::npos);
+        CHECK(proj < filt);  // projection pushed ahead of the filter
+
+        DataFrame r = lf.collect();
+        CHECK(r.names == std::vector<std::string>{"a"});
+        CHECK(r.num_rows() == 4);  // a in {3,4,5,6}
+        const std::int64_t* a = r.column("a").data<std::int64_t>();
+        CHECK(a[0] == 3);
+        CHECK(a[3] == 6);
+    }
+
+    TEST_CASE("projection pushdown remaps a filter on a surviving column") {
+        // Filter reads 'b' (col 1) but output is 'a'; both are live, and the
+        // remapped predicate must still select the right rows after the source
+        // projection renumbers columns.
+        auto lf =
+            make_df().lazy().filter(col(1) > std::int64_t{30}).select({"a"});
+        DataFrame r = lf.collect();
+        CHECK(r.names == std::vector<std::string>{"a"});
+        CHECK(r.num_rows() == 3);  // b in {40,50,60} -> a in {4,5,6}
+        const std::int64_t* a = r.column("a").data<std::int64_t>();
+        CHECK(a[0] == 4);
+        CHECK(a[2] == 6);
+    }
+
     TEST_CASE("streaming row ops: head / slice / tail / rename") {
         LazyFrame base = make_df().lazy();      // a=1..6, b=10..60
 
