@@ -337,7 +337,17 @@ std::shared_ptr<const TierCache> build_tier_cache(const std::string& index_path,
 }
 
 std::shared_mutex g_tier_mtx;
-std::unordered_map<std::string, std::shared_ptr<const TierCache>> g_tier_cache;
+
+// Leaked intentionally: entries hold open RocksDB handles, and running this
+// map's destructor at process exit races RocksDB's own static teardown
+// (SyncPoint) -> heap-use-after-free. clear_tier_cache() (a rocksdb pre-exit
+// hook) empties it cleanly during orderly shutdown instead.
+std::unordered_map<std::string, std::shared_ptr<const TierCache>>&
+tier_cache_map() {
+    static auto* m =
+        new std::unordered_map<std::string, std::shared_ptr<const TierCache>>();
+    return *m;
+}
 
 // The cache holds each index's read-only agg DB open for reuse. It is dropped
 // from a rocksdb pre-exit cleanup (see register_pre_exit_cleanup) so the DBs
@@ -345,12 +355,12 @@ std::unordered_map<std::string, std::shared_ptr<const TierCache>> g_tier_cache;
 // plain std::atexit would run too late and leak them via that abandon path.
 void clear_tier_cache() {
     std::unique_lock<std::shared_mutex> lk(g_tier_mtx);
-    g_tier_cache.clear();
+    tier_cache_map().clear();
 }
 
 void evict_tier_cache(const std::string& index_path) {
     std::unique_lock<std::shared_mutex> lk(g_tier_mtx);
-    g_tier_cache.erase(index_path);
+    tier_cache_map().erase(index_path);
 }
 
 std::shared_ptr<const TierCache> tier_cache(const std::string& index_path) {
@@ -366,8 +376,8 @@ std::shared_ptr<const TierCache> tier_cache(const std::string& index_path) {
     const std::int64_t mtime = current_mtime(index_path);
     {
         std::shared_lock<std::shared_mutex> rlk(g_tier_mtx);
-        if (auto it = g_tier_cache.find(index_path);
-            it != g_tier_cache.end() && it->second->mtime == mtime)
+        if (auto it = tier_cache_map().find(index_path);
+            it != tier_cache_map().end() && it->second->mtime == mtime)
             return it->second;
     }
     // Build outside the lock: build_tier_cache -> open_agg_db may reset() the
@@ -377,10 +387,11 @@ std::shared_ptr<const TierCache> tier_cache(const std::string& index_path) {
     // insert; last write wins and both hold the same data for this mtime.
     auto tc = build_tier_cache(index_path, mtime);
     std::unique_lock<std::shared_mutex> wlk(g_tier_mtx);
-    if (auto it = g_tier_cache.find(index_path);
-        it != g_tier_cache.end() && it->second->mtime == mtime)
+    if (auto it = tier_cache_map().find(index_path);
+        it != tier_cache_map().end() && it->second->mtime == mtime)
         return it->second;
-    g_tier_cache[index_path] = tc;  // replaces stale; old readers keep theirs
+    tier_cache_map()[index_path] =
+        tc;  // replaces stale; old readers keep theirs
     return tc;
 }
 
