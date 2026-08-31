@@ -36,10 +36,12 @@ constexpr std::int64_t DEFAULT_MORSEL_ROWS = 65536;
 
 // Drain a cursor to a single DataFrame, concatenating its morsels under
 // `names`.
-DataFrame drain_to_frame(Cursor& in, const std::vector<std::string>& names,
-                         std::int64_t max_rows) {
+coro::CoroTask<DataFrame> drain_to_frame(Cursor& in,
+                                         const std::vector<std::string>& names,
+                                         std::int64_t max_rows) {
     std::vector<std::vector<Series>> chunks;
-    while (auto m = in.next(max_rows)) chunks.push_back(std::move(m->columns));
+    while (auto m = co_await in.next(max_rows))
+        chunks.push_back(std::move(m->columns));
     DataFrame out;
     out.names = names;
     // Trust the produced column count over `names`: a data-dependent sink emits
@@ -53,7 +55,7 @@ DataFrame drain_to_frame(Cursor& in, const std::vector<std::string>& names,
         for (auto& ch : chunks) parts.push_back(&ch[c]);
         out.columns.push_back(concat_columns(parts));
     }
-    return out;
+    co_return out;
 }
 
 Morsel morsel_of(DataFrame&& f) {
@@ -175,8 +177,8 @@ class InMemoryCursor : public Cursor {
     explicit InMemoryCursor(std::shared_ptr<const DataFrame> frame)
         : frame_(std::move(frame)), n_(frame_->num_rows()) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (off_ >= n_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (off_ >= n_) co_return std::nullopt;
         const std::int64_t len =
             std::min(std::max<std::int64_t>(max_rows, 1), n_ - off_);
         DataFrame chunk = frame_->slice(off_, len);
@@ -185,7 +187,7 @@ class InMemoryCursor : public Cursor {
         m.rows = len;
         m.columns.reserve(chunk.columns.size());
         for (Series& c : chunk.columns) m.columns.push_back(std::move(c));
-        return m;
+        co_return m;
     }
 
    private:
@@ -201,8 +203,8 @@ class FilterCursor : public Cursor {
     FilterCursor(std::unique_ptr<Cursor> in, Expr pred)
         : in_(std::move(in)), pred_(std::move(pred)) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        while (auto m = in_->next(max_rows)) {
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        while (auto m = co_await in_->next(max_rows)) {
             Series mask = eval(pred_, column_ptrs(m->columns));
             DataFrame tmp;
             tmp.names.assign(m->columns.size(), std::string());
@@ -213,9 +215,9 @@ class FilterCursor : public Cursor {
             for (const Series& c : kept.columns)
                 out.columns.push_back(c.materialize());
             out.rows = out.columns.empty() ? 0 : out.columns.front().length();
-            if (out.rows > 0) return out;
+            if (out.rows > 0) co_return out;
         }
-        return std::nullopt;
+        co_return std::nullopt;
     }
 
    private:
@@ -229,14 +231,14 @@ class SelectCursor : public Cursor {
     SelectCursor(std::unique_ptr<Cursor> in, std::vector<int> idx)
         : in_(std::move(in)), idx_(std::move(idx)) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        auto m = in_->next(max_rows);
-        if (!m) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        auto m = co_await in_->next(max_rows);
+        if (!m) co_return std::nullopt;
         Morsel out;
         out.rows = m->rows;
         out.columns.reserve(idx_.size());
         for (int i : idx_) out.columns.push_back(m->columns[i].share());
-        return out;
+        co_return out;
     }
 
    private:
@@ -250,9 +252,9 @@ class WithColumnCursor : public Cursor {
     WithColumnCursor(std::unique_ptr<Cursor> in, Expr e, int replace)
         : in_(std::move(in)), expr_(std::move(e)), replace_(replace) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        auto m = in_->next(max_rows);
-        if (!m) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        auto m = co_await in_->next(max_rows);
+        if (!m) co_return std::nullopt;
         Series nc = eval(expr_, column_ptrs(m->columns));
         Morsel out;
         out.rows = m->rows;
@@ -261,7 +263,7 @@ class WithColumnCursor : public Cursor {
             out.columns[static_cast<std::size_t>(replace_)] = std::move(nc);
         else
             out.columns.push_back(std::move(nc));
-        return out;
+        co_return out;
     }
 
    private:
@@ -291,19 +293,19 @@ class SliceCursor : public Cursor {
                 std::int64_t len)
         : in_(std::move(in)), offset_(offset), len_(len) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         while (emitted_ < len_) {
-            auto m = in_->next(max_rows);
-            if (!m) return std::nullopt;
+            auto m = co_await in_->next(max_rows);
+            if (!m) co_return std::nullopt;
             const std::int64_t start = seen_;
             seen_ += m->rows;
             const std::int64_t w_start = std::max(offset_, start);
             const std::int64_t w_end = std::min(offset_ + len_, seen_);
             if (w_end <= w_start) continue;
             emitted_ += w_end - w_start;
-            return slice_morsel(*m, w_start - start, w_end - w_start);
+            co_return slice_morsel(*m, w_start - start, w_end - w_start);
         }
-        return std::nullopt;
+        co_return std::nullopt;
     }
 
    private:
@@ -319,13 +321,13 @@ class TailCursor : public Cursor {
     TailCursor(std::unique_ptr<Cursor> in, std::int64_t n)
         : in_(std::move(in)), n_(n) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
         done_ = true;
-        if (n_ <= 0) return std::nullopt;
+        if (n_ <= 0) co_return std::nullopt;
         std::deque<Morsel> buf;
         std::int64_t total = 0;
-        while (auto m = in_->next(max_rows)) {
+        while (auto m = co_await in_->next(max_rows)) {
             total += m->rows;
             buf.push_back(std::move(*m));
             while (!buf.empty() && total - buf.front().rows >= n_) {
@@ -333,7 +335,7 @@ class TailCursor : public Cursor {
                 buf.pop_front();
             }
         }
-        if (buf.empty()) return std::nullopt;
+        if (buf.empty()) co_return std::nullopt;
         const std::size_t ncols = buf.front().columns.size();
         Morsel out;
         out.rows = total;
@@ -344,8 +346,8 @@ class TailCursor : public Cursor {
             for (Morsel& m : buf) parts.push_back(&m.columns[c]);
             out.columns.push_back(concat_columns(parts));
         }
-        if (total > n_) return slice_morsel(out, total - n_, n_);
-        return out;
+        if (total > n_) co_return slice_morsel(out, total - n_, n_);
+        co_return out;
     }
 
    private:
@@ -373,13 +375,13 @@ Morsel map_frame(Morsel&& m, Fn&& fn) {
 class DropNullsCursor : public Cursor {
    public:
     explicit DropNullsCursor(std::unique_ptr<Cursor> in) : in_(std::move(in)) {}
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        while (auto m = in_->next(max_rows)) {
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        while (auto m = co_await in_->next(max_rows)) {
             Morsel out = map_frame(std::move(*m),
                                    [](DataFrame f) { return f.drop_nulls(); });
-            if (out.rows > 0) return out;
+            if (out.rows > 0) co_return out;
         }
-        return std::nullopt;
+        co_return std::nullopt;
     }
 
    private:
@@ -391,11 +393,11 @@ class FillNullCursor : public Cursor {
    public:
     FillNullCursor(std::unique_ptr<Cursor> in, dftu_scalar value)
         : in_(std::move(in)), value_(value) {}
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        auto m = in_->next(max_rows);
-        if (!m) return std::nullopt;
-        return map_frame(std::move(*m),
-                         [&](DataFrame f) { return f.fill_null(value_); });
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        auto m = co_await in_->next(max_rows);
+        if (!m) co_return std::nullopt;
+        co_return map_frame(std::move(*m),
+                            [&](DataFrame f) { return f.fill_null(value_); });
     }
 
    private:
@@ -408,9 +410,9 @@ class WithRowIndexCursor : public Cursor {
    public:
     explicit WithRowIndexCursor(std::unique_ptr<Cursor> in)
         : in_(std::move(in)) {}
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        auto m = in_->next(max_rows);
-        if (!m) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        auto m = co_await in_->next(max_rows);
+        if (!m) co_return std::nullopt;
         std::vector<std::int64_t> idx(static_cast<std::size_t>(m->rows));
         for (std::int64_t i = 0; i < m->rows; ++i) idx[i] = pos_ + i;
         pos_ += m->rows;
@@ -419,7 +421,7 @@ class WithRowIndexCursor : public Cursor {
         out.columns.reserve(m->columns.size() + 1);
         out.columns.push_back(Series::flat_i64(idx.data(), m->rows));
         for (Series& c : m->columns) out.columns.push_back(std::move(c));
-        return out;
+        co_return out;
     }
 
    private:
@@ -431,22 +433,22 @@ class WithRowIndexCursor : public Cursor {
 class NullCountCursor : public Cursor {
    public:
     explicit NullCountCursor(std::unique_ptr<Cursor> in) : in_(std::move(in)) {}
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
         done_ = true;
         std::vector<std::int64_t> counts;
-        while (auto m = in_->next(max_rows)) {
+        while (auto m = co_await in_->next(max_rows)) {
             if (counts.empty()) counts.assign(m->columns.size(), 0);
             for (std::size_t i = 0; i < m->columns.size(); ++i)
                 counts[i] += m->columns[i].null_count();
         }
-        if (counts.empty()) return std::nullopt;
+        if (counts.empty()) co_return std::nullopt;
         Morsel out;
         out.rows = 1;
         out.columns.reserve(counts.size());
         for (std::int64_t& c : counts)
             out.columns.push_back(Series::flat_i64(&c, 1));
-        return out;
+        co_return out;
     }
 
    private:
@@ -477,11 +479,11 @@ class ExplodeCursor : public Cursor {
         : in_(std::move(in)),
           sch_(std::move(sch)),
           column_(std::move(column)) {}
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        auto m = in_->next(max_rows);
-        if (!m) return std::nullopt;
-        return frame_op(std::move(*m), sch_,
-                        [&](DataFrame f) { return f.explode(column_); });
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        auto m = co_await in_->next(max_rows);
+        if (!m) co_return std::nullopt;
+        co_return frame_op(std::move(*m), sch_,
+                           [&](DataFrame f) { return f.explode(column_); });
     }
 
    private:
@@ -499,11 +501,11 @@ class UnpivotCursor : public Cursor {
           sch_(std::move(sch)),
           id_(std::move(id)),
           val_(std::move(val)) {}
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        auto m = in_->next(max_rows);
-        if (!m) return std::nullopt;
-        return frame_op(std::move(*m), sch_,
-                        [&](DataFrame f) { return f.unpivot(id_, val_); });
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        auto m = co_await in_->next(max_rows);
+        if (!m) co_return std::nullopt;
+        co_return frame_op(std::move(*m), sch_,
+                           [&](DataFrame f) { return f.unpivot(id_, val_); });
     }
 
    private:
@@ -523,12 +525,12 @@ class TopkCursor : public Cursor {
           name_(std::move(name)),
           k_(k),
           largest_(largest) {}
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
         done_ = true;
         DataFrame best;
         bool has = false;
-        while (auto m = in_->next(max_rows)) {
+        while (auto m = co_await in_->next(max_rows)) {
             DataFrame cur;
             cur.names = sch_;
             for (Series& c : m->columns) cur.columns.push_back(std::move(c));
@@ -540,13 +542,13 @@ class TopkCursor : public Cursor {
                 best = u.topk(name_, k_, largest_);
             }
         }
-        if (!has) return std::nullopt;
+        if (!has) co_return std::nullopt;
         Morsel out;
         out.rows = best.num_rows();
         out.columns.reserve(best.columns.size());
         for (const Series& c : best.columns)
             out.columns.push_back(c.materialize());
-        return out;
+        co_return out;
     }
 
    private:
@@ -601,8 +603,8 @@ class GroupByCursor : public Cursor {
           key_(std::move(key)),
           aggs_(std::move(aggs)) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
         done_ = true;
 
         const int key_idx = index_in(sch_, key_);
@@ -642,7 +644,7 @@ class GroupByCursor : public Cursor {
         while (!eof) {
             batch.clear();
             for (std::size_t b = 0; b < BATCH; ++b) {
-                auto m = in_->next(max_rows);
+                auto m = co_await in_->next(max_rows);
                 if (!m) {
                     eof = true;
                     break;
@@ -679,7 +681,7 @@ class GroupByCursor : public Cursor {
         out.columns.reserve(r.columns.size());
         for (const Series& c : r.columns)
             out.columns.push_back(c.materialize());
-        return out;
+        co_return out;
     }
 
    private:
@@ -716,8 +718,8 @@ class GroupByDynamicCursor : public Cursor {
           origin_(origin),
           origin_min_(origin_min) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
         done_ = true;
         if (every_ <= 0)
             throw std::invalid_argument("group_by_dynamic: every must be > 0");
@@ -755,7 +757,7 @@ class GroupByDynamicCursor : public Cursor {
         AggStatePtr state = agg_new(specs);
         bool anchored = false;
         std::int64_t start0 = 0, origin = origin_;
-        while (auto m = in_->next(max_rows)) {
+        while (auto m = co_await in_->next(max_rows)) {
             const Series& tc = m->columns[static_cast<std::size_t>(ti)];
             if (tc.type() != TypeId::Int64)
                 throw std::invalid_argument("group_by_dynamic: " + time_col_ +
@@ -799,7 +801,7 @@ class GroupByDynamicCursor : public Cursor {
             agg_accumulate(*state, keyc, values);
         }
         DataFrame r = agg_finalize(*state, time_col_).sort_by(time_col_, false);
-        return morsel_of(std::move(r));
+        co_return morsel_of(std::move(r));
     }
 
    private:
@@ -831,14 +833,14 @@ class SampleCursor : public Cursor {
           n_(std::max<std::int64_t>(n, 0)),
           seed_(seed) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
         done_ = true;
         DataFrame best;                   // <= n_ rows
         std::vector<std::uint64_t> keys;  // parallel to best's rows
         std::vector<std::int64_t> idx;    // original global row indices
         std::int64_t off = 0;
-        while (auto m = in_->next(max_rows)) {
+        while (auto m = co_await in_->next(max_rows)) {
             const std::int64_t mrows = m->rows;
             DataFrame mf;
             mf.names = sch_;
@@ -886,7 +888,7 @@ class SampleCursor : public Cursor {
             return idx[static_cast<std::size_t>(a)] <
                    idx[static_cast<std::size_t>(b)];
         });
-        return morsel_of(take(best, ord));
+        co_return morsel_of(take(best, ord));
     }
 
    private:
@@ -910,8 +912,8 @@ class SortMergeCursor : public Cursor {
           descending_(descending),
           budget_(budget) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (!built_) build(max_rows);
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (!built_) co_await build(max_rows);
 
         std::vector<std::vector<Series>> pieces;
         std::int64_t out_rows = 0;
@@ -941,9 +943,9 @@ class SortMergeCursor : public Cursor {
             pieces.push_back(std::move(piece.columns));
             out_rows += limit - pos;
             pos_[static_cast<std::size_t>(winner)] = limit;
-            if (limit >= wm.rows) advance(winner, max_rows);
+            if (limit >= wm.rows) co_await advance(winner, max_rows);
         }
-        if (pieces.empty()) return std::nullopt;
+        if (pieces.empty()) co_return std::nullopt;
         Morsel out;
         out.rows = out_rows;
         const std::size_t ncols = pieces.front().size();
@@ -954,7 +956,7 @@ class SortMergeCursor : public Cursor {
             for (auto& pc : pieces) parts.push_back(&pc[c]);
             out.columns.push_back(concat_columns(parts));
         }
-        return out;
+        co_return out;
     }
 
    private:
@@ -981,9 +983,9 @@ class SortMergeCursor : public Cursor {
         return best;
     }
 
-    void advance(int k, std::int64_t max_rows) {
+    coro::CoroTask<void> advance(int k, std::int64_t max_rows) {
         cur_[static_cast<std::size_t>(k)] =
-            runs_[static_cast<std::size_t>(k)]->next(max_rows);
+            co_await runs_[static_cast<std::size_t>(k)]->next(max_rows);
         pos_[static_cast<std::size_t>(k)] = 0;
     }
 
@@ -1016,7 +1018,7 @@ class SortMergeCursor : public Cursor {
         w.close();
     }
 
-    void build(std::int64_t max_rows) {
+    coro::CoroTask<void> build(std::int64_t max_rows) {
         key_idx_ = static_cast<int>(std::distance(
             sch_.begin(), std::find(sch_.begin(), sch_.end(), key_)));
         if (key_idx_ >= static_cast<int>(sch_.size()))
@@ -1025,7 +1027,7 @@ class SortMergeCursor : public Cursor {
         std::vector<std::vector<Series>> pending;
         std::size_t pend_bytes = 0;
         int run_id = 0;
-        while (auto m = in_->next(max_rows)) {
+        while (auto m = co_await in_->next(max_rows)) {
             pend_bytes += morsel_bytes(m->columns);
             pending.push_back(std::move(m->columns));
             if (budget_ > 0 && pend_bytes > budget_) {
@@ -1052,7 +1054,7 @@ class SortMergeCursor : public Cursor {
         cur_.resize(runs_.size());
         pos_.assign(runs_.size(), 0);
         for (std::size_t k = 0; k < runs_.size(); ++k)
-            cur_[k] = runs_[k]->next(max_rows);
+            cur_[k] = co_await runs_[k]->next(max_rows);
         built_ = true;
     }
 
@@ -1079,8 +1081,8 @@ class UniqueCursor : public Cursor {
         if (parallel_backend_installed()) seen_p_.resize(DEDUP_PARTITIONS);
     }
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        while (auto m = in_->next(max_rows)) {
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        while (auto m = co_await in_->next(max_rows)) {
             const std::int64_t n = m->rows;
             // Build the exact row keys in parallel (scalar string work, one per
             // row, independent), then dedupe (radix-partitioned when a
@@ -1102,9 +1104,9 @@ class UniqueCursor : public Cursor {
             DataFrame mf;
             mf.names = sch_;
             mf.columns = std::move(m->columns);
-            return morsel_of(take(mf, keep));
+            co_return morsel_of(take(mf, keep));
         }
-        return std::nullopt;
+        co_return std::nullopt;
     }
 
    private:
@@ -1123,8 +1125,8 @@ class DescribeCursor : public Cursor {
     DescribeCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch)
         : in_(std::move(in)), sch_(std::move(sch)) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
         done_ = true;
         // Per-morsel SIMD reduction into one mergeable FieldStat per numeric
         // column (the engine's shared aggregation atom), so the numeric work is
@@ -1133,7 +1135,7 @@ class DescribeCursor : public Cursor {
         std::vector<FieldStat> acc;
         std::int64_t total_rows = 0;
         bool first = true;
-        while (auto m = in_->next(max_rows)) {
+        while (auto m = co_await in_->next(max_rows)) {
             if (first) {
                 first = false;
                 for (std::size_t c = 0; c < m->columns.size(); ++c)
@@ -1164,7 +1166,7 @@ class DescribeCursor : public Cursor {
             out.names.push_back(sch_[static_cast<std::size_t>(num_idx[j])]);
         }
         produced_ = out.names;
-        return morsel_of(std::move(out));
+        co_return morsel_of(std::move(out));
     }
 
     std::optional<std::vector<std::string>> out_names() const override {
@@ -1197,9 +1199,9 @@ class IsDupCursor : public Cursor {
     IsDupCursor(std::unique_ptr<Cursor> in, std::uint64_t budget, bool unique)
         : first_(std::move(in)), spool_(budget), unique_(unique) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (!counted_) count(max_rows);
-        while (auto m = pass2_->next(max_rows)) {
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (!counted_) co_await count(max_rows);
+        while (auto m = co_await pass2_->next(max_rows)) {
             const std::int64_t n = m->rows;
             const std::int64_t nbytes = (n + 7) / 8;
             std::vector<std::uint8_t> bits(static_cast<std::size_t>(nbytes), 0);
@@ -1224,13 +1226,13 @@ class IsDupCursor : public Cursor {
             Morsel out;
             out.rows = n;
             out.columns.push_back(Series::flat(TypeId::Bool, bits.data(), n));
-            return out;
+            co_return out;
         }
-        return std::nullopt;
+        co_return std::nullopt;
     }
 
    private:
-    void count(std::int64_t max_rows) {
+    coro::CoroTask<void> count(std::int64_t max_rows) {
         std::vector<AggSpec> specs(1);
         specs[0].op = AggOp::Count;
         specs[0].out = "count";
@@ -1248,7 +1250,7 @@ class IsDupCursor : public Cursor {
         while (!eof) {
             batch.clear();
             for (std::size_t b = 0; b < BATCH; ++b) {
-                auto m = first_->next(max_rows);
+                auto m = co_await first_->next(max_rows);
                 if (!m) {
                     eof = true;
                     break;
@@ -1311,10 +1313,10 @@ class ToDummiesCursor : public Cursor {
           sch_(std::move(sch)),
           column_(std::move(column)) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (!built_) build(max_rows);
-        auto m = pass2_->next(max_rows);
-        if (!m) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (!built_) co_await build(max_rows);
+        auto m = co_await pass2_->next(max_rows);
+        if (!m) co_return std::nullopt;
         const Series& col = m->columns[static_cast<std::size_t>(ci_)];
         const std::int64_t n = m->rows;
         std::vector<Series> one;
@@ -1340,7 +1342,7 @@ class ToDummiesCursor : public Cursor {
                 out.columns.push_back(
                     Series::flat(TypeId::Int8, col_bits.data(), n));
         }
-        return out;
+        co_return out;
     }
 
     std::optional<std::vector<std::string>> out_names() const override {
@@ -1348,7 +1350,7 @@ class ToDummiesCursor : public Cursor {
     }
 
    private:
-    void build(std::int64_t max_rows) {
+    coro::CoroTask<void> build(std::int64_t max_rows) {
         ci_ = static_cast<int>(std::distance(
             sch_.begin(), std::find(sch_.begin(), sch_.end(), column_)));
         if (ci_ >= static_cast<int>(sch_.size()))
@@ -1356,7 +1358,7 @@ class ToDummiesCursor : public Cursor {
 
         ankerl::unordered_dense::set<std::string> seen;
         std::vector<Series> chunks;
-        while (auto m = first_->next(max_rows)) {
+        while (auto m = co_await first_->next(max_rows)) {
             const Series& col = m->columns[static_cast<std::size_t>(ci_)];
             std::vector<Series> one;
             one.push_back(col.share());
@@ -1418,8 +1420,8 @@ class PivotCursor : public Cursor {
           values_(std::move(values)),
           agg_(std::move(agg)) {}
 
-    std::optional<Morsel> next(std::int64_t max_rows) override {
-        if (done_) return std::nullopt;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
         done_ = true;
         const int ii = idx_of(index_), ci = idx_of(on_), vi = idx_of(values_);
         if (ii < 0) throw std::out_of_range("pivot: no column named " + index_);
@@ -1430,7 +1432,7 @@ class PivotCursor : public Cursor {
         // Pass 1: distinct index and `on` values (ascending, matching eager).
         ankerl::unordered_dense::set<std::string> seen_i, seen_c;
         std::vector<Series> ich, cch;
-        while (auto m = first_->next(max_rows)) {
+        while (auto m = co_await first_->next(max_rows)) {
             distinct_into(m->columns[static_cast<std::size_t>(ii)], seen_i,
                           ich);
             distinct_into(m->columns[static_cast<std::size_t>(ci)], seen_c,
@@ -1461,7 +1463,7 @@ class PivotCursor : public Cursor {
         specs.push_back(std::move(sp));
         AggStatePtr state = agg_new(std::move(specs));
         auto p2 = spool_.reader();
-        while (auto m = p2->next(max_rows)) {
+        while (auto m = co_await p2->next(max_rows)) {
             const Series& ic = m->columns[static_cast<std::size_t>(ii)];
             const Series& cc = m->columns[static_cast<std::size_t>(ci)];
             const Series& vc = m->columns[static_cast<std::size_t>(vi)];
@@ -1505,7 +1507,7 @@ class PivotCursor : public Cursor {
             out.columns.push_back(source.take(ti));
         }
         produced_ = out.names;
-        return morsel_of(std::move(out));
+        co_return morsel_of(std::move(out));
     }
 
     std::optional<std::vector<std::string>> out_names() const override {
@@ -2350,7 +2352,7 @@ LazyFrame LazyFrame::auto_spill() const {
     return LazyFrame(source_, ops_, resolve_spill_budget(0));
 }
 
-DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
+coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
     auto ops = pushdown_projections(
         source_->names(), pushdown_predicates(source_->names(), ops_));
     // 0 resolves to auto (~1/3 RAM), same policy as View.
@@ -2365,7 +2367,7 @@ DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
             for (const Series& c : f->columns)
                 start.columns.push_back(c.share());  // zero-copy, move-only
             if (auto out = run_ops_in_memory(std::move(start), ops))
-                return std::move(*out);
+                co_return std::move(*out);
         }
     }
     const std::int64_t eff_rows =
@@ -2376,11 +2378,11 @@ DataFrame LazyFrame::collect(std::int64_t morsel_rows) const {
         cur = make_cursor(*op, std::move(cur), sch, budget);
         sch = out_schema(*op, std::move(sch));
     }
-    DataFrame out = drain_to_frame(*cur, sch, eff_rows);
+    DataFrame out = co_await drain_to_frame(*cur, sch, eff_rows);
     // A data-dependent terminal (pivot/to_dummies/describe) knows its true
     // schema only after running; prefer it over the static plan schema.
     if (auto n = cur->out_names()) out.names = std::move(*n);
-    return out;
+    co_return out;
 }
 
 LazyFrame DataFrame::lazy() const {

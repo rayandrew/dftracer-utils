@@ -54,7 +54,7 @@ class Writer {
 class Reader : public Cursor {
    public:
     explicit Reader(const std::string& path);
-    std::optional<Morsel> next(std::int64_t max_rows) override;
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override;
 
    private:
     std::ifstream is_;

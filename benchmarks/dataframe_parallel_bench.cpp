@@ -10,6 +10,8 @@
 //
 //   dataframe_parallel_bench [rows] [groups]
 
+#include <dftracer/utils/core/coro/task.h>
+#include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/field_stat.h>
@@ -28,11 +30,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace dftracer::utils::dataframe;
 
 namespace {
+
+// Drives a LazyFrame::collect() coroutine to completion on the default
+// runtime; the bench installs its own thread backend but the runtime itself
+// is single-threaded here, so this just blocks for the result.
+DataFrame run(dftracer::utils::coro::CoroTask<DataFrame> t) {
+    return dftracer::utils::default_runtime().submit(std::move(t)).get();
+}
 
 int g_threads = 1;
 
@@ -153,7 +163,7 @@ int main(int argc, char** argv) {
         double best = 1e300;
         for (int r = 0; r < reps; ++r) {
             const auto t0 = std::chrono::steady_clock::now();
-            DataFrame out = df.lazy().group_by("k", aggs).collect();
+            DataFrame out = run(df.lazy().group_by("k", aggs).collect());
             const auto t1 = std::chrono::steady_clock::now();
             do_not_optimize(out.num_rows());
             best = std::min(
@@ -175,7 +185,7 @@ int main(int argc, char** argv) {
         double best = 1e300;
         for (int r = 0; r < 5; ++r) {
             const auto t0 = std::chrono::steady_clock::now();
-            DataFrame out = df.lazy().group_by("k", aggs).collect(rows);
+            DataFrame out = run(df.lazy().group_by("k", aggs).collect(rows));
             const auto t1 = std::chrono::steady_clock::now();
             do_not_optimize(out.num_rows());
             best = std::min(
@@ -248,7 +258,7 @@ int main(int argc, char** argv) {
         double best = 1e300;
         for (int r = 0; r < reps; ++r) {
             const auto t0 = std::chrono::steady_clock::now();
-            DataFrame out = df.lazy().unique().collect();
+            DataFrame out = run(df.lazy().unique().collect());
             const auto t1 = std::chrono::steady_clock::now();
             do_not_optimize(out.num_rows());
             best = std::min(
@@ -259,10 +269,10 @@ int main(int argc, char** argv) {
     };
     set_parallel_backend(nullptr, nullptr);
     const double uq_ser = time_unique(3);
-    DataFrame uq_serial_out = df.lazy().unique().collect();
+    DataFrame uq_serial_out = run(df.lazy().unique().collect());
     install_runtime_parallel_backend();
     const double uq_par = time_unique(3);
-    DataFrame uq_par_out = df.lazy().unique().collect();
+    DataFrame uq_par_out = run(df.lazy().unique().collect());
     bool uq_ok = uq_serial_out.num_rows() == uq_par_out.num_rows();
     {
         const std::int64_t* uv = uq_serial_out.column("v").data<std::int64_t>();
@@ -290,7 +300,7 @@ int main(int argc, char** argv) {
         double best = 1e300;
         for (int r = 0; r < reps; ++r) {
             const auto t0 = std::chrono::steady_clock::now();
-            DataFrame out = dup_df.lazy().unique().collect();
+            DataFrame out = run(dup_df.lazy().unique().collect());
             const auto t1 = std::chrono::steady_clock::now();
             do_not_optimize(out.num_rows());
             best = std::min(
@@ -301,10 +311,10 @@ int main(int argc, char** argv) {
     };
     set_parallel_backend(nullptr, nullptr);
     const double uqd_ser = time_unique_dup(3);
-    DataFrame uqd_serial_out = dup_df.lazy().unique().collect();
+    DataFrame uqd_serial_out = run(dup_df.lazy().unique().collect());
     install_runtime_parallel_backend();
     const double uqd_par = time_unique_dup(3);
-    DataFrame uqd_par_out = dup_df.lazy().unique().collect();
+    DataFrame uqd_par_out = run(dup_df.lazy().unique().collect());
     bool uqd_ok = uqd_serial_out.num_rows() == uqd_par_out.num_rows();
     {
         const std::int64_t* uv = uqd_serial_out.column("k").data<std::int64_t>();
@@ -322,9 +332,9 @@ int main(int argc, char** argv) {
         double best = 1e300;
         for (int r = 0; r < reps; ++r) {
             const auto t0 = std::chrono::steady_clock::now();
-            DataFrame out = want_unique
+            DataFrame out = run(want_unique
                                ? dup_df.lazy().is_unique().collect()
-                               : dup_df.lazy().is_duplicated().collect();
+                               : dup_df.lazy().is_duplicated().collect());
             const auto t1 = std::chrono::steady_clock::now();
             do_not_optimize(out.num_rows());
             best = std::min(
@@ -336,10 +346,10 @@ int main(int argc, char** argv) {
 
     set_parallel_backend(nullptr, nullptr);
     const double dup_ser = time_isdup(false, 3);
-    DataFrame dup_serial_out = dup_df.lazy().is_duplicated().collect();
+    DataFrame dup_serial_out = run(dup_df.lazy().is_duplicated().collect());
     install_runtime_parallel_backend();
     const double dup_par = time_isdup(false, 3);
-    DataFrame dup_par_out = dup_df.lazy().is_duplicated().collect();
+    DataFrame dup_par_out = run(dup_df.lazy().is_duplicated().collect());
     bool dup_ok = dup_serial_out.num_rows() == dup_par_out.num_rows();
     {
         const Series& sa = dup_serial_out.column("is_duplicated");
@@ -354,10 +364,10 @@ int main(int argc, char** argv) {
 
     set_parallel_backend(nullptr, nullptr);
     const double uni_ser = time_isdup(true, 3);
-    DataFrame uni_serial_out = dup_df.lazy().is_unique().collect();
+    DataFrame uni_serial_out = run(dup_df.lazy().is_unique().collect());
     install_runtime_parallel_backend();
     const double uni_par = time_isdup(true, 3);
-    DataFrame uni_par_out = dup_df.lazy().is_unique().collect();
+    DataFrame uni_par_out = run(dup_df.lazy().is_unique().collect());
     bool uni_ok = uni_serial_out.num_rows() == uni_par_out.num_rows();
     {
         const Series& sa = uni_serial_out.column("is_unique");
@@ -1334,7 +1344,7 @@ int main(int argc, char** argv) {
         return se.filter(m);
     };
     auto lazy_sort_filter = [&]() {
-        return df.lazy().sort_by("s").filter(keep).collect();
+        return run(df.lazy().sort_by("s").filter(keep).collect());
     };
     auto time_it = [&](auto&& fn, int reps) {
         double best = 1e300;
@@ -1382,11 +1392,11 @@ int main(int argc, char** argv) {
         return w.select({"k", "kv"});
     };
     auto lazy_map = [&]() {
-        return df.lazy()
+        return run(df.lazy()
             .filter(vpos)
             .with_column("kv", kv)
             .select({"k", "kv"})
-            .collect();
+            .collect());
     };
     const double mp_eager = time_it(eager_map, 5);
     const double mp_lazy = time_it(lazy_map, 5);

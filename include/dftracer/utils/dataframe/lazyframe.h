@@ -1,6 +1,7 @@
 #ifndef DFTRACER_UTILS_DATAFRAME_LAZYFRAME_H
 #define DFTRACER_UTILS_DATAFRAME_LAZYFRAME_H
 
+#include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
 
@@ -20,14 +21,14 @@ struct Morsel {
 };
 
 /// A stateful reader over one Source. next() returns the next morsel, or
-/// nullopt at end; `max_rows` is a size hint. The engine pulls it
-/// synchronously. A producer that wants async/prefetch/backpressure does that
-/// inside next() (e.g. hand back a morsel a background reader prepared) - the
-/// engine stays synchronous.
+/// nullopt at end; `max_rows` is a size hint. The engine pulls it async
+/// (co_await), so a producer can suspend on real I/O inside next() instead of
+/// blocking a worker thread.
 class Cursor {
    public:
     virtual ~Cursor() = default;
-    virtual std::optional<Morsel> next(std::int64_t max_rows) = 0;
+    virtual coro::CoroTask<std::optional<Morsel>> next(
+        std::int64_t max_rows) = 0;
     /// Output column names, when they are only known after producing (a
     /// data-dependent schema like pivot/to_dummies). nullopt means the plan's
     /// static schema is authoritative. Valid only after the cursor is drained.
@@ -163,7 +164,7 @@ class LazyFrame {
     /// Run the pipeline and materialize the surviving rows. `morsel_rows` is
     /// the scan chunk size; <= 0 (the default) means auto; one pass over a
     /// resident source, the bounded streaming default otherwise.
-    DataFrame collect(std::int64_t morsel_rows = 0) const;
+    coro::CoroTask<DataFrame> collect(std::int64_t morsel_rows = 0) const;
 
    private:
     LazyFrame(std::shared_ptr<const Source> source,

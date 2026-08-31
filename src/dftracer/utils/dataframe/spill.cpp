@@ -78,17 +78,17 @@ class SpoolReader : public Cursor {
         : mem_(mem) {
         if (!spill_path.empty()) disk_ = std::make_unique<Reader>(spill_path);
     }
-    std::optional<Morsel> next(std::int64_t max_rows) override {
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         if (pos_ < mem_->size()) {
             const Morsel& m = (*mem_)[pos_++];
             Morsel out;
             out.rows = m.rows;
             out.columns.reserve(m.columns.size());
             for (const Series& c : m.columns) out.columns.push_back(c.share());
-            return out;
+            co_return out;
         }
-        if (disk_) return disk_->next(max_rows);
-        return std::nullopt;
+        if (disk_) co_return co_await disk_->next(max_rows);
+        co_return std::nullopt;
     }
 
    private:
@@ -214,10 +214,10 @@ std::unique_ptr<Cursor> Spool::reader() {
         &mem_, dir_ ? dir_->run_path(0) : std::string());
 }
 
-std::optional<Morsel> Reader::next(std::int64_t /*max_rows*/) {
+coro::CoroTask<std::optional<Morsel>> Reader::next(std::int64_t /*max_rows*/) {
     std::int64_t len = 0;
     is_.read(reinterpret_cast<char*>(&len), sizeof(len));
-    if (!is_ || is_.gcount() == 0) return std::nullopt;
+    if (!is_ || is_.gcount() == 0) co_return std::nullopt;
     std::string blob(static_cast<std::size_t>(len), '\0');
     is_.read(blob.data(), static_cast<std::streamsize>(len));
     if (is_.gcount() != len) throw std::runtime_error("spill: short run read");
@@ -229,7 +229,7 @@ std::optional<Morsel> Reader::next(std::int64_t /*max_rows*/) {
     m.columns.reserve(static_cast<std::size_t>(ncols));
     for (std::int32_t c = 0; c < ncols; ++c)
         m.columns.push_back(get_series(p, pend));
-    return m;
+    co_return m;
 }
 
 }  // namespace dftracer::utils::dataframe::spill

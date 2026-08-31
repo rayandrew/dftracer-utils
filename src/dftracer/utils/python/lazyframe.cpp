@@ -10,6 +10,7 @@
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 
 #include <dftracer/utils/core/common/memory_budget.h>  // NO_SPILL_BUDGET
+#include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
@@ -18,6 +19,7 @@
 #include <dftracer/utils/python/py_agg_helpers.h>
 #include <dftracer/utils/python/py_list_helpers.h>
 #include <dftracer/utils/python/py_method.h>
+#include <dftracer/utils/python/py_runtime_mixin.h>  // run_blocking
 #include <dftracer/utils/python/py_scalar_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 
@@ -368,13 +370,14 @@ PyObject* LazyFrame_collect(PyObject* self, PyObject* args, PyObject* kwds) {
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "|L", const_cast<char**>(kw),
                                      &morsel_rows))
         return nullptr;
-    try {
-        return dftracer::utils::python::wrap_dataframe(
-            b->lf.collect(morsel_rows));
-    } catch (const std::exception& e) {
-        PyErr_SetString(PyExc_ValueError, e.what());
+    dataframe::DataFrame out;
+    if (!run_blocking([&] {
+            out = dftracer::utils::default_runtime()
+                      .submit(b->lf.collect(morsel_rows))
+                      .get();
+        }))
         return nullptr;
-    }
+    return dftracer::utils::python::wrap_dataframe(std::move(out));
 }
 
 PyMethodDef LazyFrame_methods[] = {

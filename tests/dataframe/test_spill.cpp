@@ -1,14 +1,26 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/core/coro/task.h>
+#include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/dataframe/internal/spill.h>
 #include <dftracer/utils/dataframe/series.h>
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
+using dftracer::utils::dataframe::Morsel;
 using dftracer::utils::dataframe::Series;
 namespace spill = dftracer::utils::dataframe::spill;
+
+namespace {
+std::optional<Morsel> run(
+    dftracer::utils::coro::CoroTask<std::optional<Morsel>> t) {
+    return dftracer::utils::default_runtime().submit(std::move(t)).get();
+}
+}  // namespace
 
 TEST_SUITE("spill") {
     TEST_CASE("round-trip mixed-type morsels through a run file") {
@@ -33,7 +45,7 @@ TEST_SUITE("spill") {
 
         spill::Reader r(path);
         int morsels = 0;
-        while (auto m = r.next(0)) {
+        while (auto m = run(r.next(0))) {
             ++morsels;
             REQUIRE(m->rows == 4);
             REQUIRE(m->columns.size() == 3);
@@ -59,6 +71,6 @@ TEST_SUITE("spill") {
             w.close();
         }
         spill::Reader r(path);
-        CHECK_FALSE(r.next(0).has_value());
+        CHECK_FALSE(run(r.next(0)).has_value());
     }
 }
