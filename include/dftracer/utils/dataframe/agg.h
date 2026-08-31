@@ -1,7 +1,7 @@
 #ifndef DFTRACER_UTILS_DATAFRAME_AGG_H
 #define DFTRACER_UTILS_DATAFRAME_AGG_H
 
-#include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/series.h>
 
 #include <cstdint>
 #include <memory>
@@ -16,6 +16,8 @@
 // thread (no locks); parallelism is the driver's job (per-worker or per-chunk
 // partials, then merge).
 namespace dftracer::utils::dataframe {
+
+struct DataFrame;  // dataframe/dataframe.h; only used by value as a return type
 
 enum class AggOp {
     Count = 0,

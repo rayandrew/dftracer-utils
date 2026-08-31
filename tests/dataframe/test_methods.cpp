@@ -491,6 +491,32 @@ TEST_CASE("group_agg_expr argmax/sumsq/set_union via the expression builders") {
     }
 }
 
+TEST_CASE(
+    "DataFrame::group_by(Expr, AggExprSpec) matches the string overload") {
+    namespace df = dftracer::utils::dataframe;
+    DataFrame b;
+    b.names = {"k", "v"};
+    b.columns.push_back(i64({0, 1, 0, 1, 0, 1}));
+    b.columns.push_back(i64({1, 2, 3, 4, 5, 6}));
+
+    DataFrame expected = b.group_by(
+        "k", {GroupAgg{Agg::Sum, "v", "s"}, GroupAgg{Agg::Mean, "v", "m"}});
+
+    std::vector<df::AggExprSpec> specs{df::agg_sum(df::expr_col(1), "s"),
+                                       df::agg_mean(df::expr_col(1), "m")};
+    DataFrame got = b.group_by(df::expr_col(0), specs);
+
+    REQUIRE(got.num_rows() == expected.num_rows());
+    const std::int64_t* ke = expected.column("k").data<std::int64_t>();
+    const std::int64_t* kg = got.column("k").data<std::int64_t>();
+    const std::int64_t* se = expected.column("s").data<std::int64_t>();
+    const std::int64_t* sg = got.column("s").data<std::int64_t>();
+    for (std::int64_t i = 0; i < got.num_rows(); ++i) {
+        CHECK(kg[i] == ke[i]);
+        CHECK(sg[i] == se[i]);
+    }
+}
+
 TEST_CASE("dftu_dataframe opaque C ABI: build, inspect, frame ops") {
     Series id = i64({1, 2, 3, 4});
     Series val = i64({40, 10, 30, 20});

@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/dataframe/agg_expr.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
@@ -18,6 +19,10 @@
 using dftracer::utils::StringIntern;
 using dftracer::utils::coro::CoroTask;
 using dftracer::utils::dataframe::Agg;
+using dftracer::utils::dataframe::agg_argmax;
+using dftracer::utils::dataframe::agg_mean;
+using dftracer::utils::dataframe::agg_sum;
+using dftracer::utils::dataframe::AggExprSpec;
 using dftracer::utils::dataframe::col;
 using dftracer::utils::dataframe::Cursor;
 using dftracer::utils::dataframe::DataFrame;
@@ -351,6 +356,84 @@ TEST_SUITE("lazyframe") {
                 CHECK(mean[i] == doctest::Approx(4.0));
                 CHECK(cnt[i] == 3);
             }
+        }
+    }
+
+    TEST_CASE("group_by(Expr, AggExprSpec) matches the string overload") {
+        std::vector<std::int64_t> g{0, 1, 0, 1, 0, 1};
+        std::vector<std::int64_t> v{1, 2, 3, 4, 5, 6};
+        DataFrame df;
+        df.names = {"g", "v"};
+        df.columns.push_back(Series::flat_i64(g.data(), 6));
+        df.columns.push_back(Series::flat_i64(v.data(), 6));
+
+        // A string-literal key must still resolve to the string overload, not
+        // the Expr one (Expr has no implicit ctor from a string/char*).
+        std::vector<GroupAgg> str_aggs{{Agg::Sum, "v", "s", 0.0},
+                                       {Agg::Mean, "v", "m", 0.0}};
+        DataFrame expected = run(df.lazy().group_by("g", str_aggs).collect(2));
+
+        std::vector<AggExprSpec> expr_aggs{agg_sum(col(1), "s"),
+                                           agg_mean(col(1), "m")};
+        DataFrame got = run(df.lazy().group_by(col(0), expr_aggs).collect(2));
+
+        REQUIRE(got.names == expected.names);
+        REQUIRE(got.num_rows() == expected.num_rows());
+        const std::int64_t* gk_e = expected.column("g").data<std::int64_t>();
+        const std::int64_t* gk_g = got.column("g").data<std::int64_t>();
+        const std::int64_t* s_e = expected.column("s").data<std::int64_t>();
+        const std::int64_t* s_g = got.column("s").data<std::int64_t>();
+        const double* m_e = expected.column("m").data<double>();
+        const double* m_g = got.column("m").data<double>();
+        for (std::int64_t i = 0; i < got.num_rows(); ++i) {
+            CHECK(gk_g[i] == gk_e[i]);
+            CHECK(s_g[i] == s_e[i]);
+            CHECK(m_g[i] == doctest::Approx(m_e[i]));
+        }
+    }
+
+    TEST_CASE("group_by(Expr, ...) with a computed key and an ArgMax agg") {
+        std::vector<std::int64_t> a{0, 0, 1, 1, 0, 1};
+        std::vector<std::int64_t> b{0, 1, 0, 0, 1, 1};  // a+b: 0,1,1,1,1,2
+        std::vector<std::int64_t> x{10, 20, 30, 40, 50, 60};
+        std::vector<std::int64_t> by{5, 1, 9, 2, 3, 7};
+        DataFrame df;
+        df.names = {"a", "b", "x", "by"};
+        df.columns.push_back(Series::flat_i64(a.data(), 6));
+        df.columns.push_back(Series::flat_i64(b.data(), 6));
+        df.columns.push_back(Series::flat_i64(x.data(), 6));
+        df.columns.push_back(Series::flat_i64(by.data(), 6));
+
+        // Hand-built with_column + string group_by: the reference desugar.
+        DataFrame ref =
+            run(df.lazy()
+                    .with_column("__k", col(0) + col(1))
+                    .group_by("__k",
+                              std::vector<GroupAgg>{
+                                  {Agg::Sum, "x", "s", 0.0},
+                                  {Agg::ArgMax, "x", "am", 0.0, "by"}})
+                    .collect(2));
+
+        std::vector<AggExprSpec> specs{agg_sum(col(2), "s"),
+                                       agg_argmax(col(2), col(3), "am")};
+        DataFrame got =
+            run(df.lazy().group_by(col(0) + col(1), specs).collect(2));
+
+        REQUIRE(got.num_rows() == ref.num_rows());
+        const std::int64_t* rk = ref.column("__k").data<std::int64_t>();
+        const std::int64_t* rs = ref.column("s").data<std::int64_t>();
+        const std::int64_t* gk = got.column(got.names[0]).data<std::int64_t>();
+        const std::int64_t* gs = got.column("s").data<std::int64_t>();
+        for (std::int64_t i = 0; i < got.num_rows(); ++i) {
+            bool matched = false;
+            for (std::int64_t j = 0; j < ref.num_rows(); ++j) {
+                if (rk[j] != gk[i]) continue;
+                matched = true;
+                CHECK(gs[i] == rs[j]);
+                CHECK(got.column("am").string_at(i) ==
+                      ref.column("am").string_at(j));
+            }
+            CHECK(matched);
         }
     }
 

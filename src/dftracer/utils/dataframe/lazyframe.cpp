@@ -624,6 +624,44 @@ AggOp to_agg_op(Agg a) {
     return AggOp::Count;
 }
 
+Agg from_agg_op(AggOp a) {
+    switch (a) {
+        case AggOp::Sum:
+            return Agg::Sum;
+        case AggOp::Min:
+            return Agg::Min;
+        case AggOp::Max:
+            return Agg::Max;
+        case AggOp::Count:
+            return Agg::Count;
+        case AggOp::Mean:
+            return Agg::Mean;
+        case AggOp::Var:
+            return Agg::Var;
+        case AggOp::Std:
+            return Agg::Std;
+        case AggOp::Skew:
+            return Agg::Skew;
+        case AggOp::Kurt:
+            return Agg::Kurt;
+        case AggOp::First:
+            return Agg::First;
+        case AggOp::Last:
+            return Agg::Last;
+        case AggOp::Pct:
+            return Agg::Pct;
+        case AggOp::Hist:
+            return Agg::Hist;
+        case AggOp::ArgMax:
+            return Agg::ArgMax;
+        case AggOp::SumSq:
+            return Agg::SumSq;
+        case AggOp::SetUnion:
+            return Agg::SetUnion;
+    }
+    return Agg::Count;
+}
+
 // Streaming group-by: fold every morsel into one mergeable AggState (bounded by
 // the group count), finalize once. No materialize-all.
 class GroupByCursor : public Cursor {
@@ -2287,6 +2325,39 @@ LazyFrame LazyFrame::group_by(std::string key,
     ops.push_back(std::make_shared<LazyOp>(
         LazyOp{GroupByOp{std::move(key), std::move(aggs)}}));
     return with_ops(std::move(ops));
+}
+
+LazyFrame LazyFrame::group_by(Expr key, std::vector<AggExprSpec> aggs) const {
+    LazyFrame lf = *this;
+    std::vector<std::string> sch = lf.schema();
+    int tmp = 0;
+    // Route a bare column-ref expr to its schema name directly; otherwise
+    // materialize it into a hidden temp column and route to that.
+    auto resolve = [&](const Expr& e, const char* prefix) -> std::string {
+        const std::int32_t idx = expr_col_index(e);
+        if (idx >= 0 && static_cast<std::size_t>(idx) < sch.size())
+            return sch[static_cast<std::size_t>(idx)];
+        std::string name =
+            std::string("__gb_") + prefix + std::to_string(tmp++);
+        lf = lf.with_column(name, e);
+        sch.push_back(name);
+        return name;
+    };
+
+    const std::string key_name = resolve(key, "key");
+
+    std::vector<GroupAgg> gaggs;
+    gaggs.reserve(aggs.size());
+    for (const AggExprSpec& a : aggs) {
+        GroupAgg g;
+        g.op = from_agg_op(a.op);
+        g.out = a.out;
+        g.param = a.param;
+        if (a.op != AggOp::Count) g.column = resolve(a.value, "v");
+        if (a.op == AggOp::ArgMax) g.by = resolve(a.by, "by");
+        gaggs.push_back(std::move(g));
+    }
+    return lf.group_by(key_name, std::move(gaggs));
 }
 
 LazyFrame LazyFrame::sort_by(std::string name, bool descending) const {

@@ -3,6 +3,7 @@
 
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/coro/async_generator.h>
+#include <dftracer/utils/dataframe/agg_expr.h>
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/dataframe/types.h>
 #include <dftracer/utils/query/query.h>
@@ -146,6 +147,11 @@ struct DataFrame {
     /// aggregate.
     DataFrame group_by(const std::string& key,
                        const std::vector<GroupAgg>& aggs) const;
+    /// Group by an expression key and compute each expression aggregate in one
+    /// CSE'd, pruned pass (see group_agg_expr). A bare column-ref key uses that
+    /// column's name for the result; a computed key is named "key".
+    DataFrame group_by(const Expr& key,
+                       const std::vector<AggExprSpec>& aggs) const;
 
     /// Reshape wide -> long: keep `id_vars`, stack `value_vars` into a
     /// `variable`/`value` column pair. `melt` is an alias.

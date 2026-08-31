@@ -100,6 +100,19 @@ DataFrame DataFrame::group_by(const std::string& key,
     return dfops::group_by(*this, key, aggs);
 }
 
+DataFrame DataFrame::group_by(const Expr& key,
+                              const std::vector<AggExprSpec>& aggs) const {
+    const std::int64_t idx = expr_col_index(key);
+    const std::string key_name =
+        (idx >= 0 && static_cast<std::size_t>(idx) < names.size())
+            ? names[static_cast<std::size_t>(idx)]
+            : std::string("key");
+    std::vector<const Series*> inputs;
+    inputs.reserve(columns.size());
+    for (const Series& c : columns) inputs.push_back(&c);
+    return group_agg_expr(key, aggs, inputs, key_name);
+}
+
 DataFrame DataFrame::unpivot(const std::vector<std::string>& id_vars,
                              const std::vector<std::string>& value_vars) const {
     return dfops::unpivot(*this, id_vars, value_vars);

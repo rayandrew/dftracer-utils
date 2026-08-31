@@ -1,4 +1,5 @@
 #include <dftracer/utils/dataframe/agg.h>
+#include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/field_stat.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_i64/u64/f64
 #include <dftracer/utils/dataframe/parallel.h>              // parallel_for
