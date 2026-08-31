@@ -110,6 +110,7 @@ TEST_SUITE("AggFold") {
                                   {AggOp::Min, "dur", "min_dur"},
                                   {AggOp::Max, "dur", "max_dur"}})
                             .collect()
+                            .collect()
                             .get();
 
         // fused fold: same plan, driven through PodSource.
@@ -171,6 +172,7 @@ TEST_SUITE("AggFold") {
         auto expected = View::from_file(gz, idx)
                             .group_by({GroupKey::cat()})
                             .agg({{AggOp::Sum, "size", "sum_size"}})
+                            .collect()
                             .collect()
                             .get();
 

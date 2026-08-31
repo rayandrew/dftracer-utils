@@ -227,7 +227,9 @@ def test_columnar_over_view_batch_stays_in_vec():
         with dft.Indexer(files=[gz]) as ix:
             ix.ensure_indexed()
 
-        batch = TraceViewer(gz).group_by("cat").agg("count", "sum:dur", "mean:dur").collect()
+        batch = (
+            TraceViewer(gz).group_by("cat").agg("count", "sum:dur", "mean:dur").collect().collect()
+        )
         assert isinstance(batch, DataFrame)
         assert set(["cat", "count", "sum_dur", "mean_dur"]).issubset(batch.keys())
 
@@ -253,7 +255,7 @@ def test_columnar_batch_to_arrow_and_pandas_roundtrip():
         gz = env.create_test_gzip_file()
         with dft.Indexer(files=[gz]) as ix:
             ix.ensure_indexed()
-        batch = TraceViewer(gz).group_by("cat").agg("count").collect()
+        batch = TraceViewer(gz).group_by("cat").agg("count").collect().collect()
         tbl = batch.to_arrow()
         assert tbl.num_rows == batch.num_rows
         df = batch.to_pandas()
@@ -273,7 +275,7 @@ def test_columnar_batch_and_column_pickle_roundtrip():
         gz = env.create_test_gzip_file()
         with dft.Indexer(files=[gz]) as ix:
             ix.ensure_indexed()
-        batch = TraceViewer(gz).group_by("cat").agg("count", "sum:dur").collect()
+        batch = TraceViewer(gz).group_by("cat").agg("count", "sum:dur").collect().collect()
 
         b2 = pickle.loads(pickle.dumps(batch))
         assert isinstance(b2, DataFrame)
@@ -298,7 +300,7 @@ def test_vecbatch_native_frame_ops():
         gz = env.create_test_gzip_file()
         with dft.Indexer(files=[gz]) as ix:
             ix.ensure_indexed()
-        batch = TraceViewer(gz).group_by("cat").agg("count", "sum:dur").collect()
+        batch = TraceViewer(gz).group_by("cat").agg("count", "sum:dur").collect().collect()
 
         proj = batch.select("cat", "count")
         assert isinstance(proj, DataFrame)
@@ -585,7 +587,7 @@ def test_vecbatch_topk_and_concat():
         gz = env.create_test_gzip_file()
         with dft.Indexer(files=[gz]) as ix:
             ix.ensure_indexed()
-        batch = TraceViewer(gz).group_by("cat").agg("count", "sum:dur").collect()
+        batch = TraceViewer(gz).group_by("cat").agg("count", "sum:dur").collect().collect()
 
         top1 = batch.topk("count", 1, largest=True)
         assert isinstance(top1, DataFrame)

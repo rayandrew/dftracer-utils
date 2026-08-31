@@ -989,7 +989,7 @@ class DFAnalyzerAggregatedTraceViewer(DaskAggregatedTraceViewer):
         if temporal:
             agg_view = agg_view.time_bucket(bucket_us)
         if family == "regular":
-            tbl = agg_view.agg(*aggs).collect()
+            tbl = agg_view.agg(*aggs).collect().collect()
         else:
             tbl = agg_view.agg(*aggs).collect_typed().get(family)
 

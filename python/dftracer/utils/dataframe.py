@@ -7,9 +7,11 @@ reshape primitive - ``join``/``asof``/``interval``, ``window``/``gap_fill``,
 ``sample``, ``top_k``, ``sort`` - is a native method that takes and returns
 ``DataFrame``s, running the SIMD kernels on the native columns; Arrow is crossed
 only at the edge (``to_arrow``/``from_arrow``), never as the operating boundary.
-``TraceViewer`` / ``AggregatedTraceViewer`` wrap the native lazy viewers so their
-terminals (``collect`` / ``collect_typed`` / ``join``) return a wrapped
-``DataFrame``. See :mod:`dftracer.utils.series` for the column counterpart.
+``TraceViewer`` / ``AggregatedTraceViewer`` wrap the native lazy viewers;
+``collect`` returns a :class:`~dftracer.utils.lazyframe.LazyFrame` (call its
+own ``.collect()`` to materialize), while ``collect_typed`` / ``join`` return a
+wrapped ``DataFrame`` directly. See :mod:`dftracer.utils.series` for the
+column counterpart.
 """
 
 from __future__ import annotations
@@ -797,8 +799,14 @@ class _ViewerFilters:
         # (sum/min/max/mean/var/std/skew/kurt) emit one <op>_<arg> column each.
         return self._rewrap(self._native.agg_numeric_args(*reductions))
 
-    def collect(self) -> "DataFrame":
-        return _wrap(self._native.collect())
+    def collect(self) -> "LazyFrame":
+        """Build the query plan; nothing scans until the result's own
+        .collect() (-> DataFrame) or .to_arrow()/.to_pandas()/etc."""
+        # Local import: lazyframe.py imports DataFrame from this module, so a
+        # module-level import here would be circular.
+        from .lazyframe import LazyFrame
+
+        return LazyFrame(self._native.collect())
 
     def stream(
         self,

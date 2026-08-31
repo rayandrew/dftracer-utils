@@ -227,6 +227,7 @@ TEST_SUITE("RawGzipFuse") {
                        .group_by({GroupKey::cat()})
                        .agg({{AggOp::Count, "", "n"}})
                        .collect()
+                       .collect()
                        .get();
 
         std::string boot_idx = determine_index_path(gz, env.get_dir() + "/bi");
@@ -234,6 +235,7 @@ TEST_SUITE("RawGzipFuse") {
         auto boot = View::from_file(gz, boot_idx)
                         .group_by({GroupKey::cat()})
                         .agg({{AggOp::Count, "", "n"}})
+                        .collect()
                         .collect()
                         .get();
 
@@ -292,6 +294,7 @@ TEST_SUITE("RawGzipFuse") {
                        .group_by({GroupKey::cat()})
                        .agg({{AggOp::Count, "", "n"}})
                        .collect()
+                       .collect()
                        .get();
         REQUIRE(ref.num_rows() == 1);  // only POSIX
 
@@ -301,6 +304,7 @@ TEST_SUITE("RawGzipFuse") {
                        .query(R"(cat == "POSIX")")
                        .group_by({GroupKey::cat()})
                        .agg({{AggOp::Count, "", "n"}})
+                       .collect()
                        .collect()
                        .get();
         CHECK(got.num_rows() == ref.num_rows());  // filter applied: 1 group
@@ -329,6 +333,7 @@ TEST_SUITE("RawGzipFuse") {
                        .group_by({GroupKey::cat()})
                        .agg({{AggOp::Count, "", "n"}})
                        .collect()
+                       .collect()
                        .get();
 
         std::string fresh = determine_index_path(gz, env.get_dir() + "/nf");
@@ -336,6 +341,7 @@ TEST_SUITE("RawGzipFuse") {
                        .query(R"(fhash == "fh1")")
                        .group_by({GroupKey::cat()})
                        .agg({{AggOp::Count, "", "n"}})
+                       .collect()
                        .collect()
                        .get();
         CHECK(rows_equal(got, ref));  // correctly filtered via the fallback

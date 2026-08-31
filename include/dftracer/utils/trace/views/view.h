@@ -4,6 +4,7 @@
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/field.h>
+#include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/trace_config.h>
 #include <dftracer/utils/trace/views/result_join.h>
@@ -647,9 +648,14 @@ class View {
     /// column from a pre-v12 index that stored no type reads as "string".
     std::vector<ColumnInfo> schema() const;
 
-    /// Run group_by + agg, returning a columnar dataframe::DataFrame. No agg
-    /// counts per group; no group_by folds the whole set into one row.
-    coro::CoroTask<dftracer::utils::dataframe::DataFrame> collect() const;
+    /// Run group_by + agg, returning a LazyFrame over the deferred scan. No
+    /// agg counts per group; no group_by folds the whole set into one row.
+    /// Builds the plan only; the scan runs on the LazyFrame's collect().
+    dftracer::utils::dataframe::LazyFrame collect() const;
+
+    /// The eager scan behind collect(). Public for ViewSource; prefer
+    /// collect() otherwise.
+    coro::CoroTask<dftracer::utils::dataframe::DataFrame> collect_frame() const;
 
     /// Containment terminals over one scan. `partition` names the lane keys;
     /// `ts`/`dur`/`name` name the interval and label fields (any field - a POD

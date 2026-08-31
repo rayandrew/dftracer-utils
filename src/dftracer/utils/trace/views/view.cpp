@@ -17,6 +17,7 @@
 #include <dftracer/utils/trace/views/view_executor.h>
 #include <dftracer/utils/trace/views/view_plan.h>
 #include <dftracer/utils/trace/views/view_scan.h>
+#include <dftracer/utils/trace/views/view_source.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 
@@ -534,7 +535,11 @@ coro::CoroTask<ExportStats> View::export_trace(TraceWriteOptions opts) const {
     co_return co_await detail::run_export_trace(*plan_, opts);
 }
 
-coro::CoroTask<dataframe::DataFrame> View::collect() const {
+dataframe::LazyFrame View::collect() const {
+    return dataframe::LazyFrame::scan(std::make_shared<ViewSource>(*this));
+}
+
+coro::CoroTask<dataframe::DataFrame> View::collect_frame() const {
     // A row query (no group_by/agg) returns the matching events, not a count.
     if (detail::is_row_query(*plan_))
         co_return co_await detail::run_collect_rows(*plan_);

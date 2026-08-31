@@ -8,6 +8,7 @@
 #include <dftracer/utils/dataframe/internal/column_read.h>
 #include <dftracer/utils/plugins/host.h>
 #include <dftracer/utils/python/dataframe.h>
+#include <dftracer/utils/python/lazyframe.h>
 #include <dftracer/utils/python/plugin_host.h>
 #include <dftracer/utils/python/py_dict_helpers.h>
 #include <dftracer/utils/python/py_errors.h>
@@ -806,28 +807,22 @@ PyObject* tv_offset(TraceViewerObject* self, PyObject* arg) {
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #endif
 
-// collect(cache=False) -> a native DataFrame (our columnar format); Arrow is
-// produced only on an explicit batch.to_arrow()/to_pandas()/to_polars(). cache
-// uses the materialized-view cache (reconstruct on hit, else scan + persist +
-// return); it requires an aggregation (group_by/agg), enforced by the runtime
-// guard.
+// collect(cache=False) -> a LazyFrame over this viewer's plan; nothing runs
+// until the caller materializes it (LazyFrame.collect() -> DataFrame, or
+// .to_arrow()/.to_pandas()/.to_polars()). cache uses the materialized-view
+// cache (reconstruct on hit, else scan + persist + return); it requires an
+// aggregation (group_by/agg), enforced by the runtime guard.
 PyObject* tv_collect(TraceViewerObject* self, PyObject*) {
 #ifndef DFTRACER_UTILS_ENABLE_ARROW
     PyErr_SetString(PyExc_RuntimeError,
                     "collect() requires the arrow-enabled build");
     return nullptr;
 #else
-    Runtime* rt = resolve_runtime(self);
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
     ViewerPlan plan = *plan_of(self);
-    DataFrame table;
-    if (!run_blocking([&] {
-            View v = build_view_from_data(files, index_dir, plan);
-            table = rt->submit(v.collect()).get();
-        }))
-        return nullptr;
-    return dftracer::utils::python::wrap_dataframe(std::move(table));
+    View v = build_view_from_data(files, index_dir, plan);
+    return dftracer::utils::python::wrap_lazyframe(v.collect());
 #endif
 }
 
@@ -1921,7 +1916,7 @@ PyObject* tv_statistics(TraceViewerObject* self, PyObject*) {
                                AggSpec(AggOp::Std, "dur", "duration_stddev_us"),
                                AggSpec(AggOp::Min, "ts", "min_timestamp_us"),
                                AggSpec(AggOp::Max, "ts", "max_timestamp_us")});
-            table = rt->submit(v.collect()).get();
+            table = rt->submit(v.collect().collect()).get();
         }))
         return nullptr;
 
@@ -2245,8 +2240,9 @@ static PyMethodDef tv_methods[] = {
     {"schema", DFTU_PYCFUNCTION(tv_schema), METH_NOARGS,
      "Map each column to its type (no trace scan)."},
     {"collect", DFTU_PYCFUNCTION(tv_collect), METH_NOARGS,
-     "Run group_by+agg; return a native DataFrame (call .to_arrow() for "
-     "Arrow)."},
+     "Build the group_by+agg plan and return a LazyFrame; nothing scans "
+     "until you call .collect() (-> DataFrame) or .to_arrow()/.to_pandas() "
+     "on the result."},
     {"call_tree", DFTU_PYCFUNCTION(tv_call_tree), METH_VARARGS,
      "call_tree(partition) -> scan, then the events DataFrame plus "
      "level/parent_id (containment nesting per lane)."},

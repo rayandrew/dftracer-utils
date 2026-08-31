@@ -50,8 +50,8 @@ class CompareView {
     coro::CoroTask<dataframe::DataFrame> collect() const {
         // Both sides aggregate concurrently: two pruned scans, one when_all.
         auto [base, variant] = co_await coro::when_all(
-            baseline_.group_by(group_by_).agg(agg_).collect(),
-            variant_.group_by(group_by_).agg(agg_).collect());
+            baseline_.group_by(group_by_).agg(agg_).collect().collect(),
+            variant_.group_by(group_by_).agg(agg_).collect().collect());
         co_return compare_batches(base, variant,
                                   static_cast<std::int64_t>(group_by_.size()));
     }

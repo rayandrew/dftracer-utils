@@ -50,6 +50,13 @@ coro::CoroTask<DataFrame> drain_to_frame(Cursor& in,
         chunks.empty() ? names.size() : chunks.front().size();
     out.columns.reserve(ncols);
     for (std::size_t c = 0; c < ncols; ++c) {
+        // A single chunk needs no merge - concat_columns cannot rejoin a
+        // nested (List/Struct) column, which a single already-complete chunk
+        // (e.g. a resident source's one morsel) may carry.
+        if (chunks.size() == 1) {
+            out.columns.push_back(std::move(chunks.front()[c]));
+            continue;
+        }
         std::vector<const Series*> parts;
         parts.reserve(chunks.size());
         for (auto& ch : chunks) parts.push_back(&ch[c]);

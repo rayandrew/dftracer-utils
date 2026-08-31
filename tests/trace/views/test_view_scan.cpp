@@ -85,6 +85,7 @@ TEST_SUITE("View") {
         auto full = View::from_file(s.gz, s.idx)
                         .group_by({GroupKey::name()})
                         .collect()
+                        .collect()
                         .get();
         REQUIRE(full.num_rows() == 2);  // read (POSIX), fwrite (STDIO)
 
@@ -92,12 +93,14 @@ TEST_SUITE("View") {
                        .group_by({GroupKey::name()})
                        .limit(1)
                        .collect()
+                       .collect()
                        .get();
         CHECK(one.num_rows() == 1);
 
         auto rest = View::from_file(s.gz, s.idx)
                         .group_by({GroupKey::name()})
                         .offset(1)
+                        .collect()
                         .collect()
                         .get();
         CHECK(rest.num_rows() == 1);
@@ -292,6 +295,7 @@ TEST_SUITE("View") {
                                {AggOp::Max, "dur", "max_dur"},
                                {AggOp::Mean, "dur", "mean_dur"}})
                          .collect()
+                         .collect()
                          .get();
 
         CHECK(bhas(table, "cat"));
@@ -312,8 +316,11 @@ TEST_SUITE("View") {
 
     TEST_CASE("View - collect with no group_by returns the matching events") {
         const auto& s = shared_trace();  // 30 POSIX + 20 STDIO = 50 events
-        auto table =
-            View::from_file(s.gz, s.idx).metadata(false).collect().get();
+        auto table = View::from_file(s.gz, s.idx)
+                         .metadata(false)
+                         .collect()
+                         .collect()
+                         .get();
         REQUIRE(table.num_rows() == 50);
         // Every event row carries the top-level columns.
         for (const char* c : {"name", "cat", "pid", "tid", "ts", "dur", "ph"})
@@ -326,6 +333,7 @@ TEST_SUITE("View") {
                          .metadata(false)
                          .query(R"(cat == "POSIX")")
                          .select({"name", "dur"})
+                         .collect()
                          .collect()
                          .get();
         CHECK(posix.num_rows() == 30);
@@ -346,6 +354,7 @@ TEST_SUITE("View") {
                          .phase(Phase::Counters)
                          .group_by({GroupKey::name()})
                          .agg_numeric_args()
+                         .collect()
                          .collect()
                          .get();
 
@@ -378,6 +387,7 @@ TEST_SUITE("View") {
                 .group_by({GroupKey::name()})
                 .agg_numeric_args({AggSpec(AggOp::Sum), AggSpec(AggOp::Max),
                                    AggSpec(AggOp::Mean)})
+                .collect()
                 .collect()
                 .get();
 
@@ -441,6 +451,7 @@ TEST_SUITE("View") {
         auto table = v.phase(Phase::Events)
                          .group_by({GroupKey::cat()})
                          .agg({{AggOp::Count, "", "count"}})
+                         .collect()
                          .collect()
                          .get();
 
