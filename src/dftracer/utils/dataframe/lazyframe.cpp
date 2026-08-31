@@ -1939,17 +1939,32 @@ std::optional<DataFrame> try_fuse_map(
         }
 
     if (!filters.empty()) {
-        Expr pred = filters[0]->pred;
+        // A trivial `col <cmp> scalar` filter runs as a direct Series kernel;
+        // only a compound predicate goes through the expression compiler.
+        auto mask_of = [&](const Expr& p) -> Series {
+            std::int32_t c;
+            CmpOp op;
+            Scalar rhs;
+            if (expr_as_col_cmp(p, &c, &op, &rhs))
+                return src.columns[static_cast<std::size_t>(c)].compare(op,
+                                                                        rhs);
+            return eval(p, column_ptrs(src.columns));
+        };
+        Series mask = mask_of(filters[0]->pred);
         for (std::size_t i = 1; i < filters.size(); ++i)
-            pred = expr_logical(DFTU_LOGICAL_AND, pred, filters[i]->pred);
-        sub = sub.filter(eval(pred, column_ptrs(src.columns)));
+            mask = mask & mask_of(filters[i]->pred);
+        sub = sub.filter(mask);
     }
 
-    // Compute only the derived outputs; a bare column passes through zero-copy.
+    // Bare columns pass through zero-copy, `col <op> col` runs a direct Series
+    // kernel, and only the rest go through the CSE-fused compiler.
     std::vector<Expr> computed;
-    for (const Expr& e : outs)
-        if (expr_col_index(e) < 0)
+    for (const Expr& e : outs) {
+        std::int32_t a, b;
+        BinaryOp op;
+        if (expr_col_index(e) < 0 && !expr_as_col_binary(e, &op, &a, &b))
             computed.push_back(expr_remap_cols(e, old_to_new));
+    }
     std::vector<Series> comp =
         computed.empty() ? std::vector<Series>{}
                          : eval_many(computed, column_ptrs(sub.columns));
@@ -1958,12 +1973,33 @@ std::optional<DataFrame> try_fuse_map(
     out.columns.reserve(outs.size());
     std::size_t ci = 0;
     for (const Expr& e : outs) {
-        const std::int32_t c = expr_col_index(e);
-        if (c >= 0)
+        std::int32_t c = expr_col_index(e), a, b;
+        BinaryOp op;
+        if (c >= 0) {
             out.columns.push_back(
                 sub.columns[static_cast<std::size_t>(old_to_new[c])].share());
-        else
+        } else if (expr_as_col_binary(e, &op, &a, &b)) {
+            const Series& x =
+                sub.columns[static_cast<std::size_t>(old_to_new[a])];
+            const Series& y =
+                sub.columns[static_cast<std::size_t>(old_to_new[b])];
+            switch (op) {
+                case BinaryOp::Add:
+                    out.columns.push_back(x.add(y));
+                    break;
+                case BinaryOp::Sub:
+                    out.columns.push_back(x.sub(y));
+                    break;
+                case BinaryOp::Mul:
+                    out.columns.push_back(x.mul(y));
+                    break;
+                case BinaryOp::Div:
+                    out.columns.push_back(x.div(y));
+                    break;
+            }
+        } else {
             out.columns.push_back(std::move(comp[ci++]));
+        }
     }
     return out;
 }

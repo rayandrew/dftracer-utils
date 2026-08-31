@@ -63,6 +63,28 @@ std::int32_t expr_col_index(const Expr& e) {
     return n && n->kind == ExprKind::Col ? n->i : -1;
 }
 
+bool expr_as_col_cmp(const Expr& e, std::int32_t* col, CmpOp* op, Scalar* rhs) {
+    const auto& n = e.node();
+    if (!n || n->kind != ExprKind::Cmp || !n->a || n->a->kind != ExprKind::Col)
+        return false;
+    *col = n->a->i;
+    *op = static_cast<CmpOp>(n->i);
+    *rhs = n->scalar;
+    return true;
+}
+
+bool expr_as_col_binary(const Expr& e, BinaryOp* op, std::int32_t* a,
+                        std::int32_t* b) {
+    const auto& n = e.node();
+    if (!n || n->kind != ExprKind::Binary || !n->a || !n->b ||
+        n->a->kind != ExprKind::Col || n->b->kind != ExprKind::Col)
+        return false;
+    *op = static_cast<BinaryOp>(n->i);
+    *a = n->a->i;
+    *b = n->b->i;
+    return true;
+}
+
 namespace {
 bool node_references(const std::shared_ptr<const ExprNode>& n,
                      std::int32_t index) {

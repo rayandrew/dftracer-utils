@@ -535,6 +535,13 @@ class Series {
         return ge(v);
     }
 
+    /// Compare against a scalar with a runtime op code, producing a Bool mask.
+    /// For a planner holding op and rhs as values.
+    Series compare(CmpOp op, Scalar rhs) const {
+        return Series{
+            dftu_series_compare(handle_, static_cast<dftu_cmp_op>(op), rhs)};
+    }
+
    private:
     template <class T>
     static dftu_scalar to_scalar_(T v) {

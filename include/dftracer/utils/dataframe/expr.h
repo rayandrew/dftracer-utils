@@ -51,6 +51,15 @@ std::int32_t expr_col_index(const Expr& e);
 /// planner tell whether a predicate depends on a given column.
 bool expr_references(const Expr& e, std::int32_t index);
 
+/// If `e` is `col <cmp> scalar`, fill *col/*op/*rhs and return true. Lets the
+/// planner run a trivial predicate as a direct Series kernel, skipping the
+/// expression compiler.
+bool expr_as_col_cmp(const Expr& e, std::int32_t* col, CmpOp* op, Scalar* rhs);
+
+/// If `e` is `col <binary> col`, fill *op/*a/*b and return true.
+bool expr_as_col_binary(const Expr& e, BinaryOp* op, std::int32_t* a,
+                        std::int32_t* b);
+
 /// Rewrite every column reference `col(i)` to `col(old_to_new[i])`, leaving an
 /// out-of-range index unchanged. Lets the planner renumber a predicate after
 /// columns are dropped or reordered (projection pushdown). Returns a new Expr;
