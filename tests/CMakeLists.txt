@@ -16,6 +16,12 @@ target_link_libraries(
   PRIVATE doctest::doctest ghc_filesystem)
 link_zlib(testing_utilities STATIC)
 
+# Pure-C ABI guard: compile the public ABI headers with the C compiler so any
+# C++ leak into a */abi.h fails the build.
+add_library(c_abi_guard OBJECT abi/c_abi_guard.c)
+target_include_directories(
+  c_abi_guard PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}/include)
+
 # ##############################################################################
 # Unit Tests
 # ##############################################################################
@@ -27,6 +33,7 @@ link_zlib(testing_utilities STATIC)
 set(TEST_CPP_SOURCES
     # Core tests
     core/test_runtime.cpp
+    core/test_task_abi.cpp
     core/test_logging.cpp
     core/test_string_intern.cpp
     core/test_hex64.cpp
