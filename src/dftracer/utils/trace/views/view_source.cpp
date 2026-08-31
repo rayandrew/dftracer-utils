@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/coro/coro.h>
 #include <dftracer/utils/core/pipeline/executor.h>
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/stream_row_fold.h>
 #include <dftracer/utils/trace/views/view_plan.h>
 #include <dftracer/utils/trace/views/view_source.h>
@@ -78,9 +79,30 @@ std::shared_future<void> spawn_on_current_executor(coro::CoroTask<void> task) {
     return fut;
 }
 
+// Rows [offset, offset+n) of `m`, sharing `m`'s schema (name_ids/intern) since
+// a row slice does not change it.
+dftracer::utils::dataframe::Morsel slice_morsel(
+    const dftracer::utils::dataframe::Morsel& m, std::int64_t offset,
+    std::int64_t n) {
+    dftracer::utils::dataframe::DataFrame tmp;
+    tmp.names.assign(m.columns.size(), std::string());
+    for (const dftracer::utils::dataframe::Series& c : m.columns)
+        tmp.columns.push_back(c.share());
+    dftracer::utils::dataframe::DataFrame s = tmp.slice(offset, n);
+
+    dftracer::utils::dataframe::Morsel out;
+    out.rows = n;
+    out.columns = std::move(s.columns);
+    out.name_ids = m.name_ids;
+    out.intern = m.intern;
+    return out;
+}
+
 // Pulls morsels off the channel, releasing each one's share of `budget_` back
 // to the fold's producers once it is handed off; surfaces the producer's
-// exception, if any, once the channel drains.
+// exception, if any, once the channel drains. A caller-supplied `max_rows`
+// re-chunks a received morsel into <=max_rows-row sub-morsels instead of
+// handing the whole (one-per-scan-batch) morsel out at once.
 class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
    public:
     StreamViewCursor(
@@ -93,19 +115,45 @@ class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
           producer_(std::move(producer)) {}
 
     coro::CoroTask<std::optional<dftracer::utils::dataframe::Morsel>> next(
-        std::int64_t /*max_rows*/) override {
-        auto item = co_await channel_->receive();
-        if (item)
-            budget_->release(detail::morsel_bytes(*item));
-        else
-            producer_.get();
-        co_return item;
+        std::int64_t max_rows) override {
+        if (max_rows <= 0) {
+            auto item = co_await channel_->receive();
+            if (item)
+                budget_->release(detail::morsel_bytes(*item));
+            else
+                producer_.get();
+            co_return item;
+        }
+
+        if (!pending_ || offset_ >= pending_->rows) {
+            auto item = co_await channel_->receive();
+            if (!item) {
+                producer_.get();
+                co_return std::nullopt;
+            }
+            pending_bytes_ = detail::morsel_bytes(*item);
+            pending_ = std::move(item);
+            offset_ = 0;
+        }
+
+        const std::int64_t n = std::min(max_rows, pending_->rows - offset_);
+        dftracer::utils::dataframe::Morsel out =
+            slice_morsel(*pending_, offset_, n);
+        offset_ += n;
+        if (offset_ >= pending_->rows) {
+            budget_->release(pending_bytes_);
+            pending_.reset();
+        }
+        co_return out;
     }
 
    private:
     std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>> channel_;
     std::shared_ptr<coro::CoroSemaphore> budget_;
     std::shared_future<void> producer_;
+    std::optional<dftracer::utils::dataframe::Morsel> pending_;
+    std::int64_t offset_ = 0;
+    std::uint64_t pending_bytes_ = 0;
 };
 
 }  // namespace
@@ -113,8 +161,12 @@ class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
 bool ViewSource::can_stream_rows() const {
     if (!view_.is_row_query()) return false;
     const detail::ViewPlan& p = *view_.plan_;
+    // View::collect() always strips sort/topk/offset/limit before building a
+    // ViewSource, and select unless it needs the resolver (resolved.*/r.*
+    // fields, which the raw stream never computes); these checks stay as a
+    // defensive guard for any other caller.
     return p.sort_col.empty() && p.topk_col.empty() && p.offset == 0 &&
-           p.limit == 0 && p.select.empty();
+           p.limit == 0 && !detail::select_needs_resolver(p.select);
 }
 
 // Matches build_row_frame's own empty-select order (fixed top-level fields,

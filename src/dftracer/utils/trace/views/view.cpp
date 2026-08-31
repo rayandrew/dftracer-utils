@@ -22,7 +22,9 @@
 #include <dftracer/utils/utilities/indexer/index_database.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -536,8 +538,42 @@ coro::CoroTask<ExportStats> View::export_trace(TraceWriteOptions opts) const {
 }
 
 dataframe::LazyFrame View::collect() const {
-    return dataframe::LazyFrame::scan(std::make_shared<ViewSource>(*this))
-        .memory_budget(plan_->memory_budget);
+    // A resolved.*/r.* select on a row query is baked into NativeRowFold's
+    // build (the raw stream never computes it), so that one case keeps select
+    // in the scan plan and falls back to ViewSource's buffered path; every
+    // other post-scan op moves to the LazyFrame chain below so it streams.
+    const bool select_in_scan = detail::is_row_query(*plan_) &&
+                                detail::select_needs_resolver(plan_->select);
+
+    std::shared_ptr<detail::ViewPlan> stripped = clone(plan_);
+    if (!select_in_scan) stripped->select.clear();
+    stripped->sort_col.clear();
+    stripped->sort_desc = false;
+    stripped->topk_col.clear();
+    stripped->topk_k = -1;
+    stripped->topk_largest = true;
+    stripped->offset = 0;
+    stripped->limit = 0;
+
+    dataframe::LazyFrame lf =
+        dataframe::LazyFrame::scan(
+            std::make_shared<ViewSource>(View(std::move(stripped))))
+            .memory_budget(plan_->memory_budget);
+
+    if (!plan_->sort_col.empty())
+        lf = lf.sort_by(plan_->sort_col, plan_->sort_desc);
+    if (!plan_->topk_col.empty())
+        lf = lf.topk(plan_->topk_col, plan_->topk_k, plan_->topk_largest);
+    if (plan_->offset || plan_->limit) {
+        const std::int64_t off = static_cast<std::int64_t>(plan_->offset);
+        const std::int64_t len = plan_->limit
+                                     ? static_cast<std::int64_t>(plan_->limit)
+                                     : std::numeric_limits<std::int64_t>::max();
+        lf = lf.slice(off, len);
+    }
+    if (!select_in_scan && !plan_->select.empty())
+        lf = lf.select(plan_->select);
+    return lf;
 }
 
 coro::AsyncGenerator<dataframe::DataFrame> View::stream(

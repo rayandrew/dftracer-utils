@@ -161,6 +161,64 @@ TEST_SUITE("View - streaming row query") {
         CHECK(rows == via_collect.num_rows());
     }
 
+    TEST_CASE(
+        "View::stream() with select+sort+limit streams multiple bounded "
+        "chunks matching collect()") {
+        const auto& s = shared_trace();  // 50 rows
+        View v = View::from_file(s.gz, s.idx)
+                     .metadata(false)
+                     .select({"cat", "name", "dur"})
+                     .sort_by("dur", /*descending=*/true)
+                     .limit(20);
+
+        auto [chunks, rows] =
+            dftracer::utils::default_runtime()
+                .submit([](const View& vv)
+                            -> coro::CoroTask<
+                                std::pair<std::size_t, std::int64_t>> {
+                    std::size_t n = 0;
+                    std::int64_t rows = 0;
+                    auto gen = vv.stream(5);
+                    while (auto chunk = co_await gen.next()) {
+                        ++n;
+                        rows += chunk->num_rows();
+                    }
+                    co_return std::make_pair(n, rows);
+                }(v))
+                .get();
+
+        dataframe::DataFrame via_collect = run(v.collect().collect());
+        CHECK(chunks > 1);
+        CHECK(rows == via_collect.num_rows());
+        REQUIRE(via_collect.num_rows() == 20);
+        REQUIRE(via_collect.columns.size() == 3);
+        // sort_by(dur, desc) then limit(20): the top 20 durations, descending.
+        for (std::int64_t i = 1; i < via_collect.num_rows(); ++i)
+            CHECK(bnum(via_collect, i - 1, "dur") >=
+                  bnum(via_collect, i, "dur"));
+    }
+
+    TEST_CASE(
+        "aggregated View sort_by+limit is identical whether run via "
+        "collect() or collect_frame()") {
+        TestEnvironment env(200);
+        std::string gz = create_mixed_arg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        View v = View::from_file(gz, idx)
+                     .group_by({GroupKey::name()})
+                     .agg({{AggOp::Count, "", "n"}})
+                     .sort_by("n", /*descending=*/true)
+                     .limit(1);
+
+        dataframe::DataFrame via_lazy = run(v.collect().collect());
+        dataframe::DataFrame via_eager = run(v.collect_frame());
+
+        REQUIRE(via_lazy.num_rows() == 1);
+        REQUIRE(via_lazy.num_rows() == via_eager.num_rows());
+        CHECK(bstr(via_lazy, 0, "name") == bstr(via_eager, 0, "name"));
+        CHECK(bnum(via_lazy, 0, "n") == bnum(via_eager, 0, "n"));
+    }
+
     TEST_CASE("View::stream() over a histogram aggregation yields one chunk") {
         TestEnvironment env(200);
         std::string gz = create_mixed_arg_trace(env);
