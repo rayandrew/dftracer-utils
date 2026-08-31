@@ -1,4 +1,5 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+#include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/dataframe/dataframe.h>
@@ -7,17 +8,23 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
+using dftracer::utils::StringIntern;
 using dftracer::utils::coro::CoroTask;
 using dftracer::utils::dataframe::Agg;
 using dftracer::utils::dataframe::col;
+using dftracer::utils::dataframe::Cursor;
 using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::eval;
 using dftracer::utils::dataframe::GroupAgg;
 using dftracer::utils::dataframe::LazyFrame;
+using dftracer::utils::dataframe::Morsel;
 using dftracer::utils::dataframe::Series;
+using dftracer::utils::dataframe::Source;
 
 namespace {
 
@@ -40,6 +47,57 @@ std::vector<const Series*> ptrs(const DataFrame& df) {
     for (const Series& c : df.columns) in.push_back(&c);
     return in;
 }
+
+// A Cursor whose two morsels carry differing schemas via name_ids, to drive
+// the reconcile-by-name path of drain_to_frame.
+class RaggedCursor : public Cursor {
+   public:
+    explicit RaggedCursor(std::shared_ptr<StringIntern> intern)
+        : intern_(std::move(intern)) {}
+
+    CoroTask<std::optional<Morsel>> next(std::int64_t) override {
+        if (step_ == 0) {
+            ++step_;
+            std::vector<std::int64_t> a{1, 2};
+            std::vector<std::int64_t> b{10, 20};
+            Morsel m;
+            m.columns.push_back(Series::flat_i64(a.data(), 2));
+            m.columns.push_back(Series::flat_i64(b.data(), 2));
+            m.rows = 2;
+            m.name_ids = {intern_->get_or_insert("a"),
+                          intern_->get_or_insert("b")};
+            m.intern = intern_;
+            co_return m;
+        }
+        if (step_ == 1) {
+            ++step_;
+            std::vector<double> a{3.5};
+            std::vector<std::string> c{"x"};
+            Morsel m;
+            m.columns.push_back(Series::flat_f64(a.data(), 1));
+            m.columns.push_back(Series::strings(c));
+            m.rows = 1;
+            m.name_ids = {intern_->get_or_insert("a"),
+                          intern_->get_or_insert("c")};
+            m.intern = intern_;
+            co_return m;
+        }
+        co_return std::nullopt;
+    }
+
+   private:
+    int step_ = 0;
+    std::shared_ptr<StringIntern> intern_;
+};
+
+class RaggedSource : public Source {
+   public:
+    std::vector<std::string> names() const override { return {"a"}; }
+    std::unique_ptr<Cursor> open() const override {
+        auto intern = std::make_shared<StringIntern>();
+        return std::make_unique<RaggedCursor>(std::move(intern));
+    }
+};
 
 }  // namespace
 
@@ -512,5 +570,36 @@ TEST_SUITE("lazyframe") {
         // c = a+b in {11,22,33,44,55,66}; c > 50 -> rows 5,6 (c=55,66).
         CHECK(r.num_rows() == 2);
         CHECK(r.column("c").data<std::int64_t>()[0] == 55);
+    }
+
+    TEST_CASE("streaming source with per-morsel schema reconciles by name") {
+        auto source = std::make_shared<RaggedSource>();
+        DataFrame r = run(LazyFrame::scan(source).collect());
+
+        REQUIRE(r.num_rows() == 3);
+        REQUIRE(r.column_index("a") >= 0);
+        REQUIRE(r.column_index("b") >= 0);
+        REQUIRE(r.column_index("c") >= 0);
+
+        const Series& a =
+            r.columns[static_cast<std::size_t>(r.column_index("a"))];
+        CHECK(a.type() == dftracer::utils::dataframe::TypeId::Float64);
+        const double* av = a.data<double>();
+        CHECK(av[0] == doctest::Approx(1.0));
+        CHECK(av[1] == doctest::Approx(2.0));
+        CHECK(av[2] == doctest::Approx(3.5));
+
+        const Series& b =
+            r.columns[static_cast<std::size_t>(r.column_index("b"))];
+        CHECK_FALSE(b.is_null(0));
+        CHECK_FALSE(b.is_null(1));
+        CHECK(b.is_null(2));
+
+        const Series& c =
+            r.columns[static_cast<std::size_t>(r.column_index("c"))];
+        CHECK(c.is_null(0));
+        CHECK(c.is_null(1));
+        CHECK_FALSE(c.is_null(2));
+        CHECK(c.string_at(2) == "x");
     }
 }

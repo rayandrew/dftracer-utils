@@ -1,6 +1,7 @@
 #ifndef DFTRACER_UTILS_DATAFRAME_LAZYFRAME_H
 #define DFTRACER_UTILS_DATAFRAME_LAZYFRAME_H
 
+#include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
@@ -18,6 +19,11 @@ namespace dftracer::utils::dataframe {
 struct Morsel {
     std::vector<Series> columns;
     std::int64_t rows = 0;
+    /// Per-morsel schema for a streaming source whose morsels may differ in
+    /// columns or types. Empty means positional alignment with the plan schema
+    /// (the common case). One interned id per column, resolved via `intern`.
+    std::vector<std::uint32_t> name_ids;
+    std::shared_ptr<const dftracer::utils::StringIntern> intern;
 };
 
 /// A stateful reader over one Source. next() returns the next morsel, or

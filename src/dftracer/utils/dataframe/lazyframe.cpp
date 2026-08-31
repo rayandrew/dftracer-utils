@@ -39,7 +39,26 @@ constexpr std::int64_t DEFAULT_MORSEL_ROWS = 65536;
 coro::CoroTask<DataFrame> drain_to_frame(Cursor& in,
                                          const std::vector<std::string>& names,
                                          std::int64_t max_rows) {
+    auto first = co_await in.next(max_rows);
+    if (first && !first->name_ids.empty()) {
+        // Per-morsel schema: reconcile by name instead of positionally.
+        std::vector<DataFrame> parts;
+        for (auto m = std::move(first); m; m = co_await in.next(max_rows)) {
+            DataFrame df;
+            df.columns = std::move(m->columns);
+            df.names.reserve(m->name_ids.size());
+            for (std::uint32_t id : m->name_ids)
+                df.names.emplace_back(m->intern->resolve(id));
+            parts.push_back(std::move(df));
+        }
+        if (parts.empty()) co_return DataFrame{};
+        std::vector<const DataFrame*> ptrs;
+        ptrs.reserve(parts.size());
+        for (const DataFrame& p : parts) ptrs.push_back(&p);
+        co_return concat(ptrs, ConcatHow::Diagonal);
+    }
     std::vector<std::vector<Series>> chunks;
+    if (first) chunks.push_back(std::move(first->columns));
     while (auto m = co_await in.next(max_rows))
         chunks.push_back(std::move(m->columns));
     DataFrame out;
