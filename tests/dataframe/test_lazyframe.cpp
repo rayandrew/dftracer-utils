@@ -95,6 +95,28 @@ TEST_SUITE("lazyframe") {
         CHECK(r.column("c").data<std::int64_t>()[0] == 44);  // 4 + 40
     }
 
+    TEST_CASE("predicate pushdown moves a filter before sort_by") {
+        // sort_by only reorders rows, so a row-local filter hoists ahead of it
+        // and the sort runs on the survivors only; the result is those rows in
+        // sorted order.
+        auto lf = make_df().lazy().sort_by("a", true).filter(col(0) >
+                                                             std::int64_t{3});
+        const std::string plan = lf.explain();
+        const auto fpos = plan.find("filter");
+        const auto spos = plan.find("sort");
+        CHECK(fpos != std::string::npos);
+        CHECK(spos != std::string::npos);
+        CHECK(fpos < spos);  // filter reordered before sort_by
+
+        DataFrame r = lf.collect();
+        // survivors a>3 => {4,5,6}, sorted descending => {6,5,4}.
+        CHECK(r.num_rows() == 3);
+        const std::int64_t* a = r.column("a").data<std::int64_t>();
+        CHECK(a[0] == 6);
+        CHECK(a[1] == 5);
+        CHECK(a[2] == 4);
+    }
+
     TEST_CASE("streaming row ops: head / slice / tail / rename") {
         LazyFrame base = make_df().lazy();      // a=1..6, b=10..60
 

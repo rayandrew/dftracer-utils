@@ -1768,15 +1768,30 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
         sch = out_schema(*op, std::move(sch));
     }
 
+    // Hoist each filter as early as possible. A filter is row-local and
+    // indexes its columns by position, so it commutes with any preceding op
+    // that neither drops the rows it reads nor renumbers those columns:
+    //  - with_column, unless the predicate reads the column it writes;
+    //  - sort_by, which only reorders rows (filter-before-sort is the big win:
+    //    the sort then runs on the surviving rows only);
+    //  - rename, which only relabels columns (positions unchanged).
+    // Both endpoints keep the same schema width, so a hoisted filter's column
+    // indices and every with_column's output index stay valid.
     bool changed = true;
     while (changed) {
         changed = false;
         for (std::size_t i = 1; i < nodes.size(); ++i) {
             const auto* filt = std::get_if<FilterOp>(&nodes[i].op->node);
-            const bool prev_wc =
-                std::holds_alternative<WithColumnOp>(nodes[i - 1].op->node);
-            if (filt && prev_wc &&
-                !expr_references(filt->pred, nodes[i - 1].write_idx)) {
+            if (!filt) continue;
+            const LazyOp& prev = *nodes[i - 1].op;
+            bool hoist = false;
+            if (std::holds_alternative<WithColumnOp>(prev.node)) {
+                hoist = !expr_references(filt->pred, nodes[i - 1].write_idx);
+            } else if (std::holds_alternative<SortByOp>(prev.node) ||
+                       std::holds_alternative<RenameOp>(prev.node)) {
+                hoist = true;
+            }
+            if (hoist) {
                 std::swap(nodes[i - 1], nodes[i]);
                 changed = true;
             }

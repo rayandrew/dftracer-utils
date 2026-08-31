@@ -11,6 +11,7 @@
 //   dataframe_parallel_bench [rows] [groups]
 
 #include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/field_stat.h>
 #include <dftracer/utils/dataframe/kernels/field_stat.h>
 #include <dftracer/utils/dataframe/kernels/stats.h>
@@ -1316,6 +1317,54 @@ int main(int argc, char** argv) {
                 es_ok ? "OK" : "MISMATCH", es_max_rel,
                 static_cast<long long>(es_valid_mismatch));
     ok = ok && es_ok;
+
+    // Lazy optimizer win: sort_by then a selective filter. Eager sorts all
+    // rows then filters; lazy reorders the filter ahead of the sort, so the
+    // sort runs only on the survivors. Same result (survivors in sorted order),
+    // very different cost. Both run with the backend installed.
+    install_runtime_parallel_backend();
+    const std::int64_t keep_from = rows - rows / 20;  // keep ~5% (v = row index)
+    dftu_scalar thr{};
+    thr.kind = DFTU_SCALAR_TAG_I64;
+    thr.value.i = keep_from;
+    Expr keep = expr_cmp(DFTU_CMP_GT, expr_col(1), thr);  // column 1 = v
+    auto eager_sort_filter = [&]() {
+        DataFrame se = df.sort_by("s");
+        Series m = se.column("v") > keep_from;
+        return se.filter(m);
+    };
+    auto lazy_sort_filter = [&]() {
+        return df.lazy().sort_by("s").filter(keep).collect();
+    };
+    auto time_it = [&](auto&& fn, int reps) {
+        double best = 1e300;
+        for (int r = 0; r < reps; ++r) {
+            const auto t0 = std::chrono::steady_clock::now();
+            DataFrame out = fn();
+            const auto t1 = std::chrono::steady_clock::now();
+            do_not_optimize(out.num_rows());
+            best = std::min(
+                best,
+                std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    const double sf_eager = time_it(eager_sort_filter, 5);
+    const double sf_lazy = time_it(lazy_sort_filter, 5);
+    DataFrame sf_e = eager_sort_filter();
+    DataFrame sf_l = lazy_sort_filter();
+    bool sf_ok = sf_e.num_rows() == sf_l.num_rows();
+    if (sf_ok) {
+        const std::int64_t* es = sf_e.column("s").data<std::int64_t>();
+        const std::int64_t* ls = sf_l.column("s").data<std::int64_t>();
+        for (std::int64_t i = 0; sf_ok && i < sf_e.num_rows(); ++i)
+            sf_ok = es[i] == ls[i];
+    }
+    std::printf(
+        "sort+filter (optimizer reorder): eager %8.2f ms | lazy %8.2f ms "
+        "(%.2fx) correctness: %s\n",
+        sf_eager, sf_lazy, sf_eager / sf_lazy, sf_ok ? "OK" : "MISMATCH");
+    ok = ok && sf_ok;
 
     return ok ? 0 : 1;
 }
