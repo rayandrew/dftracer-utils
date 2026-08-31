@@ -87,6 +87,38 @@ TEST_SUITE("View - streaming row query") {
         CHECK(row_key_set(via_lazy) == row_key_set(via_eager));
     }
 
+    TEST_CASE("View::stream() drained matches View::collect().collect()") {
+        TestEnvironment env(200);
+        std::string gz = create_mixed_arg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        View v = View::from_file(gz, idx).metadata(false);
+
+        auto drain = [](const View& view) {
+            return dftracer::utils::default_runtime()
+                .submit([](const View& vv)
+                            -> coro::CoroTask<std::vector<
+                                std::tuple<std::string, double, double>>> {
+                    std::vector<std::tuple<std::string, double, double>> rows;
+                    auto gen = vv.stream();
+                    while (auto chunk = co_await gen.next()) {
+                        auto part = row_key_set(*chunk);
+                        rows.insert(rows.end(), part.begin(), part.end());
+                    }
+                    co_return rows;
+                }(view))
+                .get();
+        };
+
+        std::vector<std::tuple<std::string, double, double>> via_stream =
+            drain(v);
+        std::sort(via_stream.begin(), via_stream.end());
+        dataframe::DataFrame via_collect = run(v.collect().collect());
+
+        REQUIRE(static_cast<std::int64_t>(via_stream.size()) ==
+                via_collect.num_rows());
+        CHECK(via_stream == row_key_set(via_collect));
+    }
+
     TEST_CASE("collect() falls back to buffered collect_frame() with select") {
         const auto& s = shared_trace();
         View v = View::from_file(s.gz, s.idx)

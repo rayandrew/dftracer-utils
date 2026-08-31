@@ -540,6 +540,13 @@ dataframe::LazyFrame View::collect() const {
         .memory_budget(plan_->memory_budget);
 }
 
+coro::AsyncGenerator<dataframe::DataFrame> View::stream(
+    std::int64_t morsel_rows) const {
+    dataframe::LazyFrame lf = collect();
+    auto gen = lf.stream(morsel_rows);
+    while (auto df = co_await gen.next()) co_yield std::move(*df);
+}
+
 coro::CoroTask<dataframe::DataFrame> View::collect_frame() const {
     // A row query (no group_by/agg) returns the matching events, not a count.
     if (detail::is_row_query(*plan_))

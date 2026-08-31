@@ -1,6 +1,7 @@
 #ifndef DFTRACER_UTILS_TRACE_VIEWS_VIEW_H
 #define DFTRACER_UTILS_TRACE_VIEWS_VIEW_H
 
+#include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/field.h>
@@ -653,6 +654,12 @@ class View {
     /// agg counts per group; no group_by folds the whole set into one row.
     /// Builds the plan only; the scan runs on the LazyFrame's collect().
     dftracer::utils::dataframe::LazyFrame collect() const;
+
+    /// Streaming terminal over collect()'s LazyFrame: each yielded DataFrame
+    /// is a standalone chunk of at most `morsel_rows` rows (<= 0 means auto).
+    /// One-shot; re-call to restart. Drains this to get collect()'s result.
+    coro::AsyncGenerator<dftracer::utils::dataframe::DataFrame> stream(
+        std::int64_t morsel_rows = 0) const;
 
     /// The eager scan behind collect(). Public for ViewSource; prefer
     /// collect() otherwise.
