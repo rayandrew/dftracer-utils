@@ -45,18 +45,18 @@ std::string create_mixed_arg_trace(TestEnvironment& env) {
 std::vector<std::tuple<std::string, double, double>> row_key_set(
     const dataframe::DataFrame& df) {
     std::vector<std::tuple<std::string, double, double>> rows;
-    const bool has_x = bhas(df, "x");
-    const bool has_y = bhas(df, "y");
+    const bool has_x = bhas(df, "args.x");
+    const bool has_y = bhas(df, "args.y");
     for (std::int64_t i = 0; i < df.num_rows(); ++i) {
         const double x =
-            has_x && !df.columns[static_cast<std::size_t>(bcol(df, "x"))]
+            has_x && !df.columns[static_cast<std::size_t>(bcol(df, "args.x"))]
                           .is_null(i)
-                ? bnum(df, i, "x")
+                ? bnum(df, i, "args.x")
                 : -1.0;
         const double y =
-            has_y && !df.columns[static_cast<std::size_t>(bcol(df, "y"))]
+            has_y && !df.columns[static_cast<std::size_t>(bcol(df, "args.y"))]
                           .is_null(i)
-                ? bnum(df, i, "y")
+                ? bnum(df, i, "args.y")
                 : -1.0;
         rows.emplace_back(bstr(df, i, "name"), x, y);
     }
@@ -79,10 +79,10 @@ TEST_SUITE("View - streaming row query") {
 
         REQUIRE(via_lazy.num_rows() == 50);
         REQUIRE(via_lazy.num_rows() == via_eager.num_rows());
-        CHECK(bhas(via_lazy, "x"));
-        CHECK(bhas(via_lazy, "y"));
-        CHECK(bhas(via_eager, "x"));
-        CHECK(bhas(via_eager, "y"));
+        CHECK(bhas(via_lazy, "args.x"));
+        CHECK(bhas(via_lazy, "args.y"));
+        CHECK(bhas(via_eager, "args.x"));
+        CHECK(bhas(via_eager, "args.y"));
 
         CHECK(row_key_set(via_lazy) == row_key_set(via_eager));
     }

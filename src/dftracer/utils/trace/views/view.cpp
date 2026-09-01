@@ -546,8 +546,8 @@ dataframe::LazyFrame View::collect() const {
     // data-dependent (its arg columns are discovered at scan time), so a
     // LazyFrame projection resolved against the source's index-derived schema
     // would miss an un-indexed arg column and index the morsel out of bounds.
-    const bool select_in_scan =
-        detail::is_row_query(*plan_) && !plan_->select.empty();
+    const bool row_query = detail::is_row_query(*plan_);
+    const bool select_in_scan = row_query && !plan_->select.empty();
 
     std::shared_ptr<detail::ViewPlan> stripped = clone(plan_);
     if (!select_in_scan) stripped->select.clear();
@@ -564,10 +564,19 @@ dataframe::LazyFrame View::collect() const {
             std::make_shared<ViewSource>(View(std::move(stripped))))
             .memory_budget(plan_->memory_budget);
 
+    // A row query's scan producer canonicalizes arg column names to
+    // "args.<key>" (see build_row_frame); sort/topk on a bare arg name must
+    // resolve to that same column.
     if (!plan_->sort_col.empty())
-        lf = lf.sort_by(plan_->sort_col, plan_->sort_desc);
+        lf = lf.sort_by(row_query
+                            ? detail::canonical_row_column_name(plan_->sort_col)
+                            : plan_->sort_col,
+                        plan_->sort_desc);
     if (!plan_->topk_col.empty())
-        lf = lf.topk(plan_->topk_col, plan_->topk_k, plan_->topk_largest);
+        lf = lf.topk(row_query
+                         ? detail::canonical_row_column_name(plan_->topk_col)
+                         : plan_->topk_col,
+                     plan_->topk_k, plan_->topk_largest);
     if (plan_->offset || plan_->limit) {
         const std::int64_t off = static_cast<std::int64_t>(plan_->offset);
         const std::int64_t len = plan_->limit

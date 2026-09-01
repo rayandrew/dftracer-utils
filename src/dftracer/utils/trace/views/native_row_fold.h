@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace dftracer::utils::trace::views::detail {
@@ -29,6 +30,14 @@ dataframe::DataFrame build_row_frame(
 /// True if `select` names any resolved.*/r.* field, so the caller should build
 /// a GroupResolver (which opens the index name tables) for build_row_frame.
 bool select_needs_resolver(const std::vector<std::string>& select);
+
+/// The output column name build_row_frame's select branch gives `sel`: a
+/// top-level field or resolved.*/r.* virtual field keeps its own name;
+/// fhash/hhash keep their bare name; anything else is a flattened arg and is
+/// canonicalized to "args.<key>" (accepting `sel` bare or "args."-prefixed).
+/// ViewSource::names() uses this so a streamed morsel's schema always matches
+/// what build_row_frame actually emits for the same select.
+std::string canonical_row_column_name(std::string_view sel);
 
 /// Collect matching raw events straight into a native DataFrame. The
 /// row-query terminal (collect() / stream() with no group_by/agg) folds every

@@ -264,6 +264,14 @@ bool select_needs_resolver(const std::vector<std::string>& select) {
     return false;
 }
 
+std::string canonical_row_column_name(std::string_view sel) {
+    if (is_top_level(sel)) return std::string(sel);
+    if (resolved_kind(sel) != ResolvedKind::None) return std::string(sel);
+    const std::string_view key = strip_args_prefix(sel);
+    if (is_hash_field(key)) return std::string(key);
+    return std::string(dftracer::utils::ARGS_PREFIX) + std::string(key);
+}
+
 dataframe::DataFrame build_row_frame(
     const std::vector<FoldEvent>& evs,
     const dftracer::utils::StringIntern& intern,
@@ -303,12 +311,12 @@ dataframe::DataFrame build_row_frame(
             named.emplace_back(std::string(intern_->resolve(k)), k);
         std::sort(named.begin(), named.end());
         for (const auto& [nm, k] : named) {
-            out.names.push_back(nm);
+            out.names.push_back(std::string(dftracer::utils::ARGS_PREFIX) + nm);
             out.columns.push_back(arg_column(evs, k, *intern_));
         }
     } else {
         for (const std::string& sel : select_) {
-            out.names.push_back(sel);
+            out.names.push_back(canonical_row_column_name(sel));
             if (is_top_level(sel)) {
                 out.columns.push_back(
                     top_column(evs, sel, *intern_, time_scale));

@@ -848,9 +848,14 @@ coro::CoroTask<dataframe::DataFrame> run_collect_rows(const ViewPlan& plan) {
     std::array<Fold*, 1> folds{&fold};
     co_await fuse(plan, vdef, folds, intern);
     dataframe::DataFrame b = fold.build();
-    if (!plan.sort_col.empty()) b = b.sort_by(plan.sort_col, plan.sort_desc);
+    // sort_col/topk_col name a column the way a caller would select it (bare
+    // or "args."-prefixed); canonicalize to match build_row_frame's actual
+    // output name before resolving against the built frame.
+    if (!plan.sort_col.empty())
+        b = b.sort_by(canonical_row_column_name(plan.sort_col), plan.sort_desc);
     if (!plan.topk_col.empty())
-        b = b.topk(plan.topk_col, plan.topk_k, plan.topk_largest);
+        b = b.topk(canonical_row_column_name(plan.topk_col), plan.topk_k,
+                   plan.topk_largest);
     if (plan.offset || plan.limit) {
         const std::int64_t off = static_cast<std::int64_t>(plan.offset);
         const std::int64_t len =

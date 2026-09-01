@@ -338,14 +338,20 @@ class TestTraceViewer:
             gz = _make_trace(env, "events.pfw.gz", rows)
 
             # A plain collect() (no group_by/agg) returns the matching events
-            # with every column - top-level plus a union of the args.
+            # with every column - top-level plus a union of the args, each
+            # flattened arg prefixed "args." so it can't collide with a
+            # top-level column of the same bare name.
             d = TraceViewer(gz).collect().collect().to_arrow().to_pydict()
-            assert {"name", "cat", "pid", "tid", "ts", "dur", "ph", "ret", "path"} <= set(d)
-            assert d["ret"] == [100, 101, 102, 103, 104]
+            assert {"name", "cat", "pid", "tid", "ts", "dur", "ph", "args.ret", "args.path"} <= set(
+                d
+            )
+            assert d["args.ret"] == [100, 101, 102, 103, 104]
             assert d["name"] == ["read"] * 5
-            assert d["path"][0] == "/f0"
+            assert d["args.path"][0] == "/f0"
 
-            # select projects a subset (top-level + arg names).
+            # select projects a subset (top-level + arg names); a bare arg name
+            # still resolves, but the output column is canonicalized to
+            # "args.<key>".
             sel = (
                 TraceViewer(gz)
                 .select("name", "ts", "ret")
@@ -354,9 +360,10 @@ class TestTraceViewer:
                 .to_arrow()
                 .to_pydict()
             )
-            assert set(sel) == {"name", "ts", "ret"}
+            assert set(sel) == {"name", "ts", "args.ret"}
 
-            # filter narrows the event rows.
+            # filter narrows the event rows (query DSL still resolves the bare
+            # arg name).
             assert TraceViewer(gz).filter("ret > 102").collect().collect().num_rows == 2
 
     def test_call_tree_and_flamegraph(self):

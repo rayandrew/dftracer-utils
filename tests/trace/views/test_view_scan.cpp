@@ -343,6 +343,63 @@ TEST_SUITE("View") {
     }
 
     TEST_CASE(
+        "View - a flattened arg named like a top-level field stays a "
+        "distinct args.<key> column") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // Each event's top-level "name" is "read"/"write"; its arg "name" is a
+        // different string, so the row frame must carry both "name" (top-level)
+        // and "args.name" (the arg) without a schema collision.
+        std::string pfw = env.get_dir() + "/collide.pfw";
+        {
+            std::ofstream ofs(pfw);
+            ofs << R"({"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,)"
+                   R"("ts":1000,"dur":10,"args":{"name":"inner_read"}})"
+                << "\n";
+            ofs << R"({"ph":"X","name":"write","cat":"POSIX","pid":1,"tid":1,)"
+                   R"("ts":1100,"dur":10,"args":{"name":"inner_write"}})"
+                << "\n";
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        // Empty select: every column, including both "name" and "args.name".
+        dataframe::DataFrame all =
+            View::from_file(gz, idx).metadata(false).collect().collect().get();
+        REQUIRE(bhas(all, "name"));
+        REQUIRE(bhas(all, "args.name"));
+        std::map<std::string, std::string> top_by_arg;
+        for (std::int64_t i = 0; i < all.num_rows(); ++i)
+            top_by_arg[bstr(all, i, "name")] = bstr(all, i, "args.name");
+        CHECK(top_by_arg["read"] == "inner_read");
+        CHECK(top_by_arg["write"] == "inner_write");
+
+        // A bare "name" select still resolves to the top-level field; the arg
+        // is only reachable via its "args." prefix.
+        dataframe::DataFrame bare_name = View::from_file(gz, idx)
+                                             .metadata(false)
+                                             .select({"name"})
+                                             .collect()
+                                             .collect()
+                                             .get();
+        REQUIRE(bare_name.num_columns() == 1);
+        CHECK(bhas(bare_name, "name"));
+        CHECK_FALSE(bhas(bare_name, "args.name"));
+
+        dataframe::DataFrame arg_name = View::from_file(gz, idx)
+                                            .metadata(false)
+                                            .select({"args.name"})
+                                            .collect()
+                                            .collect()
+                                            .get();
+        REQUIRE(arg_name.num_columns() == 1);
+        CHECK(bhas(arg_name, "args.name"));
+        CHECK_FALSE(bhas(arg_name, "name"));
+    }
+
+    TEST_CASE(
         "View - agg_numeric_args aggregates every numeric arg as a mean") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
@@ -442,9 +499,10 @@ TEST_SUITE("View") {
                                             .collect()
                                             .get();
             REQUIRE(rows.num_columns() == 2);
-            REQUIRE(bhas(rows, "cycles"));
+            REQUIRE(bhas(rows, "args.cycles"));
             REQUIRE(rows.num_rows() == 10);
-            REQUIRE(rows.columns[static_cast<std::size_t>(bcol(rows, "cycles"))]
+            REQUIRE(rows.columns[static_cast<std::size_t>(
+                                     bcol(rows, "args.cycles"))]
                         .type() == dataframe::TypeId::String);
 
             // Tally (name, cycles) pairs; a null cycles reads as empty.
@@ -452,7 +510,7 @@ TEST_SUITE("View") {
             int nnull = 0;
             for (std::int64_t i = 0; i < rows.num_rows(); ++i) {
                 name_counts[bstr(rows, i, "name")]++;
-                const std::string c = bstr(rows, i, "cycles");
+                const std::string c = bstr(rows, i, "args.cycles");
                 if (c.empty())
                     nnull++;
                 else
@@ -472,7 +530,7 @@ TEST_SUITE("View") {
             std::vector<const dataframe::Series*> inputs;
             for (const auto& col : rows.columns) inputs.push_back(&col);
             const auto cyc = dataframe::expr_col(
-                static_cast<std::int32_t>(bcol(rows, "cycles")));
+                static_cast<std::int32_t>(bcol(rows, "args.cycles")));
             std::vector<dataframe::AggExprSpec> specs = {
                 dataframe::agg_count("count_cycles"),
                 dataframe::agg_sum(cyc, "sum_cycles")};

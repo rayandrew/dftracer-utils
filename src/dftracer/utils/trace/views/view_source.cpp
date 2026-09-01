@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/field_ref.h>
 #include <dftracer/utils/core/coro/async_semaphore.h>
 #include <dftracer/utils/core/coro/channel.h>
 #include <dftracer/utils/core/coro/coro.h>
@@ -14,6 +15,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 
 namespace dftracer::utils::trace::views {
@@ -190,7 +192,9 @@ std::vector<std::string> ViewSource::row_schema() const {
             c == "name" || c == "cat" || c == "fhash" || c == "hhash")
             continue;
         if (c.find('.') != std::string::npos) continue;  // nested/resolved.*
-        out.push_back(std::move(c));
+        // A flattened arg column: build_row_frame's empty-select branch
+        // always names these "args.<key>", so the schemas must match.
+        out.push_back(std::string(dftracer::utils::ARGS_PREFIX) + c);
     }
     return out;
 }
@@ -199,8 +203,17 @@ std::vector<std::string> ViewSource::names() const {
     if (can_stream_rows()) {
         // A non-empty select fixes every streamed morsel's columns to exactly
         // this list (see open()), so the schema must match it, not the
-        // broader index-derived row_schema().
-        if (!view_.plan_->select.empty()) return view_.plan_->select;
+        // broader index-derived row_schema(). Canonicalize each select entry
+        // the same way build_row_frame does, so a bare arg name (or one
+        // colliding with a top-level field) resolves to the same column name
+        // the producer actually emits.
+        if (!view_.plan_->select.empty()) {
+            std::vector<std::string> out;
+            out.reserve(view_.plan_->select.size());
+            for (const std::string& sel : view_.plan_->select)
+                out.push_back(detail::canonical_row_column_name(sel));
+            return out;
+        }
         return row_schema();
     }
     return buffer()->names;
