@@ -2617,8 +2617,11 @@ coro::AsyncGenerator<DataFrame> LazyFrame::stream(
         cur = make_cursor(*op, std::move(cur), sch, budget);
         sch = out_schema(*op, std::move(sch));
     }
-    while (auto m = co_await cur->next(eff_rows))
-        co_yield frame_from_morsel(std::move(*m), sch, cur->out_names());
+    while (auto m = co_await cur->next(eff_rows)) {
+        DataFrame chunk =
+            frame_from_morsel(std::move(*m), sch, cur->out_names());
+        co_yield std::move(chunk);
+    }
 }
 
 coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {

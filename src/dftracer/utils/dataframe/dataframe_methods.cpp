@@ -50,8 +50,10 @@ coro::AsyncGenerator<DataFrame> DataFrame::stream(
     const std::int64_t eff_rows =
         morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
     const std::int64_t nrows = num_rows();
-    for (std::int64_t offset = 0; offset < nrows; offset += eff_rows)
-        co_yield dfops::slice(*this, offset, eff_rows);
+    for (std::int64_t offset = 0; offset < nrows; offset += eff_rows) {
+        DataFrame chunk = dfops::slice(*this, offset, eff_rows);
+        co_yield std::move(chunk);
+    }
 }
 DataFrame DataFrame::reverse() const { return dfops::reverse(*this); }
 DataFrame DataFrame::sort_by(const std::string& name, bool descending) const {
