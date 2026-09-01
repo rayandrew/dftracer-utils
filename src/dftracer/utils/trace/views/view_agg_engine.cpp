@@ -275,12 +275,11 @@ bool agg_engine_eligible(const ViewPlan& plan) {
             case GroupKey::Kind::FileName:
             case GroupKey::Kind::HostName:
             case GroupKey::Kind::IoCat:
+            case GroupKey::Kind::AccPat:
             case GroupKey::Kind::Rank:
             case GroupKey::Kind::Arg:
             case GroupKey::Kind::Field:
                 break;
-            case GroupKey::Kind::AccPat:
-                return false;
         }
         if (gk.transform != GroupKey::Transform::None) return false;
     }

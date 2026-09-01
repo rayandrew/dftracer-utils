@@ -1951,6 +1951,15 @@ TEST_SUITE("View") {
         SUBCASE("group_by io_cat, forced spill") {
             run_both(GroupKey::io_cat(), "io_cat", 128);
         }
+        // acc_pat is a stub key: the GroupMap fold emits the constant "0" for
+        // every event, so both paths must collapse to a single group whose
+        // "acc_pat" value is "0".
+        SUBCASE("group_by acc_pat") {
+            run_both(GroupKey::acc_pat(), "acc_pat", 0);
+        }
+        SUBCASE("group_by acc_pat, forced spill") {
+            run_both(GroupKey::acc_pat(), "acc_pat", 128);
+        }
 
         // The engine path must try the no-scan tier/rollup fast path before
         // scanning: materialize a finer (cat, name) rollup via the legacy

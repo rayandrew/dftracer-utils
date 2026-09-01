@@ -36,6 +36,10 @@ bool is_hash_field(std::string_view f) { return f == "fhash" || f == "hhash"; }
 // from the event name, not a stored field.
 bool is_iocat_field(std::string_view f) { return f == "io_cat"; }
 
+// acc_pat is a computed dimension whose key is the constant "0" for every event
+// (the GroupMap fold in agg_fold.h pushes '0'), not a stored field.
+bool is_accpat_field(std::string_view f) { return f == "acc_pat"; }
+
 // An agg-engine group-key-string request (see native_row_fold.h). Sets `field`
 // to the underlying field name and `arg_only` (append_arg vs append_value).
 bool is_agg_key_field(std::string_view sel, std::string_view& field,
@@ -245,6 +249,12 @@ df::Series iocat_column(const std::vector<FoldEvent>& evs,
                             static_cast<std::int64_t>(vals.size()));
 }
 
+// The acc_pat group key: the constant "0" String for every event, matching the
+// GroupMap fold (agg_fold.h pushes '0'). A single-group, byte-identical key.
+df::Series accpat_column(const std::vector<FoldEvent>& evs) {
+    return df::Series::strings(std::vector<std::string>(evs.size(), "0"));
+}
+
 // A group-key string column rendered exactly as the GroupMap fold builds its
 // key (PodSource append_arg for an Arg key, append_value for a Field key), so
 // the engine group-by is byte-identical: a missing value is the empty string,
@@ -410,8 +420,9 @@ std::vector<std::string> row_fold_extra_captures(
             if (nf == "size") continue;
             f = nf;
         }
-        // resolved.*/r.* and io_cat are computed, not captured raw.
-        if (resolved_kind(f) != ResolvedKind::None || is_iocat_field(f))
+        // resolved.*/r.*, io_cat and acc_pat are computed, not captured raw.
+        if (resolved_kind(f) != ResolvedKind::None || is_iocat_field(f) ||
+            is_accpat_field(f))
             continue;
         add(f);
     }
@@ -427,6 +438,7 @@ std::string canonical_row_column_name(std::string_view sel) {
     if (is_top_level(sel)) return std::string(sel);
     if (resolved_kind(sel) != ResolvedKind::None) return std::string(sel);
     if (is_iocat_field(sel)) return std::string(sel);
+    if (is_accpat_field(sel)) return std::string(sel);
     const std::string_view key = strip_args_prefix(sel);
     if (is_hash_field(key)) return std::string(key);
     return std::string(dftracer::utils::ARGS_PREFIX) + std::string(key);
@@ -498,6 +510,8 @@ dataframe::DataFrame build_row_frame(
                              : null_string_column(evs.size()));
             } else if (is_iocat_field(sel)) {
                 out.columns.push_back(iocat_column(evs, *intern_));
+            } else if (is_accpat_field(sel)) {
+                out.columns.push_back(accpat_column(evs));
             } else if (const std::string_view key = strip_args_prefix(sel);
                        is_hash_field(key)) {
                 out.columns.push_back(hash_column(evs, key, *intern_));
