@@ -1586,28 +1586,22 @@ if(DFTRACER_UTILS_BUILD_PYTHON)
 
   install(TARGETS dftracer_utils_ext LIBRARY DESTINATION "dftracer/utils")
 
-  # Bundle plugin.h's full header closure beside the package so plugin authoring
-  # (jit + the dftracer_plugin CLI) compiles from a plain pip-installed wheel.
-  # plugin.h now also carries the header-only query builder (F/Field), so the
-  # closure adds query/{builder,ast,ast_string}.h and core/common/export.h. Keep
-  # the dftracer/utils/<subpath> layout so includes resolve as <dftracer/utils/...>.
-  # Bundle the whole plugins/ header directory: jit-generated code includes
-  # prims.h directly, and plugin.h pulls in its siblings (host/compose/reflect/
-  # result_registry), so a hand-picked subset leaves a wheel that cannot compile.
+  # Bundle the complete include/dftracer/utils tree beside the package so any
+  # public C/C++ ABI header (plugins, query builder, dataframe/core/coro abi.h,
+  # ...) compiles from a plain pip-installed wheel. A hand-picked subset breaks
+  # as soon as one public header pulls in a sibling that wasn't listed; ship
+  # the whole tree instead of tracking that closure by hand. Keep the
+  # dftracer/utils/<subpath> layout so includes resolve as <dftracer/utils/...>.
   install(
-    DIRECTORY "${CMAKE_SOURCE_DIR}/include/dftracer/utils/plugins/"
-    DESTINATION "dftracer/utils/include/dftracer/utils/plugins"
+    DIRECTORY "${CMAKE_SOURCE_DIR}/include/dftracer/utils/"
+    DESTINATION "dftracer/utils/include/dftracer/utils"
     FILES_MATCHING
     PATTERN "*.h")
   install(
-    FILES
-      "${CMAKE_SOURCE_DIR}/include/dftracer/utils/query/builder.h"
-      "${CMAKE_SOURCE_DIR}/include/dftracer/utils/query/ast.h"
-      "${CMAKE_SOURCE_DIR}/include/dftracer/utils/query/ast_string.h"
-    DESTINATION "dftracer/utils/include/dftracer/utils/query")
-  install(
-    FILES "${CMAKE_SOURCE_DIR}/include/dftracer/utils/core/common/export.h"
-    DESTINATION "dftracer/utils/include/dftracer/utils/core/common")
+    DIRECTORY "${CMAKE_BINARY_DIR}/include/dftracer/utils/"
+    DESTINATION "dftracer/utils/include/dftracer/utils"
+    FILES_MATCHING
+    PATTERN "*.h")
 
   # Editable installs place the .so in site-packages but serve .py files
   # from the source tree via .pth redirect. Install the .pyi stub next
