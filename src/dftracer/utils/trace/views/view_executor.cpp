@@ -624,7 +624,7 @@ static coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
 // fold buckets in. Idempotent: a plan not requesting min alignment (or with no
 // bucket) is returned unchanged, so terminals can call it defensively. A
 // missing/locked index leaves the origin at 0 (absolute).
-static ViewPlan resolve_bucket_origin(const ViewPlan& plan) {
+ViewPlan resolve_bucket_origin(const ViewPlan& plan) {
     if (!plan.bucket_origin_min || plan.time_bucket_us == 0) return plan;
     namespace idx = utilities::indexer;
     std::uint64_t global_min = std::numeric_limits<std::uint64_t>::max();

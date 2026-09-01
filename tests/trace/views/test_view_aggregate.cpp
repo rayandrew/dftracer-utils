@@ -10,6 +10,7 @@
 
 #include <array>
 #include <atomic>
+#include <functional>
 #include <map>
 
 #include "test_view_common.h"
@@ -1878,6 +1879,79 @@ TEST_SUITE("View") {
         SUBCASE("group_by (cat, pid), mixed case merges, forced spill") {
             run_both_multi({{gz3, idx3}}, {GroupKey::cat(), GroupKey::pid()},
                            {"cat", "pid"}, 128);
+        }
+
+        // time_bucket is a computed key too: the bucket column goes first
+        // (agg_fold.h prepends it before plan.group_by), so pair rows by
+        // [time_bucket, ...extra_key_cols] the same way check_match_multi
+        // pairs any other composite key. `bucket_of` applies time_scale/
+        // time_bucket(_min); group_by (if any) runs first, matching the
+        // group_by-then-time_bucket order used elsewhere in this file.
+        auto run_both_bucket =
+            [&](const std::function<View(View)>& bucket_of,
+                const std::vector<GroupKey>& extra_gks,
+                const std::vector<std::string>& extra_key_cols,
+                std::uint64_t mem_budget) {
+                auto build = [&] {
+                    View v = View::from_file(gz, idx);
+                    if (mem_budget) v = v.memory_budget(mem_budget);
+                    View grouped =
+                        extra_gks.empty() ? v : v.group_by(extra_gks);
+                    return bucket_of(grouped).agg({
+                        {AggOp::Count, "", "n"},
+                        {AggOp::Sum, "dur", "sum_dur"},
+                        {AggOp::Mean, "dur", "mean_dur"},
+                    });
+                };
+                // Warm the on-disk index once so legacy and engine below see
+                // the same (already-built) index: bucket_origin_min reads its
+                // zone maps and falls back to origin 0 on a first-touch/missing
+                // index, so comparing a first-touch run against a second-touch
+                // run would compare two different origins, not the same
+                // formula.
+                build().collect().collect().get();
+                dataframe::DataFrame legacy = [&] {
+                    EnvGuard off(false);
+                    return build().collect().collect().get();
+                }();
+                dataframe::DataFrame engine = [&] {
+                    EnvGuard on(true);
+                    return build().collect().collect().get();
+                }();
+                std::vector<std::string> keys = {"time_bucket"};
+                keys.insert(keys.end(), extra_key_cols.begin(),
+                            extra_key_cols.end());
+                check_match_multi(legacy, engine, keys);
+            };
+
+        SUBCASE("time_bucket alone") {
+            run_both_bucket([](View v) { return v.time_bucket(1000); }, {}, {},
+                            0);
+        }
+        SUBCASE("time_bucket alone, forced spill") {
+            run_both_bucket([](View v) { return v.time_bucket(1000); }, {}, {},
+                            128);
+        }
+        SUBCASE("time_bucket + name") {
+            run_both_bucket([](View v) { return v.time_bucket(1000); },
+                            {GroupKey::name()}, {"name"}, 0);
+        }
+        SUBCASE("time_bucket + name, forced spill") {
+            run_both_bucket([](View v) { return v.time_bucket(1000); },
+                            {GroupKey::name()}, {"name"}, 128);
+        }
+        SUBCASE("time_bucket with an explicit origin") {
+            run_both_bucket([](View v) { return v.time_bucket(700, 500); }, {},
+                            {}, 0);
+        }
+        SUBCASE("time_bucket_min (trace-min-aligned origin)") {
+            run_both_bucket([](View v) { return v.time_bucket_min(700); }, {},
+                            {}, 0);
+        }
+        SUBCASE("time_bucket with a non-1.0 time_scale") {
+            run_both_bucket(
+                [](View v) { return v.time_scale(0.01).time_bucket(10); }, {},
+                {}, 0);
         }
     }
 }

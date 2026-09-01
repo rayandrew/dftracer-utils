@@ -41,6 +41,12 @@ coro::CoroTask<ExportStats> run_export_trace_indexed(
 
 coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan);
 
+/// Resolve a min-aligned bucket origin (plan.bucket_origin_min) to the trace's
+/// minimum timestamp, read from the index zone maps (no event scan). A no-op
+/// (returns `plan` unchanged) when min alignment or bucketing is not
+/// requested, so callers can apply it defensively.
+ViewPlan resolve_bucket_origin(const ViewPlan& plan);
+
 /// True for a row query (no group_by / agg / numeric-args): collect() returns
 /// the matching events, not an aggregate.
 bool is_row_query(const ViewPlan& plan);
