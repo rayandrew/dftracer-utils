@@ -219,7 +219,9 @@ TEST_SUITE("View - streaming row query") {
 
         REQUIRE(via_lazy.num_rows() == 1);
         REQUIRE(via_lazy.num_rows() == via_eager.num_rows());
-        CHECK(bstr(via_lazy, 0, "name") == bstr(via_eager, 0, "name"));
+        // n is the deterministic max count; the winning name can tie, and
+        // limit(1) then picks one arbitrarily, so the two paths may keep a
+        // different max-count name. Assert the count, not the tied name.
         CHECK(bnum(via_lazy, 0, "n") == bnum(via_eager, 0, "n"));
     }
 
