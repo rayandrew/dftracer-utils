@@ -8,6 +8,7 @@
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/fold_event.h>
+#include <dftracer/utils/trace/views/native_row_fold.h>
 
 #include <cstdint>
 #include <memory>
@@ -47,6 +48,10 @@ class StreamRowFold : public Fold {
 
     bool accepts(const ScanShape&) const override { return true; }
     bool needs_args() const override { return true; }
+
+    std::vector<std::string> extra_captures() const override {
+        return row_fold_extra_captures(select_);
+    }
 
     std::unique_ptr<Fold> slice() const override {
         return std::make_unique<StreamRowFold>(channel_, budget_, intern_,

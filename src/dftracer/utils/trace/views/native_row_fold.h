@@ -15,6 +15,14 @@ namespace dftracer::utils::trace::views::detail {
 
 class GroupResolver;
 
+/// Sentinel select tokens the agg engine uses to ask build_row_frame for a
+/// group-key STRING column rendered exactly as the GroupMap fold builds its key
+/// (PodSource append_arg for an Arg key, append_value for a Field key): "" for
+/// a missing value, numbers stringified. Internal to the agg-engine <->
+/// row-fold seam; never a user-facing select.
+inline constexpr std::string_view AGG_KEY_ARG_PREFIX = "__aggkey_arg:";
+inline constexpr std::string_view AGG_KEY_FIELD_PREFIX = "__aggkey_field:";
+
 /// Build one native DataFrame from `events`: top-level columns plus every arg
 /// (empty `select`) or a projected subset. Arg columns infer their type per key
 /// and null-fill absent rows. `fhash`/`hhash` resolve from their dedicated
@@ -30,6 +38,15 @@ dataframe::DataFrame build_row_frame(
 /// True if `select` names any resolved.*/r.* field, so the caller should build
 /// a GroupResolver (which opens the index name tables) for build_row_frame.
 bool select_needs_resolver(const std::vector<std::string>& select);
+
+/// The non-scalar fields a `select` needs the scan to capture: nested paths and
+/// non-POD top-level fields the scan does not carry by default (flat args come
+/// from needs_args, POD scalars are inherent). An agg group-key sentinel is
+/// mapped to its underlying real field. A row fold returns this from
+/// extra_captures() so build_row_frame's select branch can resolve those
+/// fields.
+std::vector<std::string> row_fold_extra_captures(
+    const std::vector<std::string>& select);
 
 /// The output column name build_row_frame's select branch gives `sel`: a
 /// top-level field or resolved.*/r.* virtual field keeps its own name;
@@ -62,6 +79,10 @@ class NativeRowFold : public Fold {
 
     bool accepts(const ScanShape&) const override { return true; }
     bool needs_args() const override { return true; }
+
+    std::vector<std::string> extra_captures() const override {
+        return row_fold_extra_captures(select_);
+    }
 
     std::unique_ptr<Fold> slice() const override {
         return std::make_unique<NativeRowFold>(*intern_, select_, time_scale_,

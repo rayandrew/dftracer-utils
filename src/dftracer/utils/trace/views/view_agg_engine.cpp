@@ -5,6 +5,7 @@
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/trace/views/aggfold.h>
 #include <dftracer/utils/trace/views/fold.h>
+#include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/view_agg_engine.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_executor.h>
@@ -147,7 +148,9 @@ bool key_is_resolved(GroupKey::Kind kind) {
 // The raw scan/group-by field a key groups on: fhash/hhash for a resolved
 // name key (the fold groups on the hash, a bijection, and relabels to the
 // resolved name only after aggregation), pid for Rank (the rank map keys on
-// pid, matching agg_fold.h's append_group_dim), else the key's own column.
+// pid, matching agg_fold.h's append_group_dim), a group-key-string sentinel for
+// an Arg/Field key (rendered like the GroupMap fold, then relabeled to
+// group_col_name after aggregation), else the key's own column.
 std::string key_group_field(const GroupKey& gk) {
     switch (gk.kind) {
         case GroupKey::Kind::FilePath:
@@ -157,6 +160,10 @@ std::string key_group_field(const GroupKey& gk) {
             return "hhash";
         case GroupKey::Kind::Rank:
             return "pid";
+        case GroupKey::Kind::Arg:
+            return std::string(AGG_KEY_ARG_PREFIX) + gk.arg;
+        case GroupKey::Kind::Field:
+            return std::string(AGG_KEY_FIELD_PREFIX) + gk.arg;
         default:
             return group_col_name(gk);
     }
@@ -223,10 +230,10 @@ bool agg_engine_eligible(const ViewPlan& plan) {
             case GroupKey::Kind::HostName:
             case GroupKey::Kind::IoCat:
             case GroupKey::Kind::Rank:
-                break;
-            case GroupKey::Kind::AccPat:
             case GroupKey::Kind::Arg:
             case GroupKey::Kind::Field:
+                break;
+            case GroupKey::Kind::AccPat:
                 return false;
         }
         if (gk.transform != GroupKey::Transform::None) return false;
@@ -426,6 +433,13 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     const std::size_t off = has_bucket ? 1 : 0;
     if (has_bucket) r.names[0] = "time_bucket";
     if (cat_pos) r.names[off + *cat_pos] = "cat";
+    // An Arg/Field key groups on a sentinel-named string column; relabel it to
+    // its user-facing group_col_name (== gk.arg == key_names[j]).
+    for (std::size_t j = 0; j < plan.group_by.size(); ++j) {
+        const GroupKey::Kind k = plan.group_by[j].kind;
+        if (k == GroupKey::Kind::Arg || k == GroupKey::Kind::Field)
+            r.names[off + j] = key_names[j];
+    }
     for (std::size_t i = 0; i < off + key_names.size(); ++i)
         r.columns[i] = key_column_to_string(r.columns[i]);
 

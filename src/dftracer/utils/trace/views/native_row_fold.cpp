@@ -2,6 +2,7 @@
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/dataframe/types.h>
 #include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/view_resolver.h>
 
@@ -32,6 +33,23 @@ bool is_hash_field(std::string_view f) { return f == "fhash" || f == "hhash"; }
 // io_cat is a computed dimension (dfanalyzer I/O category), derived per row
 // from the event name, not a stored field.
 bool is_iocat_field(std::string_view f) { return f == "io_cat"; }
+
+// An agg-engine group-key-string request (see native_row_fold.h). Sets `field`
+// to the underlying field name and `arg_only` (append_arg vs append_value).
+bool is_agg_key_field(std::string_view sel, std::string_view& field,
+                      bool& arg_only) {
+    if (sel.substr(0, AGG_KEY_ARG_PREFIX.size()) == AGG_KEY_ARG_PREFIX) {
+        field = sel.substr(AGG_KEY_ARG_PREFIX.size());
+        arg_only = true;
+        return true;
+    }
+    if (sel.substr(0, AGG_KEY_FIELD_PREFIX.size()) == AGG_KEY_FIELD_PREFIX) {
+        field = sel.substr(AGG_KEY_FIELD_PREFIX.size());
+        arg_only = false;
+        return true;
+    }
+    return false;
+}
 
 // An Arrow-layout validity bitmap (1 = valid) from a per-row present flag;
 // empty (no nulls) when every row is present.
@@ -216,6 +234,28 @@ df::Series iocat_column(const std::vector<FoldEvent>& evs,
                             static_cast<std::int64_t>(vals.size()));
 }
 
+// A group-key string column rendered exactly as the GroupMap fold builds its
+// key (PodSource append_arg for an Arg key, append_value for a Field key), so
+// the engine group-by is byte-identical: a missing value is the empty string,
+// numbers are stringified.
+df::Series group_key_str_column(const std::vector<FoldEvent>& evs,
+                                const dftracer::utils::StringIntern& intern,
+                                std::string_view field, bool arg_only) {
+    std::vector<std::string> vals;
+    vals.reserve(evs.size());
+    std::string buf;
+    for (const auto& ev : evs) {
+        buf.clear();
+        PodSource src(ev, intern);
+        if (arg_only)
+            src.append_arg(buf, field);
+        else
+            src.append_value(buf, field);
+        vals.push_back(buf);
+    }
+    return df::Series::strings(vals);
+}
+
 // A resolved.* / r.* virtual field maps to a hash field resolved through the
 // index name tables (fpath <- fhash, hostname/host <- hhash).
 enum class ResolvedKind { None, File, Host };
@@ -288,7 +328,36 @@ bool select_needs_resolver(const std::vector<std::string>& select) {
     return false;
 }
 
+std::vector<std::string> row_fold_extra_captures(
+    const std::vector<std::string>& select) {
+    auto is_pod_scalar = [](std::string_view f) {
+        return f == "name" || f == "cat" || f == "pid" || f == "tid" ||
+               f == "ts" || f == "dur";
+    };
+    std::vector<std::string> out;
+    auto add = [&](std::string_view f) {
+        if (f.empty() || is_pod_scalar(f)) return;
+        for (const auto& e : out)
+            if (e == f) return;
+        out.emplace_back(f);
+    };
+    for (const std::string& sel : select) {
+        std::string_view f = sel;
+        std::string_view uf;
+        bool ao = false;
+        if (is_agg_key_field(sel, uf, ao)) f = uf;
+        // resolved.*/r.* and io_cat are computed, not captured raw.
+        if (resolved_kind(f) != ResolvedKind::None || is_iocat_field(f))
+            continue;
+        add(f);
+    }
+    return out;
+}
+
 std::string canonical_row_column_name(std::string_view sel) {
+    std::string_view f;
+    bool arg_only = false;
+    if (is_agg_key_field(sel, f, arg_only)) return std::string(sel);
     if (is_top_level(sel)) return std::string(sel);
     if (resolved_kind(sel) != ResolvedKind::None) return std::string(sel);
     if (is_iocat_field(sel)) return std::string(sel);
@@ -342,7 +411,12 @@ dataframe::DataFrame build_row_frame(
     } else {
         for (const std::string& sel : select_) {
             out.names.push_back(canonical_row_column_name(sel));
-            if (is_top_level(sel)) {
+            std::string_view agg_key_f;
+            bool agg_key_arg_only = false;
+            if (is_agg_key_field(sel, agg_key_f, agg_key_arg_only)) {
+                out.columns.push_back(group_key_str_column(
+                    evs, *intern_, agg_key_f, agg_key_arg_only));
+            } else if (is_top_level(sel)) {
                 out.columns.push_back(
                     top_column(evs, sel, *intern_, time_scale));
             } else if (const ResolvedKind rk = resolved_kind(sel);

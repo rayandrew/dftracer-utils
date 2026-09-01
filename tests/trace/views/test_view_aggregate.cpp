@@ -1808,6 +1808,31 @@ TEST_SUITE("View") {
         CHECK(by_arg.count("mpi") == 0);
     }
 
+    TEST_CASE("View - time_metric reads the CM record, no scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string pfw = env.get_dir() + "/time_metric.pfw";
+        {
+            std::ofstream ofs(pfw);
+            ofs << R"({"name":"CM","ph":"M","cat":"dftracer","pid":0,"tid":0,)"
+                   R"("args":{"name":"time_metric","value":"NS"}})"
+                << "\n";
+            int ts = 1000;
+            for (int i = 0; i < 20; ++i) {
+                ofs << R"({"ph":"X","name":"read","cat":"POSIX","pid":1,)"
+                       R"("tid":10,"ts":)"
+                    << ts << R"(,"dur":5,"args":{}})" << "\n";
+                ts += 100;
+            }
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        CHECK(View::from_file(gz, idx).time_metric() == trace::TimeMetric::NS);
+    }
+
     TEST_CASE("View - agg engine path matches the GroupMap path") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
@@ -2214,6 +2239,59 @@ TEST_SUITE("View") {
         }
         SUBCASE("group_by rank, forced spill") {
             run_both_file(gz6, idx6, GroupKey::rank(), "rank", 128);
+        }
+
+        // An Arg/Field key derives a group-key column from a flattened arg (or,
+        // for Field, a top-level-then-arg lookup); both paths must render the
+        // same key text, including "" for the events missing the arg. The
+        // read events carry arg x, the write events carry arg y, so grouping by
+        // x exercises the present-and-missing split.
+        std::string gz7, idx7;
+        {
+            std::string pfw7 = env.get_dir() + "/agg_engine_arg.pfw";
+            std::ofstream ofs(pfw7);
+            int ts = 1000;
+            for (int i = 0; i < 30; ++i) {
+                ofs << R"({"ph":"X","name":"read","cat":"POSIX","pid":1,)"
+                       R"("tid":10,"ts":)"
+                    << ts << R"(,"dur":)" << (5 + (i % 11))
+                    << R"(,"args":{"x":)" << (i % 5) << R"(}})" << "\n";
+                ts += 100;
+            }
+            for (int i = 0; i < 30; ++i) {
+                ofs << R"({"ph":"X","name":"write","cat":"STDIO","pid":2,)"
+                       R"("tid":20,"ts":)"
+                    << ts << R"(,"dur":)" << (5 + (i % 13))
+                    << R"(,"args":{"y":)" << (i % 4) << R"(}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz7 = pfw7 + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw7, gz7);
+            fs::remove(pfw7);
+            idx7 = determine_index_path(gz7, "");
+        }
+        SUBCASE("group_by arg x") {
+            run_both_file(gz7, idx7, GroupKey::of_arg("x"), "x", 0);
+        }
+        SUBCASE("group_by arg x, forced spill") {
+            run_both_file(gz7, idx7, GroupKey::of_arg("x"), "x", 128);
+        }
+        SUBCASE("group_by field name") {
+            run_both_file(gz7, idx7, GroupKey::field("name"), "name", 0);
+        }
+        SUBCASE("group_by field x (arg via field)") {
+            run_both_file(gz7, idx7, GroupKey::field("x"), "x", 0);
+        }
+        SUBCASE("group_by (name, arg x)") {
+            run_both_multi({{gz7, idx7}},
+                           {GroupKey::name(), GroupKey::of_arg("x")},
+                           {"name", "x"}, 0);
+        }
+        SUBCASE("group_by (name, arg x), forced spill") {
+            run_both_multi({{gz7, idx7}},
+                           {GroupKey::name(), GroupKey::of_arg("x")},
+                           {"name", "x"}, 128);
         }
 
         // time_bucket is a computed key too: the bucket column goes first
