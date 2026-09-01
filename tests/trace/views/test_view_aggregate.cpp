@@ -1881,6 +1881,84 @@ TEST_SUITE("View") {
                            {"cat", "pid"}, 128);
         }
 
+        // Resolved-name keys (FilePath/FileName/HostName): each file declares
+        // its own fhash/hhash via FH/HH metadata and every event references it,
+        // so the two files genuinely resolve to different names (distinct
+        // basenames, so FileName has no cross-file collision to merge).
+        std::string gz4, idx4, gz5, idx5;
+        {
+            std::string pfw4 = env.get_dir() + "/agg_engine_resolved_a.pfw";
+            std::ofstream ofs(pfw4);
+            ofs << R"({"name":"FH","cat":"dftracer","pid":1,"tid":1,"ph":"M","args":{"name":"/data/dirA/a.h5","value":"FA1"}})"
+                << "\n"
+                << R"({"name":"HH","cat":"dftracer","pid":1,"tid":1,"ph":"M","args":{"name":"nodeA","value":"HA1"}})"
+                << "\n";
+            const char* names[] = {"read", "write", "open"};
+            const int pids[] = {1, 2};
+            int ts = 1000;
+            for (int i = 0; i < 30; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 3]
+                    << R"(","cat":"POSIX","pid":)" << pids[i % 2]
+                    << R"(,"tid":10,"ts":)" << ts << R"(,"dur":)"
+                    << (5 + (i % 11))
+                    << R"(,"args":{"fhash":"FA1","hhash":"HA1"}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz4 = pfw4 + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw4, gz4);
+            fs::remove(pfw4);
+            idx4 = determine_index_path(gz4, "");
+
+            std::string pfw5 = env.get_dir() + "/agg_engine_resolved_b.pfw";
+            std::ofstream ofs5(pfw5);
+            ofs5
+                << R"({"name":"FH","cat":"dftracer","pid":1,"tid":1,"ph":"M","args":{"name":"/data/dirB/b.h5","value":"FB1"}})"
+                << "\n"
+                << R"({"name":"HH","cat":"dftracer","pid":1,"tid":1,"ph":"M","args":{"name":"nodeB","value":"HB1"}})"
+                << "\n";
+            ts = 1000;
+            for (int i = 0; i < 20; ++i) {
+                ofs5 << R"({"ph":"X","name":")" << names[i % 3]
+                     << R"(","cat":"POSIX","pid":)" << pids[i % 2]
+                     << R"(,"tid":10,"ts":)" << ts << R"(,"dur":)"
+                     << (5 + (i % 7))
+                     << R"(,"args":{"fhash":"FB1","hhash":"HB1"}})" << "\n";
+                ts += 100;
+            }
+            ofs5.close();
+            gz5 = pfw5 + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw5, gz5);
+            fs::remove(pfw5);
+            idx5 = determine_index_path(gz5, "");
+        }
+        SUBCASE("group_by file_path across two files") {
+            run_both_multi({{gz4, idx4}, {gz5, idx5}}, {GroupKey::file_path()},
+                           {"file_path"}, 0);
+        }
+        SUBCASE("group_by file_path across two files, forced spill") {
+            run_both_multi({{gz4, idx4}, {gz5, idx5}}, {GroupKey::file_path()},
+                           {"file_path"}, 128);
+        }
+        SUBCASE("group_by file_name across two files") {
+            run_both_multi({{gz4, idx4}, {gz5, idx5}}, {GroupKey::file_name()},
+                           {"file_name"}, 0);
+        }
+        SUBCASE("group_by host_name across two files") {
+            run_both_multi({{gz4, idx4}, {gz5, idx5}}, {GroupKey::host_name()},
+                           {"host_name"}, 0);
+        }
+        SUBCASE("group_by (file_path, pid) across two files") {
+            run_both_multi({{gz4, idx4}, {gz5, idx5}},
+                           {GroupKey::file_path(), GroupKey::pid()},
+                           {"file_path", "pid"}, 0);
+        }
+        SUBCASE("group_by (file_path, pid) across two files, forced spill") {
+            run_both_multi({{gz4, idx4}, {gz5, idx5}},
+                           {GroupKey::file_path(), GroupKey::pid()},
+                           {"file_path", "pid"}, 128);
+        }
+
         // time_bucket is a computed key too: the bucket column goes first
         // (agg_fold.h prepends it before plan.group_by), so pair rows by
         // [time_bucket, ...extra_key_cols] the same way check_match_multi

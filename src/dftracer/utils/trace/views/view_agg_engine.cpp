@@ -9,6 +9,7 @@
 #include <dftracer/utils/trace/views/view_source.h>
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -130,6 +131,40 @@ dataframe::Series key_column_to_string(const dataframe::Series& col) {
         ErrorCode::INTERNAL, "agg engine: unexpected group-key column type");
 }
 
+bool key_is_resolved(GroupKey::Kind kind) {
+    return kind == GroupKey::Kind::FilePath ||
+           kind == GroupKey::Kind::FileName || kind == GroupKey::Kind::HostName;
+}
+
+// The raw scan/group-by field a key groups on: fhash/hhash for a resolved
+// name key (the fold groups on the hash, a bijection, and relabels to the
+// resolved name only after aggregation), else the key's own column.
+std::string key_group_field(const GroupKey& gk) {
+    switch (gk.kind) {
+        case GroupKey::Kind::FilePath:
+        case GroupKey::Kind::FileName:
+            return "fhash";
+        case GroupKey::Kind::HostName:
+            return "hhash";
+        default:
+            return group_col_name(gk);
+    }
+}
+
+// Resolve one already-stringified hash group-key column to its resolved name,
+// matching resolve_group_keys/resolve_group_value exactly (same GroupResolver,
+// same FileName-from-FilePath basename derivation).
+dataframe::Series resolve_key_column(const dataframe::Series& hashes,
+                                     const GroupResolver& resolver,
+                                     GroupKey::Kind kind) {
+    const std::int64_t n = hashes.length();
+    std::vector<std::string> vals(static_cast<std::size_t>(n));
+    for (std::int64_t i = 0; i < n; ++i)
+        vals[static_cast<std::size_t>(i)] = resolve_group_value(
+            resolver, kind, std::string(hashes.string_at(i)));
+    return dataframe::Series::strings(vals);
+}
+
 }  // namespace
 
 bool agg_engine_eligible(const ViewPlan& plan) {
@@ -142,12 +177,12 @@ bool agg_engine_eligible(const ViewPlan& plan) {
             case GroupKey::Kind::Fhash:
             case GroupKey::Kind::Hhash:
             case GroupKey::Kind::Cat:
-                break;
-            case GroupKey::Kind::IoCat:
-            case GroupKey::Kind::AccPat:
             case GroupKey::Kind::FilePath:
             case GroupKey::Kind::FileName:
             case GroupKey::Kind::HostName:
+                break;
+            case GroupKey::Kind::IoCat:
+            case GroupKey::Kind::AccPat:
             case GroupKey::Kind::Rank:
             case GroupKey::Kind::Arg:
             case GroupKey::Kind::Field:
@@ -184,9 +219,13 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     const bool has_bucket = plan.time_bucket_us > 0;
 
     std::vector<std::string> key_names;
+    std::vector<std::string> key_fields;
     key_names.reserve(plan.group_by.size());
-    for (const GroupKey& gk : plan.group_by)
+    key_fields.reserve(plan.group_by.size());
+    for (const GroupKey& gk : plan.group_by) {
         key_names.push_back(group_col_name(gk));
+        key_fields.push_back(key_group_field(gk));
+    }
 
     // Scaled-field renaming (bucket only, see below): ts/dur route through a
     // hidden pre-scaled column instead of the raw field name.
@@ -221,8 +260,10 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // discovered schema) guarantees every streamed morsel carries the same
     // columns in the same order: the streaming group_by resolves key/value
     // columns once against the Source's schema, so a morsel with a different
-    // column layout would silently misalign otherwise.
-    std::vector<std::string> select = key_names;
+    // column layout would silently misalign otherwise. Group keys select the
+    // field they fold on (key_fields), which for a resolved name key is the
+    // raw hash, not the resolved-name output column.
+    std::vector<std::string> select = key_fields;
     auto add_field = [&](const std::string& f) {
         if (f.empty()) return;
         if (std::find(select.begin(), select.end(), f) == select.end())
@@ -269,14 +310,15 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     static constexpr const char* CAT_KEY_COL = "__view_agg_engine_cat_key";
     static constexpr const char* BUCKET_KEY_COL =
         "__view_agg_engine_time_bucket";
-    std::vector<std::string> group_key_names = key_names;
-    auto cat_it = std::find(key_names.begin(), key_names.end(), "cat");
-    if (cat_it != key_names.end()) {
-        const auto cat_idx =
-            static_cast<std::int32_t>(cat_it - key_names.begin());
-        group_key_names[static_cast<std::size_t>(cat_idx)] = CAT_KEY_COL;
-        lf = lf.with_column(
-            CAT_KEY_COL, dataframe::expr_lower(dataframe::expr_col(cat_idx)));
+    std::vector<std::string> group_key_names = key_fields;
+    std::optional<std::size_t> cat_pos;
+    for (std::size_t i = 0; i < plan.group_by.size(); ++i) {
+        if (plan.group_by[i].kind != GroupKey::Kind::Cat) continue;
+        cat_pos = i;
+        group_key_names[i] = CAT_KEY_COL;
+        lf = lf.with_column(CAT_KEY_COL,
+                            dataframe::expr_lower(dataframe::expr_col(
+                                static_cast<std::int32_t>(i))));
     }
 
     // Bucket key: match agg_fold.h's fold_event_over exactly. `ts` there is the
@@ -332,11 +374,27 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         co_await lf.group_by(group_key_names, gaggs).collect();
     const std::size_t off = has_bucket ? 1 : 0;
     if (has_bucket) r.names[0] = "time_bucket";
-    if (cat_it != key_names.end())
-        r.names[off + static_cast<std::size_t>(cat_it - key_names.begin())] =
-            "cat";
+    if (cat_pos) r.names[off + *cat_pos] = "cat";
     for (std::size_t i = 0; i < off + key_names.size(); ++i)
         r.columns[i] = key_column_to_string(r.columns[i]);
+
+    // Post-aggregation re-key: relabel each resolved-name key column (grouped
+    // on its raw hash, a bijection) to the resolved name, same as
+    // resolve_group_keys/resolve_group_value in the GroupMap path. Runs on the
+    // small distinct-group result, never per event.
+    bool needs_resolver = false;
+    for (const GroupKey& gk : plan.group_by)
+        needs_resolver = needs_resolver || key_is_resolved(gk.kind);
+    if (needs_resolver) {
+        const GroupResolver* resolver = ensure_resolver(plan);
+        for (std::size_t j = 0; j < plan.group_by.size(); ++j) {
+            if (!key_is_resolved(plan.group_by[j].kind)) continue;
+            const std::size_t idx = off + j;
+            r.columns[idx] = resolve_key_column(r.columns[idx], *resolver,
+                                                plan.group_by[j].kind);
+            r.names[idx] = key_names[j];
+        }
+    }
     co_return r;
 }
 
