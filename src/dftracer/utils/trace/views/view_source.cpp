@@ -229,16 +229,15 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open(
     // morsel's columns to that exact list (build_row_frame's select branch
     // always emits each one, null-filled where absent), matching names().
     auto task =
-        [](View view, double time_scale,
+        [](View v, double ts,
            std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>>
-               channel,
-           std::shared_ptr<coro::CoroSemaphore> budget,
-           std::shared_ptr<dftracer::utils::StringIntern> intern)
+               ch,
+           std::shared_ptr<coro::CoroSemaphore> sem,
+           std::shared_ptr<dftracer::utils::StringIntern> iv)
         -> coro::CoroTask<void> {
-        detail::StreamRowFold fold(channel, budget, intern, view.plan_->select,
-                                   time_scale);
+        detail::StreamRowFold fold(ch, sem, iv, v.plan_->select, ts);
         std::array<detail::Fold*, 1> folds{&fold};
-        co_await view.run_folds(folds, *intern);
+        co_await v.run_folds(folds, *iv);
     }(view_, time_scale, channel, budget, intern);
 
     std::shared_future<void> producer =

@@ -364,7 +364,7 @@ Series rolling_quantile(const Series& v, std::int64_t window, double q) {
 // `y -> (a1*a2)*y + (a2*c1 + c2)`.
 using AffineT = std::pair<double, double>;
 
-AffineT affine_compose(AffineT lhs, AffineT rhs) {
+static AffineT affine_compose(AffineT lhs, AffineT rhs) {
     return AffineT{lhs.first * rhs.first, rhs.first * lhs.second + rhs.second};
 }
 
