@@ -60,9 +60,10 @@ AggExprSpec agg_set_union(Expr value, std::string out) {
     return {AggOp::SetUnion, std::move(value), std::move(out)};
 }
 
-DataFrame group_agg_expr(const Expr& key, const std::vector<AggExprSpec>& specs,
+DataFrame group_agg_expr(const std::vector<Expr>& keys,
+                         const std::vector<AggExprSpec>& specs,
                          const std::vector<const Series*>& inputs,
-                         const std::string& key_name) {
+                         const std::vector<std::string>& key_names) {
     // The value expressions (all numeric) compile into one program so a shared
     // subexpression is computed once (CSE); deduping identical value nodes maps
     // them to one evaluated column, folded into a single shared FieldStat.
@@ -125,12 +126,28 @@ DataFrame group_agg_expr(const Expr& key, const std::vector<AggExprSpec>& specs,
     for (std::int32_t ci : raw_cols)
         values.push_back(inputs[static_cast<std::size_t>(ci)]);
 
-    // The key may be any type (e.g. a string category): take a bare column
-    // reference directly, only routing a computed key through the evaluator.
-    const std::int32_t ki = expr_col_index(key);
-    Series key_col = ki >= 0 ? inputs[static_cast<std::size_t>(ki)]->share()
-                             : eval(key, inputs);
-    return group_agg(key_col, values, std::move(col_specs), key_name);
+    // Each key may be any type (e.g. a string category): a bare column
+    // reference shares that input column directly; only a computed key routes
+    // through the evaluator.
+    std::vector<Series> key_cols;
+    key_cols.reserve(keys.size());
+    for (const Expr& key : keys) {
+        const std::int32_t ki = expr_col_index(key);
+        key_cols.push_back(ki >= 0
+                               ? inputs[static_cast<std::size_t>(ki)]->share()
+                               : eval(key, inputs));
+    }
+    std::vector<const Series*> key_ptrs;
+    key_ptrs.reserve(key_cols.size());
+    for (const Series& c : key_cols) key_ptrs.push_back(&c);
+    return group_agg(key_ptrs, values, std::move(col_specs), key_names);
+}
+
+DataFrame group_agg_expr(const Expr& key, const std::vector<AggExprSpec>& specs,
+                         const std::vector<const Series*>& inputs,
+                         const std::string& key_name) {
+    return group_agg_expr(std::vector<Expr>{key}, specs, inputs,
+                          std::vector<std::string>{key_name});
 }
 
 }  // namespace dftracer::utils::dataframe

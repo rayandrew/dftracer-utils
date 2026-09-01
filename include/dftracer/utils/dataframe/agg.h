@@ -57,12 +57,18 @@ struct AggStateDeleter {
 };
 using AggStatePtr = std::unique_ptr<AggState, AggStateDeleter>;
 
-/// A fresh partial for `specs`, grouping by a single key column.
+/// A fresh partial for `specs`, grouping by N key columns.
 AggStatePtr agg_new(std::vector<AggSpec> specs);
 
-/// Fold rows [begin, end) of a batch (one key column + the value columns the
-/// specs reference) into `state`. `end < 0` means the whole column. Serial; one
-/// thread per state - the parallel/async drivers give each chunk its own state.
+/// Fold rows [begin, end) of a batch (the N `keys` columns + the value columns
+/// the specs reference) into `state`. The composite key is hashed and compared
+/// column-by-column (no string concatenation); each key column keeps its own
+/// type. `end < 0` means the whole column. Serial; one thread per state - the
+/// parallel/async drivers give each chunk its own state.
+void agg_accumulate(AggState& state, const std::vector<const Series*>& keys,
+                    const std::vector<const Series*>& values,
+                    std::int64_t begin = 0, std::int64_t end = -1);
+/// Single-key convenience: forwards to the N-key form with `keys = {&key}`.
 void agg_accumulate(AggState& state, const Series& key,
                     const std::vector<const Series*>& values,
                     std::int64_t begin = 0, std::int64_t end = -1);
@@ -70,8 +76,11 @@ void agg_accumulate(AggState& state, const Series& key,
 /// Combine `other` into `into` (associative; for spill + distributed merge).
 void agg_merge(AggState& into, const AggState& other);
 
-/// Materialize the result: the key column (named `key_name`) plus one column
-/// per spec, in spec order.
+/// Materialize the result: one key column per `key_names` (in order, each
+/// keeping its original type) plus one column per spec, in spec order.
+DataFrame agg_finalize(const AggState& state,
+                       const std::vector<std::string>& key_names);
+/// Single-key convenience: forwards to the vector form with `{key_name}`.
 DataFrame agg_finalize(const AggState& state, const std::string& key_name);
 
 /// Serialize a partial to a portable byte blob (distributed partials / spill)
@@ -81,6 +90,11 @@ AggStatePtr agg_deserialize(const std::string& blob);
 
 /// Fused group-by: accumulate the whole batch in one pass over all specs (the
 /// sync driver chunks via the parallel_for seam and merges), then finalize.
+DataFrame group_agg(const std::vector<const Series*>& keys,
+                    const std::vector<const Series*>& values,
+                    std::vector<AggSpec> specs,
+                    const std::vector<std::string>& key_names);
+/// Single-key convenience: forwards to the N-key form.
 DataFrame group_agg(const Series& key, const std::vector<const Series*>& values,
                     std::vector<AggSpec> specs, const std::string& key_name);
 

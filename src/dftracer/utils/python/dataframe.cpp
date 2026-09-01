@@ -49,6 +49,7 @@ using dataframe::DataFrame;
 using dataframe::Series;
 using dftracer::utils::python::aggs_from_seq;
 using dftracer::utils::python::group_agg_from_spec;
+using dftracer::utils::python::strings_from_str_or_seq;
 
 // A DataFrame owns its columns as one STRUCT column: child(i) hands out a
 // column sharing the struct's buffers (O(1)), and the struct exports to Arrow
@@ -563,31 +564,40 @@ PyObject* DataFrame_hash_partition(PyObject* self, PyObject* args) {
     return list;
 }
 
-// _group_agg_expr(key, specs): the expression-aggregate workhorse. `specs` is a
-// list of (op_int, value_ast_or_None, out_name[, param[, by_ast]]); value ASTs
+// _group_agg_expr(key, specs): the expression-aggregate workhorse. `key` is a
+// column name or a sequence of names (composite key). `specs` is a list of
+// (op_int, value_ast_or_None, out_name[, param[, by_ast]]); value ASTs
 // reference this batch's columns by index. `by_ast` is ArgMax's maximized
 // value. All value expressions compile in one CSE'd, pruned pass
 // (dataframe::group_agg_expr). The Python GroupBy serializes to this.
 PyObject* DataFrame_group_agg_expr(PyObject* self, PyObject* args) {
     DataFrameObject* b = as_dataframe(self);
     if (!b) return nullptr;
-    const char* key = nullptr;
+    PyObject* key_obj = nullptr;
     PyObject* specs = nullptr;
-    if (!PyArg_ParseTuple(args, "sO", &key, &specs)) return nullptr;
+    if (!PyArg_ParseTuple(args, "OO", &key_obj, &specs)) return nullptr;
+    std::vector<std::string> keys;
+    if (!strings_from_str_or_seq(key_obj, keys)) return nullptr;
     PyObject* seq = PySequence_Fast(specs, "specs must be a sequence");
     if (!seq) return nullptr;
 
     DataFrame bat = to_dataframe(b);
-    std::int32_t ki = -1;
-    for (std::size_t i = 0; i < bat.names.size(); ++i)
-        if (bat.names[i] == key) {
-            ki = static_cast<std::int32_t>(i);
-            break;
+    std::vector<dataframe::Expr> key_exprs;
+    key_exprs.reserve(keys.size());
+    for (const std::string& key : keys) {
+        std::int32_t ki = -1;
+        for (std::size_t i = 0; i < bat.names.size(); ++i)
+            if (bat.names[i] == key) {
+                ki = static_cast<std::int32_t>(i);
+                break;
+            }
+        if (ki < 0) {
+            Py_DECREF(seq);
+            PyErr_Format(PyExc_KeyError, "group_by: no column named %s",
+                         key.c_str());
+            return nullptr;
         }
-    if (ki < 0) {
-        Py_DECREF(seq);
-        PyErr_Format(PyExc_KeyError, "group_by: no column named %s", key);
-        return nullptr;
+        key_exprs.push_back(dataframe::expr_col(ki));
     }
 
     std::vector<dataframe::AggExprSpec> aggs;
@@ -647,27 +657,32 @@ PyObject* DataFrame_group_agg_expr(PyObject* self, PyObject* args) {
     inputs.reserve(bat.columns.size());
     for (const Series& c : bat.columns) inputs.push_back(&c);
     return run_batch_op([&] {
-        return dataframe::group_agg_expr(dataframe::expr_col(ki), aggs, inputs,
-                                         key);
+        return dataframe::group_agg_expr(key_exprs, aggs, inputs, keys);
     });
 }
 
 // Two-step / expression forms delegate to the Python GroupBy, which serializes
-// each spec and calls _group_agg_expr. `args` is (key, *specs).
-PyObject* delegate_groupby(PyObject* self, PyObject* args) {
+// each spec and calls _group_agg_expr. `args[0:nk]` are the key names (a tuple,
+// even for one key); `args[nk:]` are the specs.
+PyObject* delegate_groupby(PyObject* self, PyObject* args, Py_ssize_t nk) {
     PyObject* mod = PyImport_ImportModule("dftracer.utils.columnar");
     if (!mod) return nullptr;
     PyObject* gb_type = PyObject_GetAttrString(mod, "GroupBy");
     Py_DECREF(mod);
     if (!gb_type) return nullptr;
-    PyObject* gb = PyObject_CallFunctionObjArgs(
-        gb_type, self, PyTuple_GET_ITEM(args, 0), nullptr);
+    PyObject* keys = PyTuple_GetSlice(args, 0, nk);
+    if (!keys) {
+        Py_DECREF(gb_type);
+        return nullptr;
+    }
+    PyObject* gb = PyObject_CallFunctionObjArgs(gb_type, self, keys, nullptr);
+    Py_DECREF(keys);
     Py_DECREF(gb_type);
     if (!gb) return nullptr;
     Py_ssize_t n = PyTuple_GET_SIZE(args);
-    if (n == 1) return gb;             // two-step: hand back the GroupBy
+    if (n == nk) return gb;             // two-step: hand back the GroupBy
     PyObject* rest =
-        PyTuple_GetSlice(args, 1, n);  // the specs, as an arg tuple
+        PyTuple_GetSlice(args, nk, n);  // the specs, as an arg tuple
     PyObject* aggm = rest ? PyObject_GetAttrString(gb, "agg") : nullptr;
     Py_DECREF(gb);
     PyObject* res = aggm ? PyObject_Call(aggm, rest, nullptr) : nullptr;
@@ -676,31 +691,44 @@ PyObject* delegate_groupby(PyObject* self, PyObject* args) {
     return res;
 }
 
-// group_by(key, *specs). Two forms: legacy string specs ("count" /
-// "<op>:<column>", op in sum|min|max|mean|var|std|skew|kurt) run inline; a call
-// with no specs (two-step .agg(...)) or any expression spec delegates to the
-// Python GroupBy and the expression-aggregate path (CSE + pruner).
+// group_by(*keys_and_specs). The leading run of plain column-name strings
+// (not "count" and not containing ':') are the (possibly composite) key; a
+// trailing run of legacy "op[:column]" strings runs inline, anything else
+// (no specs, or an expression/Agg spec) delegates to the Python GroupBy and
+// the expression-aggregate path (CSE + pruner).
 PyObject* DataFrame_group_by(PyObject* self, PyObject* args) {
     DataFrameObject* b = as_dataframe(self);
     if (!b) return nullptr;
     Py_ssize_t n = PyTuple_GET_SIZE(args);
     if (n < 1) {
-        PyErr_SetString(PyExc_TypeError, "group_by(key, *aggs) needs a key");
+        PyErr_SetString(PyExc_TypeError, "group_by(*keys, *aggs) needs a key");
         return nullptr;
     }
-    const char* key = PyUnicode_AsUTF8(PyTuple_GET_ITEM(args, 0));
-    if (!key) return nullptr;
-    bool all_str = n >= 2;
-    for (Py_ssize_t i = 1; i < n; ++i)
-        if (!PyUnicode_Check(PyTuple_GET_ITEM(args, i))) {
-            all_str = false;
-            break;
-        }
-    if (n == 1 || !all_str) return delegate_groupby(self, args);
+    Py_ssize_t nk = 0;
+    for (; nk < n; ++nk) {
+        PyObject* a = PyTuple_GET_ITEM(args, nk);
+        if (!PyUnicode_Check(a)) break;
+        const char* s = PyUnicode_AsUTF8(a);
+        if (!s) return nullptr;
+        const std::string sv(s);
+        if (sv == "count" || sv.find(':') != std::string::npos) break;
+    }
+    if (nk == 0) nk = 1;  // args[0] is always at least one key
+    bool rest_legacy = n > nk;
+    for (Py_ssize_t i = nk; i < n && rest_legacy; ++i)
+        rest_legacy = PyUnicode_Check(PyTuple_GET_ITEM(args, i)) != 0;
+    if (n == nk || !rest_legacy) return delegate_groupby(self, args, nk);
 
+    std::vector<std::string> keys;
+    keys.reserve(static_cast<std::size_t>(nk));
+    for (Py_ssize_t i = 0; i < nk; ++i) {
+        const char* s = PyUnicode_AsUTF8(PyTuple_GET_ITEM(args, i));
+        if (!s) return nullptr;
+        keys.emplace_back(s);
+    }
     std::vector<std::string> specs;
-    specs.reserve(static_cast<std::size_t>(n - 1));
-    for (Py_ssize_t i = 1; i < n; ++i) {
+    specs.reserve(static_cast<std::size_t>(n - nk));
+    for (Py_ssize_t i = nk; i < n; ++i) {
         const char* s = PyUnicode_AsUTF8(PyTuple_GET_ITEM(args, i));
         if (!s) return nullptr;
         specs.emplace_back(s);
@@ -710,7 +738,7 @@ PyObject* DataFrame_group_by(PyObject* self, PyObject* args) {
         aggs.reserve(specs.size());
         for (const std::string& spec : specs)
             aggs.push_back(group_agg_from_spec(spec));
-        return dataframe::group_by(to_dataframe(b), key, aggs);
+        return dataframe::group_by(to_dataframe(b), keys, aggs);
     });
 }
 

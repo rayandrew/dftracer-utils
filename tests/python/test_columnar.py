@@ -917,6 +917,40 @@ def test_group_by_agg_expressions():
     assert legacy.to_arrow().to_pydict() == expr.to_arrow().to_pydict()
 
 
+def test_group_by_multi_key_matches_pandas():
+    # Native multi-key group_by: composite (cat, pid) key, each column keeping
+    # its own type (cat stays String, pid stays Int64), matching
+    # pandas.groupby([k1, k2]).
+    pd = pytest.importorskip("pandas")
+    from dftracer.utils.columnar import F
+
+    cat = ["io", "cpu", "io", "cpu", "io", "cpu", "io"]
+    pid = pa.array([1, 1, 2, 1, 1, 2, 2], pa.int64())
+    dur = pa.array([10, 20, 30, 40, 50, 60, 70], pa.int64())
+    tbl = pa.table({"cat": cat, "pid": pid, "dur": dur})
+    batch = _dataframe_from_arrow(tbl)
+
+    # Two-step multi-key form: batch.group_by("cat", "pid").agg(...).
+    got = batch.group_by("cat", "pid").agg(F.dur.sum().alias("s"), F.dur.mean().alias("m"))
+    got_df = got.to_pandas().set_index(["cat", "pid"]).sort_index()
+
+    ref = pd.DataFrame({"cat": cat, "pid": pid.to_pylist(), "dur": dur.to_pylist()})
+    exp = ref.groupby(["cat", "pid"])["dur"].agg(s="sum", m="mean").sort_index()
+
+    assert list(got_df.index) == list(exp.index)
+    assert got_df["s"].tolist() == exp["s"].tolist()
+    assert got_df["m"].tolist() == exp["m"].tolist()
+    # Each key column keeps its own dtype: cat stays String, pid stays Int64.
+    got_arrow = got.to_arrow()
+    assert got_arrow.schema.field("cat").type == pa.string()
+    assert got_arrow.schema.field("pid").type in (pa.int64(),)
+
+    # Legacy inline multi-key form: trailing "op:col" specs after N key names.
+    legacy = batch.group_by("cat", "pid", "sum:dur")
+    legacy_df = legacy.to_pandas().set_index(["cat", "pid"]).sort_index()
+    assert legacy_df["sum_dur"].tolist() == exp["s"].tolist()
+
+
 def test_query_string_filter():
     # A query DSL string filters a VecBatch via the SIMD mask backend
     # (pandas.query-style), and where() routes strings through it.

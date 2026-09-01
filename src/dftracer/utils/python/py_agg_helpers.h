@@ -52,6 +52,32 @@ inline bool aggs_from_seq(
     return true;
 }
 
+// Parse a group_by key argument that is either one column name or a sequence
+// of names (native multi-key entry point). Appends to `out`.
+inline bool strings_from_str_or_seq(PyObject* obj,
+                                    std::vector<std::string>& out) {
+    if (PyUnicode_Check(obj)) {
+        const char* s = PyUnicode_AsUTF8(obj);
+        if (!s) return false;
+        out.emplace_back(s);
+        return true;
+    }
+    PyObject* seq =
+        PySequence_Fast(obj, "key must be a str or a sequence of str");
+    if (!seq) return false;
+    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+    for (Py_ssize_t i = 0; i < n; ++i) {
+        const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
+        if (!s) {
+            Py_DECREF(seq);
+            return false;
+        }
+        out.emplace_back(s);
+    }
+    Py_DECREF(seq);
+    return true;
+}
+
 }  // namespace dftracer::utils::python
 
 #endif  // DFTRACER_UTILS_PYTHON_PY_AGG_HELPERS_H

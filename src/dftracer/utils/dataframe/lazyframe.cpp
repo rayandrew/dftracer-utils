@@ -667,17 +667,19 @@ Agg from_agg_op(AggOp a) {
 class GroupByCursor : public Cursor {
    public:
     GroupByCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
-                  std::string key, std::vector<GroupAgg> aggs)
+                  std::vector<std::string> keys, std::vector<GroupAgg> aggs)
         : in_(std::move(in)),
           sch_(std::move(sch)),
-          key_(std::move(key)),
+          keys_(std::move(keys)),
           aggs_(std::move(aggs)) {}
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         if (done_) co_return std::nullopt;
         done_ = true;
 
-        const int key_idx = index_in(sch_, key_);
+        std::vector<int> key_idx;
+        key_idx.reserve(keys_.size());
+        for (const std::string& k : keys_) key_idx.push_back(index_in(sch_, k));
         std::vector<AggSpec> specs;
         std::vector<int> value_idx;  // sch indices of the deduped value columns
         ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
@@ -722,10 +724,13 @@ class GroupByCursor : public Cursor {
             }
             if (batch.empty()) break;
             auto accumulate = [&](AggState& st, const Morsel& m) {
+                std::vector<const Series*> keys;
+                keys.reserve(key_idx.size());
+                for (int ki : key_idx) keys.push_back(&m.columns[ki]);
                 std::vector<const Series*> values;
                 values.reserve(value_idx.size());
                 for (int vi : value_idx) values.push_back(&m.columns[vi]);
-                agg_accumulate(st, m.columns[key_idx], values);
+                agg_accumulate(st, keys, values);
             };
             if (batch.size() == 1) {
                 accumulate(*state, batch[0]);
@@ -744,7 +749,7 @@ class GroupByCursor : public Cursor {
             for (auto& p : partials)
                 if (p) agg_merge(*state, *p);
         }
-        DataFrame r = agg_finalize(*state, key_);
+        DataFrame r = agg_finalize(*state, keys_);
         Morsel out;
         out.rows = r.num_rows();
         out.columns.reserve(r.columns.size());
@@ -761,7 +766,7 @@ class GroupByCursor : public Cursor {
     }
     std::unique_ptr<Cursor> in_;
     std::vector<std::string> sch_;
-    std::string key_;
+    std::vector<std::string> keys_;
     std::vector<GroupAgg> aggs_;
     bool done_ = false;
 };
@@ -1658,7 +1663,7 @@ struct TopkOp {
     bool largest;
 };
 struct GroupByOp {
-    std::string key;
+    std::vector<std::string> keys;
     std::vector<GroupAgg> aggs;
 };
 struct SortByOp {
@@ -1751,7 +1756,7 @@ std::vector<std::string> out_schema(const LazyOp& op,
                 return s;
             },
             [&](const GroupByOp& o) {
-                std::vector<std::string> s{o.key};
+                std::vector<std::string> s = o.keys;
                 for (const GroupAgg& a : o.aggs) s.push_back(a.out);
                 return s;
             },
@@ -1795,7 +1800,7 @@ std::string describe_op(const LazyOp& op) {
             [](const ExplodeOp& o) { return "explode " + o.column; },
             [](const UnpivotOp&) { return std::string("unpivot"); },
             [](const TopkOp& o) { return "topk " + o.name; },
-            [](const GroupByOp& o) { return "group_by " + o.key; },
+            [](const GroupByOp& o) { return "group_by " + join_names(o.keys); },
             [](const SortByOp& o) { return "sort_by " + o.name; },
             [](const UniqueOp&) { return std::string("unique"); },
             [](const SampleOp&) { return std::string("sample"); },
@@ -2108,7 +2113,7 @@ std::optional<DataFrame> run_ops_in_memory(
                     return df.with_row_index(o.name);
                 },
                 [&](const NullCountOp&) { return df.null_count(); },
-                [&](const GroupByOp& o) { return df.group_by(o.key, o.aggs); },
+                [&](const GroupByOp& o) { return df.group_by(o.keys, o.aggs); },
                 [&](const auto&) {
                     ok = false;
                     return DataFrame{};
@@ -2179,7 +2184,7 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             },
             [&](const GroupByOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<GroupByCursor>(std::move(in), sch,
-                                                       o.key, o.aggs);
+                                                       o.keys, o.aggs);
             },
             [&](const SortByOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<SortMergeCursor>(
@@ -2321,13 +2326,23 @@ LazyFrame LazyFrame::topk(std::string name, std::int64_t k,
 
 LazyFrame LazyFrame::group_by(std::string key,
                               std::vector<GroupAgg> aggs) const {
+    return group_by(std::vector<std::string>{std::move(key)}, std::move(aggs));
+}
+
+LazyFrame LazyFrame::group_by(std::vector<std::string> keys,
+                              std::vector<GroupAgg> aggs) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(
-        LazyOp{GroupByOp{std::move(key), std::move(aggs)}}));
+        LazyOp{GroupByOp{std::move(keys), std::move(aggs)}}));
     return with_ops(std::move(ops));
 }
 
 LazyFrame LazyFrame::group_by(Expr key, std::vector<AggExprSpec> aggs) const {
+    return group_by(std::vector<Expr>{std::move(key)}, std::move(aggs));
+}
+
+LazyFrame LazyFrame::group_by(std::vector<Expr> keys,
+                              std::vector<AggExprSpec> aggs) const {
     LazyFrame lf = *this;
     std::vector<std::string> sch = lf.schema();
     int tmp = 0;
@@ -2344,7 +2359,9 @@ LazyFrame LazyFrame::group_by(Expr key, std::vector<AggExprSpec> aggs) const {
         return name;
     };
 
-    const std::string key_name = resolve(key, "key");
+    std::vector<std::string> key_names;
+    key_names.reserve(keys.size());
+    for (const Expr& key : keys) key_names.push_back(resolve(key, "key"));
 
     std::vector<GroupAgg> gaggs;
     gaggs.reserve(aggs.size());
@@ -2357,7 +2374,7 @@ LazyFrame LazyFrame::group_by(Expr key, std::vector<AggExprSpec> aggs) const {
         if (a.op == AggOp::ArgMax) g.by = resolve(a.by, "by");
         gaggs.push_back(std::move(g));
     }
-    return lf.group_by(key_name, std::move(gaggs));
+    return lf.group_by(std::move(key_names), std::move(gaggs));
 }
 
 LazyFrame LazyFrame::sort_by(std::string name, bool descending) const {

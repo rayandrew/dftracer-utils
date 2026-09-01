@@ -76,6 +76,10 @@ Series concat_columns(const std::vector<const Series*>& parts);
 /// std::out_of_range on an unknown column/op.
 DataFrame group_by(const DataFrame& b, const std::string& key,
                    const std::vector<GroupAgg>& aggs);
+/// N-key form: a composite key over `keys` (hashed and compared
+/// column-by-column, each keeping its own type).
+DataFrame group_by(const DataFrame& b, const std::vector<std::string>& keys,
+                   const std::vector<GroupAgg>& aggs);
 
 /// Partition the rows into `n_parts` batches by a stable hash of the `keys`
 /// columns (rows with equal keys always land in the same part). The shuffle

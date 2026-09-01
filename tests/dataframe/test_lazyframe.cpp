@@ -27,6 +27,7 @@ using dftracer::utils::dataframe::col;
 using dftracer::utils::dataframe::Cursor;
 using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::eval;
+using dftracer::utils::dataframe::Expr;
 using dftracer::utils::dataframe::GroupAgg;
 using dftracer::utils::dataframe::LazyFrame;
 using dftracer::utils::dataframe::Morsel;
@@ -356,6 +357,83 @@ TEST_SUITE("lazyframe") {
                 CHECK(mean[i] == doctest::Approx(4.0));
                 CHECK(cnt[i] == 3);
             }
+        }
+    }
+
+    TEST_CASE(
+        "streaming group_by(vector<string>) composite key across morsels") {
+        std::vector<std::int64_t> g{0, 1, 0, 1, 0, 1};
+        std::vector<std::int64_t> p{1, 1, 1, 2, 1, 2};
+        std::vector<std::int64_t> v{1, 2, 3, 4, 5, 6};
+        DataFrame df;
+        df.names = {"g", "p", "v"};
+        df.columns.push_back(Series::flat_i64(g.data(), 6));
+        df.columns.push_back(Series::flat_i64(p.data(), 6));
+        df.columns.push_back(Series::flat_i64(v.data(), 6));
+        std::vector<GroupAgg> aggs{{Agg::Sum, "v", "sum", 0.0},
+                                   {Agg::Count, "", "count", 0.0}};
+
+        // Small morsel size forces multiple partial states to merge.
+        DataFrame r =
+            run(df.lazy()
+                    .group_by(std::vector<std::string>{"g", "p"}, aggs)
+                    .collect(2));
+        DataFrame expected =
+            df.group_by(std::vector<std::string>{"g", "p"}, aggs);
+        REQUIRE(r.names == std::vector<std::string>{"g", "p", "sum", "count"});
+        REQUIRE(r.num_rows() == expected.num_rows());
+        for (std::int64_t i = 0; i < r.num_rows(); ++i) {
+            const std::int64_t gk = r.column("g").data<std::int64_t>()[i];
+            const std::int64_t pk = r.column("p").data<std::int64_t>()[i];
+            std::int64_t j = -1;
+            for (std::int64_t k = 0; k < expected.num_rows(); ++k)
+                if (expected.column("g").data<std::int64_t>()[k] == gk &&
+                    expected.column("p").data<std::int64_t>()[k] == pk)
+                    j = k;
+            REQUIRE(j >= 0);
+            CHECK(r.column("sum").data<std::int64_t>()[i] ==
+                  expected.column("sum").data<std::int64_t>()[j]);
+            CHECK(r.column("count").data<std::int64_t>()[i] ==
+                  expected.column("count").data<std::int64_t>()[j]);
+        }
+    }
+
+    TEST_CASE(
+        "group_by(vector<Expr>, AggExprSpec) matches the string overload") {
+        std::vector<std::int64_t> g{0, 1, 0, 1, 0, 1};
+        std::vector<std::int64_t> p{1, 1, 1, 2, 1, 2};
+        std::vector<std::int64_t> v{1, 2, 3, 4, 5, 6};
+        DataFrame df;
+        df.names = {"g", "p", "v"};
+        df.columns.push_back(Series::flat_i64(g.data(), 6));
+        df.columns.push_back(Series::flat_i64(p.data(), 6));
+        df.columns.push_back(Series::flat_i64(v.data(), 6));
+
+        std::vector<GroupAgg> str_aggs{{Agg::Sum, "v", "s", 0.0}};
+        DataFrame expected =
+            run(df.lazy()
+                    .group_by(std::vector<std::string>{"g", "p"}, str_aggs)
+                    .collect(2));
+
+        std::vector<AggExprSpec> expr_aggs{agg_sum(col(2), "s")};
+        DataFrame got =
+            run(df.lazy()
+                    .group_by(std::vector<Expr>{col(0), col(1)}, expr_aggs)
+                    .collect(2));
+
+        REQUIRE(got.names == expected.names);
+        REQUIRE(got.num_rows() == expected.num_rows());
+        for (std::int64_t i = 0; i < got.num_rows(); ++i) {
+            const std::int64_t gk = got.column("g").data<std::int64_t>()[i];
+            const std::int64_t pk = got.column("p").data<std::int64_t>()[i];
+            std::int64_t j = -1;
+            for (std::int64_t k = 0; k < expected.num_rows(); ++k)
+                if (expected.column("g").data<std::int64_t>()[k] == gk &&
+                    expected.column("p").data<std::int64_t>()[k] == pk)
+                    j = k;
+            REQUIRE(j >= 0);
+            CHECK(got.column("s").data<std::int64_t>()[i] ==
+                  expected.column("s").data<std::int64_t>()[j]);
         }
     }
 

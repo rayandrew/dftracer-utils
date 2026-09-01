@@ -637,8 +637,16 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
             )
         )
 
-    def group_by(self, key: str, *aggs: "Union[str, Agg]") -> "Union[DataFrame, GroupBy]":
-        return _wrap(self._native.group_by(_unwrap(key), *[_unwrap(x) for x in aggs]))
+    def group_by(
+        self, key: "Union[str, Sequence[str]]", *aggs: "Union[str, Agg]"
+    ) -> "Union[DataFrame, GroupBy]":
+        """Group by one column name or several (a composite key), then either
+        run inline legacy specs or return a lazy :class:`GroupBy` for
+        ``.agg(...)``."""
+        keys = [key] if isinstance(key, str) else list(key)
+        return _wrap(
+            self._native.group_by(*[_unwrap(k) for k in keys], *[_unwrap(a) for a in aggs])
+        )
 
 
 def _to_filter_dsl(predicate: "Union[str, Expr]") -> str:

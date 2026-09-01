@@ -894,6 +894,81 @@ TEST_SUITE("vec") {
         CHECK(rt.columns[3].data<double>()[0] == doctest::Approx(20.0));
     }
 
+    TEST_CASE("agg engine: native multi-key group_by (composite key, typed)") {
+        namespace ag = dftracer::utils::dataframe;
+        // Two key columns of different types: String "cat" and Int64 "pid".
+        // (cat, pid) = (io, 1), (cpu, 1), (io, 2), (cpu, 1), (io, 1)
+        Series cat = Series::strings({"io", "cpu", "io", "cpu", "io"});
+        std::vector<std::int64_t> pidv{1, 1, 2, 1, 1};
+        Series pid = Series::flat_i64(pidv.data(), 5);
+        std::vector<std::int64_t> durv{10, 5, 20, 15, 30};
+        Series dur = Series::flat_i64(durv.data(), 5);
+        std::vector<const Series*> keys{&cat, &pid};
+        std::vector<const Series*> vals{&dur};
+        std::vector<ag::AggSpec> specs{{ag::AggOp::Count, -1, "n"},
+                                       {ag::AggOp::Sum, 0, "sum_dur"}};
+
+        DataFrame g = ag::group_agg(keys, vals, specs, {"cat", "pid"});
+        REQUIRE(g.num_rows() == 3);  // (io,1) (cpu,1) (io,2) - first-seen order
+        REQUIRE(g.names ==
+                std::vector<std::string>{"cat", "pid", "n", "sum_dur"});
+        CHECK(g.columns[0].type() == TypeId::String);
+        CHECK(g.columns[1].type() == TypeId::Int64);
+
+        auto find = [&](const std::string& c, std::int64_t p) -> std::int64_t {
+            for (std::int64_t i = 0; i < g.num_rows(); ++i)
+                if (g.columns[0].string_at(i) == c &&
+                    g.columns[1].data<std::int64_t>()[i] == p)
+                    return i;
+            FAIL("group not found");
+            return -1;
+        };
+        const std::int64_t io1 = find("io", 1), cpu1 = find("cpu", 1),
+                           io2 = find("io", 2);
+        CHECK(g.columns[2].data<std::int64_t>()[io1] == 2);    // rows 0,4
+        CHECK(g.columns[3].data<std::int64_t>()[io1] == 40);   // 10+30
+        CHECK(g.columns[2].data<std::int64_t>()[cpu1] == 2);
+        CHECK(g.columns[3].data<std::int64_t>()[cpu1] == 20);  // 5+15
+        CHECK(g.columns[2].data<std::int64_t>()[io2] == 1);
+        CHECK(g.columns[3].data<std::int64_t>()[io2] == 20);
+
+        // Mergeable partials + serialize round-trip, split across the same
+        // composite key.
+        Series ck1 = Series::strings({"io", "cpu"});
+        std::vector<std::int64_t> pk1{1, 1};
+        Series pid1 = Series::flat_i64(pk1.data(), 2);
+        std::vector<std::int64_t> d1{10, 5};
+        Series c1 = Series::flat_i64(d1.data(), 2);
+        Series ck2 = Series::strings({"io", "cpu", "io"});
+        std::vector<std::int64_t> pk2{2, 1, 1};
+        Series pid2 = Series::flat_i64(pk2.data(), 3);
+        std::vector<std::int64_t> d2{20, 15, 30};
+        Series c2 = Series::flat_i64(d2.data(), 3);
+
+        auto s1 = ag::agg_new(specs);
+        auto s2 = ag::agg_new(specs);
+        std::vector<const Series*> keys1{&ck1, &pid1}, keys2{&ck2, &pid2};
+        std::vector<const Series*> v1{&c1}, v2{&c2};
+        ag::agg_accumulate(*s1, keys1, v1);
+        ag::agg_accumulate(*s2, keys2, v2);
+        std::string blob = ag::agg_serialize(*s2);
+        auto s2b = ag::agg_deserialize(blob);
+        ag::agg_merge(*s1, *s2b);
+        DataFrame merged =
+            ag::agg_finalize(*s1, std::vector<std::string>{"cat", "pid"});
+        REQUIRE(merged.num_rows() == 3);
+        const std::int64_t mio1 = [&] {
+            for (std::int64_t i = 0; i < merged.num_rows(); ++i)
+                if (merged.columns[0].string_at(i) == "io" &&
+                    merged.columns[1].data<std::int64_t>()[i] == 1)
+                    return i;
+            return std::int64_t(-1);
+        }();
+        REQUIRE(mio1 >= 0);
+        CHECK(merged.columns[2].data<std::int64_t>()[mio1] == 2);
+        CHECK(merged.columns[3].data<std::int64_t>()[mio1] == 40);
+    }
+
     TEST_CASE("agg engine: moment aggregates match the stats kernels") {
         namespace ag = dftracer::utils::dataframe;
         // Two groups; enough spread per group for skew/kurt to be meaningful.

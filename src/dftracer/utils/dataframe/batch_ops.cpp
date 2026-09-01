@@ -281,11 +281,15 @@ Series concat_columns(const std::vector<const Series*>& parts) {
                                        total, vptr)};
 }
 
-DataFrame group_by(const DataFrame& b, const std::string& key,
+DataFrame group_by(const DataFrame& b, const std::vector<std::string>& keys,
                    const std::vector<GroupAgg>& aggs) {
-    std::int64_t ki = index_of(b, key);
-    if (ki < 0) throw std::out_of_range("group_by: no column named " + key);
-    const Series& key_col = b.columns[static_cast<std::size_t>(ki)];
+    std::vector<const Series*> key_cols;
+    key_cols.reserve(keys.size());
+    for (const std::string& key : keys) {
+        std::int64_t ki = index_of(b, key);
+        if (ki < 0) throw std::out_of_range("group_by: no column named " + key);
+        key_cols.push_back(&b.columns[static_cast<std::size_t>(ki)]);
+    }
 
     // Lower to the fused aggregation engine: value columns referenced by index
     // (deduped), all aggregates computed in one parallel pass over the batch.
@@ -313,7 +317,12 @@ DataFrame group_by(const DataFrame& b, const std::string& key,
         if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
         specs.push_back(std::move(sp));
     }
-    return group_agg(key_col, values, std::move(specs), key);
+    return group_agg(key_cols, values, std::move(specs), keys);
+}
+
+DataFrame group_by(const DataFrame& b, const std::string& key,
+                   const std::vector<GroupAgg>& aggs) {
+    return group_by(b, std::vector<std::string>{key}, aggs);
 }
 
 namespace {

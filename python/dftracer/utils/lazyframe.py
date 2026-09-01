@@ -12,7 +12,7 @@ references resolve by position against the frame's schema at that point, so a
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, List, Union
+from typing import TYPE_CHECKING, Callable, List, Sequence, Union
 
 from .columnar import Expr, _as_expr, _emit_ast
 from .dataframe import DataFrame
@@ -116,9 +116,11 @@ class LazyFrame:
         """The ``k`` rows with the largest (or smallest) ``name`` values."""
         return LazyFrame(self._native.topk(name, k, largest))
 
-    def group_by(self, key: str, *aggs: str) -> "LazyFrame":
-        """Group by ``key`` with ``"op[:column]"`` aggregate specs."""
-        return LazyFrame(self._native.group_by(key, list(aggs)))
+    def group_by(self, key: Union[str, Sequence[str]], *aggs: str) -> "LazyFrame":
+        """Group by ``key`` (one column, or several for a composite key) with
+        ``"op[:column]"`` aggregate specs."""
+        keys = [key] if isinstance(key, str) else list(key)
+        return LazyFrame(self._native.group_by(keys, list(aggs)))
 
     def sort_by(self, name: str, descending: bool = False) -> "LazyFrame":
         """Sort by one column (external merge sort, bounded memory)."""

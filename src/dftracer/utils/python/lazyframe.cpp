@@ -38,6 +38,7 @@ using dataframe::GroupAgg;
 using dataframe::LazyFrame;
 using dftracer::utils::python::aggs_from_seq;
 using dftracer::utils::python::group_agg_from_spec;
+using dftracer::utils::python::strings_from_str_or_seq;
 
 struct LazyFrameObject {
     PyObject_HEAD LazyFrame lf;
@@ -205,16 +206,20 @@ PyObject* LazyFrame_topk(PyObject* self, PyObject* args, PyObject* kwds) {
     return run_lazy_op([&] { return b->lf.topk(name, k, largest != 0); });
 }
 
-// group_by(key, aggs): aggs is a sequence of "op[:column]" string specs.
+// group_by(key, aggs): key is a column name or a sequence of names (composite
+// key); aggs is a sequence of "op[:column]" string specs.
 PyObject* LazyFrame_group_by(PyObject* self, PyObject* args) {
     LazyFrameObject* b = as_lazyframe(self);
     if (!b) return nullptr;
-    const char* key = nullptr;
+    PyObject* key_obj = nullptr;
     PyObject* aggs_obj = nullptr;
-    if (!PyArg_ParseTuple(args, "sO", &key, &aggs_obj)) return nullptr;
+    if (!PyArg_ParseTuple(args, "OO", &key_obj, &aggs_obj)) return nullptr;
+    std::vector<std::string> keys;
+    if (!strings_from_str_or_seq(key_obj, keys)) return nullptr;
     std::vector<GroupAgg> aggs;
     if (!aggs_from_seq(aggs_obj, aggs)) return nullptr;
-    return run_lazy_op([&] { return b->lf.group_by(key, std::move(aggs)); });
+    return run_lazy_op(
+        [&] { return b->lf.group_by(std::move(keys), std::move(aggs)); });
 }
 
 PyObject* LazyFrame_sort_by(PyObject* self, PyObject* args, PyObject* kwds) {

@@ -111,11 +111,19 @@ class LazyFrame {
     /// Group by `key` and compute each aggregate (streaming: one partial state,
     /// bounded by the group count).
     LazyFrame group_by(std::string key, std::vector<GroupAgg> aggs) const;
+    /// Group by N key columns (a composite key: hashed and compared
+    /// column-by-column, each keeping its own type). Streaming, as the
+    /// single-key overload.
+    LazyFrame group_by(std::vector<std::string> keys,
+                       std::vector<GroupAgg> aggs) const;
     /// Group by an expression key and compute each expression aggregate.
     /// Desugars to with_column + the string group_by: a bare column-ref key or
     /// aggregate value is used directly, a computed one is materialized into a
     /// hidden temp column first. Fully streaming, same as the string overload.
     LazyFrame group_by(Expr key, std::vector<AggExprSpec> aggs) const;
+    /// Group by N expression keys; each desugars like the single-key overload.
+    LazyFrame group_by(std::vector<Expr> keys,
+                       std::vector<AggExprSpec> aggs) const;
     /// Sort by `name`. External merge sort: spills sorted runs past the memory
     /// budget and k-way merges them, so peak memory stays bounded.
     LazyFrame sort_by(std::string name, bool descending = false) const;

@@ -100,6 +100,11 @@ DataFrame DataFrame::group_by(const std::string& key,
     return dfops::group_by(*this, key, aggs);
 }
 
+DataFrame DataFrame::group_by(const std::vector<std::string>& keys,
+                              const std::vector<GroupAgg>& aggs) const {
+    return dfops::group_by(*this, keys, aggs);
+}
+
 DataFrame DataFrame::group_by(const Expr& key,
                               const std::vector<AggExprSpec>& aggs) const {
     const std::int64_t idx = expr_col_index(key);
@@ -111,6 +116,23 @@ DataFrame DataFrame::group_by(const Expr& key,
     inputs.reserve(columns.size());
     for (const Series& c : columns) inputs.push_back(&c);
     return group_agg_expr(key, aggs, inputs, key_name);
+}
+
+DataFrame DataFrame::group_by(const std::vector<Expr>& keys,
+                              const std::vector<AggExprSpec>& aggs) const {
+    std::vector<std::string> key_names;
+    key_names.reserve(keys.size());
+    for (std::size_t k = 0; k < keys.size(); ++k) {
+        const std::int64_t idx = expr_col_index(keys[k]);
+        key_names.push_back(
+            (idx >= 0 && static_cast<std::size_t>(idx) < names.size())
+                ? names[static_cast<std::size_t>(idx)]
+                : "key" + std::to_string(k));
+    }
+    std::vector<const Series*> inputs;
+    inputs.reserve(columns.size());
+    for (const Series& c : columns) inputs.push_back(&c);
+    return group_agg_expr(keys, aggs, inputs, key_names);
 }
 
 DataFrame DataFrame::unpivot(const std::vector<std::string>& id_vars,

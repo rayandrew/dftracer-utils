@@ -57,10 +57,17 @@ AggExprSpec agg_argmax(Expr value, Expr by, std::string out = "argmax");
 /// Distinct String values of `value`, sorted and joined (see AggOp::SetUnion).
 AggExprSpec agg_set_union(Expr value, std::string out = "set_union");
 
-/// Group `inputs` by `key` and compute each spec, evaluating the key and value
-/// expressions in one fused, CSE'd, pruned pass. Identical value expressions
-/// share a single evaluated column (and thus one accumulator). The result is
-/// the key column (named `key_name`) plus one column per spec, in spec order.
+/// Group `inputs` by `keys` (N expressions) and compute each spec, evaluating
+/// the keys and values in one fused, CSE'd, pruned pass. Identical value
+/// expressions share a single evaluated column (and thus one accumulator). A
+/// bare column-ref key shares that input column directly (any type); a
+/// computed key routes through the numeric expr evaluator. The result is one
+/// key column per `key_names` (in order) plus one column per spec.
+DataFrame group_agg_expr(const std::vector<Expr>& keys,
+                         const std::vector<AggExprSpec>& specs,
+                         const std::vector<const Series*>& inputs,
+                         const std::vector<std::string>& key_names);
+/// Single-key convenience: forwards to the N-key form.
 DataFrame group_agg_expr(const Expr& key, const std::vector<AggExprSpec>& specs,
                          const std::vector<const Series*>& inputs,
                          const std::string& key_name);

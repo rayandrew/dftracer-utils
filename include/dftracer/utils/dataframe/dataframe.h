@@ -147,10 +147,19 @@ struct DataFrame {
     /// aggregate.
     DataFrame group_by(const std::string& key,
                        const std::vector<GroupAgg>& aggs) const;
+    /// Group by N key columns (a composite key: hashed and compared
+    /// column-by-column, each keeping its own type) and compute each
+    /// aggregate.
+    DataFrame group_by(const std::vector<std::string>& keys,
+                       const std::vector<GroupAgg>& aggs) const;
     /// Group by an expression key and compute each expression aggregate in one
     /// CSE'd, pruned pass (see group_agg_expr). A bare column-ref key uses that
     /// column's name for the result; a computed key is named "key".
     DataFrame group_by(const Expr& key,
+                       const std::vector<AggExprSpec>& aggs) const;
+    /// Group by N expression keys; each bare column-ref key uses that column's
+    /// name, a computed key is named "key<i>".
+    DataFrame group_by(const std::vector<Expr>& keys,
                        const std::vector<AggExprSpec>& aggs) const;
 
     /// Reshape wide -> long: keep `id_vars`, stack `value_vars` into a

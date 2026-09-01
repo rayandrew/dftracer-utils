@@ -861,13 +861,16 @@ def _to_agg(spec: object) -> Agg:
 
 
 class GroupBy:
-    """A lazy group-by over a native ``DataFrame``; call ``.agg(*specs)`` with
-    aggregate expressions (``F.x.sum()``, ``count()``) or legacy strings
-    (``"sum:dur"``). Value expressions compile in one CSE'd, pruned pass."""
+    """A lazy group-by over a native ``DataFrame`` (one or more key columns);
+    call ``.agg(*specs)`` with aggregate expressions (``F.x.sum()``,
+    ``count()``) or legacy strings (``"sum:dur"``). Value expressions compile
+    in one CSE'd, pruned pass."""
 
-    def __init__(self, batch: "Union[DataFrame, _ext._DataFrame]", key: str) -> None:
+    def __init__(
+        self, batch: "Union[DataFrame, _ext._DataFrame]", keys: "Union[str, Sequence[str]]"
+    ) -> None:
         self._batch = batch
-        self._key = key
+        self._keys: List[str] = [keys] if isinstance(keys, str) else list(keys)
 
     def agg(self, *specs: "Union[str, Agg]") -> DataFrame:
         if not specs:
@@ -875,7 +878,7 @@ class GroupBy:
         native = _unwrap(self._batch)
         names = list(native.column_names)
         ser = [_to_agg(s)._spec(names) for s in specs]
-        return DataFrame(native._group_agg_expr(self._key, ser))
+        return DataFrame(native._group_agg_expr(self._keys, ser))
 
 
 def _collect_columns(expr: Expr) -> List[str]:

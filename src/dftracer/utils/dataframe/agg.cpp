@@ -10,6 +10,7 @@
 #include <cstring>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -92,6 +93,13 @@ std::string cell_repr(const Series& c, std::int64_t i) {
 // matches views/view_aggregate.h SET_SEP so the two engines agree.
 constexpr char AGG_SET_SEP = '\x1e';
 
+// Adapted from boost::hash_combine (Boost Software License 1.0):
+// https://www.boost.org/doc/libs/1_74_0/doc/html/hash/reference.html#boost.hash_combine
+std::uint64_t hash_combine(std::uint64_t seed, std::uint64_t v) {
+    seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
+    return seed;
+}
+
 }  // namespace
 
 // Groups fold by distinct value column, not by spec: sum(dur), mean(dur) and
@@ -105,13 +113,19 @@ class AggState {
     std::vector<FieldStatDomain> field_domain;  // field -> accumulation domain
     std::size_t nf = 0;
     bool inited = false;
-    bool key_string = false;
-    std::unordered_map<std::int64_t, std::int64_t> imap;
-    std::unordered_map<std::string, std::int64_t> smap;
-    std::vector<std::int64_t> ikeys;
-    std::vector<std::string> skeys;
-    std::vector<std::uint64_t> counts;  // per group: rows seen
-    std::vector<FieldStat> fstats;      // groups * nf
+
+    // Composite key over N columns: each column keeps its own type (Int64
+    // stays Int64, String stays String) - `key_is_str[k]` selects which of
+    // `ikey_cols[k]` / `skey_cols[k]` holds column k's per-group values. Groups
+    // are located by a combined hash of the N cells (hash_combine, no string
+    // concatenation) with a column-by-column equality check on collision.
+    std::size_t nkeys = 0;
+    std::vector<char> key_is_str;                      // nkeys
+    std::vector<std::vector<std::int64_t>> ikey_cols;  // nkeys * ngroups
+    std::vector<std::vector<std::string>> skey_cols;   // nkeys * ngroups
+    std::unordered_map<std::uint64_t, std::vector<std::int64_t>> key_buckets;
+    std::vector<std::uint64_t> counts;                 // per group: rows seen
+    std::vector<FieldStat> fstats;                     // groups * nf
 
     // First/Last state, allocated (groups * nf) only when `has_fl`. First/Last
     // are order-independent: each keeps the value at the smallest / largest
@@ -158,8 +172,7 @@ class AggState {
 
     std::size_t nspecs() const { return specs.size(); }
     std::int64_t ngroups() const {
-        return static_cast<std::int64_t>(key_string ? skeys.size()
-                                                    : ikeys.size());
+        return static_cast<std::int64_t>(counts.size());
     }
 
     // The distinct-field layout is a pure function of the specs.
@@ -241,23 +254,78 @@ class AggState {
         }
         if (has_set) sets.resize(sets.size() + n_set);
     }
-    std::int64_t group_of_i64(std::int64_t k) {
-        auto it = imap.find(k);
-        if (it != imap.end()) return it->second;
-        std::int64_t g = ngroups();
-        ikeys.push_back(k);
-        imap.emplace(k, g);
+    // Shared lookup for both live rows (get_int/get_str read a Series cell) and
+    // merge (they read another AggState's already-materialized key columns):
+    // hash the N cells, probe the bucket for an exact column-by-column match,
+    // else append a new group.
+    template <class GetInt, class GetStr>
+    std::int64_t find_or_add_group(GetInt&& get_int, GetStr&& get_str) {
+        std::uint64_t h = 0;
+        for (std::size_t k = 0; k < nkeys; ++k) {
+            const std::uint64_t cv =
+                key_is_str[k] ? std::hash<std::string_view>{}(get_str(k))
+                              : static_cast<std::uint64_t>(get_int(k));
+            h = hash_combine(h, cv);
+        }
+        auto it = key_buckets.find(h);
+        if (it != key_buckets.end()) {
+            for (std::int64_t g : it->second) {
+                bool match = true;
+                for (std::size_t k = 0; k < nkeys && match; ++k)
+                    match = key_is_str[k]
+                                ? (skey_cols[k][static_cast<std::size_t>(g)] ==
+                                   get_str(k))
+                                : (ikey_cols[k][static_cast<std::size_t>(g)] ==
+                                   get_int(k));
+                if (match) return g;
+            }
+        }
+        const std::int64_t g = ngroups();
+        for (std::size_t k = 0; k < nkeys; ++k) {
+            if (key_is_str[k])
+                skey_cols[k].emplace_back(get_str(k));
+            else
+                ikey_cols[k].push_back(get_int(k));
+        }
+        key_buckets[h].push_back(g);
         grow_group();
         return g;
     }
-    std::int64_t group_of_str(const std::string& k) {
-        auto it = smap.find(k);
-        if (it != smap.end()) return it->second;
-        std::int64_t g = ngroups();
-        skeys.push_back(k);
-        smap.emplace(k, g);
-        grow_group();
-        return g;
+    std::int64_t group_of(const std::vector<const Series*>& keys,
+                          std::int64_t i) {
+        return find_or_add_group(
+            [&](std::size_t k) { return read_i64(*keys[k], i); },
+            [&](std::size_t k) -> std::string_view {
+                return keys[k]->string_at(i);
+            });
+    }
+    std::int64_t group_of_other(const AggState& other, std::int64_t j) {
+        return find_or_add_group(
+            [&](std::size_t k) {
+                return other.ikey_cols[k][static_cast<std::size_t>(j)];
+            },
+            [&](std::size_t k) -> std::string_view {
+                return other.skey_cols[k][static_cast<std::size_t>(j)];
+            });
+    }
+
+    // Recompute key_buckets from already-populated ikey_cols/skey_cols (after
+    // deserialize), without re-appending group storage.
+    void rebuild_key_buckets(std::int64_t ng) {
+        key_buckets.clear();
+        for (std::int64_t g = 0; g < ng; ++g) {
+            std::uint64_t h = 0;
+            for (std::size_t k = 0; k < nkeys; ++k) {
+                const std::uint64_t cv =
+                    key_is_str[k]
+                        ? std::hash<std::string_view>{}(
+                              skey_cols[k][static_cast<std::size_t>(g)])
+                        : static_cast<std::uint64_t>(
+                              ikey_cols[k][static_cast<std::size_t>(g)]);
+                h = hash_combine(h, cv);
+            }
+            key_buckets[h].push_back(g);
+        }
     }
 };
 
@@ -270,11 +338,16 @@ AggStatePtr agg_new(std::vector<AggSpec> specs) {
     return s;
 }
 
-void agg_accumulate(AggState& st, const Series& key,
+void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                     const std::vector<const Series*>& values,
                     std::int64_t begin, std::int64_t end) {
     if (!st.inited) {
-        st.key_string = key.type() == TypeId::String;
+        st.nkeys = keys.size();
+        st.key_is_str.resize(st.nkeys);
+        st.ikey_cols.resize(st.nkeys);
+        st.skey_cols.resize(st.nkeys);
+        for (std::size_t k = 0; k < st.nkeys; ++k)
+            st.key_is_str[k] = keys[k]->type() == TypeId::String ? 1 : 0;
         st.field_domain.resize(st.nf);
         st.field_is_str.resize(st.nf);
         for (std::size_t fj = 0; fj < st.nf; ++fj) {
@@ -285,7 +358,7 @@ void agg_accumulate(AggState& st, const Series& key,
         }
         st.inited = true;
     }
-    if (end < 0) end = key.length();
+    if (end < 0) end = keys.empty() ? 0 : keys[0]->length();
     const std::int64_t clen = end - begin;
 
     // Precompute DDSketch bucket keys for each sketch field in one SIMD pass
@@ -313,9 +386,7 @@ void agg_accumulate(AggState& st, const Series& key,
     }
 
     for (std::int64_t i = begin; i < end; ++i) {
-        std::int64_t g = st.key_string
-                             ? st.group_of_str(std::string(key.string_at(i)))
-                             : st.group_of_i64(read_i64(key, i));
+        std::int64_t g = st.group_of(keys, i);
         st.counts[static_cast<std::size_t>(g)]++;
         const std::size_t base = static_cast<std::size_t>(g) * st.nf;
         for (std::size_t fj = 0; fj < st.nf; ++fj) {
@@ -382,6 +453,13 @@ void agg_accumulate(AggState& st, const Series& key,
     }
 }
 
+void agg_accumulate(AggState& st, const Series& key,
+                    const std::vector<const Series*>& values,
+                    std::int64_t begin, std::int64_t end) {
+    const std::vector<const Series*> keys{&key};
+    agg_accumulate(st, keys, values, begin, end);
+}
+
 void agg_merge(AggState& into, const AggState& other) {
     if (!other.inited) return;
     if (!into.inited) {
@@ -404,15 +482,15 @@ void agg_merge(AggState& into, const AggState& other) {
         into.n_set = other.n_set;
         into.spec_set = other.spec_set;
         into.set_val_col = other.set_val_col;
-        into.key_string = other.key_string;
+        into.nkeys = other.nkeys;
+        into.key_is_str = other.key_is_str;
+        into.ikey_cols.assign(into.nkeys, {});
+        into.skey_cols.assign(into.nkeys, {});
         into.inited = true;
     }
     const std::int64_t og = other.ngroups();
     for (std::int64_t j = 0; j < og; ++j) {
-        std::int64_t g =
-            into.key_string
-                ? into.group_of_str(other.skeys[static_cast<std::size_t>(j)])
-                : into.group_of_i64(other.ikeys[static_cast<std::size_t>(j)]);
+        std::int64_t g = into.group_of_other(other, j);
         into.counts[static_cast<std::size_t>(g)] +=
             other.counts[static_cast<std::size_t>(j)];
         const std::size_t db = static_cast<std::size_t>(g) * into.nf;
@@ -466,15 +544,19 @@ void agg_merge(AggState& into, const AggState& other) {
     }
 }
 
-DataFrame agg_finalize(const AggState& st, const std::string& key_name) {
+DataFrame agg_finalize(const AggState& st,
+                       const std::vector<std::string>& key_names) {
     const std::int64_t ng = st.ngroups();
     const std::size_t ns = st.nspecs();
     DataFrame out;
-    out.names.push_back(key_name);
-    if (st.key_string)
-        out.columns.push_back(Series::strings(st.skeys));
-    else
-        out.columns.push_back(Series::flat_i64(st.ikeys.data(), ng));
+    for (std::size_t k = 0; k < st.nkeys; ++k) {
+        out.names.push_back(k < key_names.size() ? key_names[k]
+                                                 : "key" + std::to_string(k));
+        if (st.key_is_str[k])
+            out.columns.push_back(Series::strings(st.skey_cols[k]));
+        else
+            out.columns.push_back(Series::flat_i64(st.ikey_cols[k].data(), ng));
+    }
 
     for (std::size_t s = 0; s < ns; ++s) {
         const AggSpec& sp = st.specs[s];
@@ -662,6 +744,10 @@ DataFrame agg_finalize(const AggState& st, const std::string& key_name) {
     return out;
 }
 
+DataFrame agg_finalize(const AggState& st, const std::string& key_name) {
+    return agg_finalize(st, std::vector<std::string>{key_name});
+}
+
 namespace {
 
 template <class T>
@@ -696,7 +782,8 @@ constexpr std::int64_t AGG_GRAIN = 1 << 16;
 std::string agg_serialize(const AggState& st) {
     std::string s;
     put(s, static_cast<std::uint32_t>(st.specs.size()));
-    put(s, static_cast<std::uint8_t>(st.key_string ? 1 : 0));
+    put(s, static_cast<std::uint32_t>(st.nkeys));
+    for (char b : st.key_is_str) put(s, static_cast<std::uint8_t>(b));
     for (const AggSpec& sp : st.specs) {
         put(s, static_cast<std::int32_t>(sp.op));
         put(s, sp.value_col);
@@ -714,10 +801,12 @@ std::string agg_serialize(const AggState& st) {
                        fj < st.field_is_str.size() ? st.field_is_str[fj] : 0));
     const std::int64_t ng = st.ngroups();
     put(s, ng);
-    if (st.key_string)
-        for (const std::string& k : st.skeys) put_bytes(s, k);
-    else
-        for (std::int64_t k : st.ikeys) put(s, k);
+    for (std::size_t k = 0; k < st.nkeys; ++k) {
+        if (st.key_is_str[k])
+            for (const std::string& v : st.skey_cols[k]) put_bytes(s, v);
+        else
+            for (std::int64_t v : st.ikey_cols[k]) put(s, v);
+    }
     for (std::uint64_t c : st.counts) put(s, c);
     for (const FieldStat& f : st.fstats) put(s, f);
     if (st.has_fl) {
@@ -756,7 +845,11 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     Reader r{blob.data()};
     AggStatePtr st(new AggState());
     const std::uint32_t ns = r.get<std::uint32_t>();
-    st->key_string = r.get<std::uint8_t>() != 0;
+    const std::uint32_t nkeys = r.get<std::uint32_t>();
+    st->nkeys = nkeys;
+    st->key_is_str.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k)
+        st->key_is_str[k] = static_cast<char>(r.get<std::uint8_t>());
     st->specs.resize(ns);
     for (std::uint32_t i = 0; i < ns; ++i) {
         st->specs[i].op = static_cast<AggOp>(r.get<std::int32_t>());
@@ -778,19 +871,21 @@ AggStatePtr agg_deserialize(const std::string& blob) {
             st->field_is_str[i] = static_cast<char>(r.get<std::uint8_t>());
     }
     const std::int64_t ng = r.get<std::int64_t>();
-    if (st->key_string) {
-        st->skeys.resize(static_cast<std::size_t>(ng));
-        for (std::int64_t g = 0; g < ng; ++g) {
-            st->skeys[static_cast<std::size_t>(g)] = r.get_bytes();
-            st->smap.emplace(st->skeys[static_cast<std::size_t>(g)], g);
-        }
-    } else {
-        st->ikeys.resize(static_cast<std::size_t>(ng));
-        for (std::int64_t g = 0; g < ng; ++g) {
-            st->ikeys[static_cast<std::size_t>(g)] = r.get<std::int64_t>();
-            st->imap.emplace(st->ikeys[static_cast<std::size_t>(g)], g);
+    st->ikey_cols.resize(nkeys);
+    st->skey_cols.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k) {
+        if (st->key_is_str[k]) {
+            st->skey_cols[k].resize(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g)
+                st->skey_cols[k][static_cast<std::size_t>(g)] = r.get_bytes();
+        } else {
+            st->ikey_cols[k].resize(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g)
+                st->ikey_cols[k][static_cast<std::size_t>(g)] =
+                    r.get<std::int64_t>();
         }
     }
+    st->rebuild_key_buckets(ng);
     st->counts.resize(static_cast<std::size_t>(ng));
     for (std::int64_t g = 0; g < ng; ++g)
         st->counts[static_cast<std::size_t>(g)] = r.get<std::uint64_t>();
@@ -851,13 +946,15 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     return st;
 }
 
-DataFrame group_agg(const Series& key, const std::vector<const Series*>& values,
-                    std::vector<AggSpec> specs, const std::string& key_name) {
-    const std::int64_t n = key.length();
+DataFrame group_agg(const std::vector<const Series*>& keys,
+                    const std::vector<const Series*>& values,
+                    std::vector<AggSpec> specs,
+                    const std::vector<std::string>& key_names) {
+    const std::int64_t n = keys.empty() ? 0 : keys[0]->length();
     if (n <= AGG_GRAIN) {
         auto st = agg_new(std::move(specs));
-        agg_accumulate(*st, key, values);
-        return agg_finalize(*st, key_name);
+        agg_accumulate(*st, keys, values);
+        return agg_finalize(*st, key_names);
     }
     // Parallel driver: each chunk folds into its own partial (no locks), then
     // the partials merge. parallel_for runs serial when no backend is
@@ -866,13 +963,20 @@ DataFrame group_agg(const Series& key, const std::vector<const Series*>& values,
     std::vector<AggStatePtr> partials(static_cast<std::size_t>(chunks));
     parallel_for(n, AGG_GRAIN, [&](std::int64_t b, std::int64_t e) {
         auto st = agg_new(specs);
-        agg_accumulate(*st, key, values, b, e);
+        agg_accumulate(*st, keys, values, b, e);
         partials[static_cast<std::size_t>(b / AGG_GRAIN)] = std::move(st);
     });
     auto acc = agg_new(std::move(specs));
     for (auto& p : partials)
         if (p) agg_merge(*acc, *p);
-    return agg_finalize(*acc, key_name);
+    return agg_finalize(*acc, key_names);
+}
+
+DataFrame group_agg(const Series& key, const std::vector<const Series*>& values,
+                    std::vector<AggSpec> specs, const std::string& key_name) {
+    const std::vector<const Series*> keys{&key};
+    return group_agg(keys, values, std::move(specs),
+                     std::vector<std::string>{key_name});
 }
 
 }  // namespace dftracer::utils::dataframe
