@@ -639,6 +639,11 @@ DFTU_EXPORT dftu_dataframe* dftu_dataframe_drop_duplicates(
 DFTU_EXPORT dftu_dataframe* dftu_dataframe_sort_by_multi(
     const dftu_dataframe* df, const char* const* names, int32_t n,
     int32_t descending);
+/** Per-column direction form: `descending[i]` (0/1) applies to `names[i]`.
+ * `descending_n` must be 1 (broadcast to every key) or equal `n`. */
+DFTU_EXPORT dftu_dataframe* dftu_dataframe_sort_by_multi_per_col(
+    const dftu_dataframe* df, const char* const* names, int32_t n,
+    const int32_t* descending, int32_t descending_n);
 /** The last `n` rows (clamped). */
 DFTU_EXPORT dftu_dataframe* dftu_dataframe_tail(const dftu_dataframe* df,
                                                 int64_t n);
@@ -756,8 +761,9 @@ typedef enum {
     DFTU_TOK_RANK,     /**< dftu_rank_method operand */
     DFTU_TOK_ROLLING,  /**< dftu_rolling_op operand */
     DFTU_TOK_FRAME, /**< a dftu_dataframe operand, or a dftu_dataframe return */
-    DFTU_TOK_STRLIST /**< a (const char* const*, int32 count) string-list
-                        operand */
+    DFTU_TOK_STRLIST, /**< a (const char* const*, int32 count) string-list
+                         operand */
+    DFTU_TOK_I32LIST  /**< a (const int32_t*, int32 count) int32-list operand */
 } dftu_op_tok;
 
 /** Max operand tokens a signature carries (5-bit fields: a return token plus up
@@ -828,9 +834,10 @@ DFTU_EXPORT int dftu_op_register(const dftu_op_desc* desc);
 
 /** One operand slot. Only the union member the operand's token names is read:
  * SCALAR->scalar, I64->i64, F64->f64, CHAR->ch, an enum token (CMP/PRIM/
- * LOGICAL/DTYPE/REDUCE/I32/RANK/ROLLING)->i32, STR->str, STRLIST->list, and a
- * frame op's SERIES operand (a mask/column)->series. A SERIES/FRAME operand of
- * a column/frame op is passed in the runner's in[]/frames[] array, not here. */
+ * LOGICAL/DTYPE/REDUCE/I32/RANK/ROLLING)->i32, STR->str, STRLIST->list,
+ * I32LIST->i32list, and a frame op's SERIES operand (a mask/column)->series. A
+ * SERIES/FRAME operand of a column/frame op is passed in the runner's
+ * in[]/frames[] array, not here. */
 typedef union dftu_op_val {
     dftu_scalar scalar;
     int64_t i64;
@@ -846,6 +853,10 @@ typedef union dftu_op_val {
         const char* const* items;
         int32_t n;
     } list;
+    struct {
+        const int32_t* items;
+        int32_t n;
+    } i32list;
 } dftu_op_val;
 
 /** The operands an op consumes, one slot per operand token in order (args[i]

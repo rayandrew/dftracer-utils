@@ -102,6 +102,10 @@ struct DataFrame {
     /// Stable lexicographic sort by several key columns (nulls last).
     DataFrame sort_by_multi(const std::vector<std::string>& by,
                             bool descending = false) const;
+    /// Per-column direction form: `descending[i]` applies to `by[i]`; a single
+    /// flag broadcasts to every key.
+    DataFrame sort_by_multi(const std::vector<std::string>& by,
+                            const std::vector<bool>& descending) const;
     DataFrame topk(const std::string& name, std::int64_t k,
                    bool largest = true) const;
 

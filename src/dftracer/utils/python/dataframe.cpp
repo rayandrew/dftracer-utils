@@ -369,11 +369,11 @@ PyObject* DataFrame_sort_by_multi(PyObject* self, PyObject* args,
     DataFrameObject* b = as_dataframe(self);
     if (!b) return nullptr;
     PyObject* names_obj = nullptr;
-    int descending = 0;
+    PyObject* descending_obj = nullptr;
     static const char* kwlist[] = {"names", "descending", nullptr};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|p",
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|O",
                                      const_cast<char**>(kwlist), &names_obj,
-                                     &descending))
+                                     &descending_obj))
         return nullptr;
     PyObject* seq = PySequence_Fast(names_obj, "names must be a sequence");
     if (!seq) return nullptr;
@@ -388,9 +388,32 @@ PyObject* DataFrame_sort_by_multi(PyObject* self, PyObject* args,
         names.emplace_back(s);
     }
     Py_DECREF(seq);
+
+    // `descending` is either a single bool (broadcasts) or a sequence of bool,
+    // one per name; a bare Python list is never truthy-coerced (that was the
+    // old "any non-empty list sorts descending" bug).
+    std::vector<bool> descending;
+    if (!descending_obj) {
+        descending.push_back(false);
+    } else if (PyBool_Check(descending_obj) || PyLong_Check(descending_obj)) {
+        descending.push_back(PyObject_IsTrue(descending_obj) != 0);
+    } else {
+        PyObject* dseq = PySequence_Fast(
+            descending_obj, "descending must be a bool or a sequence of bool");
+        if (!dseq) return nullptr;
+        Py_ssize_t dn = PySequence_Fast_GET_SIZE(dseq);
+        for (Py_ssize_t i = 0; i < dn; ++i) {
+            int truth = PyObject_IsTrue(PySequence_Fast_GET_ITEM(dseq, i));
+            if (truth < 0) {
+                Py_DECREF(dseq);
+                return nullptr;
+            }
+            descending.push_back(truth != 0);
+        }
+        Py_DECREF(dseq);
+    }
     return run_batch_op([&] {
-        return dataframe::sort_by_multi(to_dataframe(b), names,
-                                        descending != 0);
+        return dataframe::sort_by_multi(to_dataframe(b), names, descending);
     });
 }
 

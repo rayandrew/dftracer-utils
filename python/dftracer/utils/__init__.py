@@ -49,7 +49,7 @@ from .dftracer_utils_ext import (
 from .dftracer_utils_ext import (
     set_default_runtime as _set_default_native_runtime,
 )
-from .enums import AggOp, GroupKey, Phase  # noqa: F401
+from .enums import AggOp, DType, GroupKey, Phase  # noqa: F401
 from .indexer import (  # noqa: F401
     AggregationConfig,
     Indexer,

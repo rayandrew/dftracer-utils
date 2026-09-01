@@ -144,6 +144,43 @@ constexpr std::size_t buffer_bytes(TypeId t, std::int64_t n) noexcept {
     return static_cast<std::size_t>(n) * byte_width(t);
 }
 
+/// The lowercase dtype name (e.g. "int64", "float64"), for diagnostics.
+constexpr const char* type_name(TypeId t) noexcept {
+    switch (t) {
+        case TypeId::Bool:
+            return "bool";
+        case TypeId::Int8:
+            return "int8";
+        case TypeId::Int16:
+            return "int16";
+        case TypeId::Int32:
+            return "int32";
+        case TypeId::Int64:
+            return "int64";
+        case TypeId::Uint8:
+            return "uint8";
+        case TypeId::Uint16:
+            return "uint16";
+        case TypeId::Uint32:
+            return "uint32";
+        case TypeId::Uint64:
+            return "uint64";
+        case TypeId::Float32:
+            return "float32";
+        case TypeId::Float64:
+            return "float64";
+        case TypeId::String:
+            return "string";
+        case TypeId::Binary:
+            return "binary";
+        case TypeId::List:
+            return "list";
+        case TypeId::Struct:
+            return "struct";
+    }
+    return "unknown";
+}
+
 }  // namespace dftracer::utils::dataframe
 
 #endif  // DFTRACER_UTILS_DATAFRAME_TYPES_H

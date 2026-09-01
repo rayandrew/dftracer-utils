@@ -764,7 +764,13 @@ void parallel_stable_sort_indices(std::vector<std::int64_t>& order, Less less) {
 
 DataFrame sort_by_multi(const DataFrame& b,
                         const std::vector<std::string>& names,
-                        bool descending) {
+                        const std::vector<bool>& descending) {
+    if (descending.empty())
+        throw std::invalid_argument(
+            "sort_by_multi: descending must not be empty");
+    if (descending.size() != 1 && descending.size() != names.size())
+        throw std::invalid_argument(
+            "sort_by_multi: descending must have size 1 or match names.size()");
     std::vector<const Series*> keys;
     keys.reserve(names.size());
     for (const std::string& name : names) {
@@ -773,11 +779,13 @@ DataFrame sort_by_multi(const DataFrame& b,
             throw std::out_of_range("sort_by_multi: no column named " + name);
         keys.push_back(&b.columns[static_cast<std::size_t>(k)]);
     }
+    const bool broadcast = descending.size() == 1;
     const std::int64_t n = b.num_rows();
     std::vector<std::int64_t> order(static_cast<std::size_t>(n));
     for (std::int64_t i = 0; i < n; ++i) order[static_cast<std::size_t>(i)] = i;
     parallel_stable_sort_indices(order, [&](std::int64_t a, std::int64_t bb) {
-        for (const Series* c : keys) {
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            const Series* c = keys[i];
             bool na = c->is_null(a);
             bool nb = c->is_null(bb);
             if (na || nb) {
@@ -785,12 +793,18 @@ DataFrame sort_by_multi(const DataFrame& b,
                 return !na;  // nulls last in both directions
             }
             int r = raw_cmp(*c, a, bb);
-            if (descending) r = -r;
+            if (broadcast ? descending[0] : descending[i]) r = -r;
             if (r != 0) return r < 0;
         }
         return false;
     });
     return take(b, order);
+}
+
+DataFrame sort_by_multi(const DataFrame& b,
+                        const std::vector<std::string>& names,
+                        bool descending) {
+    return sort_by_multi(b, names, std::vector<bool>{descending});
 }
 
 DataFrame tail(const DataFrame& b, std::int64_t n) {

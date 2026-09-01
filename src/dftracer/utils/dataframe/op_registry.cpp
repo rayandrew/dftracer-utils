@@ -86,6 +86,8 @@ const char* tok_name(dftu_op_tok t) {
             return "frame";
         case DFTU_TOK_STRLIST:
             return "strlist";
+        case DFTU_TOK_I32LIST:
+            return "i32list";
     }
     return "?";
 }
@@ -326,6 +328,11 @@ dftu_dataframe* dftu_op_run_frame(const dftu_op_desc* op,
             return as<DF (*)(CDF, const char* const*, int32_t,
                              const char* const*, int32_t)>(op->fn)(
                 df, g[1].list.items, g[1].list.n, g[2].list.items, g[2].list.n);
+        case DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32LIST):
+            return as<DF (*)(CDF, const char* const*, int32_t, const int32_t*,
+                             int32_t)>(op->fn)(df, g[1].list.items, g[1].list.n,
+                                               g[2].i32list.items,
+                                               g[2].i32list.n);
         case DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE):
             return as<DF (*)(CDF, const char*, int64_t, int32_t)>(op->fn)(
                 df, g[1].str.ptr, g[2].i64, g[3].i32);

@@ -96,3 +96,39 @@ def test_string_ops():
     assert mask.to_numpy().tolist() == [True, True, False]
     assert isinstance(s.to_uppercase(), Series)
     assert s.to_uppercase().to_pandas().tolist() == ["ABC", "BCD", "XYZ"]
+
+
+def test_astype_matches_cast_by_name_enum_and_int():
+    from dftracer.utils import DType
+
+    s = Series.from_numpy(np.array([1, 2, 3], dtype=np.int64))
+    by_name = s.astype("int64")
+    by_enum = s.cast(DType.INT64)
+    by_int = s.cast(4)
+    assert by_name.type == by_enum.type == by_int.type == int(DType.INT64)
+    assert by_name.to_numpy().tolist() == [1, 2, 3]
+
+    # Case-insensitive name lookup, and an unknown name raises.
+    assert s.astype("Float64").type == int(DType.FLOAT64)
+    with pytest.raises(ValueError):
+        s.astype("not_a_dtype")
+
+
+def test_uint64_float64_arithmetic_promotes():
+    from dftracer.utils import DType
+
+    u = Series.from_numpy(np.array([1, 2, 3], dtype=np.uint64))
+    f = Series.from_numpy(np.array([0.5, 1.5, 2.5], dtype=np.float64))
+
+    summed = u.add(f)
+    assert summed.type == int(DType.FLOAT64)
+    assert summed.to_numpy().tolist() == pytest.approx([1.5, 3.5, 5.5])
+
+    i = Series.from_numpy(np.array([1, 2, 3], dtype=np.int64))
+    prod = i.mul_scalar(1.0)
+    assert prod.type == int(DType.FLOAT64)
+    assert prod.to_numpy().tolist() == pytest.approx([1.0, 2.0, 3.0])
+
+    u_prod = u.mul_scalar(1.0)
+    assert u_prod.type == int(DType.FLOAT64)
+    assert u_prod.to_numpy().tolist() == pytest.approx([1.0, 2.0, 3.0])

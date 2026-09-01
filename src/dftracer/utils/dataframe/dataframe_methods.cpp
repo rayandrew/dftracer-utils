@@ -63,6 +63,10 @@ DataFrame DataFrame::sort_by_multi(const std::vector<std::string>& by,
                                    bool descending) const {
     return dfops::sort_by_multi(*this, by, descending);
 }
+DataFrame DataFrame::sort_by_multi(const std::vector<std::string>& by,
+                                   const std::vector<bool>& descending) const {
+    return dfops::sort_by_multi(*this, by, descending);
+}
 DataFrame DataFrame::drop_nulls() const { return dfops::drop_nulls(*this); }
 DataFrame DataFrame::fill_null(dftu_scalar value) const {
     return dfops::fill_null(*this, value);

@@ -473,10 +473,29 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
         """Drop duplicate rows, keeping the first (alias of :meth:`unique`)."""
         return _wrap(self._native.unique())
 
+    def sort_values(
+        self,
+        by: Union[str, Sequence[str]],
+        ascending: Union[bool, Sequence[bool]] = True,
+    ) -> "DataFrame":
+        """Order rows by one column or several, pandas-style. ``by`` and
+        ``ascending`` each accept a scalar or a sequence; a sequence
+        ``ascending`` maps one flag per column in ``by`` (a single flag
+        broadcasts to every key)."""
+        names = [by] if isinstance(by, str) else list(by)
+        if isinstance(ascending, bool):
+            descending: Union[bool, "list[bool]"] = not ascending
+        else:
+            descending = [not a for a in ascending]
+        if len(names) == 1 and isinstance(descending, bool):
+            return _wrap(self._native.sort_by(names[0], descending))
+        return _wrap(self._native.sort_by_multi(names, descending))
+
     def sort(self, by: Union[str, Sequence[str]], descending: bool = False) -> "DataFrame":
         """Order rows by one column (``by`` a name) or lexicographically by
         several (``by`` a list); the fluent spelling over the native
-        :meth:`sort_by` / :meth:`sort_by_multi`."""
+        :meth:`sort_by` / :meth:`sort_by_multi`. See :meth:`sort_values` for
+        the pandas-style ``ascending`` spelling (accepts a per-column list)."""
         if isinstance(by, str):
             return _wrap(self._native.sort_by(by, descending))
         return _wrap(self._native.sort_by_multi(list(by), descending))
@@ -537,7 +556,11 @@ class DataFrame(_Wrapper["_ext._DataFrame"]):
 
         return LazyFrame(self._native.lazy())
 
-    def sort_by_multi(self, names: "list[str]", descending: bool = False) -> "DataFrame":
+    def sort_by_multi(
+        self, names: "list[str]", descending: Union[bool, Sequence[bool]] = False
+    ) -> "DataFrame":
+        """A single flag broadcasts to every key; a sequence maps one flag per
+        name (size must be 1 or ``len(names)``)."""
         return _wrap(self._native.sort_by_multi(_unwrap(names), _unwrap(descending)))
 
     def sample(self, n: int, seed: int = 0) -> "DataFrame":

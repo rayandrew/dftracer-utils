@@ -28,6 +28,7 @@ from typing import (
 )
 
 from . import dftracer_utils_ext as _ext
+from .enums import _DTYPE_BY_NAME, DType
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -55,6 +56,17 @@ def _wrap(obj: Any) -> Any:
         if isinstance(obj, native_type):
             return wrapper(obj)
     return obj
+
+
+def _resolve_dtype(dtype: "Union[str, int, DType]") -> int:
+    """A dtype spelled as a name, a DType member, or a raw int code -> int
+    code. Raises ValueError on an unrecognized name."""
+    if isinstance(dtype, str):
+        try:
+            return int(_DTYPE_BY_NAME[dtype.lower()])
+        except KeyError:
+            raise ValueError(f"unknown dtype name: {dtype!r}") from None
+    return int(dtype)
 
 
 _N = TypeVar("_N")
@@ -325,9 +337,14 @@ class Series(_Wrapper["_ext._Series"]):
 
     # -- native engine ops (SIMD kernels, wrapped from the C extension) --------
     def add(self, other: "Series") -> "Series":
+        """Element-wise addition; mixed dtypes promote to a common type
+        (numpy rules, e.g. uint64 + float64 -> float64)."""
         return _wrap(self._native.add(_unwrap(other)))
 
     def sub(self, other: "Series") -> "Series":
+        """Element-wise subtraction; mixed dtypes promote to a common type
+        (numpy rules). Note: uint64 - uint64 wraps on underflow (like numpy);
+        cast to a signed or float dtype first for interval/signed math."""
         return _wrap(self._native.sub(_unwrap(other)))
 
     def mul(self, other: "Series") -> "Series":
@@ -340,6 +357,10 @@ class Series(_Wrapper["_ext._Series"]):
         return _wrap(self._native.add_scalar(_unwrap(v)))
 
     def sub_scalar(self, v: Union[int, float]) -> "Series":
+        """Subtract a scalar; a float ``v`` promotes an integer column to
+        Float64 (numpy's weak-scalar rule). Note: uint64 - v wraps on
+        underflow (like numpy); cast to a signed or float dtype first for
+        interval/signed math."""
         return _wrap(self._native.sub_scalar(_unwrap(v)))
 
     def mul_scalar(self, v: Union[int, float]) -> "Series":
@@ -348,8 +369,16 @@ class Series(_Wrapper["_ext._Series"]):
     def div_scalar(self, v: Union[int, float]) -> "Series":
         return _wrap(self._native.div_scalar(_unwrap(v)))
 
-    def cast(self, type_id: int) -> "Series":
-        return _wrap(self._native.cast(_unwrap(type_id)))
+    def astype(self, dtype: "Union[str, int, DType]") -> "Series":
+        """Cast to ``dtype``: a :class:`~dftracer.utils.enums.DType`, its
+        int code, or a dtype name (``"int64"``, ``"Float64"``, case-insensitive;
+        matches the ``DType`` member names). The pandas-style primary spelling
+        of :meth:`cast`."""
+        return _wrap(self._native.cast(_unwrap(_resolve_dtype(dtype))))
+
+    def cast(self, type_id: "Union[str, int, DType]") -> "Series":
+        """Alias of :meth:`astype`."""
+        return self.astype(type_id)
 
     def prim(self, op: int) -> "Series":
         return _wrap(self._native.prim(_unwrap(op)))
@@ -452,6 +481,10 @@ class Series(_Wrapper["_ext._Series"]):
         method: Literal["average", "min", "dense", "ordinal"] = "average",
         descending: bool = False,
     ) -> "Series":
+        """Rank each element (1-based); ties per ``method``. Always returns a
+        Float64 Series, matching pandas ``rank()`` (even ``method="dense"``,
+        which pandas also returns as float). Call ``.astype("int64")`` on the
+        result for integer ranks."""
         return _wrap(self._native.rank(_unwrap(method), _unwrap(descending)))
 
     def rolling(self, window: int, op: Literal["sum", "mean", "min", "max"] = "sum") -> "Series":
@@ -668,24 +701,29 @@ class Series(_Wrapper["_ext._Series"]):
         return _wrap(self._native.str_split(_unwrap(sep)))
 
     # -- native property accessors --------------------------------------------
+    # These are attributes, not methods: read as ``s.type``, never ``s.type()``.
     @property
     def type(self) -> int:
-        """The native element type of the column."""
+        """(property, not a method) The native element type of the column, a
+        :class:`~dftracer.utils.enums.DType` value. Read as ``s.type``."""
         return self._native.type
 
     @property
     def encoding(self) -> int:
-        """The native storage encoding (flat, dictionary, selection)."""
+        """(property, not a method) The native storage encoding (flat,
+        dictionary, selection). Read as ``s.encoding``."""
         return self._native.encoding
 
     @property
     def length(self) -> int:
-        """Number of elements in the column."""
+        """(property, not a method) Number of elements in the column. Read as
+        ``s.length``."""
         return self._native.length
 
     @property
     def null_count(self) -> int:
-        """Number of null elements."""
+        """(property, not a method) Number of null elements. Read as
+        ``s.null_count``."""
         return self._native.null_count
 
     @property

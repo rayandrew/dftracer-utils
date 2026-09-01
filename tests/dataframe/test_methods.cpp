@@ -755,6 +755,49 @@ TEST_CASE("DataFrame sort_by_multi lexicographic") {
     CHECK(b[3] == 9);
 }
 
+TEST_CASE("DataFrame sort_by_multi per-column direction") {
+    DataFrame df;
+    df.names = {"a", "b"};
+    df.columns.push_back(i64({2, 1, 2, 1}));
+    df.columns.push_back(i64({9, 8, 7, 6}));
+
+    // [false, true]: a asc, b desc -> (1,8),(1,6),(2,9),(2,7).
+    DataFrame mixed =
+        df.sort_by_multi({"a", "b"}, std::vector<bool>{false, true});
+    const std::int64_t* a = mixed.column("a").data<std::int64_t>();
+    const std::int64_t* b = mixed.column("b").data<std::int64_t>();
+    CHECK(a[0] == 1);
+    CHECK(b[0] == 8);
+    CHECK(a[1] == 1);
+    CHECK(b[1] == 6);
+    CHECK(a[2] == 2);
+    CHECK(b[2] == 9);
+    CHECK(a[3] == 2);
+    CHECK(b[3] == 7);
+
+    // Distinct from [true, true] (both descending).
+    DataFrame both =
+        df.sort_by_multi({"a", "b"}, std::vector<bool>{true, true});
+    const std::int64_t* a2 = both.column("a").data<std::int64_t>();
+    const std::int64_t* b2 = both.column("b").data<std::int64_t>();
+    CHECK(a2[0] == 2);
+    CHECK(b2[0] == 9);
+    CHECK_FALSE((a2[0] == a[0] && b2[0] == b[0]));
+
+    // A single-flag list broadcasts to every key.
+    DataFrame broadcast = df.sort_by_multi({"a", "b"}, std::vector<bool>{true});
+    CHECK(broadcast.column("a").data<std::int64_t>()[0] ==
+          both.column("a").data<std::int64_t>()[0]);
+    CHECK(broadcast.column("b").data<std::int64_t>()[0] ==
+          both.column("b").data<std::int64_t>()[0]);
+
+    CHECK_THROWS_AS(df.sort_by_multi({"a", "b"}, std::vector<bool>{}),
+                    std::invalid_argument);
+    CHECK_THROWS_AS(
+        df.sort_by_multi({"a", "b"}, std::vector<bool>{true, true, false}),
+        std::invalid_argument);
+}
+
 TEST_CASE("DataFrame unique / is_duplicated / is_unique") {
     DataFrame df;
     df.names = {"k", "v"};

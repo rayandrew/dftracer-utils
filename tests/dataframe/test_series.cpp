@@ -126,6 +126,35 @@ TEST_SUITE("vec") {
         CHECK(pm[2] == 90);
     }
 
+    TEST_CASE("mixed-type arithmetic promotes instead of returning null") {
+        std::vector<std::uint64_t> ua{1, 2, 3};
+        std::vector<double> fb{0.5, 1.5, 2.5};
+        Series su = Series::flat(TypeId::Uint64, ua.data(), 3);
+        Series sf = Series::flat_f64(fb.data(), 3);
+
+        Series sum = add(su, sf);
+        REQUIRE(sum.valid());
+        CHECK(sum.type() == TypeId::Float64);
+        const double* p = sum.data<double>();
+        CHECK(p[0] == doctest::Approx(1.5));
+        CHECK(p[1] == doctest::Approx(3.5));
+        CHECK(p[2] == doctest::Approx(5.5));
+
+        std::vector<std::int64_t> ia{2, 4, 6};
+        Series si = Series::flat_i64(ia.data(), 3);
+        Series prod = mul_scalar(si, 1.0);
+        REQUIRE(prod.valid());
+        CHECK(prod.type() == TypeId::Float64);
+        const double* pp = prod.data<double>();
+        CHECK(pp[0] == doctest::Approx(2.0));
+        CHECK(pp[2] == doctest::Approx(6.0));
+
+        Series uprod = mul_scalar(su, 1.0);
+        REQUIRE(uprod.valid());
+        CHECK(uprod.type() == TypeId::Float64);
+        CHECK(uprod.data<double>()[2] == doctest::Approx(3.0));
+    }
+
     TEST_CASE("float64 div (SIMD) and int64 div zero guard") {
         std::vector<double> a{1.0, 3.0, 9.0};
         std::vector<double> b{2.0, 2.0, 3.0};

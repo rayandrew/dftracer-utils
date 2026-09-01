@@ -47,6 +47,7 @@ DFTU_FRAME_OP(sort_by, dftu_dataframe_sort_by, FRAME, FRAME, STR, I32, NONE, NON
 DFTU_FRAME_OP(select, dftu_dataframe_select, FRAME, FRAME, STRLIST, NONE, NONE, NONE)
 DFTU_FRAME_OP(rename, dftu_dataframe_rename, FRAME, FRAME, STRLIST, NONE, NONE, NONE)
 DFTU_FRAME_OP(sort_by_multi, dftu_dataframe_sort_by_multi, FRAME, FRAME, STRLIST, I32, NONE, NONE)
+DFTU_FRAME_OP(sort_by_multi_per_col, dftu_dataframe_sort_by_multi_per_col, FRAME, FRAME, STRLIST, I32LIST, NONE, NONE)
 DFTU_FRAME_OP(with_column, dftu_dataframe_with_column, FRAME, FRAME, STR, SERIES, NONE, NONE)
 DFTU_FRAME_OP(unpivot, dftu_dataframe_unpivot, FRAME, FRAME, STRLIST, STRLIST, NONE, NONE)
 DFTU_FRAME_OP(topk, dftu_dataframe_topk, FRAME, FRAME, STR, I64, I32, NONE)

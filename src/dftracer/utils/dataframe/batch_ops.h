@@ -109,6 +109,13 @@ DataFrame unique(const DataFrame& b);
 DataFrame sort_by_multi(const DataFrame& b,
                         const std::vector<std::string>& names, bool descending);
 
+/// Per-column direction form: `descending[i]` applies to `names[i]`. A single
+/// flag broadcasts to every key. Throws std::out_of_range if a name is absent;
+/// std::invalid_argument if `descending` is neither size 1 nor `names.size()`.
+DataFrame sort_by_multi(const DataFrame& b,
+                        const std::vector<std::string>& names,
+                        const std::vector<bool>& descending);
+
 /// The last `n` rows (clamped), across every column.
 DataFrame tail(const DataFrame& b, std::int64_t n);
 

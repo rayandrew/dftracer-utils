@@ -139,6 +139,21 @@ dftu_dataframe* dftu_dataframe_sort_by_multi(const dftu_dataframe* df,
     for (int32_t i = 0; i < n; ++i) cols.emplace_back(names[i]);
     return wrap(df->df.sort_by_multi(cols, descending != 0));
 }
+dftu_dataframe* dftu_dataframe_sort_by_multi_per_col(const dftu_dataframe* df,
+                                                     const char* const* names,
+                                                     int32_t n,
+                                                     const int32_t* descending,
+                                                     int32_t descending_n) {
+    if (!df) return nullptr;
+    std::vector<std::string> cols;
+    cols.reserve(static_cast<std::size_t>(n));
+    for (int32_t i = 0; i < n; ++i) cols.emplace_back(names[i]);
+    std::vector<bool> desc;
+    desc.reserve(static_cast<std::size_t>(descending_n));
+    for (int32_t i = 0; i < descending_n; ++i)
+        desc.push_back(descending[i] != 0);
+    return wrap(df->df.sort_by_multi(cols, desc));
+}
 dftu_dataframe* dftu_dataframe_tail(const dftu_dataframe* df, int64_t n) {
     return df ? wrap(df->df.tail(n)) : nullptr;
 }

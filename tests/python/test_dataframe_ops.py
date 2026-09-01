@@ -335,6 +335,32 @@ def test_melt_concat_union_distinct_sample_topk_sort():
     assert _col(scores.sort("v", descending=True), "v") == [3, 2, 1]
 
 
+def test_sort_values_per_column_ascending():
+    # Regression: sort_by_multi(names, descending=[False, False]) used to sort
+    # descending on every call, because a non-empty Python list is always
+    # truthy and the old native arg parser coerced any object to bool.
+    df = _df({"a": [2, 1, 2, 1], "b": [9, 8, 7, 6]})
+
+    both_asc = df.sort_values(["a", "b"], ascending=[True, True])
+    assert _col(both_asc, "a") == [1, 1, 2, 2]
+    assert _col(both_asc, "b") == [6, 8, 7, 9]
+
+    mixed = df.sort_values(["a", "b"], ascending=[True, False])
+    assert _col(mixed, "a") == [1, 1, 2, 2]
+    assert _col(mixed, "b") == [8, 6, 9, 7]
+    assert _col(mixed, "b") != _col(both_asc, "b")
+
+    # A scalar ascending still works, and inverts to the native `descending`.
+    assert _col(df.sort_values("a", ascending=True), "a") == [1, 1, 2, 2]
+    assert _col(df.sort_values("a", ascending=False), "a") == [2, 2, 1, 1]
+
+    # The old bug: sort_by_multi's own list-of-bool `descending` must not
+    # truthy-coerce either.
+    fixed = df.sort_by_multi(["a", "b"], descending=[False, False])
+    assert _col(fixed, "a") == [1, 1, 2, 2]
+    assert _col(fixed, "b") == [6, 8, 7, 9]
+
+
 def test_bad_column_name_raises_keyerror():
     df = _df({"pid": [1], "ts": [1], "dur": [1]})
     with pytest.raises(KeyError):

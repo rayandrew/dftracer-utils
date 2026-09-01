@@ -67,57 +67,81 @@ void Series_dealloc(SeriesObject* self) {
     Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
 }
 
+// Arithmetic between two dtypes that promotion cannot reconcile (e.g. a
+// non-numeric column) is a dtype mismatch, not the generic "null column"
+// failure other kernels use - name both dtypes so the caller knows what to
+// cast.
+PyObject* make_arith_series(Series&& col, TypeId a_type, TypeId b_type) {
+    if (!col.valid()) {
+        PyErr_Format(PyExc_TypeError, "unsupported operand dtypes: %s and %s",
+                     dataframe::type_name(a_type),
+                     dataframe::type_name(b_type));
+        return nullptr;
+    }
+    return make_series(std::move(col));
+}
+
 // ---- kernels -------------------------------------------------------------
 
 PyObject* Series_add(PyObject* self, PyObject* other) {
     Series* a = as_series(self);
     Series* b = as_series(other);
     if (!a || !b) return nullptr;
-    return make_series(dataframe::add(*a, *b));
+    return make_arith_series(dataframe::add(*a, *b), a->type(), b->type());
 }
 PyObject* Series_sub(PyObject* self, PyObject* other) {
     Series* a = as_series(self);
     Series* b = as_series(other);
     if (!a || !b) return nullptr;
-    return make_series(dataframe::sub(*a, *b));
+    return make_arith_series(dataframe::sub(*a, *b), a->type(), b->type());
 }
 PyObject* Series_mul(PyObject* self, PyObject* other) {
     Series* a = as_series(self);
     Series* b = as_series(other);
     if (!a || !b) return nullptr;
-    return make_series(dataframe::mul(*a, *b));
+    return make_arith_series(dataframe::mul(*a, *b), a->type(), b->type());
 }
 PyObject* Series_div(PyObject* self, PyObject* other) {
     Series* a = as_series(self);
     Series* b = as_series(other);
     if (!a || !b) return nullptr;
-    return make_series(dataframe::div(*a, *b));
+    return make_arith_series(dataframe::div(*a, *b), a->type(), b->type());
 }
 
 // A Python number as either an i64 or an f64 scalar; the kernel converts it to
-// the column's element type.
+// the column's element type, promoting to Float64 when the scalar is a float
+// and the column is not (numpy's weak-scalar rule).
 enum class ScalarOp { Add, Sub, Mul, Div };
 
 PyObject* scalar_op(PyObject* self, PyObject* value, ScalarOp op) {
     Series* a = as_series(self);
     if (!a) return nullptr;
+    TypeId a_type = a->type();
     if (PyFloat_Check(value)) {
         double v = PyFloat_AsDouble(value);
         if (v == -1.0 && PyErr_Occurred()) return nullptr;
         if (op == ScalarOp::Mul)
-            return make_series(dataframe::mul_scalar(*a, v));
+            return make_arith_series(dataframe::mul_scalar(*a, v), a_type,
+                                     TypeId::Float64);
         if (op == ScalarOp::Div)
-            return make_series(dataframe::div_scalar(*a, v));
-        return make_series(
-            dataframe::add_scalar(*a, op == ScalarOp::Sub ? -v : v));
+            return make_arith_series(dataframe::div_scalar(*a, v), a_type,
+                                     TypeId::Float64);
+        return make_arith_series(
+            dataframe::add_scalar(*a, op == ScalarOp::Sub ? -v : v), a_type,
+            TypeId::Float64);
     }
     long long v = PyLong_AsLongLong(value);
     if (v == -1 && PyErr_Occurred()) return nullptr;
     auto iv = static_cast<std::int64_t>(v);
-    if (op == ScalarOp::Mul) return make_series(dataframe::mul_scalar(*a, iv));
-    if (op == ScalarOp::Div) return make_series(dataframe::div_scalar(*a, iv));
-    return make_series(
-        dataframe::add_scalar(*a, op == ScalarOp::Sub ? -iv : iv));
+    if (op == ScalarOp::Mul)
+        return make_arith_series(dataframe::mul_scalar(*a, iv), a_type,
+                                 TypeId::Int64);
+    if (op == ScalarOp::Div)
+        return make_arith_series(dataframe::div_scalar(*a, iv), a_type,
+                                 TypeId::Int64);
+    return make_arith_series(
+        dataframe::add_scalar(*a, op == ScalarOp::Sub ? -iv : iv), a_type,
+        TypeId::Int64);
 }
 
 PyObject* Series_add_scalar(PyObject* self, PyObject* v) {

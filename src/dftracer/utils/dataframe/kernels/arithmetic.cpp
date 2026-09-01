@@ -186,22 +186,62 @@ bool is_numeric(TypeId t) {
     return t != TypeId::Bool && t != TypeId::String && t != TypeId::Binary;
 }
 
+bool is_float_type(TypeId t) {
+    return t == TypeId::Float32 || t == TypeId::Float64;
+}
+bool is_signed_int_type(TypeId t) {
+    return t == TypeId::Int8 || t == TypeId::Int16 || t == TypeId::Int32 ||
+           t == TypeId::Int64;
+}
+bool is_unsigned_int_type(TypeId t) {
+    return t == TypeId::Uint8 || t == TypeId::Uint16 || t == TypeId::Uint32 ||
+           t == TypeId::Uint64;
+}
+
+// numpy/pandas array-array result_type for a numeric binary op: widen within
+// the same signedness, promote a float/int mix to Float64, and promote a
+// signed/unsigned mix to Float64 unless the signed side is strictly wider (so
+// it already covers the unsigned side's range).
+TypeId promote_common(TypeId a, TypeId b) {
+    if (a == b) return a;
+    if (is_float_type(a) || is_float_type(b)) return TypeId::Float64;
+    const std::size_t wa = byte_width(a);
+    const std::size_t wb = byte_width(b);
+    if (is_signed_int_type(a) && is_signed_int_type(b)) return wa >= wb ? a : b;
+    if (is_unsigned_int_type(a) && is_unsigned_int_type(b))
+        return wa >= wb ? a : b;
+    TypeId signed_t = is_signed_int_type(a) ? a : b;
+    TypeId unsigned_t = is_unsigned_int_type(a) ? a : b;
+    return byte_width(signed_t) > byte_width(unsigned_t) ? signed_t
+                                                         : TypeId::Float64;
+}
+
+// Weak-scalar promotion: a Python int scalar never forces a wider column
+// dtype (numpy semantics), but a float scalar against an integer column does.
 dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
     if (a->encoding != Encoding::Flat || !is_numeric(a->type)) return nullptr;
 
-    auto* out = new dftu_series();
-    out->type = a->type;
-    out->encoding = Encoding::Flat;
-    out->length = a->length;
-    out->null_count = a->null_count;
-    out->validity = a->validity;
-    out->data = Buffer::allocate(static_cast<std::size_t>(a->length) *
-                                 byte_width(a->type));
+    dftu_series* casted = nullptr;
+    const dftu_series* src = a;
+    if (s.kind == DFTU_SCALAR_TAG_F64 && !is_float_type(a->type)) {
+        casted = dftu_series_cast(a, static_cast<dftu_dtype>(TypeId::Float64));
+        if (!casted) return nullptr;
+        src = casted;
+    }
 
-    std::int32_t t = static_cast<std::int32_t>(a->type);
-    const void* pa = a->data->data();
+    auto* out = new dftu_series();
+    out->type = src->type;
+    out->encoding = Encoding::Flat;
+    out->length = src->length;
+    out->null_count = src->null_count;
+    out->validity = src->validity;
+    out->data = Buffer::allocate(static_cast<std::size_t>(src->length) *
+                                 byte_width(src->type));
+
+    std::int32_t t = static_cast<std::int32_t>(src->type);
+    const void* pa = src->data->data();
     void* po = out->data->data();
-    std::size_t n = static_cast<std::size_t>(a->length);
+    std::size_t n = static_cast<std::size_t>(src->length);
     switch (op) {
         case BinOp::Add:
             HWY_DYNAMIC_DISPATCH(AddScalarKernel)(t, pa, s, po, n);
@@ -216,27 +256,49 @@ dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
             HWY_DYNAMIC_DISPATCH(DivScalarKernel)(t, pa, s, po, n);
             break;
     }
+    if (casted) dftu_series_free(casted);
     return out;
 }
 
 dftu_series* binop(const dftu_series* a, const dftu_series* b, BinOp op) {
     if (a->encoding != Encoding::Flat || b->encoding != Encoding::Flat)
         return nullptr;
-    if (a->type != b->type || a->length != b->length) return nullptr;
-    if (!is_numeric(a->type)) return nullptr;
+    if (a->length != b->length) return nullptr;
+    if (!is_numeric(a->type) || !is_numeric(b->type)) return nullptr;
+
+    dftu_series* casted_a = nullptr;
+    dftu_series* casted_b = nullptr;
+    const dftu_series* pa_src = a;
+    const dftu_series* pb_src = b;
+    if (a->type != b->type) {
+        TypeId common = promote_common(a->type, b->type);
+        if (a->type != common) {
+            casted_a = dftu_series_cast(a, static_cast<dftu_dtype>(common));
+            if (!casted_a) return nullptr;
+            pa_src = casted_a;
+        }
+        if (b->type != common) {
+            casted_b = dftu_series_cast(b, static_cast<dftu_dtype>(common));
+            if (!casted_b) {
+                if (casted_a) dftu_series_free(casted_a);
+                return nullptr;
+            }
+            pb_src = casted_b;
+        }
+    }
 
     auto* out = new dftu_series();
-    out->type = a->type;
+    out->type = pa_src->type;
     out->encoding = Encoding::Flat;
-    out->length = a->length;
-    out->data = Buffer::allocate(static_cast<std::size_t>(a->length) *
-                                 byte_width(a->type));
+    out->length = pa_src->length;
+    out->data = Buffer::allocate(static_cast<std::size_t>(pa_src->length) *
+                                 byte_width(pa_src->type));
 
-    std::int32_t t = static_cast<std::int32_t>(a->type);
-    const void* pa = a->data->data();
-    const void* pb = b->data->data();
+    std::int32_t t = static_cast<std::int32_t>(pa_src->type);
+    const void* pa = pa_src->data->data();
+    const void* pb = pb_src->data->data();
     void* po = out->data->data();
-    std::size_t n = static_cast<std::size_t>(a->length);
+    std::size_t n = static_cast<std::size_t>(pa_src->length);
     switch (op) {
         case BinOp::Add:
             HWY_DYNAMIC_DISPATCH(AddKernel)(t, pa, pb, po, n);
@@ -251,6 +313,8 @@ dftu_series* binop(const dftu_series* a, const dftu_series* b, BinOp op) {
             HWY_DYNAMIC_DISPATCH(DivKernel)(t, pa, pb, po, n);
             break;
     }
+    if (casted_a) dftu_series_free(casted_a);
+    if (casted_b) dftu_series_free(casted_b);
     return out;
 }
 
