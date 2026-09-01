@@ -2,6 +2,7 @@
 #define DFTRACER_TESTS_VIEW_COMMON_H
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/coro/task.h>
+#include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/json/json_value.h>
 #include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/indexing/chunk_statistics.h>
@@ -11,6 +12,7 @@
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/index_database_writer_context.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
+#include <doctest/doctest.h>
 #include <testing_utilities.h>
 
 #include <cstdint>
@@ -23,6 +25,34 @@ using namespace dftracer::utils;
 using namespace dftracer::utils::trace::internal;
 using namespace dftracer::utils::trace::views;
 using namespace dftu_utils_test;
+
+// A view test binary has no cli_main guard, so a test that touches the
+// aggregation tier cache (which holds read-only agg DBs open for reuse) would
+// leak those DBs at exit. Close them once all tests finish but while doctest's
+// main - and every RocksDB static - is still alive; test_run_end runs
+// in-process before teardown, avoiding the static-destruction-order races an
+// atexit hook would hit. Mirrors cli_main's guard for the CLIs.
+namespace test_view_common_detail {
+struct RocksDbCleanupListener : doctest::IReporter {
+    explicit RocksDbCleanupListener(const doctest::ContextOptions&) {}
+    void test_run_end(const doctest::TestRunStats&) override {
+        dftracer::utils::rocksdb::mark_process_exiting_for_rocksdb();
+    }
+    void report_query(const doctest::QueryData&) override {}
+    void test_run_start() override {}
+    void test_case_start(const doctest::TestCaseData&) override {}
+    void test_case_reenter(const doctest::TestCaseData&) override {}
+    void test_case_end(const doctest::CurrentTestCaseStats&) override {}
+    void test_case_exception(const doctest::TestCaseException&) override {}
+    void subcase_start(const doctest::SubcaseSignature&) override {}
+    void subcase_end() override {}
+    void log_assert(const doctest::AssertData&) override {}
+    void log_message(const doctest::MessageData&) override {}
+    void test_case_skipped(const doctest::TestCaseData&) override {}
+};
+}  // namespace test_view_common_detail
+DOCTEST_REGISTER_LISTENER("rocksdb_cleanup", 1,
+                          test_view_common_detail::RocksDbCleanupListener);
 
 namespace test_view_common {
 
