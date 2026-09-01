@@ -30,8 +30,8 @@ void StreamRowFold::step(const FoldBatch& batch) {
     std::vector<FoldEvent> events;
     events.reserve(batch.events.size());
     for (const FoldEvent& ev : batch.events) {
-        if (ev.phase == RecordPhase::METADATA ||
-            ev.phase == RecordPhase::UNKNOWN)
+        if (ev.phase == RecordPhase::UNKNOWN ||
+            (!keep_metadata_ && ev.phase == RecordPhase::METADATA))
             continue;
         events.push_back(ev);
     }

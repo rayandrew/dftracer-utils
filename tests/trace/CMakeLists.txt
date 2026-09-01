@@ -31,6 +31,7 @@ set(TRACE_TEST_SOURCES
     views/test_view_scan.cpp
     views/test_view_lazy.cpp
     views/test_view_stream_rows.cpp
+    views/test_metadata_query.cpp
     views/test_field_filter.cpp
     views/test_view_aggregate.cpp
     views/test_stats_view.cpp

@@ -91,6 +91,71 @@ class TestTraceViewer:
             gz = _make_trace(env, "time_metric.pfw.gz", rows)
             assert TraceViewer(gz).time_metric() == "ns"
 
+    def test_phase_metadata_row_query_returns_filtered_rows(self):
+        # A phase("metadata") row query (no group_by/agg) must return the
+        # metadata records as rows, args flattened, and honor the query filter.
+        from dftracer.utils import Field
+
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "name": "CM",
+                    "ph": "M",
+                    "pid": 0,
+                    "tid": 0,
+                    "ts": 0,
+                    "args": {"name": "time_metric", "value": "NS"},
+                },
+            ] + [
+                {
+                    "ph": "X",
+                    "name": "read",
+                    "cat": "POSIX",
+                    "pid": 1,
+                    "tid": 1,
+                    "ts": 1000 + i,
+                    "dur": 5,
+                    "args": {},
+                }
+                for i in range(5)
+            ]
+            gz = _make_trace(env, "meta_rows.pfw.gz", rows)
+
+            meta = TraceViewer(gz).phase("metadata").collect().collect().to_arrow()
+            assert meta.num_rows >= 1
+            assert "args.name" in meta.column_names
+            assert "args.value" in meta.column_names
+            d = meta.to_pydict()
+            assert "CM" in d["name"]
+            assert "time_metric" in d["args.name"]
+
+            filtered = (
+                TraceViewer(gz)
+                .phase("metadata")
+                .query(Field("args.name") == "time_metric")
+                .collect()
+                .collect()
+                .to_arrow()
+            )
+            assert filtered.num_rows == 1
+            assert filtered.to_pydict()["args.value"][0] == "NS"
+
+            # A non-matching filter proves the query really runs on metadata.
+            none = (
+                TraceViewer(gz)
+                .phase("metadata")
+                .query(Field("args.name") == "nope")
+                .collect()
+                .collect()
+                .to_arrow()
+            )
+            assert none.num_rows == 0
+
+            # A normal event row query never includes the metadata record.
+            events = TraceViewer(gz).phase("events").collect().collect().to_arrow()
+            assert events.num_rows == 5
+            assert "CM" not in events.to_pydict()["name"]
+
     def test_time_metric_defaults_to_us(self):
         with Environment(lines=200) as env:
             gz = _indexed(env)

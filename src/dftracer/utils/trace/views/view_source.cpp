@@ -320,7 +320,8 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open_stream(
            std::shared_ptr<coro::CoroSemaphore> sem,
            std::shared_ptr<dftracer::utils::StringIntern> iv)
         -> coro::CoroTask<void> {
-        detail::StreamRowFold fold(ch, sem, iv, vv.plan_->select, ts);
+        detail::StreamRowFold fold(ch, sem, iv, vv.plan_->select, ts, nullptr,
+                                   vv.plan_->phase == Phase::Metadata);
         std::array<detail::Fold*, 1> folds{&fold};
         co_await vv.run_folds(folds, *iv);
     }(v, time_scale, channel, budget, intern);

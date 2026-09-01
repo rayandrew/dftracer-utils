@@ -61,7 +61,9 @@ std::string canonical_row_column_name(std::string_view sel);
 /// event's top-level fields plus its args into columns; `select` projects a
 /// subset (top-level names or arg keys, bare or "args."-prefixed), and an empty
 /// `select` emits every column (the union of all args seen, null-filled where
-/// an event lacks a key). ph="M" metadata is skipped (it carries no event row).
+/// an event lacks a key). ph="M" metadata is skipped unless `keep_metadata` is
+/// set (phase("metadata")), which emits the records as rows with their args
+/// flattened like any event's.
 ///
 /// build() materializes one frame over every accumulated event, so the column
 /// union is exact and no cross-slot schema reconciliation is needed. Types are
@@ -71,11 +73,13 @@ class NativeRowFold : public Fold {
    public:
     NativeRowFold(const dftracer::utils::StringIntern& intern,
                   std::vector<std::string> select, double time_scale = 1.0,
-                  std::shared_ptr<const GroupResolver> resolver = nullptr)
+                  std::shared_ptr<const GroupResolver> resolver = nullptr,
+                  bool keep_metadata = false)
         : intern_(&intern),
           select_(std::move(select)),
           time_scale_(time_scale),
-          resolver_(std::move(resolver)) {}
+          resolver_(std::move(resolver)),
+          keep_metadata_(keep_metadata) {}
 
     bool accepts(const ScanShape&) const override { return true; }
     bool needs_args() const override { return true; }
@@ -86,13 +90,13 @@ class NativeRowFold : public Fold {
 
     std::unique_ptr<Fold> slice() const override {
         return std::make_unique<NativeRowFold>(*intern_, select_, time_scale_,
-                                               resolver_);
+                                               resolver_, keep_metadata_);
     }
 
     void step(const FoldBatch& batch) override {
         for (const FoldEvent& ev : batch.events) {
-            if (ev.phase == RecordPhase::METADATA ||
-                ev.phase == RecordPhase::UNKNOWN)
+            if (ev.phase == RecordPhase::UNKNOWN ||
+                (!keep_metadata_ && ev.phase == RecordPhase::METADATA))
                 continue;
             events_.push_back(ev);
         }
@@ -122,6 +126,7 @@ class NativeRowFold : public Fold {
     double time_scale_;                // ts/dur multiplier (1.0 = none)
     std::shared_ptr<const GroupResolver>
         resolver_;                     // resolved.* names, or null
+    bool keep_metadata_;               // phase("metadata"): keep ph=M records
     std::vector<FoldEvent> events_;
 };
 

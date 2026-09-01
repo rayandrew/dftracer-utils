@@ -37,13 +37,15 @@ class StreamRowFold : public Fold {
                   std::shared_ptr<coro::CoroSemaphore> budget,
                   std::shared_ptr<dftracer::utils::StringIntern> intern,
                   std::vector<std::string> select, double time_scale = 1.0,
-                  std::shared_ptr<const GroupResolver> resolver = nullptr)
+                  std::shared_ptr<const GroupResolver> resolver = nullptr,
+                  bool keep_metadata = false)
         : channel_(std::move(channel)),
           budget_(std::move(budget)),
           intern_(std::move(intern)),
           select_(std::move(select)),
           time_scale_(time_scale),
           resolver_(std::move(resolver)),
+          keep_metadata_(keep_metadata),
           guard_(channel_.get()) {}
 
     bool accepts(const ScanShape&) const override { return true; }
@@ -55,7 +57,8 @@ class StreamRowFold : public Fold {
 
     std::unique_ptr<Fold> slice() const override {
         return std::make_unique<StreamRowFold>(channel_, budget_, intern_,
-                                               select_, time_scale_, resolver_);
+                                               select_, time_scale_, resolver_,
+                                               keep_metadata_);
     }
 
     void step(const FoldBatch& batch) override;
@@ -86,6 +89,7 @@ class StreamRowFold : public Fold {
     std::vector<std::string> select_;
     double time_scale_;
     std::shared_ptr<const GroupResolver> resolver_;
+    bool keep_metadata_;  // phase("metadata"): keep ph=M records
     coro::Channel<dataframe::Morsel>::ProducerGuard guard_;
 
     // fuse() awaits take_pending()'s task right after step() and before the

@@ -844,7 +844,8 @@ coro::CoroTask<dataframe::DataFrame> run_collect_rows(const ViewPlan& plan) {
         for (const auto& f : plan.files) index_paths.push_back(f.index_path);
         resolver = std::make_shared<const GroupResolver>(index_paths);
     }
-    NativeRowFold fold(intern, plan.select, plan.time_scale, resolver);
+    NativeRowFold fold(intern, plan.select, plan.time_scale, resolver,
+                       plan.phase == Phase::Metadata);
     std::array<Fold*, 1> folds{&fold};
     co_await fuse(plan, vdef, folds, intern);
     dataframe::DataFrame b = fold.build();
