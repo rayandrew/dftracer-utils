@@ -14,7 +14,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <iterator>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -213,6 +216,49 @@ coro::CoroTask<void> harvest_ranks(const ViewPlan& plan) {
     apply_ranks(plan, agg.ranks());
 }
 
+// The numeric args auto_numeric_metrics discovers are data-dependent (the arg
+// set is only known after a scan; see docs/plans
+// lazyframe_async_unification 3.3 / 5.4). Run the SAME GroupMap fold that the
+// legacy path folds with (a single group, no per-arg sketch) and read the
+// sorted union of the arg names it saw - byte-identical to the set to_batch
+// would emit (fold_numeric_args_t discovers, reserved/pre-agg-filtered, plus
+// the io-cat-derived "size"). Its finish_map is discarded; only the names are
+// kept, then fed back as engine value columns.
+coro::CoroTask<std::vector<std::string>> harvest_numeric_arg_names(
+    const ViewPlan& plan) {
+    ViewPlan hp = plan;
+    hp.group_by.clear();
+    hp.agg.clear();
+    hp.auto_numeric_metrics = true;
+    hp.numeric_arg_aggs.clear();
+    hp.time_bucket_us = 0;
+    hp.bucket_origin_us = 0;
+    hp.bucket_origin_min = false;
+    hp.materialize = false;
+    hp.sort_col.clear();
+    hp.topk_col.clear();
+    hp.offset = 0;
+    hp.limit = 0;
+    hp.select.clear();
+    hp.schema.reset();
+    ensure_schema(hp);
+    ViewDefinition vdef = make_vdef(hp, /*for_aggregation=*/true);
+    dftracer::utils::StringIntern intern;
+    AggFold agg(hp, intern);
+    std::array<Fold*, 1> folds{&agg};
+    co_await fuse(hp, vdef, folds, intern);
+    std::set<std::string> names;  // to_batch unions the dyn keys via std::set
+    GroupMap m = agg.finish_map();
+    for (const auto& [k, a] : m) {
+        (void)k;
+        for (const auto& [name, stat] : a.dyn) {
+            (void)stat;
+            names.insert(name);
+        }
+    }
+    co_return std::vector<std::string>(names.begin(), names.end());
+}
+
 }  // namespace
 
 bool agg_engine_eligible(const ViewPlan& plan) {
@@ -238,8 +284,14 @@ bool agg_engine_eligible(const ViewPlan& plan) {
         }
         if (gk.transform != GroupKey::Transform::None) return false;
     }
-    if (plan.auto_numeric_metrics) return false;
-    if (!plan.numeric_arg_aggs.empty()) return false;
+    // The dyn (auto_numeric_metrics) path feeds each discovered numeric arg as
+    // a Float64 value column, so every reduction maps to an engine Agg EXCEPT
+    // Count: the engine's Count is the group's row count, while the dyn Count
+    // is the arg-present count (FieldStat::n), which the engine has no agg for.
+    // A dyn Count therefore stays on GroupMap (same reason as Count(field)
+    // below).
+    for (const AggSpec& r : plan.numeric_arg_aggs)
+        if (r.op == AggOp::Count) return false;
     // Not yet converged: materialize writes a rollup CF; Hist emits a nested
     // column the engine's spill cannot concat. Both stay on GroupMap for now.
     if (plan.materialize) return false;
@@ -298,21 +350,65 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         return f;
     };
 
+    // Auto-discovered numeric-arg reductions (the auto_numeric_metrics / dyn
+    // path). The arg set is only known after a scan, so discover it first, then
+    // feed each (arg, reduction) to the engine as a Float64 value column.
+    // Output column names and order match to_batch's dyn columns exactly (arg
+    // outer, reduction inner; legacy empty-reductions = one bare-named per-arg
+    // mean).
+    struct DynAgg {
+        std::string column;  // AGG_NUM_ARG_PREFIX + arg (the frame column name)
+        std::string out;  // dyn_col_name(spec, arg), or the bare arg (legacy)
+        AggOp op;
+        double q;
+    };
+    std::vector<DynAgg> dyn_aggs;
+    if (plan.auto_numeric_metrics) {
+        std::vector<std::string> names =
+            co_await harvest_numeric_arg_names(plan);
+        for (const std::string& name : names) {
+            const std::string col = std::string(AGG_NUM_ARG_PREFIX) + name;
+            if (plan.numeric_arg_aggs.empty()) {
+                dyn_aggs.push_back({col, name, AggOp::Mean, 0.0});
+            } else {
+                for (const AggSpec& r : plan.numeric_arg_aggs)
+                    dyn_aggs.push_back({col, dyn_col_name(r, name), r.op, r.q});
+            }
+        }
+    }
+
+    // to_batch lays out value columns as [named non-text/hist aggs, dyn cols]
+    // then text columns (ArgMax/SetUnion) then hist. The engine emits columns
+    // in gaggs order, so partition named specs into value vs text and slot the
+    // dyn columns between them to reproduce that order.
     std::vector<dataframe::GroupAgg> gaggs;
+    std::vector<dataframe::GroupAgg> text_gaggs;
     if (plan.agg.empty()) {
         dataframe::GroupAgg g;
         g.op = dataframe::Agg::Count;
         g.out = agg_col_name(AggSpec(AggOp::Count));
         gaggs.push_back(std::move(g));
     } else {
-        gaggs.reserve(plan.agg.size());
         for (const auto& spec : plan.agg) {
             dataframe::GroupAgg g = to_group_agg(spec);
             g.column = scaled_name(g.column);
             g.by = scaled_name(g.by);
-            gaggs.push_back(std::move(g));
+            if (spec.op == AggOp::ArgMax || spec.op == AggOp::SetUnion)
+                text_gaggs.push_back(std::move(g));
+            else
+                gaggs.push_back(std::move(g));
         }
     }
+    for (const DynAgg& d : dyn_aggs) {
+        dataframe::GroupAgg g;
+        g.op = to_engine_agg(d.op);
+        g.out = d.out;
+        g.param = d.q;
+        g.column = d.column;
+        gaggs.push_back(std::move(g));
+    }
+    gaggs.insert(gaggs.end(), std::make_move_iterator(text_gaggs.begin()),
+                 std::make_move_iterator(text_gaggs.end()));
 
     // A fixed select list on the raw scan (instead of the default, per-batch-
     // discovered schema) guarantees every streamed morsel carries the same
@@ -331,6 +427,7 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         add_field(spec.field);
         add_field(spec.by);
     }
+    for (const DynAgg& d : dyn_aggs) add_field(d.column);
     if (has_bucket) add_field("ts");
 
     auto next = std::make_shared<ViewPlan>(plan);
@@ -459,6 +556,26 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
                                                 plan.group_by[j].kind);
             r.names[idx] = key_names[j];
         }
+    }
+
+    // A dyn Pct on a group where the arg never appeared: the engine reads an
+    // empty per-group DDSketch, whose quantile is NaN, while the GroupMap dyn
+    // path emits 0.0 (dyn_sketches has no entry for the arg). Rewrite that NaN
+    // to 0.0 so the two paths match. Only an empty sketch yields NaN, so this
+    // touches exactly the absent-arg groups.
+    for (const DynAgg& d : dyn_aggs) {
+        if (d.op != AggOp::Pct) continue;
+        const std::int64_t ci = r.column_index(d.out);
+        if (ci < 0) continue;
+        dataframe::Series& col = r.columns[static_cast<std::size_t>(ci)];
+        if (col.type() != dataframe::TypeId::Float64) continue;
+        const std::int64_t n = col.length();
+        const double* src = col.data<double>();
+        std::vector<double> vals(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i)
+            vals[static_cast<std::size_t>(i)] =
+                std::isnan(src[i]) ? 0.0 : src[i];
+        col = dataframe::Series::flat_f64(vals.data(), n);
     }
     co_return r;
 }

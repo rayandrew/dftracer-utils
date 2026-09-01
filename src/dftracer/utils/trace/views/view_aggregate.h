@@ -203,6 +203,11 @@ const AggSpec* find_argmax(const ViewPlan& plan);
 std::string group_col_name(const GroupKey& gk);
 std::string agg_col_name(const AggSpec& spec);
 
+// Column name for one per-arg reduction of the dyn (auto_numeric_metrics) path:
+// "<op>_<arg>" (Pct uses the spec's out_name prefix). The legacy bare-mean
+// column keeps the bare arg name and does not go through here.
+std::string dyn_col_name(const AggSpec& spec, const std::string& key);
+
 // Materialize the group map straight into a columnar dataframe::DataFrame
 // (count as Int64, integer Sum/Min/Max exact as Int64/Uint64, other value
 // columns Float64, text as String, hist as list<struct>).

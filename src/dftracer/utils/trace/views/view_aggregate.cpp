@@ -575,7 +575,7 @@ static double reduce_dyn(const FieldStat& fs, AggOp op, double /*q*/) {
 // convention (sum_field). The legacy mean path keeps the bare arg name. Pct
 // uses the spec's out_name prefix (e.g. "p90_" from the pNN shorthand) so the
 // quantile is legible; otherwise it falls back to "pct_".
-static std::string dyn_col_name(const AggSpec& spec, const std::string& key) {
+std::string dyn_col_name(const AggSpec& spec, const std::string& key) {
     switch (spec.op) {
         case AggOp::Count:
             return "count_" + key;

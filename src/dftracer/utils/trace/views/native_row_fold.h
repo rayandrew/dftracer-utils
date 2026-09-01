@@ -23,6 +23,16 @@ class GroupResolver;
 inline constexpr std::string_view AGG_KEY_ARG_PREFIX = "__aggkey_arg:";
 inline constexpr std::string_view AGG_KEY_FIELD_PREFIX = "__aggkey_field:";
 
+/// Sentinel select token the agg engine uses to ask build_row_frame for a
+/// numeric-only Float64 VALUE column for one auto-discovered numeric arg (the
+/// auto_numeric_metrics / numeric_arg_aggs dyn path). The column carries the
+/// arg's numeric value where the event holds it as a number and null otherwise,
+/// matching the GroupMap fold's per-arg FieldStat (fold_numeric_args_t, which
+/// feeds only PodSource::for_each_numeric_arg values). The special name "size"
+/// resolves to the io-cat-derived byte size (derived_size_t), falling back to a
+/// literal numeric "size" arg. Internal to the agg-engine <-> row-fold seam.
+inline constexpr std::string_view AGG_NUM_ARG_PREFIX = "__aggnum_arg:";
+
 /// Build one native DataFrame from `events`: top-level columns plus every arg
 /// (empty `select`) or a projected subset. Arg columns infer their type per key
 /// and null-fill absent rows. `fhash`/`hhash` resolve from their dedicated

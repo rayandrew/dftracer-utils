@@ -2,12 +2,14 @@
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/dataframe/types.h>
 #include <dftracer/utils/trace/internal/utils.h>
+#include <dftracer/utils/trace/views/agg_fold.h>
 #include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/view_resolver.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -49,6 +51,15 @@ bool is_agg_key_field(std::string_view sel, std::string_view& field,
         return true;
     }
     return false;
+}
+
+// An agg-engine numeric-arg value-column request (see native_row_fold.h). Sets
+// `name` to the arg name (or the "size" pseudo-field).
+bool is_num_arg_field(std::string_view sel, std::string_view& name) {
+    if (sel.substr(0, AGG_NUM_ARG_PREFIX.size()) != AGG_NUM_ARG_PREFIX)
+        return false;
+    name = sel.substr(AGG_NUM_ARG_PREFIX.size());
+    return true;
 }
 
 // An Arrow-layout validity bitmap (1 = valid) from a per-row present flag;
@@ -256,6 +267,51 @@ df::Series group_key_str_column(const std::vector<FoldEvent>& evs,
     return df::Series::strings(vals);
 }
 
+// One auto-discovered numeric arg as a Float64 value column for the agg
+// engine's dyn path: the arg's numeric value where the event carries it as a
+// number (int64 or double), null otherwise. Matches the GroupMap fold's per-arg
+// FieldStat, which is fed only by PodSource::for_each_numeric_arg (string args
+// contribute nothing). The "size" pseudo-field resolves to the io-cat-derived
+// byte size (derived_size_t), falling back to a literal numeric "size" arg, so
+// the discovered "size" metric matches fold_numeric_args_t.
+df::Series num_arg_column(const std::vector<FoldEvent>& evs,
+                          std::string_view name,
+                          const dftracer::utils::StringIntern& intern) {
+    const bool is_size = name == "size";
+    const std::uint32_t keyid =
+        const_cast<dftracer::utils::StringIntern&>(intern).get_or_insert(name);
+    const std::int64_t n = static_cast<std::int64_t>(evs.size());
+    std::vector<double> vals;
+    std::vector<bool> present;
+    vals.reserve(evs.size());
+    present.reserve(evs.size());
+    for (const auto& ev : evs) {
+        std::optional<double> num;
+        if (is_size) {
+            PodSource src(ev, intern);
+            num = derived_size_t(src);
+        }
+        if (!num) {
+            if (const auto* v = find_arg(ev, keyid)) {
+                if (const auto* d = std::get_if<double>(v))
+                    num = *d;
+                else if (const auto* i = std::get_if<std::int64_t>(v))
+                    num = static_cast<double>(*i);
+            }
+        }
+        if (num) {
+            vals.push_back(*num);
+            present.push_back(true);
+        } else {
+            vals.push_back(0.0);
+            present.push_back(false);
+        }
+    }
+    auto vbits = validity_of(present);
+    return df::Series::flat(df::TypeId::Float64, vals.data(), n,
+                            vbits.empty() ? nullptr : vbits.data());
+}
+
 // A resolved.* / r.* virtual field maps to a hash field resolved through the
 // index name tables (fpath <- fhash, hostname/host <- hhash).
 enum class ResolvedKind { None, File, Host };
@@ -346,6 +402,14 @@ std::vector<std::string> row_fold_extra_captures(
         std::string_view uf;
         bool ao = false;
         if (is_agg_key_field(sel, uf, ao)) f = uf;
+        // A numeric-arg value column captures its underlying arg; "size" is
+        // derived from other args (ret/size_sum/image_size, already captured by
+        // needs_args), so it is computed, not captured raw.
+        std::string_view nf;
+        if (is_num_arg_field(sel, nf)) {
+            if (nf == "size") continue;
+            f = nf;
+        }
         // resolved.*/r.* and io_cat are computed, not captured raw.
         if (resolved_kind(f) != ResolvedKind::None || is_iocat_field(f))
             continue;
@@ -357,7 +421,9 @@ std::vector<std::string> row_fold_extra_captures(
 std::string canonical_row_column_name(std::string_view sel) {
     std::string_view f;
     bool arg_only = false;
+    std::string_view num_name;
     if (is_agg_key_field(sel, f, arg_only)) return std::string(sel);
+    if (is_num_arg_field(sel, num_name)) return std::string(sel);
     if (is_top_level(sel)) return std::string(sel);
     if (resolved_kind(sel) != ResolvedKind::None) return std::string(sel);
     if (is_iocat_field(sel)) return std::string(sel);
@@ -413,9 +479,13 @@ dataframe::DataFrame build_row_frame(
             out.names.push_back(canonical_row_column_name(sel));
             std::string_view agg_key_f;
             bool agg_key_arg_only = false;
+            std::string_view num_arg_name;
             if (is_agg_key_field(sel, agg_key_f, agg_key_arg_only)) {
                 out.columns.push_back(group_key_str_column(
                     evs, *intern_, agg_key_f, agg_key_arg_only));
+            } else if (is_num_arg_field(sel, num_arg_name)) {
+                out.columns.push_back(
+                    num_arg_column(evs, num_arg_name, *intern_));
             } else if (is_top_level(sel)) {
                 out.columns.push_back(
                     top_column(evs, sel, *intern_, time_scale));

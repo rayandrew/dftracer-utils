@@ -2294,6 +2294,70 @@ TEST_SUITE("View") {
                            {"name", "x"}, 128);
         }
 
+        // auto_numeric_metrics discovers the numeric args at scan (gz7's read
+        // events carry x, write events carry y), so both the bare-mean legacy
+        // path and explicit per-arg reductions must emit the same discovered
+        // columns (x/y), with 0.0 where an arg never appears in a group.
+        // Grouped by name so read has x-present/y-absent and write the reverse.
+        auto run_both_dyn =
+            [&](const std::function<AggregatedView(View)>& agg_of,
+                std::uint64_t mem_budget) {
+                auto build = [&] {
+                    View v = View::from_file(gz7, idx7);
+                    if (mem_budget) v = v.memory_budget(mem_budget);
+                    return agg_of(v.group_by({GroupKey::name()}));
+                };
+                check_match(collect_groupmap(build()), collect_engine(build()),
+                            "name");
+            };
+        SUBCASE("group_by name + auto_numeric_metrics (legacy bare mean)") {
+            run_both_dyn([](View v) { return v.agg_numeric_args(); }, 0);
+        }
+        SUBCASE("group_by name + auto_numeric_metrics, forced spill") {
+            run_both_dyn([](View v) { return v.agg_numeric_args(); }, 128);
+        }
+        SUBCASE("group_by name + explicit numeric_arg_aggs") {
+            run_both_dyn(
+                [](View v) {
+                    return v.agg_numeric_args({
+                        AggSpec(AggOp::Sum),
+                        AggSpec(AggOp::Mean),
+                        AggSpec(AggOp::Min),
+                        AggSpec(AggOp::Max),
+                        AggSpec(AggOp::SumSq),
+                        AggSpec(AggOp::Var),
+                        AggSpec(AggOp::Std),
+                        AggSpec(AggOp::Skew),
+                        AggSpec(AggOp::Kurt),
+                        AggSpec(AggOp::Pct, "", "p90", "", 0.9),
+                    });
+                },
+                0);
+        }
+        SUBCASE("group_by name + explicit numeric_arg_aggs, forced spill") {
+            run_both_dyn(
+                [](View v) {
+                    return v.agg_numeric_args({
+                        AggSpec(AggOp::Sum),
+                        AggSpec(AggOp::Mean),
+                        AggSpec(AggOp::Var),
+                        AggSpec(AggOp::Pct, "", "p90", "", 0.9),
+                    });
+                },
+                128);
+        }
+        // A trace whose events carry no numeric args discovers nothing, so the
+        // dyn path collapses to just the group count column in both paths.
+        SUBCASE("group_by name + auto_numeric_metrics, no numeric args") {
+            auto build = [&] {
+                return View::from_file(gz, idx)
+                    .group_by({GroupKey::name()})
+                    .agg_numeric_args();
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+
         // time_bucket is a computed key too: the bucket column goes first
         // (agg_fold.h prepends it before plan.group_by), so pair rows by
         // [time_bucket, ...extra_key_cols] the same way check_match_multi
