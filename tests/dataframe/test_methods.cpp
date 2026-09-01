@@ -103,6 +103,28 @@ TEST_CASE("DataFrame group_by aggregates") {
     CHECK(n[1] == 2);
 }
 
+TEST_CASE("group_agg_expr over a String value column does not crash") {
+    namespace df = dftracer::utils::dataframe;
+    DataFrame b;
+    b.names = {"name", "cycles"};
+    b.columns.push_back(
+        Series::strings(std::vector<std::string>{"cpu", "gpu", "cpu", "gpu"}));
+    b.columns.push_back(Series::strings(
+        std::vector<std::string>{"lots", "few", "some", "few"}));
+    std::vector<const Series*> inputs = {&b.columns[0], &b.columns[1]};
+    const df::Expr cyc = df::expr_col(1);
+
+    // A bare String value flows through like the eager path: count is the group
+    // size, a numeric reducer over the String column contributes nothing (0).
+    df::AggExprSpec cnt = df::agg_count("n");
+    cnt.value = cyc;
+    DataFrame g = df::group_agg_expr(
+        df::expr_col(0), {cnt, df::agg_sum(cyc, "s")}, inputs, "name");
+    CHECK(g.num_rows() == 2);
+    CHECK(g.column("n").data<std::int64_t>()[0] == 2);
+    CHECK(g.column("s").data<std::int64_t>()[0] == 0);
+}
+
 TEST_CASE("SIMD sketch_bucket_keys matches scalar DDSketch::add") {
     namespace df = dftracer::utils::dataframe;
     std::vector<double> vals;

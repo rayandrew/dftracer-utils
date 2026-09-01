@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -111,10 +112,29 @@ DataFrame group_agg_expr(const std::vector<Expr>& keys,
         col_specs.push_back(std::move(cs));
     }
 
-    std::vector<Series> value_cols;
-    if (!value_roots.empty()) value_cols = eval_many(value_roots, inputs);
+    // A bare column reference is taken directly, any type (a String counter arg
+    // aggregates like the eager group_by: numeric reducers skip it, first/last/
+    // count still work). Only genuinely computed values run through the numeric
+    // evaluator, which has no String kernel and would yield an invalid column.
+    std::vector<Series> value_cols(value_roots.size());
+    std::vector<Expr> computed;
+    std::vector<std::size_t> computed_pos;
+    for (std::size_t i = 0; i < value_roots.size(); ++i) {
+        const std::int32_t ci = expr_col_index(value_roots[i]);
+        if (ci >= 0) {
+            value_cols[i] = inputs[static_cast<std::size_t>(ci)]->share();
+        } else {
+            computed.push_back(value_roots[i]);
+            computed_pos.push_back(i);
+        }
+    }
+    if (!computed.empty()) {
+        std::vector<Series> ev = eval_many(computed, inputs);
+        for (std::size_t j = 0; j < ev.size(); ++j)
+            value_cols[computed_pos[j]] = std::move(ev[j]);
+    }
     // raw_col indices are 0-based within raw_cols; offset them past the
-    // eval_many outputs once both column counts are known.
+    // value_cols outputs once both column counts are known.
     const std::int32_t raw_base = static_cast<std::int32_t>(value_cols.size());
     for (AggSpec& cs : col_specs)
         if (cs.op == AggOp::ArgMax || cs.op == AggOp::SetUnion)
@@ -122,7 +142,13 @@ DataFrame group_agg_expr(const std::vector<Expr>& keys,
 
     std::vector<const Series*> values;
     values.reserve(value_cols.size() + raw_cols.size());
-    for (Series& c : value_cols) values.push_back(&c);
+    for (Series& c : value_cols) {
+        if (!c.valid())
+            throw std::invalid_argument(
+                "group_agg: an aggregate value expression is not a numeric "
+                "column (no arithmetic kernel for its type)");
+        values.push_back(&c);
+    }
     for (std::int32_t ci : raw_cols)
         values.push_back(inputs[static_cast<std::size_t>(ci)]);
 
