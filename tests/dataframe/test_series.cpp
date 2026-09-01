@@ -1663,10 +1663,34 @@ TEST_SUITE("vec") {
         CHECK(m.columns[mi].data<double>()[2] == doctest::Approx(30.5));
     }
 
-    TEST_CASE("concat diagonal throws on an incompatible type clash") {
+    TEST_CASE("concat diagonal unifies a String/numeric clash on String") {
+        // A scalar column that is String in one part and numeric in another
+        // (build_row_frame infers an arg column's type per batch) unifies on
+        // String with numbers stringified, instead of aborting the concat.
         DataFrame a;
         a.names = {"v"};
         a.columns.push_back(Series::strings({"s"}));
+        DataFrame b;
+        b.names = {"v"};
+        std::vector<std::int64_t> bn{1};
+        b.columns.push_back(Series::flat_i64(bn.data(), 1));
+        DataFrame m = dv::concat({&a, &b}, dv::ConcatHow::Diagonal);
+        REQUIRE(m.columns.size() == 1);
+        CHECK(m.columns[0].type() ==
+              dftracer::utils::dataframe::TypeId::String);
+        REQUIRE(m.num_rows() == 2);
+        CHECK(m.columns[0].string_at(0) == "s");
+        CHECK(m.columns[0].string_at(1) == "1");
+    }
+
+    TEST_CASE("concat diagonal throws on a nested/scalar type clash") {
+        // A List column against a scalar has no meaningful unification.
+        DataFrame a;
+        a.names = {"v"};
+        std::vector<std::int32_t> offs{0, 1};
+        std::vector<std::int64_t> child{7};
+        a.columns.push_back(
+            Series::list(offs, Series::flat_i64(child.data(), 1)));
         DataFrame b;
         b.names = {"v"};
         std::vector<std::int64_t> bn{1};

@@ -402,6 +402,98 @@ TEST_SUITE("View") {
         CHECK(bnum(table, 0, "mean_idle_pct") == doctest::Approx(40));
     }
 
+    TEST_CASE(
+        "View - select a counter arg then group_by/agg over it (expr path)") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // ph="X" events with no "cycles", plus ph="C" counters whose "cycles"
+        // arg is a string, so the selected column is String-typed. The Python
+        // two-step .group_by(k).agg("count:cycles"/"sum:cycles") lowers to
+        // group_agg_expr, which used to feed an invalid (non-numeric) evaluated
+        // column into the aggregator and segfault.
+        std::string pfw = env.get_dir() + "/cyc.pfw";
+        {
+            std::ofstream ofs(pfw);
+            for (int i = 0; i < 4; ++i)
+                ofs << R"({"ph":"X","name":"read","cat":"POSIX","pid":1,"tid":1,"ts":)"
+                    << (1000 + i * 100) << R"(,"dur":10,"args":{}})" << "\n";
+            const char* vals[] = {"lots", "few", "some"};
+            for (int i = 0; i < 6; ++i) {
+                const char* nm = (i % 2 == 0) ? "cpu" : "gpu";
+                ofs << R"({"ph":"C","name":")" << nm
+                    << R"(","cat":"sys","pid":0,"tid":0,"ts":)"
+                    << (2000 + i * 10) << R"(,"args":{"cycles":")"
+                    << vals[i % 3] << R"("}})"
+                    << "\n";
+            }
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        // Non-deterministic corruption: repeat so an uninitialized/garbage read
+        // has several chances to surface.
+        for (int rep = 0; rep < 8; ++rep) {
+            dataframe::DataFrame rows = View::from_file(gz, idx)
+                                            .metadata(false)
+                                            .select({"name", "cycles"})
+                                            .collect()
+                                            .collect()
+                                            .get();
+            REQUIRE(rows.num_columns() == 2);
+            REQUIRE(bhas(rows, "cycles"));
+            REQUIRE(rows.num_rows() == 10);
+            REQUIRE(rows.columns[static_cast<std::size_t>(bcol(rows, "cycles"))]
+                        .type() == dataframe::TypeId::String);
+
+            // Tally (name, cycles) pairs; a null cycles reads as empty.
+            std::map<std::string, int> name_counts, cyc_counts;
+            int nnull = 0;
+            for (std::int64_t i = 0; i < rows.num_rows(); ++i) {
+                name_counts[bstr(rows, i, "name")]++;
+                const std::string c = bstr(rows, i, "cycles");
+                if (c.empty())
+                    nnull++;
+                else
+                    cyc_counts[c]++;
+            }
+            CHECK(name_counts["read"] == 4);
+            CHECK(name_counts["cpu"] == 3);
+            CHECK(name_counts["gpu"] == 3);
+            CHECK(nnull == 4);  // the 4 ph="X" rows lack "cycles"
+            CHECK(cyc_counts["lots"] == 2);
+            CHECK(cyc_counts["few"] == 2);
+            CHECK(cyc_counts["some"] == 2);
+
+            // The expr-aggregate path the Python GroupBy uses: count carries a
+            // value expr (ignored), sum evaluates the String value (skipped,
+            // 0).
+            std::vector<const dataframe::Series*> inputs;
+            for (const auto& col : rows.columns) inputs.push_back(&col);
+            const auto cyc = dataframe::expr_col(
+                static_cast<std::int32_t>(bcol(rows, "cycles")));
+            std::vector<dataframe::AggExprSpec> specs = {
+                dataframe::agg_count("count_cycles"),
+                dataframe::agg_sum(cyc, "sum_cycles")};
+            specs[0].value = cyc;
+            dataframe::DataFrame g = dataframe::group_agg_expr(
+                dataframe::expr_col(
+                    static_cast<std::int32_t>(bcol(rows, "name"))),
+                specs, inputs, "name");
+
+            REQUIRE(bhas(g, "count_cycles"));
+            REQUIRE(bhas(g, "sum_cycles"));
+            REQUIRE(g.num_rows() == 3);  // read, cpu, gpu
+            for (std::int64_t i = 0; i < g.num_rows(); ++i) {
+                const std::string nm = bstr(g, i, "name");
+                CHECK(bnum(g, i, "count_cycles") ==
+                      doctest::Approx(nm == "read" ? 4 : 3));
+                CHECK(bnum(g, i, "sum_cycles") == doctest::Approx(0));
+            }
+        }
+    }
+
     TEST_CASE("View - export_counters emits a ph=C event per group") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());

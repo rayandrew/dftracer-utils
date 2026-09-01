@@ -18,10 +18,12 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace dftracer::utils::dataframe {
 
@@ -406,16 +408,88 @@ std::vector<DataFrame> hash_partition(const DataFrame& b,
 
 namespace {
 
+// One row of a scalar (numeric/bool) column rendered as text, matching
+// build_row_frame's own stringification of numbers.
+std::string scalar_cell_to_string(const Series& s, std::int64_t i) {
+    switch (s.type()) {
+        case TypeId::Bool:
+            return s.data<std::uint8_t>()
+                       ? (((s.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1)
+                              ? "true"
+                              : "false")
+                       : "false";
+        case TypeId::Int8:
+            return std::to_string(s.data<std::int8_t>()[i]);
+        case TypeId::Int16:
+            return std::to_string(s.data<std::int16_t>()[i]);
+        case TypeId::Int32:
+            return std::to_string(s.data<std::int32_t>()[i]);
+        case TypeId::Int64:
+            return std::to_string(s.data<std::int64_t>()[i]);
+        case TypeId::Uint8:
+            return std::to_string(s.data<std::uint8_t>()[i]);
+        case TypeId::Uint16:
+            return std::to_string(s.data<std::uint16_t>()[i]);
+        case TypeId::Uint32:
+            return std::to_string(s.data<std::uint32_t>()[i]);
+        case TypeId::Uint64:
+            return std::to_string(s.data<std::uint64_t>()[i]);
+        case TypeId::Float32:
+            return std::to_string(s.data<float>()[i]);
+        case TypeId::Float64:
+            return std::to_string(s.data<double>()[i]);
+        case TypeId::String:
+        case TypeId::Binary:
+            return std::string(s.string_at(i));
+        case TypeId::List:
+        case TypeId::Struct:
+            return std::string();
+    }
+    return std::string();
+}
+
+// Render a scalar/bool column as a String column, preserving per-row validity.
+// Diagonal concat uses this where a column's type varies across parts and one
+// part is String: dftu_series_cast has no numeric->String path, so the numeric
+// parts are stringified here (numbers as text) to unify the column on String.
+Series to_string_series(const Series& s) {
+    const std::int64_t n = s.length();
+    std::vector<std::string> owned(static_cast<std::size_t>(n));
+    std::vector<std::string_view> vals(static_cast<std::size_t>(n));
+    std::vector<std::uint8_t> vbits(static_cast<std::size_t>((n + 7) / 8), 0);
+    bool any_null = false;
+    for (std::int64_t i = 0; i < n; ++i) {
+        if (s.is_null(i)) {
+            any_null = true;
+            continue;
+        }
+        owned[static_cast<std::size_t>(i)] = scalar_cell_to_string(s, i);
+        vals[static_cast<std::size_t>(i)] = owned[static_cast<std::size_t>(i)];
+        vbits[static_cast<std::size_t>(i >> 3)] |=
+            static_cast<std::uint8_t>(1u << (i & 7));
+    }
+    return Series::strings(std::span<const std::string_view>(vals),
+                           any_null ? vbits.data() : nullptr);
+}
+
+bool is_numeric_type(TypeId t) {
+    return t != TypeId::String && t != TypeId::Binary && t != TypeId::Bool &&
+           t != TypeId::List && t != TypeId::Struct;
+}
+
 // The type the same-named column takes across parts. Same type stays; a mix of
-// numeric types widens to Float64; a numeric/String or Bool/other clash has no
-// common type and throws.
+// numeric types widens to Float64; a scalar String/number clash unifies on
+// String; any other clash (nested vs scalar) has no common type and throws.
 TypeId promote_type(TypeId a, TypeId b, const std::string& name) {
     if (a == b) return a;
-    auto numeric = [](TypeId t) {
-        return t != TypeId::String && t != TypeId::Binary &&
-               t != TypeId::Bool && t != TypeId::List && t != TypeId::Struct;
-    };
-    if (numeric(a) && numeric(b)) return TypeId::Float64;
+    if (is_numeric_type(a) && is_numeric_type(b)) return TypeId::Float64;
+    // A scalar arg whose value is a string in one part and a number in another
+    // (build_row_frame infers a column's type per batch) unifies on String,
+    // numbers stringified, rather than aborting the whole concat.
+    const bool a_scalar = a != TypeId::List && a != TypeId::Struct;
+    const bool b_scalar = b != TypeId::List && b != TypeId::Struct;
+    if ((a == TypeId::String && b_scalar) || (b == TypeId::String && a_scalar))
+        return TypeId::String;
     throw std::invalid_argument("concat(diagonal): column '" + name +
                                 "' has incompatible types across parts");
 }
@@ -460,8 +534,12 @@ DataFrame concat_diagonal(const std::vector<const DataFrame*>& parts) {
                 owned.push_back(Series::nulls(target, p->num_rows()));
             } else {
                 const Series& src = p->columns[static_cast<std::size_t>(at)];
-                owned.push_back(src.type() == target ? src.share()
-                                                     : src.cast(target));
+                if (src.type() == target)
+                    owned.push_back(src.share());
+                else if (target == TypeId::String)
+                    owned.push_back(to_string_series(src));
+                else
+                    owned.push_back(src.cast(target));
             }
             cols.push_back(&owned.back());
         }

@@ -539,12 +539,15 @@ coro::CoroTask<ExportStats> View::export_trace(TraceWriteOptions opts) const {
 }
 
 dataframe::LazyFrame View::collect() const {
-    // A resolved.*/r.* select on a row query is baked into NativeRowFold's
-    // build (the raw stream never computes it), so that one case keeps select
-    // in the scan plan and falls back to ViewSource's buffered path; every
-    // other post-scan op moves to the LazyFrame chain below so it streams.
-    const bool select_in_scan = detail::is_row_query(*plan_) &&
-                                detail::select_needs_resolver(plan_->select);
+    // A row-query select is built by the scan producer itself (NativeRowFold /
+    // StreamRowFold, via build_row_frame's select branch), which emits exactly
+    // the selected columns. Keep it in the scan plan rather than stripping it
+    // and re-projecting with LazyFrame::select: a streaming morsel's schema is
+    // data-dependent (its arg columns are discovered at scan time), so a
+    // LazyFrame projection resolved against the source's index-derived schema
+    // would miss an un-indexed arg column and index the morsel out of bounds.
+    const bool select_in_scan =
+        detail::is_row_query(*plan_) && !plan_->select.empty();
 
     std::shared_ptr<detail::ViewPlan> stripped = clone(plan_);
     if (!select_in_scan) stripped->select.clear();
