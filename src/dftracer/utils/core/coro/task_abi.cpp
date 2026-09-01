@@ -34,6 +34,21 @@ coro::CoroTask<int> as_valued(coro::CoroTask<void> t) {
     co_return 0;
 }
 
+coro::CoroTask<void> await_one(coro::CoroTask<void>* task) {
+    co_await std::move(*task);
+}
+
+coro::CoroTask<void> await_all(std::vector<coro::CoroTask<void>> inner) {
+    co_await coro::when_all(std::move(inner));
+}
+
+coro::CoroTask<void> await_any(std::vector<coro::CoroTask<void>> inner) {
+    std::vector<coro::CoroTask<int>> valued;
+    valued.reserve(inner.size());
+    for (auto& t : inner) valued.push_back(as_valued(std::move(t)));
+    co_await coro::when_any(std::move(valued));
+}
+
 }  // namespace
 
 }  // namespace dftracer::utils
@@ -43,8 +58,6 @@ using dftracer::utils::default_runtime;
 using dftracer::utils::Runtime;
 using dftracer::utils::task_to_abi;
 using dftracer::utils::coro::CoroTask;
-using dftracer::utils::coro::when_all;
-using dftracer::utils::coro::when_any;
 
 extern "C" {
 
@@ -58,9 +71,10 @@ int dftu_task_run(dftu_runtime* rt, dftu_task* t) {
     auto* task = reinterpret_cast<CoroTask<void>*>(t);
     int rc = 0;
     try {
-        runtime->run_blocking(
-            "dftu_task_run",
-            [&](CoroScope&) -> CoroTask<void> { co_await std::move(*task); });
+        runtime->run_blocking("dftu_task_run",
+                              [&](CoroScope&) -> CoroTask<void> {
+                                  return dftracer::utils::await_one(task);
+                              });
     } catch (...) {
         rc = -1;
     }
@@ -70,20 +84,14 @@ int dftu_task_run(dftu_runtime* rt, dftu_task* t) {
 
 dftu_task* dftu_task_when_all(dftu_task* const* ts, uint32_t n) {
     if (n == 0 || !ts) return nullptr;
-    return task_to_abi([](std::vector<CoroTask<void>> inner) -> CoroTask<void> {
-        co_await when_all(std::move(inner));
-    }(dftracer::utils::take(ts, n)));
+    return task_to_abi(
+        dftracer::utils::await_all(dftracer::utils::take(ts, n)));
 }
 
 dftu_task* dftu_task_when_any(dftu_task* const* ts, uint32_t n) {
     if (n == 0 || !ts) return nullptr;
-    return task_to_abi([](std::vector<CoroTask<void>> inner) -> CoroTask<void> {
-        std::vector<CoroTask<int>> valued;
-        valued.reserve(inner.size());
-        for (auto& t : inner)
-            valued.push_back(dftracer::utils::as_valued(std::move(t)));
-        co_await when_any(std::move(valued));
-    }(dftracer::utils::take(ts, n)));
+    return task_to_abi(
+        dftracer::utils::await_any(dftracer::utils::take(ts, n)));
 }
 
 }  // extern "C"
