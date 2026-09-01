@@ -284,7 +284,11 @@ template <class T>
 void CumSumImpl(const void* av, void* ov, std::size_t n) {
     const T* in = static_cast<const T*>(av);
     T* out = static_cast<T*>(ov);
-    const hn::ScalableTag<T> d;
+    // Cap the scan vector to 128 bits: ShiftLeftLanes is a per-128-bit-block
+    // shift on x86, so a wider in-vector scan is silently wrong on AVX2 and
+    // fails to compile on AVX-512 (ShiftLeftBytes asserts kBytes <= 16). The
+    // per-chunk carry loop below stitches the 128-bit chunks together.
+    const hn::CappedTag<T, 16 / sizeof(T)> d;
     const std::size_t lanes = hn::Lanes(d);
     if (lanes < SCAN_SIMD_MIN_LANES) {
         T carry = T{0};
@@ -309,7 +313,8 @@ template <class T>
 void CumProdImpl(const void* av, void* ov, std::size_t n) {
     const T* in = static_cast<const T*>(av);
     T* out = static_cast<T*>(ov);
-    const hn::ScalableTag<T> d;
+    // 128-bit cap: see CumSumImpl (ShiftLeftLanes is per-128-bit-block).
+    const hn::CappedTag<T, 16 / sizeof(T)> d;
     const std::size_t lanes = hn::Lanes(d);
     if (lanes < SCAN_SIMD_MIN_LANES) {
         T carry = T{1};
@@ -334,7 +339,8 @@ template <class T, bool IS_MAX>
 void CumExtremeImpl(const void* av, void* ov, std::size_t n) {
     const T* in = static_cast<const T*>(av);
     T* out = static_cast<T*>(ov);
-    const hn::ScalableTag<T> d;
+    // 128-bit cap: see CumSumImpl (ShiftLeftLanes is per-128-bit-block).
+    const hn::CappedTag<T, 16 / sizeof(T)> d;
     const std::size_t lanes = hn::Lanes(d);
     const T ident = IS_MAX ? std::numeric_limits<T>::lowest()
                            : std::numeric_limits<T>::max();
