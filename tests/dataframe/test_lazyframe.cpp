@@ -638,6 +638,71 @@ TEST_SUITE("lazyframe") {
         CHECK(lz.num_rows() == 4);  // {5,3,1,2}
     }
 
+    TEST_CASE("unique external spill (tiny budget) matches in-memory") {
+        std::vector<std::int64_t> x{5, 3, 5, 1, 3, 5, 2, 1, 7, 3, 9, 5};
+        DataFrame df;
+        df.names = {"x"};
+        df.columns.push_back(
+            Series::flat_i64(x.data(), static_cast<std::int64_t>(x.size())));
+
+        DataFrame eg = df.unique();
+        DataFrame lz =
+            run(df.lazy().memory_budget(1).unique().collect(3));  // force spill
+
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* lp = lz.column("x").data<std::int64_t>();
+        const std::int64_t* ep = eg.column("x").data<std::int64_t>();
+        // Identical order, not just an identical set: first occurrence in
+        // original input order must survive the fast-path/spill boundary.
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(lp[i] == ep[i]);
+        CHECK(lz.num_rows() == 6);  // {5,3,1,2,7,9}
+    }
+
+    TEST_CASE(
+        "unique external spill with high-cardinality keys forces multiple "
+        "partitions/recursion") {
+        constexpr std::int64_t N = 5000;
+        std::vector<std::int64_t> x(static_cast<std::size_t>(N));
+        for (std::int64_t i = 0; i < N; ++i)
+            x[static_cast<std::size_t>(i)] = i % 700;  // 700 distinct keys
+        DataFrame df;
+        df.names = {"x"};
+        df.columns.push_back(Series::flat_i64(x.data(), N));
+
+        DataFrame eg = df.unique();
+        DataFrame lz = run(df.lazy().memory_budget(1).unique().collect(32));
+
+        REQUIRE(lz.num_rows() == 700);
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* lp = lz.column("x").data<std::int64_t>();
+        const std::int64_t* ep = eg.column("x").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(lp[i] == ep[i]);
+        // No dupes: the 700 survivors are exactly 0..699 once each.
+        std::vector<bool> found(700, false);
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) {
+            REQUIRE_FALSE(found[static_cast<std::size_t>(lp[i])]);
+            found[static_cast<std::size_t>(lp[i])] = true;
+        }
+    }
+
+    TEST_CASE(
+        "unique().head(k) under a tiny budget returns first k distinct "
+        "in order") {
+        std::vector<std::int64_t> x{5, 3, 5, 1, 3, 5, 2, 1, 7, 9};
+        DataFrame df;
+        df.names = {"x"};
+        df.columns.push_back(
+            Series::flat_i64(x.data(), static_cast<std::int64_t>(x.size())));
+
+        DataFrame lz =
+            run(df.lazy().memory_budget(1).unique().head(3).collect(3));
+        REQUIRE(lz.num_rows() == 3);
+        const std::int64_t* lp = lz.column("x").data<std::int64_t>();
+        CHECK(lp[0] == 5);
+        CHECK(lp[1] == 3);
+        CHECK(lp[2] == 1);
+    }
+
     TEST_CASE("sort_by external merge (spilling) matches eager") {
         // Scrambled keys + a payload column, tiny budget + tiny morsels so the
         // sort spills several runs and k-way merges them back.

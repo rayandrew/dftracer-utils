@@ -196,6 +196,40 @@ std::vector<std::uint8_t> first_seen_mask(
     return keep_mask;
 }
 
+// Approximate per-entry overhead of one string in an unordered_dense::set
+// (node + bucket bookkeeping), added to the key's own byte length when sizing
+// the distinct-key state for the unique() spill trigger below.
+constexpr std::size_t DEDUP_ENTRY_OVERHEAD = 48;
+
+// Grace-hash-distinct spill fan-out and recursion bound (unique() below): a
+// partition that still exceeds budget after fanning out is re-partitioned
+// with a depth-salted hash, capped so a single hot key (which always lands in
+// the same partition, however deep) cannot recurse forever.
+constexpr int UNIQUE_SPILL_FANOUT = 16;
+constexpr int UNIQUE_SPILL_MAX_DEPTH = 3;
+constexpr std::int64_t UNIQUE_SPILL_MIN_LEAF_ROWS = 64;
+
+// Depth-salted hash of a row key: depth 0 matches the plain hash so the first
+// pass agrees with any caller hashing the same key; deeper passes mix in the
+// depth so a key that collided at one depth spreads differently at the next.
+std::size_t unique_spill_hash(const std::string& key, int depth) {
+    const std::size_t h = std::hash<std::string>{}(key);
+    if (depth == 0) return h;
+    return static_cast<std::size_t>(hash::splitmix64(
+        static_cast<std::uint64_t>(h) ^
+        (static_cast<std::uint64_t>(depth) * 0x9E3779B97F4A7C15ULL)));
+}
+
+// All columns but the first (the row-id helper column prepended by the
+// unique() spill path), as cheap shared views.
+std::vector<Series> drop_first_column(const std::vector<Series>& cols) {
+    std::vector<Series> out;
+    out.reserve(cols.size() - 1);
+    for (std::size_t i = 1; i < cols.size(); ++i)
+        out.push_back(cols[i].share());
+    return out;
+}
+
 // ---- cursors ----------------------------------------------------------------
 
 // Reads contiguous chunks off an in-memory frame as zero-copy offset views.
@@ -1276,49 +1310,327 @@ class SortMergeCursor : public Cursor {
     std::vector<std::int64_t> pos_;
 };
 
-// Streaming distinct (keep first occurrence, original order). Holds only the
-// set of distinct row keys - which is the result itself, materialized by
-// collect anyway - and streams input and output morsel by morsel.
+// Streaming distinct (keep first occurrence, original order). Fast path holds
+// only the set of distinct row keys - which is the result itself, materialized
+// by collect anyway - and streams input and output morsel by morsel. When that
+// key state would exceed `budget_`, switches to a grace-hash-distinct spill:
+// every row still to come gets a global row-id, is hash-partitioned by key to
+// disk (skipping any key already resolved by the fast path), each partition is
+// deduped independently keeping the row with the minimum row-id (recursing
+// with a depth-salted hash if a partition itself does not fit budget), and the
+// survivors are k-way merged back into row-id order so the fast-emitted prefix
+// and the spilled remainder together reproduce one globally first-occurrence,
+// input-order stream.
 class UniqueCursor : public Cursor {
    public:
-    UniqueCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch)
-        : in_(std::move(in)), sch_(std::move(sch)) {
+    UniqueCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                 std::uint64_t budget)
+        : in_(std::move(in)), sch_(std::move(sch)), budget_(budget) {
         if (parallel_backend_installed()) seen_p_.resize(DEDUP_PARTITIONS);
     }
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
-        while (auto m = co_await in_->next(max_rows)) {
-            const std::int64_t n = m->rows;
-            // Build the exact row keys in parallel (scalar string work, one per
-            // row, independent), then dedupe (radix-partitioned when a
-            // parallel backend is installed, else one serial set).
-            std::vector<std::string> keys(static_cast<std::size_t>(n));
-            parallel_for(n, std::int64_t{1} << 13,
-                         [&](std::int64_t b, std::int64_t e) {
-                             for (std::int64_t i = b; i < e; ++i)
-                                 keys[static_cast<std::size_t>(i)] =
-                                     row_key(m->columns, i);
-                         });
-            std::vector<std::uint8_t> keep_mask =
-                first_seen_mask(keys, n, seen_, seen_p_);
-            std::vector<std::int64_t> keep;
-            keep.reserve(static_cast<std::size_t>(n));
-            for (std::int64_t i = 0; i < n; ++i)
-                if (keep_mask[static_cast<std::size_t>(i)]) keep.push_back(i);
-            if (keep.empty()) continue;
-            DataFrame mf;
-            mf.names = sch_;
-            mf.columns = std::move(m->columns);
-            co_return morsel_of(take(mf, keep));
+        if (!spilling_) {
+            while (auto m = co_await in_->next(max_rows)) {
+                const std::int64_t n = m->rows;
+                // Build the exact row keys in parallel (scalar string work,
+                // one per row, independent), then dedupe (radix-partitioned
+                // when a parallel backend is installed, else one serial set).
+                std::vector<std::string> keys(static_cast<std::size_t>(n));
+                parallel_for(n, std::int64_t{1} << 13,
+                             [&](std::int64_t b, std::int64_t e) {
+                                 for (std::int64_t i = b; i < e; ++i)
+                                     keys[static_cast<std::size_t>(i)] =
+                                         row_key(m->columns, i);
+                             });
+                std::vector<std::uint32_t> key_len(static_cast<std::size_t>(n));
+                for (std::int64_t i = 0; i < n; ++i)
+                    key_len[static_cast<std::size_t>(i)] =
+                        static_cast<std::uint32_t>(
+                            keys[static_cast<std::size_t>(i)].size());
+                std::vector<std::uint8_t> keep_mask =
+                    first_seen_mask(keys, n, seen_, seen_p_);
+                std::vector<std::int64_t> keep;
+                keep.reserve(static_cast<std::size_t>(n));
+                for (std::int64_t i = 0; i < n; ++i) {
+                    if (!keep_mask[static_cast<std::size_t>(i)]) continue;
+                    keep.push_back(i);
+                    fast_bytes_ += key_len[static_cast<std::size_t>(i)] +
+                                   DEDUP_ENTRY_OVERHEAD;
+                }
+                next_row_id_ += n;
+                if (budget_ > 0 && fast_bytes_ > budget_) spilling_ = true;
+                if (!keep.empty()) {
+                    DataFrame mf;
+                    mf.names = sch_;
+                    mf.columns = std::move(m->columns);
+                    co_return morsel_of(take(mf, keep));
+                }
+                if (spilling_) break;
+            }
+            if (!spilling_) co_return std::nullopt;
         }
-        co_return std::nullopt;
+        if (!drained_) co_await drain_and_finalize(max_rows);
+        co_return co_await merge_next(max_rows);
     }
 
    private:
+    bool already_seen(const std::string& key) const {
+        if (!seen_p_.empty())
+            return seen_p_[std::hash<std::string>{}(key) % seen_p_.size()]
+                .contains(key);
+        return seen_.contains(key);
+    }
+
+    std::vector<std::string> rowid_schema() const {
+        std::vector<std::string> out;
+        out.reserve(sch_.size() + 1);
+        out.emplace_back("__row_id");
+        for (const std::string& n : sch_) out.push_back(n);
+        return out;
+    }
+
+    // Hash-partitions `cols` (row-id column first, then `data_cols` for the
+    // key) into `fanout` on-disk runs by `unique_spill_hash(key, depth)`,
+    // tracking each partition's approximate bytes and row count for the
+    // recurse-or-leaf decision at finalize.
+    void partition_rows(const std::vector<Series>& tagged_cols,
+                        const std::vector<Series>& data_cols, std::int64_t n,
+                        int depth, int fanout,
+                        std::vector<spill::Writer>& writers,
+                        std::vector<std::size_t>& bytes,
+                        std::vector<std::int64_t>& rows) {
+        std::vector<std::string> keys(static_cast<std::size_t>(n));
+        parallel_for(
+            n, std::int64_t{1} << 13, [&](std::int64_t b, std::int64_t e) {
+                for (std::int64_t i = b; i < e; ++i)
+                    keys[static_cast<std::size_t>(i)] = row_key(data_cols, i);
+            });
+        std::vector<std::vector<std::int64_t>> buckets(
+            static_cast<std::size_t>(fanout));
+        for (std::int64_t i = 0; i < n; ++i) {
+            if (depth == 0 && already_seen(keys[static_cast<std::size_t>(i)]))
+                continue;  // already emitted by the fast phase
+            const std::size_t p =
+                unique_spill_hash(keys[static_cast<std::size_t>(i)], depth) %
+                static_cast<std::size_t>(fanout);
+            buckets[p].push_back(i);
+        }
+        DataFrame mf;
+        mf.names = rowid_schema();
+        mf.columns.reserve(tagged_cols.size());
+        for (const Series& c : tagged_cols) mf.columns.push_back(c.share());
+        for (int p = 0; p < fanout; ++p) {
+            if (buckets[static_cast<std::size_t>(p)].empty()) continue;
+            DataFrame sel = take(mf, buckets[static_cast<std::size_t>(p)]);
+            bytes[static_cast<std::size_t>(p)] += morsel_bytes(sel.columns);
+            rows[static_cast<std::size_t>(p)] += sel.num_rows();
+            writers[static_cast<std::size_t>(p)].write(sel.columns,
+                                                       sel.num_rows());
+        }
+    }
+
+    // Dedups one spilled partition (rows whose key was not already resolved
+    // by the fast phase, hash-partitioned to land here), keeping the row with
+    // the minimum row-id per key. If the partition itself would still exceed
+    // budget and is large enough that splitting helps, re-partitions it with
+    // a depth-salted hash instead of loading it whole (bounded recursion: a
+    // single hot key always lands in the same sub-partition however deep, so
+    // depth alone cannot force it smaller - the row-count floor stops the
+    // recursion once further splitting cannot shrink it).
+    coro::CoroTask<void> finalize_partition(const std::string& path,
+                                            std::size_t bytes,
+                                            std::int64_t rows, int depth) {
+        if (depth < UNIQUE_SPILL_MAX_DEPTH && budget_ > 0 && bytes > budget_ &&
+            rows > UNIQUE_SPILL_MIN_LEAF_ROWS) {
+            constexpr int FANOUT = UNIQUE_SPILL_FANOUT;
+            std::vector<spill::Writer> writers;
+            writers.reserve(static_cast<std::size_t>(FANOUT));
+            std::vector<int> ids(static_cast<std::size_t>(FANOUT));
+            for (int p = 0; p < FANOUT; ++p) {
+                ids[static_cast<std::size_t>(p)] = next_run_id_++;
+                writers.emplace_back(
+                    dir_.run_path(ids[static_cast<std::size_t>(p)]));
+            }
+            std::vector<std::size_t> sub_bytes(static_cast<std::size_t>(FANOUT),
+                                               0);
+            std::vector<std::int64_t> sub_rows(static_cast<std::size_t>(FANOUT),
+                                               0);
+            spill::Reader reader(path);
+            while (auto m = co_await reader.next(DEFAULT_MORSEL_ROWS)) {
+                std::vector<Series> data_cols = drop_first_column(m->columns);
+                partition_rows(m->columns, data_cols, m->rows, depth + 1,
+                               FANOUT, writers, sub_bytes, sub_rows);
+            }
+            for (spill::Writer& w : writers) w.close();
+            for (int p = 0; p < FANOUT; ++p)
+                co_await finalize_partition(
+                    dir_.run_path(ids[static_cast<std::size_t>(p)]),
+                    sub_bytes[static_cast<std::size_t>(p)],
+                    sub_rows[static_cast<std::size_t>(p)], depth + 1);
+            co_return;
+        }
+
+        // Leaf: small enough to fit budget (or recursion bottomed out) - load
+        // fully, dedupe by minimum row-id, sort survivors by row-id, and write
+        // one run for the final k-way merge.
+        std::vector<std::vector<Series>> parts;
+        std::int64_t total = 0;
+        {
+            spill::Reader reader(path);
+            while (auto m = co_await reader.next(DEFAULT_MORSEL_ROWS)) {
+                total += m->rows;
+                parts.push_back(std::move(m->columns));
+            }
+        }
+        if (total == 0) co_return;
+
+        const std::size_t ncols = parts.front().size();
+        std::vector<Series> whole;
+        whole.reserve(ncols);
+        for (std::size_t c = 0; c < ncols; ++c) {
+            std::vector<const Series*> pcs;
+            pcs.reserve(parts.size());
+            for (auto& pc : parts) pcs.push_back(&pc[c]);
+            whole.push_back(concat_columns(pcs));
+        }
+        const std::vector<Series> data_cols = drop_first_column(whole);
+        const std::int64_t* rowid = whole[0].data<std::int64_t>();
+
+        ankerl::unordered_dense::map<std::string, std::int64_t> best;
+        for (std::int64_t i = 0; i < total; ++i) {
+            std::string k = row_key(data_cols, i);
+            auto it = best.find(k);
+            if (it == best.end())
+                best.emplace(std::move(k), i);
+            else if (rowid[i] < rowid[it->second])
+                it->second = i;
+        }
+        std::vector<std::int64_t> survivors;
+        survivors.reserve(best.size());
+        for (const auto& kv : best) survivors.push_back(kv.second);
+        std::sort(survivors.begin(), survivors.end(),
+                  [&](std::int64_t a, std::int64_t b) {
+                      return rowid[a] < rowid[b];
+                  });
+
+        DataFrame mf;
+        mf.names = rowid_schema();
+        mf.columns = std::move(whole);
+        DataFrame sorted = take(mf, survivors);
+
+        const std::string run_path = dir_.run_path(next_run_id_++);
+        spill::Writer w(run_path);
+        w.write(sorted.columns, sorted.num_rows());
+        w.close();
+        survivor_runs_.push_back(std::make_unique<spill::Reader>(run_path));
+    }
+
+    // Fully drains the remaining input into UNIQUE_SPILL_FANOUT partitions
+    // (skipping rows whose key the fast phase already resolved), then dedupes
+    // and orders every partition's survivors for the k-way merge in
+    // merge_next.
+    coro::CoroTask<void> drain_and_finalize(std::int64_t max_rows) {
+        constexpr int FANOUT = UNIQUE_SPILL_FANOUT;
+        std::vector<spill::Writer> writers;
+        writers.reserve(static_cast<std::size_t>(FANOUT));
+        std::vector<int> ids(static_cast<std::size_t>(FANOUT));
+        for (int p = 0; p < FANOUT; ++p) {
+            ids[static_cast<std::size_t>(p)] = next_run_id_++;
+            writers.emplace_back(
+                dir_.run_path(ids[static_cast<std::size_t>(p)]));
+        }
+        std::vector<std::size_t> bytes(static_cast<std::size_t>(FANOUT), 0);
+        std::vector<std::int64_t> rows(static_cast<std::size_t>(FANOUT), 0);
+
+        while (auto m = co_await in_->next(max_rows)) {
+            const std::int64_t n = m->rows;
+            std::vector<std::int64_t> rowid(static_cast<std::size_t>(n));
+            for (std::int64_t i = 0; i < n; ++i)
+                rowid[static_cast<std::size_t>(i)] = next_row_id_ + i;
+            next_row_id_ += n;
+            std::vector<Series> tagged;
+            tagged.reserve(m->columns.size() + 1);
+            tagged.push_back(Series::flat_i64(rowid.data(), n));
+            for (Series& c : m->columns) tagged.push_back(std::move(c));
+            partition_rows(tagged, drop_first_column(tagged), n, 0, FANOUT,
+                           writers, bytes, rows);
+        }
+        for (spill::Writer& w : writers) w.close();
+
+        for (int p = 0; p < FANOUT; ++p)
+            co_await finalize_partition(
+                dir_.run_path(ids[static_cast<std::size_t>(p)]),
+                bytes[static_cast<std::size_t>(p)],
+                rows[static_cast<std::size_t>(p)], 0);
+
+        cur_.resize(survivor_runs_.size());
+        pos_.assign(survivor_runs_.size(), 0);
+        for (std::size_t k = 0; k < survivor_runs_.size(); ++k)
+            cur_[k] = co_await survivor_runs_[k]->next(max_rows);
+        drained_ = true;
+    }
+
+    // K-way merges the row-id-sorted survivor runs into ascending row-id
+    // order (rows are globally unique row-ids, so a one-row-at-a-time pick is
+    // fine here - this spill-finalize path is rare, not the streaming fast
+    // path), dropping the row-id helper column before emitting.
+    coro::CoroTask<std::optional<Morsel>> merge_next(std::int64_t max_rows) {
+        std::vector<std::vector<Series>> pieces;
+        std::int64_t out_rows = 0;
+        while (out_rows < max_rows) {
+            int winner = -1;
+            for (std::size_t k = 0; k < cur_.size(); ++k) {
+                if (!cur_[k] || pos_[k] >= cur_[k]->rows) continue;
+                if (winner < 0) {
+                    winner = static_cast<int>(k);
+                    continue;
+                }
+                const std::size_t wk = static_cast<std::size_t>(winner);
+                const std::int64_t cand =
+                    cur_[k]->columns[0].data<std::int64_t>()[pos_[k]];
+                const std::int64_t best =
+                    cur_[wk]->columns[0].data<std::int64_t>()[pos_[wk]];
+                if (cand < best) winner = static_cast<int>(k);
+            }
+            if (winner < 0) break;
+            const std::size_t wk = static_cast<std::size_t>(winner);
+            Morsel piece = slice_morsel(*cur_[wk], pos_[wk], 1);
+            piece.columns.erase(piece.columns.begin());
+            pieces.push_back(std::move(piece.columns));
+            ++out_rows;
+            ++pos_[wk];
+            if (pos_[wk] >= cur_[wk]->rows)
+                cur_[wk] = co_await survivor_runs_[wk]->next(max_rows);
+        }
+        if (pieces.empty()) co_return std::nullopt;
+        Morsel out;
+        out.rows = out_rows;
+        const std::size_t ncols = pieces.front().size();
+        out.columns.reserve(ncols);
+        for (std::size_t c = 0; c < ncols; ++c) {
+            std::vector<const Series*> parts;
+            parts.reserve(pieces.size());
+            for (auto& pc : pieces) parts.push_back(&pc[c]);
+            out.columns.push_back(concat_columns(parts));
+        }
+        co_return out;
+    }
+
     std::unique_ptr<Cursor> in_;
     std::vector<std::string> sch_;
+    std::uint64_t budget_;
     ankerl::unordered_dense::set<std::string> seen_;
     std::vector<ankerl::unordered_dense::set<std::string>> seen_p_;
+    std::size_t fast_bytes_ = 0;
+    std::int64_t next_row_id_ = 0;
+    bool spilling_ = false;
+    bool drained_ = false;
+    spill::Dir dir_;
+    int next_run_id_ = 0;
+    std::vector<std::unique_ptr<Cursor>> survivor_runs_;
+    std::vector<std::optional<Morsel>> cur_;
+    std::vector<std::int64_t> pos_;
 };
 
 // Streaming per-column summary statistics, matching DataFrame::describe. One
@@ -2323,7 +2635,8 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
                     std::move(in), sch, o.name, o.descending, budget);
             },
             [&](const UniqueOp&) -> std::unique_ptr<Cursor> {
-                return std::make_unique<UniqueCursor>(std::move(in), sch);
+                return std::make_unique<UniqueCursor>(std::move(in), sch,
+                                                      budget);
             },
             [&](const SampleOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<SampleCursor>(std::move(in), sch, o.n,
