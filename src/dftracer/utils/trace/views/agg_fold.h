@@ -238,28 +238,25 @@ void fold_event_over(GroupMap& map, const Src& src, const ViewPlan& plan,
     const std::uint32_t gidx =
         sketch_batch ? static_cast<std::uint32_t>(it - map.begin()) : 0;
 
-    // Occupancy (time-window reduction): OR the event's [ts, ts+dur) coverage
-    // into every bucket it spans. The scan already applied the window
-    // predicate, so these are the in-window events; popcount at finalize turns
-    // the covered sub-slots into busy time.
-    if (sch.want_occupancy && sch.occ_bucket_us > 0) {
+    // Occupancy (time-window reduction): record the event's endpoints as a
+    // +1/-1 delta pair; finalize sweeps for the exact interval union.
+    if (sch.want_occupancy) {
         auto ts = src.number("ts");
         auto dur = src.number("dur");
         if (ts && dur && *dur > 0) {
-            const auto s = static_cast<std::uint64_t>(*ts);
-            const auto d = static_cast<std::uint64_t>(*dur);
-            const std::uint64_t w = sch.occ_bucket_us;
-            a.occ_bucket_us = w;
-            a.occ_total += d;
-            if (s < a.occ_ts) a.occ_ts = s;
-            if (s + d > a.occ_te) a.occ_te = s + d;
-            const std::uint64_t first = (s / w) * w;
-            const std::uint64_t last = (s + d - 1) / w * w;
-            for (std::uint64_t b = first; b <= last; b += w) {
-                auto& ob = a.occ_buckets[b];
-                ob.mask |= occ_coverage_slots(s, d, b, w);
-                ob.active += 1;
+            std::uint64_t s = static_cast<std::uint64_t>(*ts);
+            std::uint64_t e = s + static_cast<std::uint64_t>(*dur);
+            const std::uint64_t cell = sch.occ_cell_us;
+            if (cell) {  // optional tolerance: snap start down, end up
+                s = s / cell * cell;
+                e = (e + cell - 1) / cell * cell;
             }
+            a.occ_cell_us = cell;
+            a.occ_total += static_cast<std::uint64_t>(*dur);
+            if (s < a.occ_ts) a.occ_ts = s;
+            if (e > a.occ_te) a.occ_te = e;
+            a.occ_deltas[s] += 1;
+            a.occ_deltas[e] -= 1;
         }
     }
 

@@ -851,9 +851,10 @@ class _ViewerFilters:
         return self._rewrap(self._native.time_bucket(us, normalize_to))
 
     def occ_cell(self: _ViewerT, cell_us: Union[int, float, str]) -> _ViewerT:
-        """Occupancy cell size (busy quantum); a bare number is microseconds, a
-        string ("1ms") is converted. 0 = default. Finer resolves overlap on
-        short events; honored with time_range."""
+        """Optional tolerance on the occupancy interval union; a bare number is
+        microseconds, a string ("1ms") is converted. 0/default = exact union.
+        A positive cell snaps event endpoints to that grid, bounding memory at
+        a small over-estimate."""
         us = int(round(coerce_duration(cell_us, 1e6, "cell_us")))
         return self._rewrap(self._native.occ_cell(us))
 

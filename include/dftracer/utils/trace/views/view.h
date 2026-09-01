@@ -128,11 +128,10 @@ enum class AggOp {
     SetUnion,  ///< distinct string values of `field`, emitted as a delimiter-
                ///< joined text column (sorted)
     Busy,      ///< occupancy: wall-clock us at least one event was active
-               ///< (interval union via the per-bucket coverage mask)
+               ///< (exact interval union)
     Concurrency,  ///< average parallelism: sum(dur) / busy
     Utilization,  ///< busy / makespan (max_end - min_ts)
-    Active        ///< peak concurrent headcount: max over buckets of the number
-            ///< of events overlapping a bucket (resolution = bucket width)
+    Active        ///< peak concurrent headcount (exact max overlap depth)
 };
 
 /// True for the occupancy ops (busy/concurrency/utilization/active): time-

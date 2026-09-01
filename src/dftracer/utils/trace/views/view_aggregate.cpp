@@ -7,20 +7,17 @@
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_resolver.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace dataframe = dftracer::utils::dataframe;
 
 namespace dftracer::utils::trace::views::detail {
-
-// Occupancy grid defaults: target cell (busy quantum) when the query sets no
-// occ_cell_us, and the per-window mask-cell cap that coarsens the cell on wide
-// windows so occ_buckets stays bounded.
-static constexpr std::uint64_t DEFAULT_OCC_CELL_US = 64;
-static constexpr std::uint64_t MAX_OCC_BUCKETS = 65536;
 
 std::optional<double> to_number(simdjson::dom::element e) {
     double d;
@@ -148,27 +145,7 @@ AggSchema make_agg_schema(const ViewPlan& plan) {
         if (fi >= 0 && s.field_sketch[fi] < 0)
             s.field_sketch[fi] = static_cast<int>(s.sketch_count++);
     }
-    // Size the grid off a fixed cell, not the output time_bucket - pinning the
-    // cell to the bucket rounds a short event up to bucket/64 and inflates
-    // busy. Per-window cap bounds the mask cells; unknown window falls back to
-    // 1s.
-    if (s.want_occupancy) {
-        const std::uint64_t cell =
-            plan.occ_cell_us > 0 ? plan.occ_cell_us : DEFAULT_OCC_CELL_US;
-        std::uint64_t bucket = cell * OCC_SUB_SLOTS;
-        if (plan.time_range &&
-            plan.time_range->second > plan.time_range->first) {
-            const std::uint64_t window = static_cast<std::uint64_t>(
-                plan.time_range->second - plan.time_range->first);
-            const std::uint64_t min_bucket =
-                (window + MAX_OCC_BUCKETS - 1) / MAX_OCC_BUCKETS;
-            if (bucket < min_bucket) bucket = min_bucket;
-        } else if (bucket < 1000000) {
-            bucket = 1000000;
-        }
-        if (bucket < OCC_SUB_SLOTS) bucket = OCC_SUB_SLOTS;
-        s.occ_bucket_us = bucket;
-    }
+    if (s.want_occupancy) s.occ_cell_us = plan.occ_cell_us;
     for (const auto& r : plan.numeric_arg_aggs)
         if (r.op == AggOp::Pct) {
             s.dyn_sketch = true;
@@ -195,11 +172,10 @@ int schema_field_index(const AggSchema& s, const std::string& field) {
     return -1;
 }
 
-// Occupancy summary from the per-bucket masks: busy (sum over buckets of
-// popcount * bucket/64, i.e. the interval union to bucket/64 resolution),
-// active (peak concurrency = max over buckets of the overlap headcount), total
-// (sum of raw dur, for concurrency) and span (max_end - min_start, for
-// utilization). Empty when the group had no timed events.
+// Occupancy summary from the endpoint delta-map: busy is the exact interval
+// union (prefix-sum sweep over sorted deltas), active the peak depth, total
+// the raw sum(dur) (for concurrency), span the makespan (for utilization).
+// Empty when the group had no timed events.
 struct OccSummary {
     std::uint64_t busy = 0;
     std::uint64_t active = 0;
@@ -209,21 +185,26 @@ struct OccSummary {
 
 static OccSummary occupancy_summary(const AggAccum& a) {
     OccSummary o;
-    if (a.occ_bucket_us == 0) return o;
-    std::uint64_t slots = 0;
-    for (const auto& [b, ob] : a.occ_buckets) {
-        (void)b;
-        slots += static_cast<std::uint64_t>(std::popcount(ob.mask));
-        if (ob.active > o.active) o.active = ob.active;
-    }
     o.total = a.occ_total;
     o.span = a.occ_te > a.occ_ts ? a.occ_te - a.occ_ts : 0;
-    // A coverage bitmap can only overshoot: clamp busy to sum(dur) (keeps
-    // concurrency = total/busy >= 1) and to the makespan (keeps utilization =
-    // busy/span <= 1; the span clamp is load-bearing, do not drop it).
-    o.busy = slots * a.occ_bucket_us / OCC_SUB_SLOTS;
-    if (o.busy > o.total) o.busy = o.total;
-    if (o.span && o.busy > o.span) o.busy = o.span;
+    if (a.occ_deltas.empty()) return o;
+    std::vector<std::pair<std::uint64_t, std::int64_t>> pts(
+        a.occ_deltas.begin(), a.occ_deltas.end());
+    std::sort(pts.begin(), pts.end(),
+              [](const auto& x, const auto& y) { return x.first < y.first; });
+    std::int64_t depth = 0;
+    std::uint64_t last = 0, busy = 0, peak = 0;
+    bool started = false;
+    for (const auto& [t, dlt] : pts) {
+        if (started && depth > 0) busy += t - last;
+        depth += dlt;
+        if (depth > 0 && static_cast<std::uint64_t>(depth) > peak)
+            peak = static_cast<std::uint64_t>(depth);
+        last = t;
+        started = true;
+    }
+    o.busy = busy;
+    o.active = peak;
     return o;
 }
 
@@ -399,16 +380,12 @@ void merge_accum(AggAccum& da, const AggAccum& sa, const ViewPlan& plan) {
     for (const auto& [name, sm] : sa.dyn) da.dyn[name].merge(sm);
     for (const auto& [name, sk] : sa.dyn_sketches)
         da.dyn_sketches[name].merge(sk);
-    if (sa.occ_bucket_us) {
-        da.occ_bucket_us = sa.occ_bucket_us;
+    if (!sa.occ_deltas.empty() || sa.occ_total) {
         da.occ_total += sa.occ_total;
         if (sa.occ_ts < da.occ_ts) da.occ_ts = sa.occ_ts;
         if (sa.occ_te > da.occ_te) da.occ_te = sa.occ_te;
-        for (const auto& [b, ob] : sa.occ_buckets) {
-            auto& d = da.occ_buckets[b];
-            d.mask |= ob.mask;
-            d.active += ob.active;
-        }
+        for (const auto& [t, dlt] : sa.occ_deltas) da.occ_deltas[t] += dlt;
+        if (sa.occ_cell_us) da.occ_cell_us = sa.occ_cell_us;
     }
 }
 
@@ -793,7 +770,7 @@ dataframe::DataFrame to_batch(const GroupMap& map, const ViewPlan& plan) {
         }
         if (occ_cell_col)
             vcells[vc++].push_back(dftracer::utils::dataframe::FieldNum::of(
-                static_cast<std::int64_t>(sch.occ_bucket_us / OCC_SUB_SLOTS)));
+                static_cast<std::int64_t>(sch.occ_cell_us)));
     }
 
     dataframe::DataFrame batch;

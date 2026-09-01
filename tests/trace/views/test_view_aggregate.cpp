@@ -8,10 +8,12 @@
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <functional>
 #include <map>
+#include <utility>
 
 #include "test_view_common.h"
 
@@ -1453,10 +1455,8 @@ TEST_SUITE("View") {
         "View - occupancy busy holds its invariants and honors occ_cell") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
-        // "overlap" has two overlapping intervals (union 150 < sum 200), so
-        // busy clamps to the makespan; "serial" has two disjoint ones, so busy
-        // clamps to sum(dur). occ_cell divides every ts/dur, so the grid is
-        // exact.
+        // "overlap" has two overlapping intervals (exact union 150 < sum
+        // 200); "serial" has two disjoint ones (union == sum(dur)).
         std::string pfw = env.get_dir() + "/occ.pfw";
         {
             std::ofstream ofs(pfw);
@@ -1500,13 +1500,13 @@ TEST_SUITE("View") {
         REQUIRE(se >= 0);
 
         CHECK(bnum(b, ov, "busy_cell_us") == 5);
-        // overlap: union 150 == makespan, so busy is clamped to 150.
+        // overlap: exact union == 150 (< sum(dur) == 200); the old bitmap
+        // regression drifted this toward 200 as input grew.
         CHECK(bnum(b, ov, "sum_dur") == 200);
         CHECK(bnum(b, ov, "busy") == 150);
         CHECK(bnum(b, ov, "concurrency") == doctest::Approx(200.0 / 150.0));
         CHECK(bnum(b, ov, "utilization") == doctest::Approx(1.0));
-        // serial: disjoint, so busy is clamped to sum(dur) and concurrency
-        // is 1.
+        // serial: disjoint, so busy == sum(dur) and concurrency == 1.
         CHECK(bnum(b, se, "busy") == 200);
         CHECK(bnum(b, se, "concurrency") == doctest::Approx(1.0));
 
@@ -1514,6 +1514,177 @@ TEST_SUITE("View") {
             CHECK(bnum(b, i, "busy") <= bnum(b, i, "sum_dur"));
             CHECK(bnum(b, i, "concurrency") >= 1.0 - 1e-9);
             CHECK(bnum(b, i, "utilization") <= 1.0 + 1e-9);
+        }
+    }
+
+    // Exact interval union of half-open [ts, ts+dur) events.
+    static std::uint64_t exact_union(
+        const std::vector<std::pair<long, long>>& iv) {
+        std::vector<std::pair<long, long>> spans;
+        for (const auto& [ts, dur] : iv) spans.emplace_back(ts, ts + dur);
+        std::sort(spans.begin(), spans.end());
+        std::uint64_t total = 0;
+        long cur_s = 0, cur_e = 0;
+        bool open = false;
+        for (const auto& [s, e] : spans) {
+            if (!open) {
+                cur_s = s;
+                cur_e = e;
+                open = true;
+            } else if (s <= cur_e) {
+                if (e > cur_e) cur_e = e;
+            } else {
+                total += static_cast<std::uint64_t>(cur_e - cur_s);
+                cur_s = s;
+                cur_e = e;
+            }
+        }
+        if (open) total += static_cast<std::uint64_t>(cur_e - cur_s);
+        return total;
+    }
+
+    static void write_occ_trace(const std::string& pfw,
+                                const std::vector<std::pair<long, long>>& iv,
+                                const char* name = "e") {
+        std::ofstream ofs(pfw);
+        for (const auto& [ts, dur] : iv) {
+            ofs << R"({"ph":"X","name":")" << name
+                << R"(","cat":"POSIX","pid":1,"tid":1,"ts":)" << ts
+                << R"(,"dur":)" << dur << R"(,"args":{}})" << "\n";
+        }
+    }
+
+    TEST_CASE("View - occupancy busy is the exact union, not sum(dur)") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // Heavy overlap: many events over the same window; the old per-bucket
+        // coverage bitmap coarsened cells on a wide window and drifted busy
+        // toward sum(dur). The exact delta-map sweep must not.
+        std::vector<std::pair<long, long>> iv;
+        for (int i = 0; i < 50; ++i) iv.emplace_back(1000 + i, 500);
+        const std::uint64_t expect_union = exact_union(iv);
+        std::uint64_t sum_dur = 0;
+        for (const auto& [s, d] : iv) sum_dur += static_cast<std::uint64_t>(d);
+        REQUIRE(expect_union < sum_dur);
+
+        std::string pfw = env.get_dir() + "/occ_dense.pfw";
+        write_occ_trace(pfw, iv);
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+        dataframe::DataFrame b = View::from_file(gz, idx)
+                                     .time_range(0, 1000000)
+                                     .group_by({GroupKey::name()})
+                                     .agg({{AggOp::Sum, "dur", "sum_dur"},
+                                           {AggOp::Busy, "", "busy"}})
+                                     .collect()
+                                     .collect()
+                                     .get();
+        REQUIRE(b.num_rows() == 1);
+        CHECK(bnum(b, 0, "sum_dur") == static_cast<double>(sum_dur));
+        CHECK(bnum(b, 0, "busy") == static_cast<double>(expect_union));
+        CHECK(bnum(b, 0, "busy") < bnum(b, 0, "sum_dur"));
+    }
+
+    TEST_CASE("View - occupancy active is the exact peak concurrency") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // 4 events all overlapping at t=1150: peak depth is exactly 4.
+        std::vector<std::pair<long, long>> iv = {
+            {1000, 300}, {1050, 300}, {1100, 300}, {1149, 300}};
+        const std::uint64_t expect_union = exact_union(iv);
+
+        std::string pfw = env.get_dir() + "/occ_peak.pfw";
+        write_occ_trace(pfw, iv);
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+        dataframe::DataFrame b =
+            View::from_file(gz, idx)
+                .time_range(0, 1000000)
+                .group_by({GroupKey::name()})
+                .agg({{AggOp::Busy, "", "busy"}, {AggOp::Active, "", "active"}})
+                .collect()
+                .collect()
+                .get();
+        REQUIRE(b.num_rows() == 1);
+        CHECK(bnum(b, 0, "busy") == static_cast<double>(expect_union));
+        CHECK(bnum(b, 0, "active") == 4.0);
+    }
+
+    TEST_CASE(
+        "View - occupancy on non-overlapping intervals is exact and serial") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::vector<std::pair<long, long>> iv = {
+            {1000, 100}, {2000, 100}, {3000, 100}};
+        std::uint64_t sum_dur = 300;
+
+        std::string pfw = env.get_dir() + "/occ_serial.pfw";
+        write_occ_trace(pfw, iv);
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+        dataframe::DataFrame b = View::from_file(gz, idx)
+                                     .time_range(0, 1000000)
+                                     .group_by({GroupKey::name()})
+                                     .agg({{AggOp::Sum, "dur", "sum_dur"},
+                                           {AggOp::Busy, "", "busy"},
+                                           {AggOp::Active, "", "active"}})
+                                     .collect()
+                                     .collect()
+                                     .get();
+        REQUIRE(b.num_rows() == 1);
+        CHECK(bnum(b, 0, "sum_dur") == static_cast<double>(sum_dur));
+        CHECK(bnum(b, 0, "busy") == static_cast<double>(sum_dur));
+        CHECK(bnum(b, 0, "active") == 1.0);
+    }
+
+    TEST_CASE("View - occ_cell tolerance bounds busy over the exact union") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // Two intervals with a small gap; a coarse cell can merge them into
+        // one covered span, so busy sits in [exact, exact + cell].
+        std::vector<std::pair<long, long>> iv = {{1000, 90}, {1100, 90}};
+        const std::uint64_t expect_exact = exact_union(iv);
+
+        std::string pfw = env.get_dir() + "/occ_tol.pfw";
+        write_occ_trace(pfw, iv);
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        {
+            dataframe::DataFrame b0 = View::from_file(gz, idx)
+                                          .time_range(0, 1000000)
+                                          .group_by({GroupKey::name()})
+                                          .agg({{AggOp::Busy, "", "busy"}})
+                                          .collect()
+                                          .collect()
+                                          .get();
+            REQUIRE(bhas(b0, "busy_cell_us"));
+            CHECK(bnum(b0, 0, "busy_cell_us") == 0);
+            CHECK(bnum(b0, 0, "busy") == static_cast<double>(expect_exact));
+        }
+        {
+            const std::uint64_t cell = 50;
+            dataframe::DataFrame b1 = View::from_file(gz, idx)
+                                          .time_range(0, 1000000)
+                                          .occ_cell(cell)
+                                          .group_by({GroupKey::name()})
+                                          .agg({{AggOp::Busy, "", "busy"}})
+                                          .collect()
+                                          .collect()
+                                          .get();
+            REQUIRE(bhas(b1, "busy_cell_us"));
+            CHECK(bnum(b1, 0, "busy_cell_us") == static_cast<double>(cell));
+            CHECK(bnum(b1, 0, "busy") >= static_cast<double>(expect_exact));
+            CHECK(bnum(b1, 0, "busy") <=
+                  static_cast<double>(expect_exact + 2 * cell));
         }
     }
 

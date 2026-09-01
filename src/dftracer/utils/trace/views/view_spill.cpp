@@ -81,15 +81,14 @@ void serialize_accum(std::string& out, const std::string& key,
     // Occupancy: carried so distributed partials (run_aggregate_partial) and
     // out-of-core runs merge busy/concurrency/active correctly, not just the
     // in-memory scan.
-    codec::put_be64(out, a.occ_bucket_us);
     codec::put_be64(out, a.occ_total);
     codec::put_be64(out, a.occ_ts);
     codec::put_be64(out, a.occ_te);
-    codec::put_be64(out, a.occ_buckets.size());
-    for (const auto& [b, ob] : a.occ_buckets) {
-        codec::put_be64(out, b);
-        codec::put_be64(out, ob.mask);
-        codec::put_be64(out, ob.active);
+    codec::put_be64(out, a.occ_cell_us);
+    codec::put_be64(out, a.occ_deltas.size());
+    for (const auto& [t, dlt] : a.occ_deltas) {
+        codec::put_be64(out, t);
+        codec::put_be64(out, static_cast<std::uint64_t>(dlt));
     }
 }
 
@@ -134,17 +133,15 @@ void deserialize_accum(codec::BinaryReader& br, std::string& key, AggAccum& a) {
         const std::uint64_t n = br.be64();
         for (std::uint64_t j = 0; j < n; ++j) s.insert(std::string(br.str()));
     }
-    a.occ_bucket_us = br.be64();
     a.occ_total = br.be64();
     a.occ_ts = br.be64();
     a.occ_te = br.be64();
+    a.occ_cell_us = br.be64();
     const std::uint64_t nocc = br.be64();
     for (std::uint64_t i = 0; i < nocc; ++i) {
-        const std::uint64_t b = br.be64();
-        AggAccum::OccBucket ob;
-        ob.mask = br.be64();
-        ob.active = br.be64();
-        a.occ_buckets.emplace(b, ob);
+        const std::uint64_t t = br.be64();
+        const std::int64_t dlt = static_cast<std::int64_t>(br.be64());
+        a.occ_deltas[t] += dlt;
     }
 }
 

@@ -64,49 +64,17 @@ struct AggAccum {
     // reduction is requested (AggSchema.dyn_sketch), so the common counter path
     // pays nothing for it.
     std::map<std::string, utilities::common::statistics::DDSketch> dyn_sketches;
-    // Occupancy (the time-window reduction). Time is discretized into buckets
-    // of width occ_bucket_us; per bucket, `mask` is a 64-bit coverage of
-    // sub-slots of width occ_bucket_us/64 (an event ORs in every sub-slot its
-    // [ts, ts+dur) touches) and `active` counts the events overlapping the
-    // bucket. busy = sum over buckets of popcount(mask)*occ_bucket_us/64 (the
-    // interval union to that resolution); peak concurrency = max over buckets
-    // of `active`. It streams (per event, event then discarded), is bounded by
-    // the bucket count not the event count, and merges (OR mask, + active) - so
-    // it holds on big traces and across shards.
-    struct OccBucket {
-        std::uint64_t mask = 0;
-        std::uint64_t active = 0;
-    };
-    std::unordered_map<std::uint64_t, OccBucket> occ_buckets;
-    std::uint64_t occ_bucket_us =
-        0;                        // bucket width; 0 = no occupancy collected
-    std::uint64_t occ_total = 0;  // sum(dur), for concurrency
+    // Occupancy (the time-window reduction): a sparse endpoint delta-map per
+    // group (deltas[s] += 1, deltas[s+dur] -= 1 per event). Finalize sorts the
+    // keys and sweeps a running depth: busy = union length where depth > 0
+    // (exact), active = max depth. Mergeable by key-wise add.
+    ankerl::unordered_dense::map<std::uint64_t, std::int64_t> occ_deltas;
+    std::uint64_t occ_cell_us = 0;  // quantization tolerance applied; 0 = exact
+    std::uint64_t occ_total = 0;    // sum(dur), for concurrency
     std::uint64_t occ_ts = (std::numeric_limits<std::uint64_t>::max)();
     std::uint64_t occ_te = 0;
 };
 
-// Sub-slots per occupancy bucket. Tied to the 64-bit `OccBucket::mask`, so it
-// is 64 by construction and cannot be raised without widening the mask.
-inline constexpr std::uint64_t OCC_SUB_SLOTS = 64;
-
-// Sub-slots of [bucket_start, bucket_start+w) that [ts, ts+dur) covers, as a
-// 64-bit mask: slot i is [bucket_start + i*w/64, bucket_start + (i+1)*w/64),
-// set when the interval touches any of it. busy for the bucket is popcount *
-// w/64.
-inline std::uint64_t occ_coverage_slots(std::uint64_t ts, std::uint64_t dur,
-                                        std::uint64_t bucket_start,
-                                        std::uint64_t w) {
-    const std::uint64_t lo = ts > bucket_start ? ts : bucket_start;
-    const std::uint64_t bucket_end = bucket_start + w;
-    const std::uint64_t hi = ts + dur < bucket_end ? ts + dur : bucket_end;
-    if (hi <= lo) return 0;
-    std::uint64_t slo = (lo - bucket_start) * 64 / w;
-    std::uint64_t shi = ((hi - bucket_start) * 64 + w - 1) / w;
-    if (shi > 64) shi = 64;
-    if (slo >= shi) return 0;
-    const std::uint64_t width = shi - slo;
-    return width >= 64 ? ~0ULL : (((1ULL << width) - 1) << slo);
-}
 using GroupMap = ankerl::unordered_dense::map<std::string, AggAccum>;
 
 // Query-derived fold schema: the distinct agg fields and how each AggSpec maps
@@ -121,10 +89,10 @@ struct AggSchema {
     // fields[i] -> DDSketch slot for percentile/histogram aggs, or -1.
     std::vector<int> field_sketch;
     std::size_t sketch_count = 0;
-    std::vector<int> spec_set;        // plan.agg[i] -> SetUnion slot, or -1
+    std::vector<int> spec_set;      // plan.agg[i] -> SetUnion slot, or -1
     std::size_t set_count = 0;
-    bool want_occupancy = false;      // any busy/concurrency/utilization spec
-    std::uint64_t occ_bucket_us = 0;  // occupancy bucket width (see below)
+    bool want_occupancy = false;    // any busy/concurrency/utilization spec
+    std::uint64_t occ_cell_us = 0;  // optional exact-union tolerance; 0 = exact
     // A per-arg DDSketch is collected only when a numeric_arg_aggs reduction
     // needs quantiles (Pct); otherwise the dyn FieldStat alone serves the
     // reductions and no sketch is allocated.

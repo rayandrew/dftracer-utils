@@ -53,10 +53,9 @@ struct ViewPlan {
     /// from the index zone maps, no scan) instead of 0 or a fixed origin; the
     /// executor resolves it into bucket_origin_us before the fold.
     bool bucket_origin_min = false;
-    /// Target occupancy cell size (busy quantum), microseconds; 0 = engine
-    /// default. The per-bucket coverage mask has 64 sub-slots, so this sets
-    /// occ_bucket_us = occ_cell_us * 64. Only honored when a time_range bounds
-    /// the window; without one the grid falls back to a coarse default.
+    /// Optional tolerance on the occupancy interval union, microseconds; event
+    /// endpoints snap to this grid to bound memory at a small over-estimate.
+    /// 0 = exact union (default).
     std::uint64_t occ_cell_us = 0;
     /// Multiply ts/dur/te by this to normalize from the trace's native time
     /// unit to a target (source_ns / target_ns; 1.0 = no scaling). Applied
