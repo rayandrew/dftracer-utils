@@ -216,6 +216,14 @@ bool agg_engine_enabled() {
 coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     const ViewPlan& plan_in) {
     const ViewPlan plan = resolve_bucket_origin(plan_in);
+    ensure_schema(plan);
+
+    {
+        GroupMap served;
+        if (co_await try_serve_aggregate_no_scan(plan, served))
+            co_return finalize_collect_batch(served, plan);
+    }
+
     const bool has_bucket = plan.time_bucket_us > 0;
 
     std::vector<std::string> key_names;

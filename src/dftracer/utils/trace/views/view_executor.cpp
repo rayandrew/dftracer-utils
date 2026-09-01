@@ -576,8 +576,8 @@ coro::CoroTask<ExportStats> run_materialize(const ViewPlan& plan,
 // first-touch raw-gzip bootstrap, then the aggregation tier. On a hit fills
 // `out` (resolved) and returns true; false means the query must scan. Shared by
 // run_collect and the session so the two agree on what answers without a scan.
-static coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
-                                                        GroupMap& out) {
+coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
+                                                 GroupMap& out) {
     {
         // A materialize() query opens ReadWrite so a miss reuses the handle to
         // persist below (avoids a RO-then-RW conflict).

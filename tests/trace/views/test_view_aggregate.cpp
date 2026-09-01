@@ -1733,6 +1733,40 @@ TEST_SUITE("View") {
             run_both(GroupKey::name(), "name", 128);
         }
 
+        // The engine path must try the no-scan tier/rollup fast path before
+        // scanning: materialize a finer (cat, name) rollup via the legacy
+        // path, then run the coarser (cat) query through the engine. A hit
+        // re-aggregates the persisted rollup (find_subsuming_rollup), never
+        // rescanning the trace, and must match a fresh (pre-rollup) scan.
+        SUBCASE("engine path is served by a subsuming rollup, not a rescan") {
+            auto fine = [&] {
+                return View::from_file(gz, idx)
+                    .group_by({GroupKey::cat(), GroupKey::name()})
+                    .agg({{AggOp::Count, "", "n"},
+                          {AggOp::Sum, "dur", "sum_dur"}});
+            };
+            auto coarse = [&] {
+                return View::from_file(gz, idx)
+                    .group_by({GroupKey::cat()})
+                    .agg({{AggOp::Count, "", "n"},
+                          {AggOp::Sum, "dur", "sum_dur"}});
+            };
+
+            dataframe::DataFrame expect = [&] {
+                EnvGuard off(false);
+                return coarse().collect().collect().get();
+            }();
+            {
+                EnvGuard off(false);
+                fine().run().get();  // materialize only the finer rollup
+            }
+            dataframe::DataFrame engine_served = [&] {
+                EnvGuard on(true);
+                return coarse().collect().collect().get();
+            }();
+            check_match(expect, engine_served, "cat");
+        }
+
         // Composite (multi-dim) direct-column keys: pairs rows by their
         // composite key text (exact, not Approx) so a differently-ordered
         // group set from the two paths still compares row for row.

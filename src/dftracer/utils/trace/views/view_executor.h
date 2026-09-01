@@ -47,6 +47,12 @@ coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan);
 /// requested, so callers can apply it defensively.
 ViewPlan resolve_bucket_origin(const ViewPlan& plan);
 
+/// The no-scan aggregation fast paths, in order: a subsuming rollup, the
+/// first-touch raw-gzip bootstrap, then the aggregation tier. On a hit fills
+/// `out` (resolved) and returns true; false means the query must scan.
+coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
+                                                 GroupMap& out);
+
 /// True for a row query (no group_by / agg / numeric-args): collect() returns
 /// the matching events, not an aggregate.
 bool is_row_query(const ViewPlan& plan);
