@@ -2,10 +2,15 @@
 #include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
+#include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/trace/comparator/compare_view.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
+#include <dftracer/utils/trace/views/view_agg_engine.h>
+#include <dftracer/utils/trace/views/view_aggregate.h>
+#include <dftracer/utils/trace/views/view_executor.h>
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -1803,9 +1808,7 @@ TEST_SUITE("View") {
         CHECK(by_arg.count("mpi") == 0);
     }
 
-    TEST_CASE(
-        "View - agg engine path (DFTRACER_UTILS_AGG_ENGINE) matches the "
-        "GroupMap path") {
+    TEST_CASE("View - agg engine path matches the GroupMap path") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());
         std::string pfw = env.get_dir() + "/agg_engine.pfw";
@@ -1830,14 +1833,31 @@ TEST_SUITE("View") {
         fs::remove(pfw);
         std::string idx = determine_index_path(gz, "");
 
-        struct EnvGuard {
-            explicit EnvGuard(bool on) {
-                if (on)
-                    ::setenv("DFTRACER_UTILS_AGG_ENGINE", "1", 1);
-                else
-                    ::unsetenv("DFTRACER_UTILS_AGG_ENGINE");
-            }
-            ~EnvGuard() { ::unsetenv("DFTRACER_UTILS_AGG_ENGINE"); }
+        // Drive the two internal collection paths directly on the built
+        // View's plan, bypassing View::collect_frame's routing entirely.
+        namespace detail = dftracer::utils::trace::views::detail;
+        auto collect_engine = [](const View& v) {
+            dftracer::utils::Runtime rt;
+            dataframe::DataFrame result;
+            rt.run_blocking(
+                "agg-engine",
+                [&](dftracer::utils::CoroScope&)
+                    -> dftracer::utils::coro::CoroTask<void> {
+                    result = co_await detail::run_collect_via_engine(v.plan());
+                });
+            return result;
+        };
+        auto collect_groupmap = [](const View& v) {
+            dftracer::utils::Runtime rt;
+            dataframe::DataFrame result;
+            rt.run_blocking(
+                "groupmap",
+                [&](dftracer::utils::CoroScope&)
+                    -> dftracer::utils::coro::CoroTask<void> {
+                    detail::GroupMap m = co_await detail::run_collect(v.plan());
+                    result = detail::finalize_collect_batch(m, v.plan());
+                });
+            return result;
         };
 
         auto check_match = [](const dataframe::DataFrame& a0,
@@ -1882,14 +1902,8 @@ TEST_SUITE("View") {
                     {AggOp::SetUnion, "cat", "cats"},
                 });
             };
-            dataframe::DataFrame legacy = [&] {
-                EnvGuard off(false);
-                return build().collect().collect().get();
-            }();
-            dataframe::DataFrame engine = [&] {
-                EnvGuard on(true);
-                return build().collect().collect().get();
-            }();
+            dataframe::DataFrame legacy = collect_groupmap(build());
+            dataframe::DataFrame engine = collect_engine(build());
             check_match(legacy, engine, key_col);
         };
         auto run_both = [&](const GroupKey& gk, const std::string& key_col,
@@ -1923,18 +1937,9 @@ TEST_SUITE("View") {
                           {AggOp::Sum, "dur", "sum_dur"}});
             };
 
-            dataframe::DataFrame expect = [&] {
-                EnvGuard off(false);
-                return coarse().collect().collect().get();
-            }();
-            {
-                EnvGuard off(false);
-                fine().run().get();  // materialize only the finer rollup
-            }
-            dataframe::DataFrame engine_served = [&] {
-                EnvGuard on(true);
-                return coarse().collect().collect().get();
-            }();
+            dataframe::DataFrame expect = collect_groupmap(coarse());
+            fine().run().get();  // materialize only the finer rollup
+            dataframe::DataFrame engine_served = collect_engine(coarse());
             check_match(expect, engine_served, "cat");
         }
 
@@ -1994,14 +1999,8 @@ TEST_SUITE("View") {
                     {AggOp::ArgMax, "name", "top_name", "dur"},
                 });
             };
-            dataframe::DataFrame legacy = [&] {
-                EnvGuard off(false);
-                return build().collect().collect().get();
-            }();
-            dataframe::DataFrame engine = [&] {
-                EnvGuard on(true);
-                return build().collect().collect().get();
-            }();
+            dataframe::DataFrame legacy = collect_groupmap(build());
+            dataframe::DataFrame engine = collect_engine(build());
             check_match_multi(legacy, engine, key_cols);
         };
 
@@ -2193,14 +2192,8 @@ TEST_SUITE("View") {
                 // run would compare two different origins, not the same
                 // formula.
                 build().collect().collect().get();
-                dataframe::DataFrame legacy = [&] {
-                    EnvGuard off(false);
-                    return build().collect().collect().get();
-                }();
-                dataframe::DataFrame engine = [&] {
-                    EnvGuard on(true);
-                    return build().collect().collect().get();
-                }();
+                dataframe::DataFrame legacy = collect_groupmap(build());
+                dataframe::DataFrame engine = collect_engine(build());
                 std::vector<std::string> keys = {"time_bucket"};
                 keys.insert(keys.end(), extra_key_cols.begin(),
                             extra_key_cols.end());

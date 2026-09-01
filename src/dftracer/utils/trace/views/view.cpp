@@ -600,12 +600,12 @@ coro::CoroTask<dataframe::DataFrame> View::collect_frame() const {
     // A row query (no group_by/agg) returns the matching events, not a count.
     if (detail::is_row_query(*plan_))
         co_return co_await detail::run_collect_rows(*plan_);
-    // Phase 1 of the View -> dataframe engine aggregation convergence: behind
-    // DFTRACER_UTILS_AGG_ENGINE, an eligible group_by/agg runs through the
-    // engine's streaming group_by instead of the GroupMap fold below (see
-    // view_agg_engine.h for the exact qualifier). Default off; unaffected
-    // callers keep the GroupMap path unchanged.
-    if (detail::agg_engine_enabled() && detail::agg_engine_eligible(*plan_))
+    // The View -> dataframe engine aggregation convergence: an eligible
+    // group_by/agg runs through the engine's streaming group_by instead of
+    // the GroupMap fold below (see view_agg_engine.h for the exact
+    // qualifier); this is the default. GroupMap is the fallback for plans
+    // not yet converged.
+    if (detail::agg_engine_eligible(*plan_))
         co_return co_await detail::run_collect_via_engine(*plan_);
     detail::GroupMap m = co_await detail::run_collect(*plan_);
     co_return detail::finalize_collect_batch(m, *plan_);

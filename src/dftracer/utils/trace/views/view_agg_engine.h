@@ -4,12 +4,12 @@
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/trace/views/view_plan.h>
 
-// View -> dataframe engine aggregation convergence: an alternate, flag-gated
-// group_by/agg path that routes an eligible group_by/agg View (one or more
-// direct-column keys, no transform) through the dataframe engine's streaming
-// (possibly composite-key) group_by instead of the View's own GroupMap fold.
-// Behind DFTRACER_UTILS_AGG_ENGINE and default-off; the GroupMap path
-// (view_aggregate.h/.cpp) is unchanged and stays the default.
+// View -> dataframe engine aggregation convergence: an alternate group_by/agg
+// path that routes an eligible group_by/agg View (one or more direct-column
+// keys, no transform) through the dataframe engine's streaming (possibly
+// composite-key) group_by instead of the View's own GroupMap fold. This is
+// the default for every eligible query; the GroupMap path (view_aggregate.h/
+// .cpp) is the fallback for plans agg_engine_eligible rejects.
 // run_collect_via_engine itself is declared (as a friend of View) in view.h;
 // this header only adds the eligibility check.
 namespace dftracer::utils::trace::views::detail {
@@ -18,10 +18,6 @@ namespace dftracer::utils::trace::views::detail {
 /// identically to the GroupMap path (see view_agg_engine.cpp for the exact
 /// qualifier). False routes to the existing GroupMap fold.
 bool agg_engine_eligible(const ViewPlan& plan);
-
-/// True when DFTRACER_UTILS_AGG_ENGINE is set (any non-empty value); the
-/// engine path is opt-in and off by default.
-bool agg_engine_enabled();
 
 }  // namespace dftracer::utils::trace::views::detail
 

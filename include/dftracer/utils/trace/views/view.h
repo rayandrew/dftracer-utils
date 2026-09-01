@@ -809,6 +809,11 @@ class View {
         std::span<detail::Fold* const> folds,
         dftracer::utils::StringIntern& intern) const;
 
+    /// The built plan. Exposes the internal representation so a caller can
+    /// drive the GroupMap and dataframe-engine collection paths directly
+    /// (see view_executor.h / view_agg_engine.h); not otherwise needed.
+    const detail::ViewPlan& plan() const { return *plan_; }
+
    protected:
     /// Rollup terminals, reachable only through AggregatedView (which promotes
     /// them to public). materialize_partials builds the rollup from distributed
