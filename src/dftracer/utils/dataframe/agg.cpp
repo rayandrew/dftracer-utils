@@ -289,8 +289,15 @@ class AggState {
     }
     std::int64_t group_of(const std::vector<const Series*>& keys,
                           std::int64_t i) {
+        // A non-string key column widens to int64 by its own domain, not
+        // plain read_i64: a Uint64/Float64 key (e.g. a hash or a fractional
+        // arg) would otherwise read as 0 for every row and collapse into one
+        // group.
         return find_or_add_group(
-            [&](std::size_t k) { return read_i64(*keys[k], i); },
+            [&](std::size_t k) {
+                return static_cast<std::int64_t>(
+                    read_bits(*keys[k], i, col_domain(keys[k]->type())));
+            },
             [&](std::size_t k) -> std::string_view {
                 return keys[k]->string_at(i);
             });

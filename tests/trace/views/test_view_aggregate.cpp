@@ -1630,4 +1630,100 @@ TEST_SUITE("View") {
         CHECK(by_arg["1"] == 1);
         CHECK(by_arg.count("mpi") == 0);
     }
+
+    TEST_CASE(
+        "View - agg engine path (DFTRACER_UTILS_AGG_ENGINE) matches the "
+        "GroupMap path") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string pfw = env.get_dir() + "/agg_engine.pfw";
+        {
+            std::ofstream ofs(pfw);
+            const char* names[] = {"read", "write", "open"};
+            const char* cats[] = {"POSIX", "STDIO"};
+            const int pids[] = {1, 2, 3};
+            const int tids[] = {10, 20};
+            int ts = 1000;
+            for (int i = 0; i < 90; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 3] << R"(","cat":")"
+                    << cats[i % 2] << R"(","pid":)" << pids[i % 3]
+                    << R"(,"tid":)" << tids[i % 2] << R"(,"ts":)" << ts
+                    << R"(,"dur":)" << (5 + (i % 17)) << R"(,"args":{}})"
+                    << "\n";
+                ts += 100;
+            }
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        struct EnvGuard {
+            explicit EnvGuard(bool on) {
+                if (on)
+                    ::setenv("DFTRACER_UTILS_AGG_ENGINE", "1", 1);
+                else
+                    ::unsetenv("DFTRACER_UTILS_AGG_ENGINE");
+            }
+            ~EnvGuard() { ::unsetenv("DFTRACER_UTILS_AGG_ENGINE"); }
+        };
+
+        auto check_match = [](const dataframe::DataFrame& a0,
+                              const dataframe::DataFrame& b0,
+                              const std::string& key) {
+            dataframe::DataFrame a = a0.sort_by(key, false);
+            dataframe::DataFrame b = b0.sort_by(key, false);
+            REQUIRE(a.names.size() == b.names.size());
+            for (std::size_t i = 0; i < a.names.size(); ++i) {
+                CHECK(a.names[i] == b.names[i]);
+                CHECK(a.columns[i].type() == b.columns[i].type());
+            }
+            REQUIRE(a.num_rows() == b.num_rows());
+            for (std::int64_t r = 0; r < a.num_rows(); ++r)
+                for (const auto& name : a.names) {
+                    const auto c = static_cast<std::size_t>(bcol(a, name));
+                    if (a.columns[c].type() == dataframe::TypeId::String)
+                        CHECK(bstr(a, r, name) == bstr(b, r, name));
+                    else
+                        CHECK(bnum(a, r, name) ==
+                              doctest::Approx(bnum(b, r, name)));
+                }
+        };
+
+        auto run_both = [&](const GroupKey& gk, const std::string& key_col,
+                            std::uint64_t mem_budget) {
+            auto build = [&] {
+                View v = View::from_file(gz, idx);
+                if (mem_budget) v = v.memory_budget(mem_budget);
+                return v.group_by({gk}).agg({
+                    {AggOp::Count, "", "n"},
+                    {AggOp::Sum, "dur", "sum_dur"},
+                    {AggOp::Mean, "dur", "mean_dur"},
+                    {AggOp::Min, "dur", "min_dur"},
+                    {AggOp::Max, "dur", "max_dur"},
+                    {AggOp::Var, "dur", "var_dur"},
+                    {AggOp::Std, "dur", "std_dur"},
+                    {AggOp::Pct, "dur", "p90_dur", "", 0.9},
+                    {AggOp::ArgMax, "name", "top_name", "dur"},
+                    {AggOp::SetUnion, "cat", "cats"},
+                });
+            };
+            dataframe::DataFrame legacy = [&] {
+                EnvGuard off(false);
+                return build().collect().collect().get();
+            }();
+            dataframe::DataFrame engine = [&] {
+                EnvGuard on(true);
+                return build().collect().collect().get();
+            }();
+            check_match(legacy, engine, key_col);
+        };
+
+        SUBCASE("group_by name") { run_both(GroupKey::name(), "name", 0); }
+        SUBCASE("group_by pid") { run_both(GroupKey::pid(), "pid", 0); }
+        SUBCASE("group_by tid") { run_both(GroupKey::tid(), "tid", 0); }
+        SUBCASE("group_by name, forced spill") {
+            run_both(GroupKey::name(), "name", 128);
+        }
+    }
 }

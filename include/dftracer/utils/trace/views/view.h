@@ -269,6 +269,12 @@ struct ViewPlan;
 class PartialSource;
 class Fold;
 struct ViewSessionState;
+
+/// Phase 1 of the View -> dataframe engine aggregation convergence
+/// (view_agg_engine.h/.cpp); needs View's private constructor to build the
+/// raw row-query LazyFrame the streaming group_by runs over.
+coro::CoroTask<dftracer::utils::dataframe::DataFrame> run_collect_via_engine(
+    const ViewPlan& plan);
 }  // namespace detail
 
 /// A result handle from a ViewSession op, resolved when execute() completes.
@@ -821,6 +827,8 @@ class View {
    private:
     friend class ViewSession;
     friend class ViewSource;
+    friend coro::CoroTask<dftracer::utils::dataframe::DataFrame>
+    detail::run_collect_via_engine(const detail::ViewPlan& plan);
     explicit View(std::shared_ptr<const detail::ViewPlan> plan);
 };
 
