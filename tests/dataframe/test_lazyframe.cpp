@@ -399,6 +399,100 @@ TEST_SUITE("lazyframe") {
     }
 
     TEST_CASE(
+        "group_by external spill (tiny budget) matches in-memory, "
+        "multi-key, several agg types") {
+        constexpr std::int64_t N = 600;
+        std::vector<std::int64_t> g(static_cast<std::size_t>(N)),
+            p(static_cast<std::size_t>(N)), v(static_cast<std::size_t>(N));
+        for (std::int64_t i = 0; i < N; ++i) {
+            g[static_cast<std::size_t>(i)] = i % 5;
+            p[static_cast<std::size_t>(i)] = (i / 3) % 4;
+            v[static_cast<std::size_t>(i)] = i;
+        }
+        DataFrame df;
+        df.names = {"g", "p", "v"};
+        df.columns.push_back(Series::flat_i64(g.data(), N));
+        df.columns.push_back(Series::flat_i64(p.data(), N));
+        df.columns.push_back(Series::flat_i64(v.data(), N));
+
+        std::vector<GroupAgg> aggs{
+            {Agg::Sum, "v", "sum", 0.0},    {Agg::Mean, "v", "mean", 0.0},
+            {Agg::Count, "", "count", 0.0}, {Agg::Min, "v", "min", 0.0},
+            {Agg::Max, "v", "max", 0.0},    {Agg::Var, "v", "var", 0.0},
+            {Agg::Pct, "v", "p50", 0.5}};
+        const std::vector<std::string> keys{"g", "p"};
+
+        DataFrame in_mem = run(df.lazy().group_by(keys, aggs).collect(64));
+        // Tiny budget + small morsels: several AggState flushes, k-way merged
+        // back on finalize.
+        DataFrame spilled =
+            run(df.lazy().memory_budget(256).group_by(keys, aggs).collect(8));
+
+        DataFrame a = in_mem.sort_by_multi(keys);
+        DataFrame b = spilled.sort_by_multi(keys);
+        REQUIRE(a.names == b.names);
+        REQUIRE(a.num_rows() == b.num_rows());
+        for (std::int64_t i = 0; i < a.num_rows(); ++i) {
+            CHECK(a.column("g").data<std::int64_t>()[i] ==
+                  b.column("g").data<std::int64_t>()[i]);
+            CHECK(a.column("p").data<std::int64_t>()[i] ==
+                  b.column("p").data<std::int64_t>()[i]);
+            CHECK(a.column("sum").data<std::int64_t>()[i] ==
+                  b.column("sum").data<std::int64_t>()[i]);
+            CHECK(a.column("count").data<std::int64_t>()[i] ==
+                  b.column("count").data<std::int64_t>()[i]);
+            CHECK(a.column("min").data<std::int64_t>()[i] ==
+                  b.column("min").data<std::int64_t>()[i]);
+            CHECK(a.column("max").data<std::int64_t>()[i] ==
+                  b.column("max").data<std::int64_t>()[i]);
+            CHECK(a.column("mean").data<double>()[i] ==
+                  doctest::Approx(b.column("mean").data<double>()[i]));
+            CHECK(a.column("var").data<double>()[i] ==
+                  doctest::Approx(b.column("var").data<double>()[i]));
+            CHECK(a.column("p50").data<double>()[i] ==
+                  doctest::Approx(b.column("p50").data<double>()[i])
+                      .epsilon(0.05));
+        }
+    }
+
+    TEST_CASE(
+        "group_by spill with high-cardinality keys triggers multiple "
+        "flushes, matches eager") {
+        constexpr std::int64_t N = 4000;
+        std::vector<std::int64_t> k(static_cast<std::size_t>(N)),
+            v(static_cast<std::size_t>(N));
+        for (std::int64_t i = 0; i < N; ++i) {
+            k[static_cast<std::size_t>(i)] = i;  // all-distinct: one row/group
+            v[static_cast<std::size_t>(i)] = i * 2;
+        }
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(Series::flat_i64(k.data(), N));
+        df.columns.push_back(Series::flat_i64(v.data(), N));
+
+        std::vector<GroupAgg> aggs{{Agg::Sum, "v", "sum", 0.0},
+                                   {Agg::Count, "", "count", 0.0}};
+
+        DataFrame in_mem = run(df.lazy().group_by("k", aggs).collect(256));
+        // Small budget relative to ~4000 groups forces many run flushes.
+        DataFrame spilled =
+            run(df.lazy().memory_budget(2000).group_by("k", aggs).collect(16));
+
+        DataFrame a = in_mem.sort_by_multi({"k"});
+        DataFrame b = spilled.sort_by_multi({"k"});
+        REQUIRE(a.num_rows() == N);
+        REQUIRE(b.num_rows() == N);
+        for (std::int64_t i = 0; i < N; ++i) {
+            CHECK(a.column("k").data<std::int64_t>()[i] ==
+                  b.column("k").data<std::int64_t>()[i]);
+            CHECK(a.column("sum").data<std::int64_t>()[i] ==
+                  b.column("sum").data<std::int64_t>()[i]);
+            CHECK(a.column("count").data<std::int64_t>()[i] ==
+                  b.column("count").data<std::int64_t>()[i]);
+        }
+    }
+
+    TEST_CASE(
         "group_by(vector<Expr>, AggExprSpec) matches the string overload") {
         std::vector<std::int64_t> g{0, 1, 0, 1, 0, 1};
         std::vector<std::int64_t> p{1, 1, 1, 2, 1, 2};

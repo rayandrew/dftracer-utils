@@ -88,6 +88,27 @@ DataFrame agg_finalize(const AggState& state, const std::string& key_name);
 std::string agg_serialize(const AggState& state);
 AggStatePtr agg_deserialize(const std::string& blob);
 
+/// Number of groups currently held by `state`.
+std::int64_t agg_num_groups(const AggState& state);
+
+/// Approximate in-memory bytes held by `state` (spill trigger; not exact).
+std::size_t agg_approx_bytes(const AggState& state);
+
+/// Three-way compare of the composite key of group `ga` in `a` against group
+/// `gb` in `b`. `a` and `b` must share the same key layout (same group_by
+/// keys, e.g. two states built from the same specs).
+int agg_key_cmp(const AggState& a, std::int64_t ga, const AggState& b,
+                std::int64_t gb);
+
+/// Sort `state`'s groups in place by ascending composite key. Used to write a
+/// spill run in the key order a k-way merge needs.
+void agg_sort_groups(AggState& state);
+
+/// A fresh state holding only group `g` of `state`, sharing its specs and key
+/// layout - serializable via agg_serialize and mergeable via agg_merge into
+/// another state. The unit written to and read back from a spill run.
+AggStatePtr agg_extract_group(const AggState& state, std::int64_t g);
+
 /// Fused group-by: accumulate the whole batch in one pass over all specs (the
 /// sync driver chunks via the parallel_for seam and merges), then finalize.
 DataFrame group_agg(const std::vector<const Series*>& keys,

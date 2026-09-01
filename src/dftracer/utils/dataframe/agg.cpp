@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/hash_combine.h>
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/field_stat.h>
@@ -5,9 +6,11 @@
 #include <dftracer/utils/dataframe/parallel.h>              // parallel_for
 #include <dftracer/utils/dataframe/sketch.h>  // DDSketch, sketch_bucket_keys
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <numeric>
 #include <set>
 #include <string>
 #include <string_view>
@@ -92,13 +95,6 @@ std::string cell_repr(const Series& c, std::int64_t i) {
 // Separator joining a SetUnion group's distinct values into one text cell;
 // matches views/view_aggregate.h SET_SEP so the two engines agree.
 constexpr char AGG_SET_SEP = '\x1e';
-
-// Adapted from boost::hash_combine (Boost Software License 1.0):
-// https://www.boost.org/doc/libs/1_74_0/doc/html/hash/reference.html#boost.hash_combine
-std::uint64_t hash_combine(std::uint64_t seed, std::uint64_t v) {
-    seed ^= v + 0x9e3779b97f4a7c15ULL + (seed << 6) + (seed >> 2);
-    return seed;
-}
 
 }  // namespace
 
@@ -260,14 +256,14 @@ class AggState {
     // else append a new group.
     template <class GetInt, class GetStr>
     std::int64_t find_or_add_group(GetInt&& get_int, GetStr&& get_str) {
-        std::uint64_t h = 0;
+        std::size_t h = 0;
         for (std::size_t k = 0; k < nkeys; ++k) {
-            const std::uint64_t cv =
+            const std::size_t cv =
                 key_is_str[k] ? std::hash<std::string_view>{}(get_str(k))
-                              : static_cast<std::uint64_t>(get_int(k));
-            h = hash_combine(h, cv);
+                              : static_cast<std::size_t>(get_int(k));
+            dftracer::utils::hash_combine(h, cv);
         }
-        auto it = key_buckets.find(h);
+        auto it = key_buckets.find(static_cast<std::uint64_t>(h));
         if (it != key_buckets.end()) {
             for (std::int64_t g : it->second) {
                 bool match = true;
@@ -287,7 +283,7 @@ class AggState {
             else
                 ikey_cols[k].push_back(get_int(k));
         }
-        key_buckets[h].push_back(g);
+        key_buckets[static_cast<std::uint64_t>(h)].push_back(g);
         grow_group();
         return g;
     }
@@ -314,17 +310,17 @@ class AggState {
     void rebuild_key_buckets(std::int64_t ng) {
         key_buckets.clear();
         for (std::int64_t g = 0; g < ng; ++g) {
-            std::uint64_t h = 0;
+            std::size_t h = 0;
             for (std::size_t k = 0; k < nkeys; ++k) {
-                const std::uint64_t cv =
+                const std::size_t cv =
                     key_is_str[k]
                         ? std::hash<std::string_view>{}(
                               skey_cols[k][static_cast<std::size_t>(g)])
-                        : static_cast<std::uint64_t>(
+                        : static_cast<std::size_t>(
                               ikey_cols[k][static_cast<std::size_t>(g)]);
-                h = hash_combine(h, cv);
+                dftracer::utils::hash_combine(h, cv);
             }
-            key_buckets[h].push_back(g);
+            key_buckets[static_cast<std::uint64_t>(h)].push_back(g);
         }
     }
 };
@@ -746,6 +742,164 @@ DataFrame agg_finalize(const AggState& st,
 
 DataFrame agg_finalize(const AggState& st, const std::string& key_name) {
     return agg_finalize(st, std::vector<std::string>{key_name});
+}
+
+std::int64_t agg_num_groups(const AggState& st) { return st.ngroups(); }
+
+std::size_t agg_approx_bytes(const AggState& st) {
+    std::size_t total = 0;
+    for (std::size_t k = 0; k < st.nkeys; ++k) {
+        if (st.key_is_str[k])
+            for (const std::string& v : st.skey_cols[k])
+                total += v.size() + sizeof(std::string);
+        else
+            total += st.ikey_cols[k].size() * sizeof(std::int64_t);
+    }
+    total += st.counts.size() * sizeof(std::uint64_t);
+    total += st.fstats.size() * sizeof(FieldStat);
+    if (st.has_fl) {
+        total +=
+            (st.fl_first.size() + st.fl_last.size()) * sizeof(std::uint64_t);
+        total += (st.fl_first_idx.size() + st.fl_last_idx.size()) *
+                 sizeof(std::int64_t);
+        for (const std::string& v : st.fl_first_s) total += v.size();
+        for (const std::string& v : st.fl_last_s) total += v.size();
+    }
+    if (st.has_sketch)
+        for (const DDSketch& sk : st.sketches)
+            total += sk.bins().size() * 24 + 64;
+    if (st.has_argmax) {
+        total += st.argmax_by.size() * sizeof(double) + st.argmax_has.size();
+        for (const std::string& v : st.argmax_repr) total += v.size();
+    }
+    if (st.has_set)
+        for (const std::set<std::string>& gset : st.sets)
+            for (const std::string& v : gset) total += v.size() + 32;
+    return total;
+}
+
+int agg_key_cmp(const AggState& a, std::int64_t ga, const AggState& b,
+                std::int64_t gb) {
+    for (std::size_t k = 0; k < a.nkeys; ++k) {
+        if (a.key_is_str[k]) {
+            const std::string& x = a.skey_cols[k][static_cast<std::size_t>(ga)];
+            const std::string& y = b.skey_cols[k][static_cast<std::size_t>(gb)];
+            if (x != y) return x < y ? -1 : 1;
+        } else {
+            const std::int64_t x = a.ikey_cols[k][static_cast<std::size_t>(ga)];
+            const std::int64_t y = b.ikey_cols[k][static_cast<std::size_t>(gb)];
+            if (x != y) return x < y ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+namespace {
+// Reorders `v` (blocks of `stride` elements per group) into `perm` order.
+template <class T>
+void permute_blocks(std::vector<T>& v, const std::vector<std::int64_t>& perm,
+                    std::size_t stride) {
+    if (stride == 0 || v.empty()) return;
+    std::vector<T> tmp(v.size());
+    for (std::size_t g = 0; g < perm.size(); ++g) {
+        const std::size_t src = static_cast<std::size_t>(perm[g]) * stride;
+        for (std::size_t j = 0; j < stride; ++j)
+            tmp[g * stride + j] = std::move(v[src + j]);
+    }
+    v.swap(tmp);
+}
+}  // namespace
+
+void agg_sort_groups(AggState& st) {
+    const std::int64_t ng = st.ngroups();
+    if (ng <= 1) return;
+    std::vector<std::int64_t> perm(static_cast<std::size_t>(ng));
+    std::iota(perm.begin(), perm.end(), std::int64_t{0});
+    std::sort(perm.begin(), perm.end(), [&](std::int64_t x, std::int64_t y) {
+        return agg_key_cmp(st, x, st, y) < 0;
+    });
+
+    for (std::size_t k = 0; k < st.nkeys; ++k) {
+        if (st.key_is_str[k])
+            permute_blocks(st.skey_cols[k], perm, 1);
+        else
+            permute_blocks(st.ikey_cols[k], perm, 1);
+    }
+    permute_blocks(st.counts, perm, 1);
+    permute_blocks(st.fstats, perm, st.nf);
+    if (st.has_fl) {
+        permute_blocks(st.fl_first, perm, st.nf);
+        permute_blocks(st.fl_last, perm, st.nf);
+        permute_blocks(st.fl_first_s, perm, st.nf);
+        permute_blocks(st.fl_last_s, perm, st.nf);
+        permute_blocks(st.fl_first_idx, perm, st.nf);
+        permute_blocks(st.fl_last_idx, perm, st.nf);
+    }
+    if (st.has_sketch) permute_blocks(st.sketches, perm, st.n_sketch);
+    if (st.has_argmax) {
+        permute_blocks(st.argmax_by, perm, st.n_argmax);
+        permute_blocks(st.argmax_has, perm, st.n_argmax);
+        permute_blocks(st.argmax_repr, perm, st.n_argmax);
+    }
+    if (st.has_set) permute_blocks(st.sets, perm, st.n_set);
+
+    st.rebuild_key_buckets(ng);
+}
+
+AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
+    AggStatePtr out(new AggState());
+    out->specs = st.specs;
+    out->init_layout();
+    out->nkeys = st.nkeys;
+    out->key_is_str = st.key_is_str;
+    out->ikey_cols.assign(out->nkeys, {});
+    out->skey_cols.assign(out->nkeys, {});
+    out->field_domain = st.field_domain;
+    out->field_is_str = st.field_is_str;
+    for (std::size_t k = 0; k < st.nkeys; ++k) {
+        if (st.key_is_str[k])
+            out->skey_cols[k].push_back(
+                st.skey_cols[k][static_cast<std::size_t>(g)]);
+        else
+            out->ikey_cols[k].push_back(
+                st.ikey_cols[k][static_cast<std::size_t>(g)]);
+    }
+    out->grow_group();
+    out->inited = true;
+
+    out->counts[0] = st.counts[static_cast<std::size_t>(g)];
+    const std::size_t base = static_cast<std::size_t>(g) * st.nf;
+    for (std::size_t fj = 0; fj < st.nf; ++fj)
+        out->fstats[fj] = st.fstats[base + fj];
+    if (st.has_fl) {
+        for (std::size_t fj = 0; fj < st.nf; ++fj) {
+            out->fl_first[fj] = st.fl_first[base + fj];
+            out->fl_last[fj] = st.fl_last[base + fj];
+            out->fl_first_s[fj] = st.fl_first_s[base + fj];
+            out->fl_last_s[fj] = st.fl_last_s[base + fj];
+            out->fl_first_idx[fj] = st.fl_first_idx[base + fj];
+            out->fl_last_idx[fj] = st.fl_last_idx[base + fj];
+        }
+    }
+    if (st.has_sketch) {
+        const std::size_t sbase = static_cast<std::size_t>(g) * st.n_sketch;
+        for (std::size_t sk = 0; sk < st.n_sketch; ++sk)
+            out->sketches[sk] = st.sketches[sbase + sk];
+    }
+    if (st.has_argmax) {
+        const std::size_t abase = static_cast<std::size_t>(g) * st.n_argmax;
+        for (std::size_t slot = 0; slot < st.n_argmax; ++slot) {
+            out->argmax_by[slot] = st.argmax_by[abase + slot];
+            out->argmax_has[slot] = st.argmax_has[abase + slot];
+            out->argmax_repr[slot] = st.argmax_repr[abase + slot];
+        }
+    }
+    if (st.has_set) {
+        const std::size_t setbase = static_cast<std::size_t>(g) * st.n_set;
+        for (std::size_t slot = 0; slot < st.n_set; ++slot)
+            out->sets[slot] = st.sets[setbase + slot];
+    }
+    return out;
 }
 
 namespace {

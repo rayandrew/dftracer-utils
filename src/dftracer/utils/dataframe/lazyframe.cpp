@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -662,25 +663,95 @@ Agg from_agg_op(AggOp a) {
     return Agg::Count;
 }
 
-// Streaming group-by: fold every morsel into one mergeable AggState (bounded by
-// the group count), finalize once. No materialize-all.
+// One run: single-group AggState blobs (agg_extract_group + agg_serialize),
+// length-prefixed, in ascending composite-key order (agg_sort_groups). The
+// on-disk unit a bounded k-way merge reads back one group at a time.
+void agg_write_run(AggState& st, const std::string& path) {
+    agg_sort_groups(st);
+    std::ofstream os(path, std::ios::binary);
+    const std::int64_t ng = agg_num_groups(st);
+    for (std::int64_t g = 0; g < ng; ++g) {
+        const std::string blob = agg_serialize(*agg_extract_group(st, g));
+        const std::uint32_t len = static_cast<std::uint32_t>(blob.size());
+        os.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        os.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+    }
+}
+
+// Streams one sorted run's single-group states back, one record at a time.
+class AggRunReader {
+   public:
+    explicit AggRunReader(const std::string& path)
+        : is_(path, std::ios::binary) {
+        advance();
+    }
+    bool valid() const { return valid_; }
+    const AggState& state() const { return *cur_; }
+    void advance() {
+        std::uint32_t len = 0;
+        if (!is_.read(reinterpret_cast<char*>(&len), sizeof(len))) {
+            valid_ = false;
+            return;
+        }
+        std::string blob(len, '\0');
+        is_.read(blob.data(), static_cast<std::streamsize>(len));
+        cur_ = agg_deserialize(blob);
+        valid_ = true;
+    }
+
+   private:
+    std::ifstream is_;
+    AggStatePtr cur_;
+    bool valid_ = false;
+};
+
+// Streaming group-by: fold every morsel into one mergeable AggState. When the
+// accumulated state exceeds `budget`, flush it to a sorted-by-key run on disk
+// and start a fresh state (mirrors SortMergeCursor's external merge sort). No
+// spill needed: finalize the single in-memory state directly (unchanged
+// behavior). Spilled: k-way merge the runs, combining equal composite keys,
+// emitting rows bounded by max_rows per call.
 class GroupByCursor : public Cursor {
    public:
     GroupByCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
-                  std::vector<std::string> keys, std::vector<GroupAgg> aggs)
+                  std::vector<std::string> keys, std::vector<GroupAgg> aggs,
+                  std::uint64_t budget)
         : in_(std::move(in)),
           sch_(std::move(sch)),
           keys_(std::move(keys)),
-          aggs_(std::move(aggs)) {}
+          aggs_(std::move(aggs)),
+          budget_(budget) {}
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
-        if (done_) co_return std::nullopt;
-        done_ = true;
+        if (!built_) co_await build(max_rows);
+        if (!spilled_) {
+            if (done_) co_return std::nullopt;
+            done_ = true;
+            co_return std::move(result_);
+        }
+        co_return merge_next(max_rows);
+    }
 
+   private:
+    static int index_in(const std::vector<std::string>& s,
+                        const std::string& n) {
+        auto it = std::find(s.begin(), s.end(), n);
+        return it == s.end() ? -1 : static_cast<int>(it - s.begin());
+    }
+
+    static Morsel to_morsel(const DataFrame& r) {
+        Morsel out;
+        out.rows = r.num_rows();
+        out.columns.reserve(r.columns.size());
+        for (const Series& c : r.columns)
+            out.columns.push_back(c.materialize());
+        return out;
+    }
+
+    coro::CoroTask<void> build(std::int64_t max_rows) {
         std::vector<int> key_idx;
         key_idx.reserve(keys_.size());
         for (const std::string& k : keys_) key_idx.push_back(index_in(sch_, k));
-        std::vector<AggSpec> specs;
         std::vector<int> value_idx;  // sch indices of the deduped value columns
         ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
         auto resolve = [&](const std::string& name) -> std::int32_t {
@@ -692,7 +763,7 @@ class GroupByCursor : public Cursor {
             dedup.emplace(name, idx);
             return idx;
         };
-        specs.reserve(aggs_.size());
+        specs_.reserve(aggs_.size());
         for (const GroupAgg& a : aggs_) {
             AggSpec sp;
             sp.op = to_agg_op(a.op);
@@ -700,10 +771,10 @@ class GroupByCursor : public Cursor {
             sp.param = a.param;
             sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
             if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
-            specs.push_back(std::move(sp));
+            specs_.push_back(std::move(sp));
         }
 
-        AggStatePtr state = agg_new(specs);
+        AggStatePtr state = agg_new(specs_);
         // Bounded parallel sink: pull a batch of morsels, accumulate each into
         // its own partial AggState in parallel (the mergeable agg IR), then
         // merge the partials into the running state. Memory stays bounded to
@@ -712,6 +783,7 @@ class GroupByCursor : public Cursor {
         std::vector<Morsel> batch;
         batch.reserve(BATCH);
         bool eof = false;
+        int run_id = 0;
         while (!eof) {
             batch.clear();
             for (std::size_t b = 0; b < BATCH; ++b) {
@@ -734,41 +806,101 @@ class GroupByCursor : public Cursor {
             };
             if (batch.size() == 1) {
                 accumulate(*state, batch[0]);
-                continue;
+            } else {
+                std::vector<AggStatePtr> partials(batch.size());
+                parallel_for(
+                    static_cast<std::int64_t>(batch.size()), 1,
+                    [&](std::int64_t bi, std::int64_t ei) {
+                        for (std::int64_t j = bi; j < ei; ++j) {
+                            auto st = agg_new(specs_);
+                            accumulate(*st, batch[static_cast<std::size_t>(j)]);
+                            partials[static_cast<std::size_t>(j)] =
+                                std::move(st);
+                        }
+                    });
+                for (auto& p : partials)
+                    if (p) agg_merge(*state, *p);
             }
-            std::vector<AggStatePtr> partials(batch.size());
-            parallel_for(
-                static_cast<std::int64_t>(batch.size()), 1,
-                [&](std::int64_t bi, std::int64_t ei) {
-                    for (std::int64_t j = bi; j < ei; ++j) {
-                        auto st = agg_new(specs);
-                        accumulate(*st, batch[static_cast<std::size_t>(j)]);
-                        partials[static_cast<std::size_t>(j)] = std::move(st);
-                    }
-                });
-            for (auto& p : partials)
-                if (p) agg_merge(*state, *p);
+            if (budget_ > 0 && agg_approx_bytes(*state) > budget_) {
+                agg_write_run(*state, dir_.run_path(run_id++));
+                state = agg_new(specs_);
+            }
         }
-        DataFrame r = agg_finalize(*state, keys_);
-        Morsel out;
-        out.rows = r.num_rows();
-        out.columns.reserve(r.columns.size());
-        for (const Series& c : r.columns)
-            out.columns.push_back(c.materialize());
-        co_return out;
+
+        if (run_id == 0) {
+            result_ = to_morsel(agg_finalize(*state, keys_));
+            spilled_ = false;
+        } else {
+            if (agg_num_groups(*state) > 0)
+                agg_write_run(*state, dir_.run_path(run_id++));
+            runs_.reserve(static_cast<std::size_t>(run_id));
+            for (int i = 0; i < run_id; ++i)
+                runs_.push_back(
+                    std::make_unique<AggRunReader>(dir_.run_path(i)));
+            spilled_ = true;
+        }
+        built_ = true;
     }
 
-   private:
-    static int index_in(const std::vector<std::string>& s,
-                        const std::string& n) {
-        auto it = std::find(s.begin(), s.end(), n);
-        return it == s.end() ? -1 : static_cast<int>(it - s.begin());
+    // Advances the k-way merge, combining every run whose current group
+    // shares the smallest composite key into one output row per group, until
+    // max_rows rows are produced or every run is exhausted.
+    std::optional<Morsel> merge_next(std::int64_t max_rows) {
+        std::vector<std::vector<Series>> pieces;
+        std::int64_t produced = 0;
+        while (produced < max_rows) {
+            int best = -1;
+            for (std::size_t i = 0; i < runs_.size(); ++i) {
+                if (!runs_[i]->valid()) continue;
+                if (best < 0 ||
+                    agg_key_cmp(runs_[i]->state(), 0,
+                                runs_[static_cast<std::size_t>(best)]->state(),
+                                0) < 0)
+                    best = static_cast<int>(i);
+            }
+            if (best < 0) break;
+            // Snapshot the winning key before merging: advancing `best`'s own
+            // reader mid-loop would otherwise mutate the very state later
+            // iterations compare against.
+            const AggStatePtr win_key = agg_extract_group(
+                runs_[static_cast<std::size_t>(best)]->state(), 0);
+            AggStatePtr acc = agg_new(specs_);
+            for (auto& run : runs_) {
+                if (!run->valid()) continue;
+                if (agg_key_cmp(run->state(), 0, *win_key, 0) != 0) continue;
+                agg_merge(*acc, run->state());
+                run->advance();
+            }
+            DataFrame row = agg_finalize(*acc, keys_);
+            pieces.push_back(std::move(row.columns));
+            ++produced;
+        }
+        if (pieces.empty()) return std::nullopt;
+        Morsel out;
+        out.rows = produced;
+        const std::size_t ncols = pieces.front().size();
+        out.columns.reserve(ncols);
+        for (std::size_t c = 0; c < ncols; ++c) {
+            std::vector<const Series*> parts;
+            parts.reserve(pieces.size());
+            for (auto& pc : pieces) parts.push_back(&pc[c]);
+            out.columns.push_back(concat_columns(parts));
+        }
+        return out;
     }
+
     std::unique_ptr<Cursor> in_;
     std::vector<std::string> sch_;
     std::vector<std::string> keys_;
     std::vector<GroupAgg> aggs_;
+    std::uint64_t budget_;
+    std::vector<AggSpec> specs_;
+    bool built_ = false;
     bool done_ = false;
+    bool spilled_ = false;
+    Morsel result_;
+    spill::Dir dir_;
+    std::vector<std::unique_ptr<AggRunReader>> runs_;
 };
 
 // Streaming tumbling/sliding time-window aggregation over an ascending Int64
@@ -2184,7 +2316,7 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             },
             [&](const GroupByOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<GroupByCursor>(std::move(in), sch,
-                                                       o.keys, o.aggs);
+                                                       o.keys, o.aggs, budget);
             },
             [&](const SortByOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<SortMergeCursor>(
