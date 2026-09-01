@@ -4,13 +4,14 @@
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/trace/views/view_plan.h>
 
-// Phase 1 of the View -> dataframe engine aggregation convergence: an
-// alternate, flag-gated group_by/agg path that routes a single-key
-// group_by/agg View through the dataframe engine's streaming group_by instead
-// of the View's own GroupMap fold. Behind DFTRACER_UTILS_AGG_ENGINE and
-// default-off; the GroupMap path (view_aggregate.h/.cpp) is unchanged and
-// stays the default. run_collect_via_engine itself is declared (as a friend
-// of View) in view.h; this header only adds the eligibility check.
+// View -> dataframe engine aggregation convergence: an alternate, flag-gated
+// group_by/agg path that routes an eligible group_by/agg View (one or more
+// direct-column keys, no transform) through the dataframe engine's streaming
+// (possibly composite-key) group_by instead of the View's own GroupMap fold.
+// Behind DFTRACER_UTILS_AGG_ENGINE and default-off; the GroupMap path
+// (view_aggregate.h/.cpp) is unchanged and stays the default.
+// run_collect_via_engine itself is declared (as a friend of View) in view.h;
+// this header only adds the eligibility check.
 namespace dftracer::utils::trace::views::detail {
 
 /// True when `plan` is a shape the engine path can answer byte-for-byte

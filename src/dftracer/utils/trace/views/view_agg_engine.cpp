@@ -16,15 +16,11 @@ namespace dataframe = dftracer::utils::dataframe;
 
 namespace {
 
-// Value/by fields the raw row stream emits at a fixed position in every
-// morsel: the always-present top-level event fields. An arg field's column is
-// discovered per scan batch (present only when that batch has it), so the
-// engine's streaming group_by - which resolves key/value columns once against
-// the Source's advertised schema, not per morsel - cannot safely reference
-// one without a broader fix to make that schema stable across morsels; the
-// same goes for fhash/hhash, whose column is emitted only when the batch has
-// at least one event carrying it. Keeping Phase 1 to the stable fields avoids
-// that trap entirely.
+// Value/by fields eligible for an agg spec: the always-present top-level
+// event fields. ViewSource now fixes the streamed schema to the raw scan's
+// select list (see view_source.cpp), so an arg/fhash/hhash value column is no
+// longer unsafe to reference this way, but widening agg targets past the
+// stable set is a later phase; this phase only widens group KEYS.
 bool is_stable_field(const std::string& f) {
     return f.empty() || f == "name" || f == "cat" || f == "pid" || f == "tid" ||
            f == "ts" || f == "dur";
@@ -135,27 +131,28 @@ dataframe::Series key_column_to_string(const dataframe::Series& col) {
 }  // namespace
 
 bool agg_engine_eligible(const ViewPlan& plan) {
-    if (plan.group_by.size() != 1) return false;
-    const GroupKey& gk = plan.group_by[0];
-    switch (gk.kind) {
-        case GroupKey::Kind::Name:
-        case GroupKey::Kind::Pid:
-        case GroupKey::Kind::Tid:
-            break;
-        case GroupKey::Kind::Cat:
-        case GroupKey::Kind::Fhash:
-        case GroupKey::Kind::Hhash:
-        case GroupKey::Kind::IoCat:
-        case GroupKey::Kind::AccPat:
-        case GroupKey::Kind::FilePath:
-        case GroupKey::Kind::FileName:
-        case GroupKey::Kind::HostName:
-        case GroupKey::Kind::Rank:
-        case GroupKey::Kind::Arg:
-        case GroupKey::Kind::Field:
-            return false;
+    if (plan.group_by.empty()) return false;
+    for (const GroupKey& gk : plan.group_by) {
+        switch (gk.kind) {
+            case GroupKey::Kind::Name:
+            case GroupKey::Kind::Pid:
+            case GroupKey::Kind::Tid:
+            case GroupKey::Kind::Fhash:
+            case GroupKey::Kind::Hhash:
+                break;
+            case GroupKey::Kind::Cat:
+            case GroupKey::Kind::IoCat:
+            case GroupKey::Kind::AccPat:
+            case GroupKey::Kind::FilePath:
+            case GroupKey::Kind::FileName:
+            case GroupKey::Kind::HostName:
+            case GroupKey::Kind::Rank:
+            case GroupKey::Kind::Arg:
+            case GroupKey::Kind::Field:
+                return false;
+        }
+        if (gk.transform != GroupKey::Transform::None) return false;
     }
-    if (gk.transform != GroupKey::Transform::None) return false;
     if (plan.time_bucket_us != 0) return false;
     if (plan.auto_numeric_metrics) return false;
     if (!plan.numeric_arg_aggs.empty()) return false;
@@ -182,7 +179,10 @@ bool agg_engine_enabled() {
 
 coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     const ViewPlan& plan) {
-    const std::string key_name = group_col_name(plan.group_by[0]);
+    std::vector<std::string> key_names;
+    key_names.reserve(plan.group_by.size());
+    for (const GroupKey& gk : plan.group_by)
+        key_names.push_back(group_col_name(gk));
 
     std::vector<dataframe::GroupAgg> gaggs;
     if (plan.agg.empty()) {
@@ -200,7 +200,7 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // columns in the same order: the streaming group_by resolves key/value
     // columns once against the Source's schema, so a morsel with a different
     // column layout would silently misalign otherwise.
-    std::vector<std::string> select{key_name};
+    std::vector<std::string> select = key_names;
     auto add_field = [&](const std::string& f) {
         if (f.empty()) return;
         if (std::find(select.begin(), select.end(), f) == select.end())
@@ -229,8 +229,9 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         dataframe::LazyFrame::scan(std::make_shared<ViewSource>(raw))
             .memory_budget(plan.memory_budget);
 
-    dataframe::DataFrame r = co_await lf.group_by(key_name, gaggs).collect();
-    r.columns[0] = key_column_to_string(r.columns[0]);
+    dataframe::DataFrame r = co_await lf.group_by(key_names, gaggs).collect();
+    for (std::size_t i = 0; i < key_names.size(); ++i)
+        r.columns[i] = key_column_to_string(r.columns[i]);
     co_return r;
 }
 

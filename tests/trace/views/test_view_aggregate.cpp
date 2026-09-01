@@ -1725,5 +1725,114 @@ TEST_SUITE("View") {
         SUBCASE("group_by name, forced spill") {
             run_both(GroupKey::name(), "name", 128);
         }
+
+        // Composite (multi-dim) direct-column keys: pairs rows by their
+        // composite key text (exact, not Approx) so a differently-ordered
+        // group set from the two paths still compares row for row.
+        auto check_match_multi = [](const dataframe::DataFrame& a0,
+                                    const dataframe::DataFrame& b0,
+                                    const std::vector<std::string>& keys) {
+            REQUIRE(a0.names.size() == b0.names.size());
+            for (std::size_t i = 0; i < a0.names.size(); ++i) {
+                CHECK(a0.names[i] == b0.names[i]);
+                CHECK(a0.columns[i].type() == b0.columns[i].type());
+            }
+            REQUIRE(a0.num_rows() == b0.num_rows());
+            auto sort_key = [&](const dataframe::DataFrame& df,
+                                std::int64_t r) {
+                std::string s;
+                for (const auto& k : keys) {
+                    s += bstr(df, r, k);
+                    s += '\x1f';
+                }
+                return s;
+            };
+            std::vector<std::pair<std::string, std::int64_t>> ar, br;
+            for (std::int64_t r = 0; r < a0.num_rows(); ++r)
+                ar.emplace_back(sort_key(a0, r), r);
+            for (std::int64_t r = 0; r < b0.num_rows(); ++r)
+                br.emplace_back(sort_key(b0, r), r);
+            std::sort(ar.begin(), ar.end());
+            std::sort(br.begin(), br.end());
+            for (std::size_t i = 0; i < ar.size(); ++i)
+                for (const auto& name : a0.names) {
+                    const auto c = static_cast<std::size_t>(bcol(a0, name));
+                    if (a0.columns[c].type() == dataframe::TypeId::String)
+                        CHECK(bstr(a0, ar[i].second, name) ==
+                              bstr(b0, br[i].second, name));
+                    else
+                        CHECK(bnum(a0, ar[i].second, name) ==
+                              doctest::Approx(bnum(b0, br[i].second, name)));
+                }
+        };
+
+        auto run_both_multi = [&](std::vector<ViewFile> files,
+                                  const std::vector<GroupKey>& gks,
+                                  const std::vector<std::string>& key_cols,
+                                  std::uint64_t mem_budget) {
+            auto build = [&] {
+                View v = View::from_files(files);
+                if (mem_budget) v = v.memory_budget(mem_budget);
+                return v.group_by(gks).agg({
+                    {AggOp::Count, "", "n"},
+                    {AggOp::Sum, "dur", "sum_dur"},
+                    {AggOp::Mean, "dur", "mean_dur"},
+                    {AggOp::Var, "dur", "var_dur"},
+                    {AggOp::Pct, "dur", "p90_dur", "", 0.9},
+                    {AggOp::ArgMax, "name", "top_name", "dur"},
+                });
+            };
+            dataframe::DataFrame legacy = [&] {
+                EnvGuard off(false);
+                return build().collect().collect().get();
+            }();
+            dataframe::DataFrame engine = [&] {
+                EnvGuard on(true);
+                return build().collect().collect().get();
+            }();
+            check_match_multi(legacy, engine, key_cols);
+        };
+
+        SUBCASE("group_by (name, pid)") {
+            run_both_multi({{gz, idx}}, {GroupKey::name(), GroupKey::pid()},
+                           {"name", "pid"}, 0);
+        }
+        SUBCASE("group_by (name, pid, tid), forced spill") {
+            run_both_multi({{gz, idx}},
+                           {GroupKey::name(), GroupKey::pid(), GroupKey::tid()},
+                           {"name", "pid", "tid"}, 128);
+        }
+
+        // Two files, so fhash genuinely varies across groups (not just pid).
+        std::string gz2, idx2;
+        {
+            std::string pfw2 = env.get_dir() + "/agg_engine2.pfw";
+            std::ofstream ofs(pfw2);
+            const char* names[] = {"read", "write", "open"};
+            const int pids[] = {1, 2, 3};
+            int ts = 1000;
+            for (int i = 0; i < 60; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 3]
+                    << R"(","cat":"POSIX","pid":)" << pids[i % 3]
+                    << R"(,"tid":10,"ts":)" << ts << R"(,"dur":)"
+                    << (5 + (i % 11)) << R"(,"args":{}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz2 = pfw2 + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw2, gz2);
+            fs::remove(pfw2);
+            idx2 = determine_index_path(gz2, "");
+        }
+        SUBCASE("group_by (pid, fhash) across two files") {
+            run_both_multi({{gz, idx}, {gz2, idx2}},
+                           {GroupKey::pid(), GroupKey::fhash()},
+                           {"pid", "fhash"}, 0);
+        }
+        SUBCASE("group_by (pid, fhash) across two files, forced spill") {
+            run_both_multi({{gz, idx}, {gz2, idx2}},
+                           {GroupKey::pid(), GroupKey::fhash()},
+                           {"pid", "fhash"}, 128);
+        }
     }
 }

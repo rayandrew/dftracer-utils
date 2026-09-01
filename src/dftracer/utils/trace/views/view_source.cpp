@@ -196,7 +196,13 @@ std::vector<std::string> ViewSource::row_schema() const {
 }
 
 std::vector<std::string> ViewSource::names() const {
-    if (can_stream_rows()) return row_schema();
+    if (can_stream_rows()) {
+        // A non-empty select fixes every streamed morsel's columns to exactly
+        // this list (see open()), so the schema must match it, not the
+        // broader index-derived row_schema().
+        if (!view_.plan_->select.empty()) return view_.plan_->select;
+        return row_schema();
+    }
     return buffer()->names;
 }
 
@@ -219,7 +225,9 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open(
 
     // Empty select: each batch discovers its own columns from the actual
     // scanned events, so morsels can differ batch to batch; name_ids lets
-    // drain_to_frame reconcile them.
+    // drain_to_frame reconcile them. A non-empty select instead fixes every
+    // morsel's columns to that exact list (build_row_frame's select branch
+    // always emits each one, null-filled where absent), matching names().
     auto task =
         [](View view, double time_scale,
            std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>>
@@ -227,7 +235,8 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open(
            std::shared_ptr<coro::CoroSemaphore> budget,
            std::shared_ptr<dftracer::utils::StringIntern> intern)
         -> coro::CoroTask<void> {
-        detail::StreamRowFold fold(channel, budget, intern, {}, time_scale);
+        detail::StreamRowFold fold(channel, budget, intern, view.plan_->select,
+                                   time_scale);
         std::array<detail::Fold*, 1> folds{&fold};
         co_await view.run_folds(folds, *intern);
     }(view_, time_scale, channel, budget, intern);
