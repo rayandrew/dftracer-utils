@@ -1845,7 +1845,7 @@ TEST_SUITE("View") {
                     -> dftracer::utils::coro::CoroTask<void> {
                     result = co_await detail::run_collect_via_engine(v.plan());
                 });
-            return result;
+            return detail::apply_agg_post_ops(std::move(result), v.plan());
         };
         auto collect_groupmap = [](const View& v) {
             dftracer::utils::Runtime rt;
@@ -1857,7 +1857,7 @@ TEST_SUITE("View") {
                     detail::GroupMap m = co_await detail::run_collect(v.plan());
                     result = detail::finalize_collect_batch(m, v.plan());
                 });
-            return result;
+            return detail::apply_agg_post_ops(std::move(result), v.plan());
         };
 
         auto check_match = [](const dataframe::DataFrame& a0,
@@ -2281,6 +2281,45 @@ TEST_SUITE("View") {
             run_both_bucket(
                 [](View v) { return v.time_scale(0.01).time_bucket(10); }, {},
                 {}, 0);
+        }
+
+        auto build_postop_base = [&] {
+            return View::from_file(gz, idx)
+                .group_by({GroupKey::name()})
+                .agg({
+                    {AggOp::Count, "", "n"},
+                    {AggOp::Sum, "dur", "sum_dur"},
+                });
+        };
+        SUBCASE("group_by name + sort_by") {
+            auto build = [&] { return build_postop_base().sort_by("sum_dur"); };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+        SUBCASE("group_by name + topk") {
+            auto build = [&] { return build_postop_base().topk("sum_dur", 2); };
+            dataframe::DataFrame legacy = collect_groupmap(build());
+            dataframe::DataFrame engine = collect_engine(build());
+            REQUIRE(legacy.num_rows() == 2);
+            check_match(legacy, engine, "name");
+        }
+        SUBCASE("group_by name + offset/limit") {
+            auto build = [&] {
+                return build_postop_base().sort_by("name").offset(1).limit(1);
+            };
+            dataframe::DataFrame legacy = collect_groupmap(build());
+            dataframe::DataFrame engine = collect_engine(build());
+            REQUIRE(legacy.num_rows() == 1);
+            check_match(legacy, engine, "name");
+        }
+        SUBCASE("group_by name + select") {
+            auto build = [&] {
+                return build_postop_base().select({"name", "sum_dur"});
+            };
+            dataframe::DataFrame legacy = collect_groupmap(build());
+            dataframe::DataFrame engine = collect_engine(build());
+            REQUIRE(legacy.names.size() == 2);
+            check_match(legacy, engine, "name");
         }
     }
 }

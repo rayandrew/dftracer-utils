@@ -233,9 +233,6 @@ bool agg_engine_eligible(const ViewPlan& plan) {
     }
     if (plan.auto_numeric_metrics) return false;
     if (!plan.numeric_arg_aggs.empty()) return false;
-    if (!plan.sort_col.empty() || !plan.topk_col.empty()) return false;
-    if (plan.offset != 0 || plan.limit != 0) return false;
-    if (!plan.select.empty()) return false;
     // Not yet converged: materialize writes a rollup CF; Hist emits a nested
     // column the engine's spill cannot concat. Both stay on GroupMap for now.
     if (plan.materialize) return false;

@@ -1211,7 +1211,8 @@ coro::CoroTask<ExportStats> run_session(
             if (!br.agg->apply_query && !br.agg->partial_out) {
                 GroupMap served;
                 if (co_await try_serve_aggregate_no_scan(*full, served)) {
-                    *br.agg->out = finalize_collect_batch(served, *full);
+                    *br.agg->out = apply_agg_post_ops(
+                        finalize_collect_batch(served, *full), *full);
                     continue;
                 }
             }
@@ -1235,7 +1236,8 @@ coro::CoroTask<ExportStats> run_session(
         !agg_b[0]->br->agg->partial_out) {
         GroupMap m = co_await run_scan_aggregate(*agg_b[0]->agg_plan);
         *agg_b[0]->br->agg->out =
-            finalize_collect_batch(m, *agg_b[0]->agg_plan);
+            apply_agg_post_ops(finalize_collect_batch(m, *agg_b[0]->agg_plan),
+                               *agg_b[0]->agg_plan);
         co_return ExportStats{};
     }
 
@@ -1314,7 +1316,8 @@ coro::CoroTask<ExportStats> run_session(
         apply_ranks(*agg_b[i]->agg_plan, aggs[i]->ranks());
         resolve_group_keys(m, *agg_b[i]->agg_plan);
         *agg_b[i]->br->agg->out =
-            finalize_collect_batch(m, *agg_b[i]->agg_plan);
+            apply_agg_post_ops(finalize_collect_batch(m, *agg_b[i]->agg_plan),
+                               *agg_b[i]->agg_plan);
     }
     // Factory folds published their results in Fold::finalize during the fuse;
     // let the caller pull them (while the folds are still alive here).

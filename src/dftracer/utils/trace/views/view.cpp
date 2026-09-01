@@ -606,9 +606,11 @@ coro::CoroTask<dataframe::DataFrame> View::collect_frame() const {
     // qualifier); this is the default. GroupMap is the fallback for plans
     // not yet converged.
     if (detail::agg_engine_eligible(*plan_))
-        co_return co_await detail::run_collect_via_engine(*plan_);
+        co_return detail::apply_agg_post_ops(
+            co_await detail::run_collect_via_engine(*plan_), *plan_);
     detail::GroupMap m = co_await detail::run_collect(*plan_);
-    co_return detail::finalize_collect_batch(m, *plan_);
+    co_return detail::apply_agg_post_ops(
+        detail::finalize_collect_batch(m, *plan_), *plan_);
 }
 
 bool View::is_row_query() const { return detail::is_row_query(*plan_); }

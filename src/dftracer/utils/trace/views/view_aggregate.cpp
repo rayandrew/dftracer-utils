@@ -854,18 +854,24 @@ void project_columns(dftracer::utils::dataframe::DataFrame& batch,
 
 dataframe::DataFrame finalize_collect_batch(const GroupMap& map,
                                             const ViewPlan& plan) {
-    dataframe::DataFrame b = to_batch(map, plan);
-    if (!plan.sort_col.empty()) b = b.sort_by(plan.sort_col, plan.sort_desc);
+    return to_batch(map, plan);
+}
+
+dataframe::DataFrame apply_agg_post_ops(dataframe::DataFrame batch,
+                                        const ViewPlan& plan) {
+    if (!plan.sort_col.empty())
+        batch = batch.sort_by(plan.sort_col, plan.sort_desc);
     if (!plan.topk_col.empty())
-        b = b.topk(plan.topk_col, plan.topk_k, plan.topk_largest);
+        batch = batch.topk(plan.topk_col, plan.topk_k, plan.topk_largest);
     if (plan.offset || plan.limit) {
         const std::int64_t off = static_cast<std::int64_t>(plan.offset);
-        const std::int64_t len =
-            plan.limit ? static_cast<std::int64_t>(plan.limit) : b.num_rows();
-        b = b.slice(off, len);
+        const std::int64_t len = plan.limit
+                                     ? static_cast<std::int64_t>(plan.limit)
+                                     : batch.num_rows();
+        batch = batch.slice(off, len);
     }
-    project_columns(b, plan.select);
-    return b;
+    project_columns(batch, plan.select);
+    return batch;
 }
 
 }  // namespace dftracer::utils::trace::views::detail
