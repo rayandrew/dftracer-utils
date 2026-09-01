@@ -77,6 +77,9 @@ Expr expr_unary(std::int32_t op, const Expr& a);
 Expr expr_clip(const Expr& a, dftu_scalar lo, dftu_scalar hi);
 /// Replace nulls (validity bitmap) with a fill value.
 Expr expr_fillna(const Expr& a, dftu_scalar fill);
+/// ASCII-lowercase a String column (Series::to_lowercase). Throws at compile
+/// time if the operand is not a String column.
+Expr expr_lower(const Expr& a);
 Expr expr_cmp(std::int32_t cmp, const Expr& a, dftu_scalar rhs);
 Expr expr_logical(std::int32_t op, const Expr& a, const Expr& b);
 Expr expr_not(const Expr& a);
@@ -187,6 +190,7 @@ DFTU_EXPORT dftu_expr* dftu_expr_logical(int32_t op, const dftu_expr* a,
                                          const dftu_expr* b);
 DFTU_EXPORT dftu_expr* dftu_expr_not(const dftu_expr* a);
 DFTU_EXPORT dftu_expr* dftu_expr_cast(int32_t type, const dftu_expr* a);
+DFTU_EXPORT dftu_expr* dftu_expr_lower(const dftu_expr* a);
 DFTU_EXPORT void dftu_expr_free(dftu_expr* e);
 
 /** Compile and evaluate `root` over `n_inputs` columns. Returns an owned

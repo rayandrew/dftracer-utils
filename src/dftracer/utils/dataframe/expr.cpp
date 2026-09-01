@@ -26,7 +26,8 @@ enum class ExprKind {
     Cmp,
     Logical,
     Not,
-    Cast
+    Cast,
+    Lower
 };
 
 struct ExprNode {
@@ -170,6 +171,9 @@ Expr expr_cast(TypeId type, const Expr& a) {
     return make(ExprKind::Cast, static_cast<std::int32_t>(type), {}, a.node(),
                 nullptr);
 }
+Expr expr_lower(const Expr& a) {
+    return make(ExprKind::Lower, 0, {}, a.node(), nullptr);
+}
 
 // ---- compiler: type inference + CSE + lowering to a slot program ----------
 
@@ -193,7 +197,8 @@ enum {
     OP_CMP,
     OP_LOGICAL,
     OP_NOT,
-    OP_CAST
+    OP_CAST,
+    OP_LOWER
 };
 
 struct SlotOp {
@@ -329,6 +334,16 @@ class Compiler {
                 Val a = as_col(compile(n->a.get()), "cast");
                 return cast(a, static_cast<TypeId>(n->i));
             }
+            case ExprKind::Lower: {
+                Val a = as_col(compile(n->a.get()), "lower");
+                if (a.type != TypeId::String)
+                    throw std::invalid_argument(
+                        "expr: lower needs a String column");
+                return {false,
+                        emit(OP_LOWER, a.slot, -1, 0, {}),
+                        TypeId::String,
+                        {}};
+            }
         }
         throw std::invalid_argument("expr: unknown node");
     }
@@ -444,6 +459,17 @@ class Compiler {
         memo_;
 };
 
+// Series::slice only supports fixed-width types (dftu_series_slice returns
+// null for String/Binary); fall back to a row-index take for those.
+Series load_slice(const Series& in, std::int64_t offset, std::int64_t len) {
+    if (in.type() != TypeId::String && in.type() != TypeId::Binary)
+        return in.slice(offset, len);
+    std::vector<std::int64_t> idx(static_cast<std::size_t>(len));
+    for (std::int64_t i = 0; i < len; ++i)
+        idx[static_cast<std::size_t>(i)] = offset + i;
+    return in.take(idx);
+}
+
 // Evaluate the slot program over rows [offset, offset+len) and extract one
 // column per requested final slot (shared, so distinct outputs that resolved to
 // the same slot alias the one buffer).
@@ -458,8 +484,8 @@ std::vector<Series> eval_chunk(const std::vector<SlotOp>& prog,
         auto B = [&]() { return s[static_cast<std::size_t>(op.b)].handle(); };
         switch (op.opcode) {
             case OP_LOAD:
-                s[k] = inputs[static_cast<std::size_t>(op.param)].slice(offset,
-                                                                        len);
+                s[k] = load_slice(inputs[static_cast<std::size_t>(op.param)],
+                                  offset, len);
                 break;
             case OP_ADD:
                 s[k] = Series{dftu_series_add(A(), B())};
@@ -555,6 +581,9 @@ std::vector<Series> eval_chunk(const std::vector<SlotOp>& prog,
             case OP_CAST:
                 s[k] = Series{
                     dftu_series_cast(A(), static_cast<dftu_dtype>(op.param))};
+                break;
+            case OP_LOWER:
+                s[k] = Series{dftu_series_to_lowercase(A())};
                 break;
             default:
                 return {};
@@ -685,6 +714,9 @@ dftu_expr* dftu_expr_not(const dftu_expr* a) {
 dftu_expr* dftu_expr_cast(int32_t type, const dftu_expr* a) {
     return wrap(
         dataframe::expr_cast(static_cast<dataframe::TypeId>(type), unwrap(a)));
+}
+dftu_expr* dftu_expr_lower(const dftu_expr* a) {
+    return wrap(dataframe::expr_lower(unwrap(a)));
 }
 void dftu_expr_free(dftu_expr* e) { delete e; }
 

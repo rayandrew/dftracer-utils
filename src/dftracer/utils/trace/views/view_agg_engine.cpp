@@ -1,6 +1,7 @@
 #include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/env.h>
 #include <dftracer/utils/dataframe/agg.h>
+#include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/trace/views/view_agg_engine.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
@@ -139,8 +140,8 @@ bool agg_engine_eligible(const ViewPlan& plan) {
             case GroupKey::Kind::Tid:
             case GroupKey::Kind::Fhash:
             case GroupKey::Kind::Hhash:
-                break;
             case GroupKey::Kind::Cat:
+                break;
             case GroupKey::Kind::IoCat:
             case GroupKey::Kind::AccPat:
             case GroupKey::Kind::FilePath:
@@ -229,7 +230,25 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         dataframe::LazyFrame::scan(std::make_shared<ViewSource>(raw))
             .memory_budget(plan.memory_budget);
 
-    dataframe::DataFrame r = co_await lf.group_by(key_names, gaggs).collect();
+    // cat is a computed key: the GroupMap path lowercases it for grouping only
+    // (agg_fold.h's lower_ascii) while a value agg (e.g. SetUnion(cat)) still
+    // sees the raw-case text, so the lowered key is materialized into a hidden
+    // column rather than overwriting "cat" in place.
+    static constexpr const char* CAT_KEY_COL = "__view_agg_engine_cat_key";
+    std::vector<std::string> group_key_names = key_names;
+    auto cat_it = std::find(key_names.begin(), key_names.end(), "cat");
+    if (cat_it != key_names.end()) {
+        const auto cat_idx =
+            static_cast<std::int32_t>(cat_it - key_names.begin());
+        group_key_names[static_cast<std::size_t>(cat_idx)] = CAT_KEY_COL;
+        lf = lf.with_column(
+            CAT_KEY_COL, dataframe::expr_lower(dataframe::expr_col(cat_idx)));
+    }
+
+    dataframe::DataFrame r =
+        co_await lf.group_by(group_key_names, gaggs).collect();
+    if (cat_it != key_names.end())
+        r.names[static_cast<std::size_t>(cat_it - key_names.begin())] = "cat";
     for (std::size_t i = 0; i < key_names.size(); ++i)
         r.columns[i] = key_column_to_string(r.columns[i]);
     co_return r;

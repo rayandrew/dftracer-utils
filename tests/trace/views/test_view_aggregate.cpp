@@ -1690,10 +1690,12 @@ TEST_SUITE("View") {
                 }
         };
 
-        auto run_both = [&](const GroupKey& gk, const std::string& key_col,
-                            std::uint64_t mem_budget) {
+        auto run_both_file = [&](const std::string& file,
+                                 const std::string& file_idx,
+                                 const GroupKey& gk, const std::string& key_col,
+                                 std::uint64_t mem_budget) {
             auto build = [&] {
-                View v = View::from_file(gz, idx);
+                View v = View::from_file(file, file_idx);
                 if (mem_budget) v = v.memory_budget(mem_budget);
                 return v.group_by({gk}).agg({
                     {AggOp::Count, "", "n"},
@@ -1717,6 +1719,10 @@ TEST_SUITE("View") {
                 return build().collect().collect().get();
             }();
             check_match(legacy, engine, key_col);
+        };
+        auto run_both = [&](const GroupKey& gk, const std::string& key_col,
+                            std::uint64_t mem_budget) {
+            run_both_file(gz, idx, gk, key_col, mem_budget);
         };
 
         SUBCASE("group_by name") { run_both(GroupKey::name(), "name", 0); }
@@ -1833,6 +1839,45 @@ TEST_SUITE("View") {
             run_both_multi({{gz, idx}, {gz2, idx2}},
                            {GroupKey::pid(), GroupKey::fhash()},
                            {"pid", "fhash"}, 128);
+        }
+
+        // Mixed-case cat values: the GroupMap path lowercases the group key
+        // (agg_fold.h's lower_ascii), so "POSIX"/"posix"/"Stdio"/"STDIO" must
+        // merge into two groups ("posix", "stdio") in both paths.
+        std::string gz3, idx3;
+        {
+            std::string pfw3 = env.get_dir() + "/agg_engine_cat.pfw";
+            std::ofstream ofs(pfw3);
+            const char* names[] = {"read", "write", "open"};
+            const char* cats[] = {"POSIX", "posix", "Stdio", "STDIO"};
+            const int pids[] = {1, 2};
+            int ts = 1000;
+            for (int i = 0; i < 80; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 3] << R"(","cat":")"
+                    << cats[i % 4] << R"(","pid":)" << pids[i % 2]
+                    << R"(,"tid":10,"ts":)" << ts << R"(,"dur":)"
+                    << (5 + (i % 13)) << R"(,"args":{}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz3 = pfw3 + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw3, gz3);
+            fs::remove(pfw3);
+            idx3 = determine_index_path(gz3, "");
+        }
+        SUBCASE("group_by cat, mixed case merges") {
+            run_both_file(gz3, idx3, GroupKey::cat(), "cat", 0);
+        }
+        SUBCASE("group_by cat, mixed case merges, forced spill") {
+            run_both_file(gz3, idx3, GroupKey::cat(), "cat", 128);
+        }
+        SUBCASE("group_by (cat, pid), mixed case merges") {
+            run_both_multi({{gz3, idx3}}, {GroupKey::cat(), GroupKey::pid()},
+                           {"cat", "pid"}, 0);
+        }
+        SUBCASE("group_by (cat, pid), mixed case merges, forced spill") {
+            run_both_multi({{gz3, idx3}}, {GroupKey::cat(), GroupKey::pid()},
+                           {"cat", "pid"}, 128);
         }
     }
 }
