@@ -426,10 +426,84 @@ Series import_struct(const ArrowSchema* schema, const ArrowArray* arr,
     return Series{col};
 }
 
-// Dispatch on the Arrow type: List/Struct nest recursively, everything else
-// (flat fixed-width and variable-width) through import_flat.
+// Inverse of export_dict. int32 indices map to a DICTIONARY column and int64 to
+// a SELECTION column (the widths the engine and exporter use); any other index
+// width is copied into int32 DICTIONARY codes.
+Series import_dict(const ArrowSchema* schema, const ArrowArray* arr,
+                   std::shared_ptr<void> owner) {
+    if (schema->dictionary == nullptr || arr->dictionary == nullptr)
+        return Series{};
+    ArrowSchemaView view;
+    ArrowError error;
+    if (ArrowSchemaViewInit(&view, schema, &error) != NANOARROW_OK)
+        return Series{};
+    // A dictionary schema reports view.type == DICTIONARY; the index integer
+    // type is in storage_type.
+    TypeId index_type;
+    if (!from_arrow_type(view.storage_type, index_type)) return Series{};
+
+    Series values = import_any(schema->dictionary, arr->dictionary, owner);
+    if (!values.valid()) return Series{};
+
+    const std::int64_t n = arr->length;
+    auto* col = new dftu_series();
+    col->type = static_cast<TypeId>(dftu_series_type(values.handle()));
+    col->length = n;
+    col->null_count = arr->null_count < 0 ? 0 : arr->null_count;
+    col->child = std::shared_ptr<dftu_series>(values.release());
+    if (arr->n_buffers > 0 && arr->buffers[0] != nullptr)
+        col->validity = Buffer::wrap(
+            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[0])),
+            (static_cast<std::size_t>(n) + 7) / 8, [owner](void*) {});
+
+    if (index_type == TypeId::Int64) {
+        col->encoding = Encoding::Selection;
+        col->data = Buffer::wrap(
+            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[1])),
+            static_cast<std::size_t>(n) * sizeof(std::int64_t),
+            [owner](void*) {});
+        return Series{col};
+    }
+    if (index_type == TypeId::Int32) {
+        col->encoding = Encoding::Dictionary;
+        col->data = Buffer::wrap(
+            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[1])),
+            static_cast<std::size_t>(n) * sizeof(std::int32_t),
+            [owner](void*) {});
+        return Series{col};
+    }
+
+    // Other index widths (int8/16, uint*): copy into int32 DICTIONARY codes.
+    col->encoding = Encoding::Dictionary;
+    col->data =
+        Buffer::allocate(static_cast<std::size_t>(n) * sizeof(std::int32_t));
+    auto* codes = reinterpret_cast<std::int32_t*>(col->data->data());
+    const std::size_t w = byte_width(index_type);
+    const auto* raw = static_cast<const std::uint8_t*>(arr->buffers[1]);
+    const bool is_signed =
+        index_type == TypeId::Int8 || index_type == TypeId::Int16;
+    for (std::int64_t i = 0; i < n; ++i) {
+        std::int64_t code = 0;
+        if (is_signed) {
+            std::int64_t s = 0;
+            std::memcpy(&s, raw + static_cast<std::size_t>(i) * w, w);
+            // Sign-extend from the index width.
+            const int shift = static_cast<int>((sizeof(std::int64_t) - w) * 8);
+            code = (s << shift) >> shift;
+        } else {
+            std::memcpy(&code, raw + static_cast<std::size_t>(i) * w, w);
+        }
+        codes[i] = static_cast<std::int32_t>(code);
+    }
+    return Series{col};
+}
+
+// Dispatch on the Arrow type: dictionary-encoded via import_dict, List/Struct
+// nest recursively, everything else (flat fixed-width and variable-width)
+// through import_flat.
 Series import_any(const ArrowSchema* schema, const ArrowArray* arr,
                   std::shared_ptr<void> owner) {
+    if (schema->dictionary != nullptr) return import_dict(schema, arr, owner);
     ArrowSchemaView view;
     ArrowError error;
     if (ArrowSchemaViewInit(&view, schema, &error) != NANOARROW_OK)

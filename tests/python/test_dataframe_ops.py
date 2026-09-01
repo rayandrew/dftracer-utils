@@ -36,6 +36,46 @@ def _col(df, name):
     return df.to_arrow().column(name).to_pylist()
 
 
+def test_dictionary_column_arrow_roundtrip():
+    # A pyarrow dictionary column (int32 indices) must import, not raise
+    # "unsupported Arrow column", and preserve its values on re-export.
+    vals = ["a", "b", "a", "c", "b", "a"]
+    t = pa.table({"s": pa.array(vals).dictionary_encode()})
+    assert pa.types.is_dictionary(t.schema.field("s").type)
+    df = DataFrame.from_arrow(t)
+    assert _col(df, "s") == vals
+
+
+def test_dictionary_encode_roundtrip_and_from_dict():
+    # Series.dictionary_encode() -> to_arrow -> from_dict (a to_arrow/from_arrow
+    # round-trip) must not raise and must keep values.
+    from dftracer.utils import Series
+
+    base = DataFrame.from_dict({"s": [f"k{v % 4}" for v in range(12)]})
+    col = base["s"].dictionary_encode()
+    assert col.encoding == 2  # Encoding::Dictionary
+    rebuilt = DataFrame.from_dict({"s": col})
+    assert _col(rebuilt, "s") == [f"k{v % 4}" for v in range(12)]
+    back = Series.from_arrow(col.to_arrow())
+    assert back.to_arrow().to_pylist() == [f"k{v % 4}" for v in range(12)]
+
+
+def test_from_dict_borrowed_series_outlives_source_frame():
+    # Series pulled from another frame, fed into from_dict, then the source
+    # frame is dropped: the new frame must keep the data alive (was a
+    # non-deterministic use-after-free / KeyError before the dict-import fix).
+    import gc
+
+    a = DataFrame.from_dict({"name": ["x", "y", "z", "x"], "v": [1, 2, 3, 4]})
+    s_name = a["name"]
+    s_v = a["v"]
+    b = DataFrame.from_dict({"nm": s_name, "vv": s_v})
+    del a, s_name, s_v
+    gc.collect()
+    assert _col(b, "nm") == ["x", "y", "z", "x"]
+    assert _col(b, "vv") == [1, 2, 3, 4]
+
+
 def test_group_by_dynamic_origin():
     # ts start at 5000; every=700 does not divide 5000 so alignment matters.
     df = _df({"ts": [5000 + 100 * i for i in range(20)], "v": list(range(20))})
