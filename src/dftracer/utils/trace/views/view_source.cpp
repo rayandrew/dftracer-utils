@@ -4,6 +4,10 @@
 #include <dftracer/utils/core/coro/coro.h>
 #include <dftracer/utils/core/pipeline/executor.h>
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/dataframe/expr.h>
+#include <dftracer/utils/dataframe/scalar.h>
+#include <dftracer/utils/query/builder.h>
+#include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/stream_row_fold.h>
 #include <dftracer/utils/trace/views/view_plan.h>
@@ -56,6 +60,71 @@ ViewCursor::next(std::int64_t max_rows) {
 }
 
 namespace {
+
+namespace df = dftracer::utils::dataframe;
+namespace q = dftracer::utils::query;
+
+// Translate a `col <cmp> scalar` LazyFrame predicate into an index-pushable
+// query on the named event field, so the View filters events during the scan
+// (an Exact push). `fnames[col]` is the column the predicate reads; nullopt for
+// anything else (compound exprs, col-vs-col), which the engine applies itself.
+// ts/dur carry a time_scale in the streamed morsel but the query matches the
+// raw field, so those are only pushable when the scale is the identity.
+std::optional<q::Query> translate_filter(const df::Expr& e,
+                                         const std::vector<std::string>& fnames,
+                                         double time_scale) {
+    std::int32_t ci = -1;
+    df::CmpOp op{};
+    df::Scalar rhs;
+    if (!df::expr_as_col_cmp(e, &ci, &op, &rhs)) return std::nullopt;
+    if (ci < 0 || static_cast<std::size_t>(ci) >= fnames.size())
+        return std::nullopt;
+    const std::string& col = fnames[static_cast<std::size_t>(ci)];
+    if ((col == "ts" || col == "dur") && time_scale != 1.0) return std::nullopt;
+    // The query DSL names a nested arg field by its bare key; a top-level field
+    // is unchanged.
+    const std::string field(dftracer::utils::strip_args_prefix(col));
+
+    q::CompareOp qop;
+    switch (op) {
+        case df::CmpOp::Gt:
+            qop = q::CompareOp::GT;
+            break;
+        case df::CmpOp::Ge:
+            qop = q::CompareOp::GE;
+            break;
+        case df::CmpOp::Lt:
+            qop = q::CompareOp::LT;
+            break;
+        case df::CmpOp::Le:
+            qop = q::CompareOp::LE;
+            break;
+        case df::CmpOp::Eq:
+            qop = q::CompareOp::EQ;
+            break;
+        case df::CmpOp::Ne:
+            qop = q::CompareOp::NE;
+            break;
+    }
+
+    q::LiteralNode lit;
+    switch (rhs.tag()) {
+        case DFTU_SCALAR_TAG_I64:
+            lit = q::LiteralNode{rhs.i64()};
+            break;
+        case DFTU_SCALAR_TAG_U64:
+            lit = q::LiteralNode{rhs.u64()};
+            break;
+        default:
+            lit = q::LiteralNode{rhs.f64()};
+            break;
+    }
+
+    q::Expr qe = q::field_cmp(field, qop, std::move(lit));
+    auto built = qe.build();
+    if (!built.has_value()) return std::nullopt;
+    return std::move(built.value());
+}
 
 coro::Coro run_detached(coro::CoroTask<void> task,
                         std::shared_ptr<std::promise<void>> done) {
@@ -199,24 +268,29 @@ std::vector<std::string> ViewSource::row_schema() const {
     return out;
 }
 
-std::vector<std::string> ViewSource::names() const {
+dftracer::utils::dataframe::Schema ViewSource::schema() const {
+    dftracer::utils::dataframe::Schema s;
     if (can_stream_rows()) {
         // A non-empty select fixes every streamed morsel's columns to exactly
-        // this list (see open()), so the schema must match it, not the
+        // this list (see open_stream()), so the schema must match it, not the
         // broader index-derived row_schema(). Canonicalize each select entry
         // the same way build_row_frame does, so a bare arg name (or one
         // colliding with a top-level field) resolves to the same column name
         // the producer actually emits.
         if (!view_.plan_->select.empty()) {
-            std::vector<std::string> out;
-            out.reserve(view_.plan_->select.size());
+            s.names.reserve(view_.plan_->select.size());
             for (const std::string& sel : view_.plan_->select)
-                out.push_back(detail::canonical_row_column_name(sel));
-            return out;
+                s.names.push_back(detail::canonical_row_column_name(sel));
+        } else {
+            s.names = row_schema();
         }
-        return row_schema();
+        return s;
     }
-    return buffer()->names;
+    // Aggregated / post-scan-op view: the column set is data-dependent, so the
+    // only faithful schema is the buffered result's (the documented escape
+    // hatch). Types stay empty.
+    s.names = buffer()->names;
+    return s;
 }
 
 const dftracer::utils::dataframe::DataFrame* ViewSource::as_frame() const {
@@ -224,39 +298,75 @@ const dftracer::utils::dataframe::DataFrame* ViewSource::as_frame() const {
     return buffer().get();
 }
 
-std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open(
-    std::uint64_t memory_budget) const {
-    if (!can_stream_rows()) return std::make_unique<ViewCursor>(buffer());
-
+std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open_stream(
+    const View& v, std::uint64_t memory_budget) const {
     // Capacity 0 = an effectively unbounded ring (see Channel's ctor); the
     // shared budget semaphore is the sole backpressure, acquired before send
     // and released once the cursor hands a morsel off.
     auto channel = coro::make_channel<dftracer::utils::dataframe::Morsel>(0);
     auto budget = std::make_shared<coro::CoroSemaphore>(memory_budget);
     auto intern = std::make_shared<dftracer::utils::StringIntern>();
-    const double time_scale = view_.plan_->time_scale;
+    const double time_scale = v.plan_->time_scale;
 
     // Empty select: each batch discovers its own columns from the actual
     // scanned events, so morsels can differ batch to batch; name_ids lets
     // drain_to_frame reconcile them. A non-empty select instead fixes every
     // morsel's columns to that exact list (build_row_frame's select branch
-    // always emits each one, null-filled where absent), matching names().
+    // always emits each one, null-filled where absent), matching schema().
     auto task =
-        [](View v, double ts,
+        [](View vv, double ts,
            std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>>
                ch,
            std::shared_ptr<coro::CoroSemaphore> sem,
            std::shared_ptr<dftracer::utils::StringIntern> iv)
         -> coro::CoroTask<void> {
-        detail::StreamRowFold fold(ch, sem, iv, v.plan_->select, ts);
+        detail::StreamRowFold fold(ch, sem, iv, vv.plan_->select, ts);
         std::array<detail::Fold*, 1> folds{&fold};
-        co_await v.run_folds(folds, *iv);
-    }(view_, time_scale, channel, budget, intern);
+        co_await vv.run_folds(folds, *iv);
+    }(v, time_scale, channel, budget, intern);
 
     std::shared_future<void> producer =
         spawn_on_current_executor(std::move(task));
     return std::make_unique<StreamViewCursor>(
         std::move(channel), std::move(budget), std::move(producer));
+}
+
+dftracer::utils::dataframe::ScanResult ViewSource::scan(
+    const dftracer::utils::dataframe::ScanRequest& req) const {
+    dftracer::utils::dataframe::ScanResult r;
+    r.filters.assign(req.filters.size(),
+                     dftracer::utils::dataframe::Pushed::No);
+
+    // Aggregated / post-scan-op view: buffer once (the resident fast path uses
+    // as_frame()). No filter/query pushdown here; project the buffer to honor
+    // the requested column set. The engine applies the residual filters.
+    if (!can_stream_rows()) {
+        std::shared_ptr<const dftracer::utils::dataframe::DataFrame> buf =
+            buffer();
+        if (!req.projection.empty())
+            buf = std::make_shared<const dftracer::utils::dataframe::DataFrame>(
+                buf->select(req.projection));
+        r.cursor = std::make_unique<ViewCursor>(std::move(buf));
+        return r;
+    }
+
+    // Streamable row query: translate each simple predicate into the View's
+    // query (Exact) and push projection into View::select so the fold harvests
+    // only those columns.
+    const std::vector<std::string> fnames =
+        req.projection.empty() ? names() : req.projection;
+    const double time_scale = view_.plan_->time_scale;
+    View v = view_;
+    for (std::size_t i = 0; i < req.filters.size(); ++i)
+        if (auto pushed =
+                translate_filter(req.filters[i], fnames, time_scale)) {
+            v = v.filter(std::move(*pushed));
+            r.filters[i] = dftracer::utils::dataframe::Pushed::Exact;
+        }
+    if (!req.projection.empty()) v = v.select(req.projection);
+
+    r.cursor = open_stream(v, req.memory_budget);
+    return r;
 }
 
 }  // namespace dftracer::utils::trace::views

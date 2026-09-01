@@ -41,19 +41,27 @@ class ViewSource : public dftracer::utils::dataframe::Source {
    public:
     explicit ViewSource(View view) : view_(std::move(view)) {}
 
-    std::vector<std::string> names() const override;
+    dftracer::utils::dataframe::Schema schema() const override;
     const dftracer::utils::dataframe::DataFrame* as_frame() const override;
-    std::unique_ptr<dftracer::utils::dataframe::Cursor> open(
-        std::uint64_t memory_budget) const override;
+    /// Push projection into View::select and each translatable predicate into
+    /// the View's query (reported Exact - the View filters events, not just
+    /// prunes I/O); the untranslatable rest stay No for the engine to apply.
+    dftracer::utils::dataframe::ScanResult scan(
+        const dftracer::utils::dataframe::ScanRequest& req) const override;
 
    private:
     /// A row query with no sort/topk/pagination/select - the post-scan ops
     /// run_collect_rows applies after the fuse, which streaming cannot.
     bool can_stream_rows() const;
 
-    /// Best-effort column list for the streaming source's names(), from index
+    /// Best-effort column list for the streaming source's schema(), from index
     /// metadata rather than a scan.
     std::vector<std::string> row_schema() const;
+
+    /// Open a bounded-channel streaming cursor over `v` (a row query). Used by
+    /// scan() once projection + filters are folded into `v`.
+    std::unique_ptr<dftracer::utils::dataframe::Cursor> open_stream(
+        const View& v, std::uint64_t memory_budget) const;
 
     std::shared_ptr<const dftracer::utils::dataframe::DataFrame> buffer()
         const {

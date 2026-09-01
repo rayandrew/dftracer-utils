@@ -44,30 +44,76 @@ class Cursor {
     }
 };
 
-/// A data source for a lazy query. Immutable: names() reports the schema and
-/// open() hands out a fresh Cursor, so one Source can back many collect()s.
+/// The static, scan-free schema of a Source: column names and (best-effort)
+/// types. `types` may be empty or hold TypeId::Unknown entries when a type is
+/// not known without scanning; `names` is always populated.
+struct Schema {
+    std::vector<std::string> names;
+    std::vector<TypeId> types;
+};
+
+/// How completely a source applied a pushed-down filter, per ScanRequest
+/// filter. Guides whether the engine must re-apply it over the survivors.
+enum class Pushed {
+    No,       ///< Not applied by the source; the engine applies it.
+    Inexact,  ///< The source pruned I/O but did not filter survivors; re-apply.
+    Exact,    ///< Fully applied by the source; the engine drops it.
+};
+
+/// A pushdown request the optimizer hands a Source at scan time.
+struct ScanRequest {
+    /// Columns the plan needs, in the order the scan must return them. Empty
+    /// means all source columns. A source that accepts a non-empty projection
+    /// MUST return exactly these columns, in this order.
+    std::vector<std::string> projection;
+    /// Candidate predicates, each positional against the request's column set
+    /// (projection when non-empty, else schema()). A source translates what it
+    /// can and reports the rest No.
+    std::vector<Expr> filters;
+    std::int64_t limit = -1;  ///< Slice pushdown hint; -1 means no limit.
+    /// The resolved LazyFrame budget (bytes); a streaming source may use it to
+    /// bound its own in-flight buffering. Most sources ignore it.
+    std::uint64_t memory_budget = 0;
+};
+
+/// The result of Source::scan: a fresh async Cursor plus, per ScanRequest
+/// filter, how completely the source applied it.
+struct ScanResult {
+    std::unique_ptr<Cursor> cursor;
+    std::vector<Pushed> filters;
+};
+
+/// A pushdown-aware data source for a lazy query. Immutable: schema() reports
+/// the columns without scanning and scan() hands out a fresh Cursor honoring
+/// the pushed projection/filters, so one Source can back many collect()s.
 /// Implement these two to plug any producer (a file, another engine, a trace
 /// scan) into LazyFrame.
 class Source {
    public:
     virtual ~Source() = default;
-    virtual std::vector<std::string> names() const = 0;
-    /// `memory_budget` is the resolved LazyFrame budget (bytes); a source
-    /// that streams may use it to bound its own in-flight buffering. Most
-    /// sources ignore it.
-    virtual std::unique_ptr<Cursor> open(std::uint64_t memory_budget) const = 0;
+    /// The column names and types, without a scan (index/catalog/footer).
+    virtual Schema schema() const = 0;
+    /// Open a Cursor honoring `req`. When req.projection is non-empty the
+    /// cursor's morsels carry exactly those columns in that order; the returned
+    /// ScanResult.filters reports, per req.filter, how completely it was
+    /// applied.
+    virtual ScanResult scan(const ScanRequest& req) const = 0;
     /// The resident frame when this source is already in memory, else nullptr
     /// (rows produced only by streaming). collect() runs a resident source
     /// whole-column, matching the eager path instead of paying the morsel tax.
     virtual const DataFrame* as_frame() const { return nullptr; }
+
+    /// Convenience: the schema's column names. Non-virtual; a caller that only
+    /// needs names reads this instead of building a full scan.
+    std::vector<std::string> names() const { return schema().names; }
 };
 
 /// A Source over an already-materialized in-memory frame.
 class InMemorySource : public Source {
    public:
     explicit InMemorySource(DataFrame frame);
-    std::vector<std::string> names() const override;
-    std::unique_ptr<Cursor> open(std::uint64_t memory_budget) const override;
+    Schema schema() const override;
+    ScanResult scan(const ScanRequest& req) const override;
     const DataFrame* as_frame() const override { return frame_.get(); }
 
    private:

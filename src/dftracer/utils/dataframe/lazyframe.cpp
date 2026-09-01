@@ -2670,11 +2670,34 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
 InMemorySource::InMemorySource(DataFrame frame)
     : frame_(std::make_shared<const DataFrame>(std::move(frame))) {}
 
-std::vector<std::string> InMemorySource::names() const { return frame_->names; }
+Schema InMemorySource::schema() const {
+    Schema s;
+    s.names = frame_->names;
+    s.types.reserve(frame_->columns.size());
+    for (const Series& c : frame_->columns) s.types.push_back(c.type());
+    return s;
+}
 
-std::unique_ptr<Cursor> InMemorySource::open(
-    std::uint64_t /*memory_budget*/) const {
-    return std::make_unique<InMemoryCursor>(frame_);
+ScanResult InMemorySource::scan(const ScanRequest& req) const {
+    // Honor projection zero-copy: share only the requested columns, in the
+    // requested order. Every filter stays No - the whole-column engine applies
+    // them (a resident source usually takes the as_frame() fast path anyway).
+    std::shared_ptr<const DataFrame> src = frame_;
+    if (!req.projection.empty()) {
+        DataFrame proj;
+        proj.names = req.projection;
+        proj.columns.reserve(req.projection.size());
+        for (const std::string& nm : req.projection) {
+            const int c = col_index(frame_->names, nm);
+            proj.columns.push_back(
+                frame_->columns[static_cast<std::size_t>(c)].share());
+        }
+        src = std::make_shared<const DataFrame>(std::move(proj));
+    }
+    ScanResult r;
+    r.cursor = std::make_unique<InMemoryCursor>(std::move(src));
+    r.filters.assign(req.filters.size(), Pushed::No);
+    return r;
 }
 
 LazyFrame LazyFrame::scan(std::shared_ptr<const Source> source) {
@@ -2918,17 +2941,55 @@ LazyFrame LazyFrame::auto_spill() const {
 
 coro::AsyncGenerator<DataFrame> LazyFrame::stream(
     std::int64_t morsel_rows) const {
-    auto ops = pushdown_projections(
-        source_->names(), pushdown_predicates(source_->names(), ops_));
+    const std::vector<std::string> names = source_->names();
+    auto ops = pushdown_projections(names, pushdown_predicates(names, ops_));
     // 0 resolves to auto (~1/3 RAM), same policy as View.
     const std::uint64_t budget = resolve_spill_budget(memory_budget_);
     const std::int64_t eff_rows =
         morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
-    std::unique_ptr<Cursor> cur = source_->open(budget);
-    std::vector<std::string> sch = source_->names();
-    for (const auto& op : ops) {
-        cur = make_cursor(*op, std::move(cur), sch, budget);
-        sch = out_schema(*op, std::move(sch));
+
+    // A leading Select is a pure source projection: pushdown_projections emits
+    // one with the filter col-refs already remapped into it, and a user's own
+    // leading select is one too. Push it into the scan so the source harvests
+    // only those columns; the source returns them in this exact order, so the
+    // now-identity Select and the remapped filters stay positionally aligned.
+    std::vector<std::string> projection;
+    std::size_t first = 0;
+    if (!ops.empty())
+        if (const auto* s = std::get_if<SelectOp>(&ops.front()->node)) {
+            projection = s->names;
+            first = 1;
+        }
+
+    // Candidate filters: the contiguous run right after the optional
+    // projection. Their col-refs are positional against the scan's column set
+    // (projection when present, else the source schema), which is exactly what
+    // scan() resolves them against.
+    ScanRequest req;
+    req.projection = projection;
+    req.memory_budget = budget;
+    std::vector<std::size_t> cand_pos;
+    for (std::size_t i = first; i < ops.size(); ++i) {
+        const auto* f = std::get_if<FilterOp>(&ops[i]->node);
+        if (!f) break;
+        req.filters.push_back(f->pred);
+        cand_pos.push_back(i);
+    }
+
+    ScanResult r = source_->scan(req);
+
+    // Drop every candidate the source applied exactly; the engine re-applies
+    // No/Inexact (and any filter deeper in the plan).
+    std::vector<bool> drop(ops.size(), false);
+    for (std::size_t k = 0; k < cand_pos.size() && k < r.filters.size(); ++k)
+        if (r.filters[k] == Pushed::Exact) drop[cand_pos[k]] = true;
+
+    std::unique_ptr<Cursor> cur = std::move(r.cursor);
+    std::vector<std::string> sch = projection.empty() ? names : projection;
+    for (std::size_t i = 0; i < ops.size(); ++i) {
+        if (drop[i]) continue;
+        cur = make_cursor(*ops[i], std::move(cur), sch, budget);
+        sch = out_schema(*ops[i], std::move(sch));
     }
     while (auto m = co_await cur->next(eff_rows)) {
         DataFrame chunk =

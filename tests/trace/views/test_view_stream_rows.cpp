@@ -1,10 +1,14 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/dataframe/expr.h>
+#include <dftracer/utils/dataframe/lazyframe.h>
+#include <dftracer/utils/trace/views/view_source.h>
 #include <doctest/doctest.h>
 
 #include <algorithm>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -217,6 +221,103 @@ TEST_SUITE("View - streaming row query") {
         REQUIRE(via_lazy.num_rows() == via_eager.num_rows());
         CHECK(bstr(via_lazy, 0, "name") == bstr(via_eager, 0, "name"));
         CHECK(bnum(via_lazy, 0, "n") == bnum(via_eager, 0, "n"));
+    }
+
+    TEST_CASE("ViewSource pushdown: col filter -> Query (Exact), matches") {
+        namespace df = dftracer::utils::dataframe;
+        const auto& s = shared_trace();
+        View v = View::from_file(s.gz, s.idx).metadata(false);
+        auto src = std::make_shared<ViewSource>(v);
+
+        const std::vector<std::string> names = src->names();
+        int di = -1;
+        for (int i = 0; i < static_cast<int>(names.size()); ++i)
+            if (names[i] == "dur") di = i;
+        REQUIRE(di >= 0);
+
+        // Direct scan(): the predicate is translatable and fully applied by the
+        // View, so it comes back Exact.
+        df::ScanRequest req;
+        req.filters.push_back(df::col(di) > std::int64_t{25});
+        df::ScanResult sr = src->scan(req);
+        REQUIRE(sr.filters.size() == 1);
+        CHECK(sr.filters[0] == df::Pushed::Exact);
+
+        // End-to-end: the pushed-down result equals engine-applied filtering
+        // over the unfiltered events.
+        df::DataFrame filtered = run(df::LazyFrame::scan(src)
+                                         .filter(df::col(di) > std::int64_t{25})
+                                         .collect());
+        df::DataFrame all = run(v.collect().collect());
+        std::int64_t expect = 0;
+        for (std::int64_t i = 0; i < all.num_rows(); ++i)
+            if (bnum(all, i, "dur") > 25) ++expect;
+        CHECK(expect > 0);
+        CHECK(filtered.num_rows() == expect);
+        for (std::int64_t i = 0; i < filtered.num_rows(); ++i)
+            CHECK(bnum(filtered, i, "dur") > 25);
+    }
+
+    TEST_CASE("ViewSource pushdown: non-translatable filter falls back (No)") {
+        namespace df = dftracer::utils::dataframe;
+        const auto& s = shared_trace();
+        View v = View::from_file(s.gz, s.idx).metadata(false);
+        auto src = std::make_shared<ViewSource>(v);
+
+        const std::vector<std::string> names = src->names();
+        int di = -1;
+        for (int i = 0; i < static_cast<int>(names.size()); ++i)
+            if (names[i] == "dur") di = i;
+        REQUIRE(di >= 0);
+
+        // (dur + dur) > 50 is not a bare col-cmp-scalar, so it cannot be
+        // translated to a Query; the engine applies it instead.
+        df::Expr pred = (df::col(di) + df::col(di)) > std::int64_t{50};
+        df::ScanRequest req;
+        req.filters.push_back(pred);
+        df::ScanResult sr = src->scan(req);
+        REQUIRE(sr.filters.size() == 1);
+        CHECK(sr.filters[0] == df::Pushed::No);
+
+        df::DataFrame got =
+            run(df::LazyFrame::scan(src).filter(pred).collect());
+        df::DataFrame all = run(v.collect().collect());
+        std::int64_t expect = 0;
+        for (std::int64_t i = 0; i < all.num_rows(); ++i)
+            if (2 * bnum(all, i, "dur") > 50) ++expect;
+        CHECK(expect > 0);
+        CHECK(got.num_rows() == expect);
+        for (std::int64_t i = 0; i < got.num_rows(); ++i)
+            CHECK(2 * bnum(got, i, "dur") > 50);
+    }
+
+    TEST_CASE(
+        "ViewSource pushdown: projection harvests only selected columns") {
+        namespace df = dftracer::utils::dataframe;
+        const auto& s = shared_trace();
+        View v = View::from_file(s.gz, s.idx).metadata(false);
+        auto src = std::make_shared<ViewSource>(v);
+
+        df::DataFrame proj =
+            run(df::LazyFrame::scan(src).select({"cat", "name"}).collect());
+        REQUIRE(proj.columns.size() == 2);
+        CHECK(bhas(proj, "cat"));
+        CHECK(bhas(proj, "name"));
+        CHECK(proj.num_rows() == 50);
+        for (std::int64_t i = 0; i < proj.num_rows(); ++i) {
+            const std::string cat = bstr(proj, i, "cat");
+            CHECK((cat == "POSIX" || cat == "STDIO"));
+        }
+    }
+
+    TEST_CASE("ViewSource head(10) early-stops the scan (cancellation)") {
+        namespace df = dftracer::utils::dataframe;
+        const auto& s = shared_trace();  // 50 events
+        View v = View::from_file(s.gz, s.idx).metadata(false);
+        auto src = std::make_shared<ViewSource>(v);
+
+        df::DataFrame h = run(df::LazyFrame::scan(src).head(10).collect());
+        CHECK(h.num_rows() == 10);
     }
 
     TEST_CASE("View::stream() over a histogram aggregation yields one chunk") {

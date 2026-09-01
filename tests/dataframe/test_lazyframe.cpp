@@ -40,6 +40,17 @@ DataFrame run(CoroTask<DataFrame> t) {
     return dftracer::utils::default_runtime().submit(std::move(t)).get();
 }
 
+// Drains a Cursor to one positional DataFrame (columns keep no names). A large
+// max_rows pulls the whole in-memory source as a single morsel.
+CoroTask<DataFrame> drain_cursor(std::unique_ptr<Cursor> cur) {
+    DataFrame out;
+    while (auto m = co_await cur->next(1 << 20)) {
+        out.columns = std::move(m->columns);
+        out.names.assign(out.columns.size(), std::string());
+    }
+    co_return out;
+}
+
 CoroTask<std::pair<std::vector<std::int64_t>, DataFrame>> probe_stream(
     dftracer::utils::coro::AsyncGenerator<DataFrame> gen) {
     std::vector<std::int64_t> chunk_rows;
@@ -122,11 +133,17 @@ class RaggedCursor : public Cursor {
 
 class RaggedSource : public Source {
    public:
-    std::vector<std::string> names() const override { return {"a"}; }
-    std::unique_ptr<Cursor> open(
-        std::uint64_t /*memory_budget*/) const override {
+    dftracer::utils::dataframe::Schema schema() const override {
+        return {{"a"}, {}};
+    }
+    dftracer::utils::dataframe::ScanResult scan(
+        const dftracer::utils::dataframe::ScanRequest& req) const override {
         auto intern = std::make_shared<StringIntern>();
-        return std::make_unique<RaggedCursor>(std::move(intern));
+        dftracer::utils::dataframe::ScanResult r;
+        r.cursor = std::make_unique<RaggedCursor>(std::move(intern));
+        r.filters.assign(req.filters.size(),
+                         dftracer::utils::dataframe::Pushed::No);
+        return r;
     }
 };
 
@@ -915,6 +932,36 @@ TEST_SUITE("lazyframe") {
         // c = a+b in {11,22,33,44,55,66}; c > 50 -> rows 5,6 (c=55,66).
         CHECK(r.num_rows() == 2);
         CHECK(r.column("c").data<std::int64_t>()[0] == 55);
+    }
+
+    TEST_CASE(
+        "InMemorySource projection pushdown returns only wanted columns") {
+        using dftracer::utils::dataframe::InMemorySource;
+        using dftracer::utils::dataframe::Pushed;
+        using dftracer::utils::dataframe::ScanRequest;
+        using dftracer::utils::dataframe::ScanResult;
+
+        InMemorySource src(make_df());  // columns a, b
+        CHECK(src.names() == std::vector<std::string>{"a", "b"});
+
+        ScanRequest req;
+        req.projection = {"b"};
+        req.filters.push_back(col(0) > std::int64_t{1});
+        ScanResult r = src.scan(req);
+
+        // The whole-column engine applies the predicate, so the source leaves
+        // it.
+        REQUIRE(r.filters.size() == 1);
+        CHECK(r.filters[0] == Pushed::No);
+
+        DataFrame got = dftracer::utils::default_runtime()
+                            .submit(drain_cursor(std::move(r.cursor)))
+                            .get();
+        REQUIRE(got.num_columns() == 1);  // only "b" was harvested
+        REQUIRE(got.num_rows() == 6);
+        const std::int64_t* bv = got.columns[0].data<std::int64_t>();
+        CHECK(bv[0] == 10);
+        CHECK(bv[5] == 60);
     }
 
     TEST_CASE("streaming source with per-morsel schema reconciles by name") {
