@@ -610,9 +610,15 @@ coro::CoroTask<dataframe::DataFrame> View::collect_frame() const {
     // the GroupMap fold below (see view_agg_engine.h for the exact
     // qualifier); this is the default. GroupMap is the fallback for plans
     // not yet converged.
-    if (detail::agg_engine_eligible(*plan_))
+    if (detail::agg_engine_eligible(*plan_)) {
+        // materialize() persists into the ROLLUP CF. The engine returns
+        // columns, and a resolved-key result cannot be turned back into the
+        // raw-keyed GroupMap persist_rollup needs, so run the GroupMap path
+        // for the persist; the engine then serves from that fresh rollup.
+        if (plan_->materialize) co_await detail::run_collect(*plan_);
         co_return detail::apply_agg_post_ops(
             co_await detail::run_collect_via_engine(*plan_), *plan_);
+    }
     detail::GroupMap m = co_await detail::run_collect(*plan_);
     co_return detail::apply_agg_post_ops(
         detail::finalize_collect_batch(m, *plan_), *plan_);

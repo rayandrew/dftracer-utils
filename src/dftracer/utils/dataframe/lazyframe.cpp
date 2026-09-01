@@ -876,11 +876,12 @@ class GroupByCursor : public Cursor {
         built_ = true;
     }
 
-    // Advances the k-way merge, combining every run whose current group
-    // shares the smallest composite key into one output row per group, until
-    // max_rows rows are produced or every run is exhausted.
+    // Merge every run sharing the smallest composite key into `merged`;
+    // distinct keys arrive ascending, so groups append in order. One
+    // agg_finalize at the end (not per group + concat_columns) lets a nested
+    // Hist column, which concat_columns cannot rejoin, survive spill.
     std::optional<Morsel> merge_next(std::int64_t max_rows) {
-        std::vector<std::vector<Series>> pieces;
+        AggStatePtr merged = agg_new(specs_);
         std::int64_t produced = 0;
         while (produced < max_rows) {
             int best = -1;
@@ -898,29 +899,16 @@ class GroupByCursor : public Cursor {
             // iterations compare against.
             const AggStatePtr win_key = agg_extract_group(
                 runs_[static_cast<std::size_t>(best)]->state(), 0);
-            AggStatePtr acc = agg_new(specs_);
             for (auto& run : runs_) {
                 if (!run->valid()) continue;
                 if (agg_key_cmp(run->state(), 0, *win_key, 0) != 0) continue;
-                agg_merge(*acc, run->state());
+                agg_merge(*merged, run->state());
                 run->advance();
             }
-            DataFrame row = agg_finalize(*acc, keys_);
-            pieces.push_back(std::move(row.columns));
             ++produced;
         }
-        if (pieces.empty()) return std::nullopt;
-        Morsel out;
-        out.rows = produced;
-        const std::size_t ncols = pieces.front().size();
-        out.columns.reserve(ncols);
-        for (std::size_t c = 0; c < ncols; ++c) {
-            std::vector<const Series*> parts;
-            parts.reserve(pieces.size());
-            for (auto& pc : pieces) parts.push_back(&pc[c]);
-            out.columns.push_back(concat_columns(parts));
-        }
-        return out;
+        if (produced == 0) return std::nullopt;
+        return to_morsel(agg_finalize(*merged, keys_));
     }
 
     std::unique_ptr<Cursor> in_;

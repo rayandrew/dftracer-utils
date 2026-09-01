@@ -292,13 +292,9 @@ bool agg_engine_eligible(const ViewPlan& plan) {
     // below).
     for (const AggSpec& r : plan.numeric_arg_aggs)
         if (r.op == AggOp::Count) return false;
-    // Not yet converged: materialize writes a rollup CF; Hist emits a nested
-    // column the engine's spill cannot concat. Both stay on GroupMap for now.
-    if (plan.materialize) return false;
 
     for (const auto& spec : plan.agg) {
         if (!agg_op_engine_supported(spec.op)) return false;
-        if (spec.op == AggOp::Hist) return false;
         // The engine's Count is always the group's row count; the View's
         // Count(field) counts only the field-present rows, a different value.
         if (spec.op == AggOp::Count && !spec.field.empty()) return false;

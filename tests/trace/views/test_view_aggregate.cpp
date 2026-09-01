@@ -2463,5 +2463,70 @@ TEST_SUITE("View") {
             REQUIRE(legacy.names.size() == 2);
             check_match(legacy, engine, "name");
         }
+
+        // Engine Hist must match GroupMap bin for bin, including under forced
+        // spill - the k-way merge path that once could not concat the nested
+        // column. Rows are paired by cat text (not sort_by, which would take()
+        // the nested column) so a differing group order still compares right.
+        auto run_both_hist = [&](std::uint64_t mem_budget) {
+            auto build = [&] {
+                View v = View::from_file(gz, idx);
+                if (mem_budget) v = v.memory_budget(mem_budget);
+                return v.group_by({GroupKey::cat()})
+                    .agg({{AggOp::Count, "", "n"}, {AggOp::Hist, "dur", "h"}});
+            };
+            dataframe::DataFrame legacy = collect_groupmap(build());
+            dataframe::DataFrame engine = collect_engine(build());
+            REQUIRE(legacy.num_rows() == engine.num_rows());
+            for (std::int64_t lr = 0; lr < legacy.num_rows(); ++lr) {
+                const std::string cat = bstr(legacy, lr, "cat");
+                std::int64_t er = -1;
+                for (std::int64_t r = 0; r < engine.num_rows(); ++r)
+                    if (bstr(engine, r, "cat") == cat) {
+                        er = r;
+                        break;
+                    }
+                REQUIRE(er >= 0);
+                CHECK(bnum(legacy, lr, "n") ==
+                      doctest::Approx(bnum(engine, er, "n")));
+                const auto lb = hist_bins(legacy, lr, "h");
+                const auto eb = hist_bins(engine, er, "h");
+                REQUIRE(lb.size() == eb.size());
+                for (std::size_t i = 0; i < lb.size(); ++i) {
+                    CHECK(lb[i].lower == doctest::Approx(eb[i].lower));
+                    CHECK(lb[i].upper == doctest::Approx(eb[i].upper));
+                    CHECK(lb[i].count == eb[i].count);
+                }
+            }
+        };
+        SUBCASE("group_by cat + Hist") { run_both_hist(0); }
+        SUBCASE("group_by cat + Hist, forced spill") { run_both_hist(1); }
+
+        // materialize() through the engine's collect_frame path persists the
+        // rollup (the side effect this phase added), so a later coarser query
+        // is served by re-aggregating that rollup (find_subsuming_rollup) and
+        // must match a fresh pre-rollup scan. Distinct from the subcase above
+        // that materializes via the legacy .run() terminal.
+        SUBCASE(
+            "engine materialize() persists a rollup a coarser query reads") {
+            auto fine = [&] {
+                return View::from_file(gz, idx)
+                    .group_by({GroupKey::cat(), GroupKey::name()})
+                    .agg({{AggOp::Count, "", "n"},
+                          {AggOp::Sum, "dur", "sum_dur"}});
+            };
+            auto coarse = [&] {
+                return View::from_file(gz, idx)
+                    .group_by({GroupKey::cat()})
+                    .agg({{AggOp::Count, "", "n"},
+                          {AggOp::Sum, "dur", "sum_dur"}});
+            };
+            dataframe::DataFrame expect = collect_groupmap(coarse());
+            // The full View API routes through collect_frame, where the engine
+            // materialize persist lives (collect_engine bypasses it).
+            fine().materialize().collect().collect().get();
+            dataframe::DataFrame engine_served = collect_engine(coarse());
+            check_match(expect, engine_served, "cat");
+        }
     }
 }
