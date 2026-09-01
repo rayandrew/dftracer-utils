@@ -1917,6 +1917,15 @@ TEST_SUITE("View") {
         SUBCASE("group_by name, forced spill") {
             run_both(GroupKey::name(), "name", 128);
         }
+        // io_cat is a computed key: the event name maps to the dfanalyzer I/O
+        // category enum (read -> READ, write -> WRITE, open -> METADATA), so
+        // both paths must derive and label the same integer categories.
+        SUBCASE("group_by io_cat") {
+            run_both(GroupKey::io_cat(), "io_cat", 0);
+        }
+        SUBCASE("group_by io_cat, forced spill") {
+            run_both(GroupKey::io_cat(), "io_cat", 128);
+        }
 
         // The engine path must try the no-scan tier/rollup fast path before
         // scanning: materialize a finer (cat, name) rollup via the legacy
@@ -2012,6 +2021,14 @@ TEST_SUITE("View") {
             run_both_multi({{gz, idx}},
                            {GroupKey::name(), GroupKey::pid(), GroupKey::tid()},
                            {"name", "pid", "tid"}, 128);
+        }
+        SUBCASE("group_by (cat, io_cat)") {
+            run_both_multi({{gz, idx}}, {GroupKey::cat(), GroupKey::io_cat()},
+                           {"cat", "io_cat"}, 0);
+        }
+        SUBCASE("group_by (cat, io_cat), forced spill") {
+            run_both_multi({{gz, idx}}, {GroupKey::cat(), GroupKey::io_cat()},
+                           {"cat", "io_cat"}, 128);
         }
 
         // Two files, so fhash genuinely varies across groups (not just pid).
@@ -2161,6 +2178,42 @@ TEST_SUITE("View") {
             run_both_multi({{gz4, idx4}, {gz5, idx5}},
                            {GroupKey::file_path(), GroupKey::pid()},
                            {"file_path", "pid"}, 128);
+        }
+
+        // Rank is a resolved-like key harvested from PR metadata: each pid is
+        // declared once (pid -> rank), events group on pid, and both paths must
+        // relabel the pid groups to the same rank strings.
+        std::string gz6, idx6;
+        {
+            std::string pfw6 = env.get_dir() + "/agg_engine_rank.pfw";
+            std::ofstream ofs(pfw6);
+            ofs << R"({"ph":"M","name":"PR","cat":"dftracer","pid":100,"tid":0,"args":{"name":"rank","value":"0"}})"
+                << "\n"
+                << R"({"ph":"M","name":"PR","cat":"dftracer","pid":200,"tid":0,"args":{"name":"rank","value":"1"}})"
+                << "\n"
+                << R"({"ph":"M","name":"PR","cat":"dftracer","pid":300,"tid":0,"args":{"name":"rank","value":"2"}})"
+                << "\n";
+            const char* names[] = {"read", "write", "open"};
+            const int pids[] = {100, 200, 300};
+            int ts = 1000;
+            for (int i = 0; i < 90; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 3]
+                    << R"(","cat":"POSIX","pid":)" << pids[i % 3]
+                    << R"(,"tid":10,"ts":)" << ts << R"(,"dur":)"
+                    << (5 + (i % 17)) << R"(,"args":{}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz6 = pfw6 + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw6, gz6);
+            fs::remove(pfw6);
+            idx6 = determine_index_path(gz6, "");
+        }
+        SUBCASE("group_by rank") {
+            run_both_file(gz6, idx6, GroupKey::rank(), "rank", 0);
+        }
+        SUBCASE("group_by rank, forced spill") {
+            run_both_file(gz6, idx6, GroupKey::rank(), "rank", 128);
         }
 
         // time_bucket is a computed key too: the bucket column goes first

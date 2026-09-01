@@ -1,13 +1,18 @@
 #include <dftracer/utils/core/common/error.h>
+#include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
+#include <dftracer/utils/trace/views/aggfold.h>
+#include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/view_agg_engine.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_executor.h>
+#include <dftracer/utils/trace/views/view_scan.h>
 #include <dftracer/utils/trace/views/view_source.h>
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -130,14 +135,19 @@ dataframe::Series key_column_to_string(const dataframe::Series& col) {
         ErrorCode::INTERNAL, "agg engine: unexpected group-key column type");
 }
 
+// Keys whose group column is an opaque identifier the post-aggregation re-key
+// pass relabels to a human-readable name: fhash/hhash for resolved-name keys,
+// pid for Rank (the PR-metadata rank map keys on pid).
 bool key_is_resolved(GroupKey::Kind kind) {
     return kind == GroupKey::Kind::FilePath ||
-           kind == GroupKey::Kind::FileName || kind == GroupKey::Kind::HostName;
+           kind == GroupKey::Kind::FileName ||
+           kind == GroupKey::Kind::HostName || kind == GroupKey::Kind::Rank;
 }
 
 // The raw scan/group-by field a key groups on: fhash/hhash for a resolved
 // name key (the fold groups on the hash, a bijection, and relabels to the
-// resolved name only after aggregation), else the key's own column.
+// resolved name only after aggregation), pid for Rank (the rank map keys on
+// pid, matching agg_fold.h's append_group_dim), else the key's own column.
 std::string key_group_field(const GroupKey& gk) {
     switch (gk.kind) {
         case GroupKey::Kind::FilePath:
@@ -145,6 +155,8 @@ std::string key_group_field(const GroupKey& gk) {
             return "fhash";
         case GroupKey::Kind::HostName:
             return "hhash";
+        case GroupKey::Kind::Rank:
+            return "pid";
         default:
             return group_col_name(gk);
     }
@@ -164,6 +176,36 @@ dataframe::Series resolve_key_column(const dataframe::Series& hashes,
     return dataframe::Series::strings(vals);
 }
 
+// Rank is a query-time side channel: the pid -> rank map lives in PR metadata
+// records, not the index or the event columns the engine streams. Harvest it
+// with the same AggFold logic the GroupMap path uses (identical records over
+// the same trace, so the map is byte-identical) and feed it to the shared
+// resolver the post-aggregation re-key reads.
+coro::CoroTask<void> harvest_ranks(const ViewPlan& plan) {
+    ViewPlan hp = plan;
+    hp.group_by.assign(1, GroupKey::rank());
+    hp.agg.clear();
+    hp.numeric_arg_aggs.clear();
+    hp.auto_numeric_metrics = false;
+    hp.time_bucket_us = 0;
+    hp.bucket_origin_us = 0;
+    hp.bucket_origin_min = false;
+    hp.materialize = false;
+    hp.sort_col.clear();
+    hp.topk_col.clear();
+    hp.offset = 0;
+    hp.limit = 0;
+    hp.select.clear();
+    hp.schema.reset();
+    ensure_schema(hp);
+    ViewDefinition vdef = make_vdef(hp, /*for_aggregation=*/true);
+    dftracer::utils::StringIntern intern;
+    AggFold agg(hp, intern);
+    std::array<Fold*, 1> folds{&agg};
+    co_await fuse(hp, vdef, folds, intern);
+    apply_ranks(plan, agg.ranks());
+}
+
 }  // namespace
 
 bool agg_engine_eligible(const ViewPlan& plan) {
@@ -179,10 +221,10 @@ bool agg_engine_eligible(const ViewPlan& plan) {
             case GroupKey::Kind::FilePath:
             case GroupKey::Kind::FileName:
             case GroupKey::Kind::HostName:
-                break;
             case GroupKey::Kind::IoCat:
-            case GroupKey::Kind::AccPat:
             case GroupKey::Kind::Rank:
+                break;
+            case GroupKey::Kind::AccPat:
             case GroupKey::Kind::Arg:
             case GroupKey::Kind::Field:
                 return false;
@@ -220,6 +262,13 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         if (co_await try_serve_aggregate_no_scan(plan, served))
             co_return finalize_collect_batch(served, plan);
     }
+
+    // A Rank key groups on pid and relabels to the PR-metadata rank; harvest
+    // that map into the resolver before the scan, mirroring run_scan_aggregate.
+    if (std::any_of(
+            plan.group_by.begin(), plan.group_by.end(),
+            [](const GroupKey& gk) { return gk.kind == GroupKey::Kind::Rank; }))
+        co_await harvest_ranks(plan);
 
     const bool has_bucket = plan.time_bucket_us > 0;
 

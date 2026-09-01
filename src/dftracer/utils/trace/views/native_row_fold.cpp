@@ -1,6 +1,7 @@
 #include <dftracer/utils/core/common/field_ref.h>
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/dataframe/types.h>
+#include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/view_resolver.h>
 
@@ -27,6 +28,10 @@ bool is_top_level(std::string_view f) {
 // fhash/hhash are group dimensions parsed into dedicated interned-id fields
 // (not `ev.args`), so the row builder resolves them the same way group_by does.
 bool is_hash_field(std::string_view f) { return f == "fhash" || f == "hhash"; }
+
+// io_cat is a computed dimension (dfanalyzer I/O category), derived per row
+// from the event name, not a stored field.
+bool is_iocat_field(std::string_view f) { return f == "io_cat"; }
 
 // An Arrow-layout validity bitmap (1 = valid) from a per-row present flag;
 // empty (no nulls) when every row is present.
@@ -192,6 +197,25 @@ df::Series hash_column(const std::vector<FoldEvent>& evs, std::string_view f,
                         : str_id_column(evs, &FoldEvent::hhash_id, intern);
 }
 
+// The dfanalyzer I/O category enum value per event, from the event name. Kept
+// an Int64 (the enum's integer, matching the GroupMap fold's to_chars_i64) so
+// the group-by collapses and renders it identically to a numeric key.
+df::Series iocat_column(const std::vector<FoldEvent>& evs,
+                        const dftracer::utils::StringIntern& intern) {
+    std::vector<std::int64_t> vals;
+    vals.reserve(evs.size());
+    for (const auto& ev : evs) {
+        const std::string_view name =
+            ev.name_id == dftracer::utils::StringIntern::NO_ID
+                ? std::string_view{}
+                : intern.resolve(ev.name_id);
+        vals.push_back(static_cast<std::int64_t>(
+            static_cast<int>(trace::internal::io_category(name))));
+    }
+    return df::Series::flat(df::TypeId::Int64, vals.data(),
+                            static_cast<std::int64_t>(vals.size()));
+}
+
 // A resolved.* / r.* virtual field maps to a hash field resolved through the
 // index name tables (fpath <- fhash, hostname/host <- hhash).
 enum class ResolvedKind { None, File, Host };
@@ -267,6 +291,7 @@ bool select_needs_resolver(const std::vector<std::string>& select) {
 std::string canonical_row_column_name(std::string_view sel) {
     if (is_top_level(sel)) return std::string(sel);
     if (resolved_kind(sel) != ResolvedKind::None) return std::string(sel);
+    if (is_iocat_field(sel)) return std::string(sel);
     const std::string_view key = strip_args_prefix(sel);
     if (is_hash_field(key)) return std::string(key);
     return std::string(dftracer::utils::ARGS_PREFIX) + std::string(key);
@@ -327,6 +352,8 @@ dataframe::DataFrame build_row_frame(
                 out.columns.push_back(
                     resolver ? resolved_column(evs, rk, *intern_, *resolver)
                              : null_string_column(evs.size()));
+            } else if (is_iocat_field(sel)) {
+                out.columns.push_back(iocat_column(evs, *intern_));
             } else if (const std::string_view key = strip_args_prefix(sel);
                        is_hash_field(key)) {
                 out.columns.push_back(hash_column(evs, key, *intern_));
