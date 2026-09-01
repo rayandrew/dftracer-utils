@@ -378,7 +378,7 @@ std::vector<DataFrame> hash_partition(const DataFrame& b,
     constexpr std::int64_t GRAIN = 1 << 15;
     auto compute_bucket = [&](std::int64_t b0, std::int64_t e0) {
         for (std::int64_t i = b0; i < e0; ++i) {
-            std::uint64_t h = 1469598103934665603ULL;
+            std::uint64_t h = dftracer::utils::hash::FNV1A_OFFSET_BASIS_LEGACY;
             for (const Series* c : key_cols)
                 h = splitmix64(h ^ hash_cell(*c, i));
             bucket_of[static_cast<std::size_t>(i)] = static_cast<std::int32_t>(

@@ -6,6 +6,7 @@
 // extraction and containment-depth assignment. Internal to the server.
 
 #include <ankerl/unordered_dense.h>
+#include <dftracer/utils/core/common/hash/constants.h>
 #include <dftracer/utils/server/viz_internal.h>
 #include <dftracer/utils/trace/aggregators/reserved_args.h>
 #include <simdjson.h>
@@ -37,10 +38,10 @@ struct DensityKey {
 
 struct DensityKeyHash {
     std::uint64_t operator()(const DensityKey& k) const noexcept {
-        std::uint64_t h = 1469598103934665603ULL;
+        std::uint64_t h = dftracer::utils::hash::FNV1A_OFFSET_BASIS_LEGACY;
         auto mix = [&](std::uint64_t v) {
             h ^= v;
-            h *= 1099511628211ULL;
+            h *= dftracer::utils::hash::FNV1A_PRIME;
         };
         mix(static_cast<std::uint64_t>(k.pid));
         mix(static_cast<std::uint64_t>(k.tid));
@@ -343,9 +344,11 @@ static std::vector<std::uint32_t> assign_view_depths(
     };
     struct LaneHash {
         std::uint64_t operator()(const LaneKey& k) const noexcept {
-            std::uint64_t h = 1469598103934665603ULL;
-            h = (h ^ static_cast<std::uint64_t>(k.pid)) * 1099511628211ULL;
-            h = (h ^ static_cast<std::uint64_t>(k.tid)) * 1099511628211ULL;
+            std::uint64_t h = dftracer::utils::hash::FNV1A_OFFSET_BASIS_LEGACY;
+            h = (h ^ static_cast<std::uint64_t>(k.pid)) *
+                dftracer::utils::hash::FNV1A_PRIME;
+            h = (h ^ static_cast<std::uint64_t>(k.tid)) *
+                dftracer::utils::hash::FNV1A_PRIME;
             return h;
         }
     };

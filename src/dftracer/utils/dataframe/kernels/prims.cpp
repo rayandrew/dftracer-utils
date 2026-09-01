@@ -4,6 +4,7 @@
 // stay in agreement with the JIT/plugin path (plugins/prims.h mirrors them).
 
 #include <dftracer/utils/core/common/bits.h>
+#include <dftracer/utils/core/common/hash/constants.h>
 #include <dftracer/utils/core/common/hash/splitmix64.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/buffer.h>
@@ -82,9 +83,9 @@ void PrimImpl(std::int32_t op, const std::uint64_t* a, std::int64_t* out_i64,
                     dftracer::utils::bits::ctz_u64(a[i]));
             break;
         case Prim::Mix64: {
-            const auto k1 = hn::Set(d, 0x9e3779b97f4a7c15ULL);
-            const auto m1 = hn::Set(d, 0xbf58476d1ce4e5b9ULL);
-            const auto m2 = hn::Set(d, 0x94d049bb133111ebULL);
+            const auto k1 = hn::Set(d, dftracer::utils::hash::GOLDEN_RATIO);
+            const auto m1 = hn::Set(d, dftracer::utils::hash::SPLITMIX64_MUL1);
+            const auto m2 = hn::Set(d, dftracer::utils::hash::SPLITMIX64_MUL2);
             for (; i + lanes <= n; i += lanes) {
                 auto x = hn::Add(hn::LoadU(d, a + i), k1);
                 x = hn::Mul(hn::Xor(x, hn::ShiftRight<30>(x)), m1);

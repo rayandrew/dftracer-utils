@@ -1,6 +1,7 @@
 #ifndef DFTRACER_UTILS_PLUGINS_FOLD_ADAPTER_H
 #define DFTRACER_UTILS_PLUGINS_FOLD_ADAPTER_H
 
+#include <dftracer/utils/core/common/hash/constants.h>
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/plugins/abi.h>
@@ -51,10 +52,10 @@ struct PluginTraceWriter {
 struct MapAccum {
     struct KeyHash {
         static std::size_t hash_range(const std::int64_t* p, std::size_t n) {
-            std::uint64_t h = 1469598103934665603ull;
+            std::uint64_t h = dftracer::utils::hash::FNV1A_OFFSET_BASIS_LEGACY;
             for (std::size_t i = 0; i < n; ++i) {
                 h ^= static_cast<std::uint64_t>(p[i]);
-                h *= 1099511628211ull;
+                h *= dftracer::utils::hash::FNV1A_PRIME;
             }
             return static_cast<std::size_t>(h);
         }
