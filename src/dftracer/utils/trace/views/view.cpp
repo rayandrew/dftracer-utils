@@ -225,6 +225,11 @@ std::vector<View::ColumnInfo> View::schema() const {
     return out;
 }
 
+TimeMetric View::time_metric() const {
+    if (plan_->files.empty()) return TimeMetric::US;
+    return trace::read_time_metric(plan_->files.front().file_path);
+}
+
 View View::filter(Query q) const {
     auto next = clone(plan_);
     if (next->query) {

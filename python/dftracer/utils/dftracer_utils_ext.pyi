@@ -996,6 +996,11 @@ class _TraceViewer:
         scan."""
         ...
 
+    def time_metric(self) -> str:
+        """The trace's native time unit ("us"/"ns"/"ms"/"sec") from the first
+        file's CM record. Head-read only, no scan; "us" with no files."""
+        ...
+
     def stream(
         self,
         batch_size: int = ...,

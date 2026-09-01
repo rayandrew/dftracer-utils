@@ -655,6 +655,11 @@ class View {
     /// column from a pre-v12 index that stored no type reads as "string".
     std::vector<ColumnInfo> schema() const;
 
+    /// The trace's native time unit, from the CM metadata record: a head-read
+    /// of the first file only, no scan. US when the view has no files or the
+    /// first file carries no CM record.
+    TimeMetric time_metric() const;
+
     /// Run group_by + agg, returning a LazyFrame over the deferred scan. No
     /// agg counts per group; no group_by folds the whole set into one row.
     /// Builds the plan only; the scan runs on the LazyFrame's collect().

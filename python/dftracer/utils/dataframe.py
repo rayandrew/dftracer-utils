@@ -1022,6 +1022,12 @@ class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
         ``"float64"`` / ``"string"``). No trace scan."""
         return dict(self._native.schema())
 
+    def time_metric(self) -> str:
+        """The trace's native time unit (``"us"``/``"ns"``/``"ms"``/``"sec"``)
+        from the first file's CM record. Head-read only, no scan; ``"us"`` when
+        the viewer has no files."""
+        return str(self._native.time_metric())
+
     def call_tree(
         self,
         partition: Sequence[str] = ("pid", "tid"),

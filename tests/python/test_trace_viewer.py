@@ -63,6 +63,39 @@ class TestTraceViewer:
             # One string column of the distinct cat values, joined by \x1e.
             assert set(df["set_cat"].iloc[0].split("\x1e")) == {"POSIX", "STDIO"}
 
+    def test_time_metric_reads_cm_record(self):
+        with Environment(lines=1) as env:
+            rows = [
+                {
+                    "name": "CM",
+                    "ph": "M",
+                    "cat": "dftracer",
+                    "pid": 0,
+                    "tid": 0,
+                    "args": {"name": "time_metric", "value": "NS"},
+                },
+            ]
+            for i in range(10):
+                rows.append(
+                    {
+                        "ph": "X",
+                        "name": "read",
+                        "cat": "POSIX",
+                        "pid": 1,
+                        "tid": 10,
+                        "ts": 1000 + i * 100,
+                        "dur": 5,
+                        "args": {},
+                    }
+                )
+            gz = _make_trace(env, "time_metric.pfw.gz", rows)
+            assert TraceViewer(gz).time_metric() == "ns"
+
+    def test_time_metric_defaults_to_us(self):
+        with Environment(lines=200) as env:
+            gz = _indexed(env)
+            assert TraceViewer(gz).time_metric() == "us"
+
     def test_time_bucket_normalize_alignment(self):
         with Environment(lines=1) as env:
             # Events start at ts=5000 (arbitrary absolute time); width 700 does

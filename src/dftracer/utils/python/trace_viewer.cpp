@@ -43,6 +43,7 @@
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -981,6 +982,18 @@ PyObject* tv_schema(TraceViewerObject* self, PyObject*) {
         Py_DECREF(val);
     }
     return dict;
+}
+
+// time_metric() -> str: the trace's native time unit ("us"/"ns"/"ms"/"sec")
+// from the first file's CM record. Head-read only, no scan; "us" with no files.
+PyObject* tv_time_metric(TraceViewerObject* self, PyObject*) {
+    auto files = extract_files(self);
+    const dftracer::utils::trace::TimeMetric m =
+        files.empty() ? dftracer::utils::trace::TimeMetric::US
+                      : dftracer::utils::trace::read_time_metric(files[0]);
+    std::string s(dftracer::utils::trace::time_metric_to_string(m));
+    for (char& c : s) c = static_cast<char>(std::tolower(c));
+    return PyUnicode_FromString(s.c_str());
 }
 
 // containment(partition, ts, dur, name) -> (call_tree_df, flamegraph_df) from
@@ -2189,6 +2202,9 @@ static PyMethodDef tv_methods[] = {
      "List the columns discoverable from the index (no trace scan)."},
     {"schema", DFTU_PYCFUNCTION(tv_schema), METH_NOARGS,
      "Map each column to its type (no trace scan)."},
+    {"time_metric", DFTU_PYCFUNCTION(tv_time_metric), METH_NOARGS,
+     "The trace's native time unit ('us'/'ns'/'ms'/'sec') from the first "
+     "file's CM record (head-read only, no scan)."},
     {"collect", DFTU_PYCFUNCTION(tv_collect), METH_NOARGS,
      "Build the group_by+agg plan and return a LazyFrame; nothing scans "
      "until you call .collect() (-> DataFrame) or .to_arrow()/.to_pandas() "
