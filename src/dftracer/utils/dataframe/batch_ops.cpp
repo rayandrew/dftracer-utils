@@ -56,6 +56,7 @@ AggOp agg_op_of(const std::string& op) {
     if (op == "concurrency") return AggOp::Concurrency;
     if (op == "utilization") return AggOp::Utilization;
     if (op == "active") return AggOp::Active;
+    if (op == "count_valid") return AggOp::CountValid;
     throw std::out_of_range("group_by: unknown aggregate op " + op);
 }
 
@@ -103,6 +104,8 @@ const char* to_string(Agg agg) noexcept {
             return "utilization";
         case Agg::Active:
             return "active";
+        case Agg::CountValid:
+            return "count_valid";
     }
     return "count";
 }
@@ -128,6 +131,7 @@ Agg agg_from_string(std::string_view name) {
     if (name == "concurrency") return Agg::Concurrency;
     if (name == "utilization") return Agg::Utilization;
     if (name == "active") return Agg::Active;
+    if (name == "count_valid") return Agg::CountValid;
     throw std::out_of_range("agg_from_string: unknown aggregate op " +
                             std::string(name));
 }

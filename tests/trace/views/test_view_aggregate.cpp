@@ -2537,6 +2537,173 @@ TEST_SUITE("View") {
             dataframe::DataFrame engine_served = collect_engine(coarse());
             check_match(expect, engine_served, "cat");
         }
+
+        auto with_tf = [](GroupKey g, GroupKey::Transform t,
+                          std::vector<std::string> a = {}) {
+            g.transform = t;
+            g.transform_args = std::move(a);
+            return g;
+        };
+
+        // Resolved-name key transforms: dirname/basename apply to the resolved
+        // path (gz4 -> /data/dirA/a.h5, gz5 -> /data/dirB/b.h5), so both paths
+        // must resolve then transform to the same key text.
+        SUBCASE("group_by file_path + basename transform") {
+            run_both_multi(
+                {{gz4, idx4}, {gz5, idx5}},
+                {with_tf(GroupKey::file_path(), GroupKey::Transform::Basename)},
+                {"file_path"}, 0);
+        }
+        SUBCASE("group_by file_path + dirname transform") {
+            run_both_multi(
+                {{gz4, idx4}, {gz5, idx5}},
+                {with_tf(GroupKey::file_path(), GroupKey::Transform::Dirname)},
+                {"file_path"}, 0);
+        }
+        SUBCASE("group_by file_path + basename transform, forced spill") {
+            run_both_multi(
+                {{gz4, idx4}, {gz5, idx5}},
+                {with_tf(GroupKey::file_path(), GroupKey::Transform::Basename)},
+                {"file_path"}, 128);
+        }
+
+        // A dirname transform coarsens: two distinct file hashes in the same
+        // directory fold to one key, so both paths must MERGE their events into
+        // a single group (a relabel-after-aggregate would leave two rows).
+        std::string gz8, idx8;
+        {
+            std::string pfw8 = env.get_dir() + "/agg_engine_dir.pfw";
+            std::ofstream ofs(pfw8);
+            ofs << R"({"name":"FH","cat":"dftracer","pid":1,"tid":1,"ph":"M","args":{"name":"/data/shared/f1.h5","value":"FS1"}})"
+                << "\n"
+                << R"({"name":"FH","cat":"dftracer","pid":1,"tid":1,"ph":"M","args":{"name":"/data/shared/f2.h5","value":"FS2"}})"
+                << "\n";
+            const char* fhs[] = {"FS1", "FS2"};
+            const char* names[] = {"read", "write", "open"};
+            int ts = 1000;
+            for (int i = 0; i < 40; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 3]
+                    << R"(","cat":"POSIX","pid":1,"tid":10,"ts":)" << ts
+                    << R"(,"dur":)" << (5 + (i % 11)) << R"(,"args":{"fhash":")"
+                    << fhs[i % 2] << R"("}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz8 = pfw8 + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw8, gz8);
+            fs::remove(pfw8);
+            idx8 = determine_index_path(gz8, "");
+        }
+        SUBCASE(
+            "group_by file_path + dirname transform merges same-dir files") {
+            run_both_file(
+                gz8, idx8,
+                with_tf(GroupKey::file_path(), GroupKey::Transform::Dirname),
+                "file_path", 0);
+        }
+        SUBCASE("group_by file_path + dirname merge, forced spill") {
+            run_both_file(
+                gz8, idx8,
+                with_tf(GroupKey::file_path(), GroupKey::Transform::Dirname),
+                "file_path", 128);
+        }
+
+        // A bucket transform maps a value to the first matching substring
+        // (empty when none matches) over the lowercased cat key; "o" matches
+        // both "posix" and "stdio", so gz3's four mixed-case cats coarsen to a
+        // single "o" group that both paths must merge identically.
+        SUBCASE("group_by cat + bucket transform coarsens to one group") {
+            run_both_file(
+                gz3, idx3,
+                with_tf(GroupKey::cat(), GroupKey::Transform::Bucket, {"o"}),
+                "cat", 0);
+        }
+        SUBCASE("group_by cat + bucket transform, forced spill") {
+            run_both_file(gz3, idx3,
+                          with_tf(GroupKey::cat(), GroupKey::Transform::Bucket,
+                                  {"posix"}),
+                          "cat", 128);
+        }
+
+        // Count(field) counts only field-present rows (gz7: read carries x,
+        // write carries y), unlike Count() which is the group row count.
+        SUBCASE("group_by name + Count over a sometimes-absent field") {
+            auto build = [&] {
+                return View::from_file(gz7, idx7)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Count, "", "n"},
+                          {AggOp::Count, "x", "n_x"},
+                          {AggOp::Count, "y", "n_y"}});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+        SUBCASE("group_by name + Count(field), forced spill") {
+            auto build = [&] {
+                return View::from_file(gz7, idx7)
+                    .memory_budget(128)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Count, "", "n"}, {AggOp::Count, "x", "n_x"}});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+        // dyn Count is the same per-arg present count (Float64 in both paths).
+        SUBCASE("group_by name + dyn Count/Sum") {
+            auto build = [&] {
+                return View::from_file(gz7, idx7)
+                    .group_by({GroupKey::name()})
+                    .agg_numeric_args(
+                        {AggSpec(AggOp::Count), AggSpec(AggOp::Sum)});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+
+        // Aggregates over an arbitrary arg value field. `v` is present in every
+        // group so Sum keeps its exact integer domain in both paths; Mean is
+        // Float64 and ArgMax reprs the arg's raw value.
+        std::string gz9, idx9;
+        {
+            std::string pfw9 = env.get_dir() + "/agg_engine_argval.pfw";
+            std::ofstream ofs(pfw9);
+            const char* names[] = {"read", "write"};
+            int ts = 1000;
+            for (int i = 0; i < 60; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 2]
+                    << R"(","cat":"POSIX","pid":1,"tid":10,"ts":)" << ts
+                    << R"(,"dur":)" << (5 + (i % 13)) << R"(,"args":{"v":)"
+                    << (i % 7) << R"(}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz9 = pfw9 + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw9, gz9);
+            fs::remove(pfw9);
+            idx9 = determine_index_path(gz9, "");
+        }
+        SUBCASE("group_by name + Sum/Mean/ArgMax over an arg value field") {
+            auto build = [&] {
+                return View::from_file(gz9, idx9)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Sum, "v", "sum_v"},
+                          {AggOp::Mean, "v", "mean_v"},
+                          {AggOp::ArgMax, "v", "top_v", "dur"}});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+        SUBCASE("group_by name + arg value-field aggs, forced spill") {
+            auto build = [&] {
+                return View::from_file(gz9, idx9)
+                    .memory_budget(128)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Sum, "v", "sum_v"},
+                          {AggOp::Mean, "v", "mean_v"}});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
     }
 
     TEST_CASE("View - occupancy engine path matches the GroupMap path") {

@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <iterator>
 #include <optional>
@@ -27,14 +28,43 @@ namespace dataframe = dftracer::utils::dataframe;
 
 namespace {
 
-// Value/by fields eligible for an agg spec: the always-present top-level
-// event fields. ViewSource now fixes the streamed schema to the raw scan's
-// select list (see view_source.cpp), so an arg/fhash/hhash value column is no
-// longer unsafe to reference this way, but widening agg targets past the
-// stable set is a later phase; this phase only widens group KEYS.
+// The frame column name the raw scan produces for `field` fed as a value/by
+// column: a top-level field keeps its name, an arg field becomes args.<name>
+// (canonical_row_column_name), so the group_by references the column the scan
+// emits. Empty field stays empty (Count()'s neutral value column).
+std::string value_col_name(const std::string& field) {
+    return field.empty() ? std::string() : canonical_row_column_name(field);
+}
+
+// The always-present top-level numeric fields (plus name/cat). A stable field's
+// scanned column carries a value in every group, so its accumulation domain is
+// uniform; a possibly-absent arg field is not.
 bool is_stable_field(const std::string& f) {
     return f.empty() || f == "name" || f == "cat" || f == "pid" || f == "tid" ||
            f == "ts" || f == "dur";
+}
+
+// A field agg_field_typed_t/agg_field_t derives instead of reading straight
+// (size = io-cat byte size, te = ts+dur). A plain arg/top-level column cannot
+// reproduce these, so an agg over one stays on the GroupMap path.
+bool is_derived_field(const std::string& f) { return f == "size" || f == "te"; }
+
+// A single-segment field name (no nested dot/bracket path). The GroupMap fold
+// resolves a nested value field (args.n.v) through number_typed, but the raw
+// scan feeds a value column only by a flat top-level or arg name, so a nested
+// value/by field stays on the GroupMap path.
+bool is_simple_field(const std::string& f) {
+    return f.find('.') == std::string::npos && f.find('[') == std::string::npos;
+}
+
+// Sum/Min/Max/SumSq keep an integer field's exact domain, but the GroupMap path
+// demotes a group with zero present values to the Float64 default, so the whole
+// column widens to Float64 when a field is absent from any group. The engine's
+// per-column domain cannot reproduce that data-dependent widening, so a domain-
+// sensitive reduction stays on the stable (always-present) fields.
+bool is_domain_sensitive(AggOp op) {
+    return op == AggOp::Sum || op == AggOp::Min || op == AggOp::Max ||
+           op == AggOp::SumSq;
 }
 
 bool agg_op_engine_supported(AggOp op) {
@@ -111,15 +141,23 @@ dataframe::GroupAgg to_group_agg(const AggSpec& spec) {
     g.out = agg_col_name(spec);
     g.param = spec.q;
     if (spec.op == AggOp::ArgMax) {
-        g.column = spec.field;
-        g.by = spec.by;
+        g.column = value_col_name(spec.field);
+        g.by = value_col_name(spec.by);
     } else if (is_occupancy_op(spec.op)) {
         // Occupancy has no value field; it reads the raw (ts, dur) pair, with
         // the endpoint-snap tolerance carried in param.
         g.column = "ts";
         g.by = "dur";
-    } else if (spec.op != AggOp::Count) {
-        g.column = spec.field;
+    } else if (spec.op == AggOp::Count) {
+        // Count() is the group row count; Count(field) counts only the
+        // field-present rows, which the engine's CountValid reads from the
+        // field's per-group stat (FieldStat::n).
+        if (!spec.field.empty()) {
+            g.op = dataframe::Agg::CountValid;
+            g.column = value_col_name(spec.field);
+        }
+    } else {
+        g.column = value_col_name(spec.field);
     }
     return g;
 }
@@ -190,6 +228,41 @@ dataframe::Series resolve_key_column(const dataframe::Series& hashes,
         vals[static_cast<std::size_t>(i)] = resolve_group_value(
             resolver, kind, std::string(hashes.string_at(i)));
     return dataframe::Series::strings(vals);
+}
+
+// One raw group-key column cell rendered exactly as the GroupMap fold builds
+// its key: a String cell verbatim, an integer cell as decimal, a null cell as
+// the empty string (append_arg emits nothing for a missing value).
+std::string cell_to_key_string(const dataframe::Series& col, std::int64_t r) {
+    using dataframe::TypeId;
+    if (col.is_null(r)) return std::string();
+    switch (col.type()) {
+        case TypeId::String:
+            return std::string(col.string_at(r));
+        case TypeId::Int64:
+            return std::to_string(col.data<std::int64_t>()[r]);
+        case TypeId::Uint64:
+            return std::to_string(col.data<std::uint64_t>()[r]);
+        default:
+            throw DFTUtilsException::cat(
+                ErrorCode::INTERNAL,
+                "agg engine: unexpected transform key-column type");
+    }
+}
+
+// The pre-transform value of group key `gk` for one raw cell, matching the
+// GroupMap path (resolve_group_keys: resolve_group_value after the fold's key
+// rendering). A resolved-name key resolves its hash (or keeps the raw hash when
+// no resolver is loaded); cat is lowercased like agg_fold.h's append_group_dim;
+// the rest keep their rendered value.
+std::string transform_key_base(const GroupKey& gk, std::string raw,
+                               const GroupResolver* resolver) {
+    if (key_is_resolved(gk.kind))
+        return resolver ? resolve_group_value(*resolver, gk.kind, raw) : raw;
+    if (gk.kind == GroupKey::Kind::Cat)
+        for (char& ch : raw)
+            ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+    return raw;
 }
 
 // Rank is a query-time side channel: the pid -> rank map lives in PR metadata
@@ -269,45 +342,30 @@ coro::CoroTask<std::vector<std::string>> harvest_numeric_arg_names(
 
 bool agg_engine_eligible(const ViewPlan& plan) {
     if (plan.group_by.empty() && plan.time_bucket_us == 0) return false;
-    for (const GroupKey& gk : plan.group_by) {
-        switch (gk.kind) {
-            case GroupKey::Kind::Name:
-            case GroupKey::Kind::Pid:
-            case GroupKey::Kind::Tid:
-            case GroupKey::Kind::Fhash:
-            case GroupKey::Kind::Hhash:
-            case GroupKey::Kind::Cat:
-            case GroupKey::Kind::FilePath:
-            case GroupKey::Kind::FileName:
-            case GroupKey::Kind::HostName:
-            case GroupKey::Kind::IoCat:
-            case GroupKey::Kind::AccPat:
-            case GroupKey::Kind::Rank:
-            case GroupKey::Kind::Arg:
-            case GroupKey::Kind::Field:
-                break;
-        }
-        if (gk.transform != GroupKey::Transform::None) return false;
-    }
-    // The dyn (auto_numeric_metrics) path feeds each discovered numeric arg as
-    // a Float64 value column, so every reduction maps to an engine Agg EXCEPT
-    // Count: the engine's Count is the group's row count, while the dyn Count
-    // is the arg-present count (FieldStat::n), which the engine has no agg for.
-    // A dyn Count therefore stays on GroupMap (same reason as Count(field)
-    // below).
+    // Every GroupKey::Kind and every transform is now handled by
+    // run_collect_via_engine (a resolved/computed/arg key folds on its scanned
+    // column; a transform materializes its coarsened key pre-group), so the
+    // only remaining gates are on the aggregate specs below.
     for (const AggSpec& r : plan.numeric_arg_aggs)
-        if (r.op == AggOp::Count) return false;
+        if (is_derived_field(r.field)) return false;
 
     for (const auto& spec : plan.agg) {
         if (!agg_op_engine_supported(spec.op)) return false;
-        // The engine's Count is always the group's row count; the View's
-        // Count(field) counts only the field-present rows, a different value.
-        if (spec.op == AggOp::Count && !spec.field.empty()) return false;
         // Occupancy reads raw ts/dur; under a non-identity time_scale the
         // GroupMap path splits raw-occupancy from scaled value aggs per field,
         // which the single-scan engine path cannot reproduce, so defer to it.
         if (is_occupancy_op(spec.op) && plan.time_scale != 1.0) return false;
-        if (!is_stable_field(spec.field) || !is_stable_field(spec.by))
+        // size/te are derived at fold time (agg_field_typed_t); a plain scanned
+        // column cannot reproduce them, so an agg over one stays on GroupMap.
+        if (is_derived_field(spec.field) || is_derived_field(spec.by))
+            return false;
+        // A domain-sensitive reduction over a possibly-absent arg field cannot
+        // match GroupMap's per-group integer/float demotion (see above).
+        if (is_domain_sensitive(spec.op) && !is_stable_field(spec.field))
+            return false;
+        // A nested value/by path is resolved by the fold but not by the flat
+        // value-column scan, so it stays on the GroupMap path.
+        if (!is_simple_field(spec.field) || !is_simple_field(spec.by))
             return false;
     }
     return true;
@@ -407,7 +465,11 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     }
     for (const DynAgg& d : dyn_aggs) {
         dataframe::GroupAgg g;
-        g.op = to_engine_agg(d.op);
+        // A dyn Count is the arg-present count (FieldStat::n), not the group's
+        // row count, so it maps to CountValid over the sentinel column; the
+        // Int64 result is cast to Float64 below to match the dyn column type.
+        g.op = d.op == AggOp::Count ? dataframe::Agg::CountValid
+                                    : to_engine_agg(d.op);
         g.out = d.out;
         g.param = d.q;
         g.column = d.column;
@@ -476,6 +538,49 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         dataframe::LazyFrame::scan(std::make_shared<ViewSource>(raw))
             .memory_budget(plan.memory_budget);
 
+    // Group-key transforms (dirname/basename/lower/bucket) coarsen the key:
+    // many raw values fold to one, so they must be applied BEFORE the group-by,
+    // not by relabeling the finalized result (which cannot re-merge). The
+    // engine has no dirname/basename/bucket string expr, so materialize the raw
+    // scan and build each transformed key column in C++, matching
+    // resolve_group_keys (resolve_group_value then apply_group_transform) byte
+    // for byte, then group over the in-memory frame.
+    std::vector<char> key_transformed(plan.group_by.size(), 0);
+    std::vector<std::string> tf_col(plan.group_by.size());
+    const bool needs_transform = std::any_of(
+        plan.group_by.begin(), plan.group_by.end(), [](const GroupKey& gk) {
+            return gk.transform != GroupKey::Transform::None;
+        });
+    if (needs_transform) {
+        dataframe::DataFrame frame = co_await lf.collect();
+        const bool wants_resolver = std::any_of(
+            plan.group_by.begin(), plan.group_by.end(), [](const GroupKey& gk) {
+                return gk.transform != GroupKey::Transform::None &&
+                       key_is_resolved(gk.kind);
+            });
+        const GroupResolver* resolver =
+            wants_resolver ? ensure_resolver(plan) : nullptr;
+        const std::int64_t n = frame.num_rows();
+        for (std::size_t i = 0; i < plan.group_by.size(); ++i) {
+            const GroupKey& gk = plan.group_by[i];
+            if (gk.transform == GroupKey::Transform::None) continue;
+            const std::int64_t ci = frame.column_index(key_fields[i]);
+            const dataframe::Series& src =
+                frame.columns[static_cast<std::size_t>(ci)];
+            std::vector<std::string> vals(static_cast<std::size_t>(n));
+            for (std::int64_t r = 0; r < n; ++r)
+                vals[static_cast<std::size_t>(r)] = apply_group_transform(
+                    gk, transform_key_base(gk, cell_to_key_string(src, r),
+                                           resolver));
+            tf_col[i] = "__view_agg_engine_tf_" + std::to_string(i);
+            frame.names.push_back(tf_col[i]);
+            frame.columns.push_back(dataframe::Series::strings(vals));
+            key_transformed[i] = 1;
+        }
+        lf =
+            dataframe::lazy(std::move(frame)).memory_budget(plan.memory_budget);
+    }
+
     // cat is a computed key: the GroupMap path lowercases it for grouping only
     // (agg_fold.h's lower_ascii) while a value agg (e.g. SetUnion(cat)) still
     // sees the raw-case text, so the lowered key is materialized into a hidden
@@ -484,9 +589,12 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     static constexpr const char* BUCKET_KEY_COL =
         "__view_agg_engine_time_bucket";
     std::vector<std::string> group_key_names = key_fields;
+    for (std::size_t i = 0; i < plan.group_by.size(); ++i)
+        if (key_transformed[i]) group_key_names[i] = tf_col[i];
     std::optional<std::size_t> cat_pos;
     for (std::size_t i = 0; i < plan.group_by.size(); ++i) {
         if (plan.group_by[i].kind != GroupKey::Kind::Cat) continue;
+        if (key_transformed[i]) continue;  // transform path lowercased it
         cat_pos = i;
         group_key_names[i] = CAT_KEY_COL;
         lf = lf.with_column(CAT_KEY_COL,
@@ -521,9 +629,8 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         group_key_names.insert(group_key_names.begin(), BUCKET_KEY_COL);
 
         // Value fields that need the same unrounded time_scale (agg_fold.h's
-        // field_scaled: ts/dur/te - te is never engine-eligible, see
-        // is_stable_field). Only materialize the ones an agg spec actually
-        // references.
+        // field_scaled: ts/dur; te is derived, never engine-eligible). Only
+        // materialize the ones an agg spec actually references.
         if (needs_value_scale) {
             bool need_ts = false, need_dur = false;
             for (const auto& spec : plan.agg) {
@@ -548,11 +655,12 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     const std::size_t off = has_bucket ? 1 : 0;
     if (has_bucket) r.names[0] = "time_bucket";
     if (cat_pos) r.names[off + *cat_pos] = "cat";
-    // An Arg/Field key groups on a sentinel-named string column; relabel it to
-    // its user-facing group_col_name (== gk.arg == key_names[j]).
+    // An Arg/Field key (or any transformed key, grouped on a hidden column)
+    // relabels to its user-facing group_col_name (== key_names[j]).
     for (std::size_t j = 0; j < plan.group_by.size(); ++j) {
         const GroupKey::Kind k = plan.group_by[j].kind;
-        if (k == GroupKey::Kind::Arg || k == GroupKey::Kind::Field)
+        if (key_transformed[j] || k == GroupKey::Kind::Arg ||
+            k == GroupKey::Kind::Field)
             r.names[off + j] = key_names[j];
     }
     for (std::size_t i = 0; i < off + key_names.size(); ++i)
@@ -584,12 +692,17 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // resolve_group_keys/resolve_group_value in the GroupMap path. Runs on the
     // small distinct-group result, never per event.
     bool needs_resolver = false;
-    for (const GroupKey& gk : plan.group_by)
-        needs_resolver = needs_resolver || key_is_resolved(gk.kind);
+    for (std::size_t j = 0; j < plan.group_by.size(); ++j)
+        needs_resolver =
+            needs_resolver ||
+            (key_is_resolved(plan.group_by[j].kind) && !key_transformed[j]);
     if (needs_resolver) {
         const GroupResolver* resolver = ensure_resolver(plan);
         for (std::size_t j = 0; j < plan.group_by.size(); ++j) {
-            if (!key_is_resolved(plan.group_by[j].kind)) continue;
+            // A transformed resolved key already holds the resolved+transformed
+            // string (built pre-group); do not re-resolve it here.
+            if (!key_is_resolved(plan.group_by[j].kind) || key_transformed[j])
+                continue;
             const std::size_t idx = off + j;
             r.columns[idx] = resolve_key_column(r.columns[idx], *resolver,
                                                 plan.group_by[j].kind);
@@ -614,6 +727,23 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         for (std::int64_t i = 0; i < n; ++i)
             vals[static_cast<std::size_t>(i)] =
                 std::isnan(src[i]) ? 0.0 : src[i];
+        col = dataframe::Series::flat_f64(vals.data(), n);
+    }
+
+    // A dyn Count is emitted as Int64 by CountValid but the GroupMap dyn path
+    // renders every dyn column Float64 (reduce_dyn returns a double); cast to
+    // match column-for-column.
+    for (const DynAgg& d : dyn_aggs) {
+        if (d.op != AggOp::Count) continue;
+        const std::int64_t ci = r.column_index(d.out);
+        if (ci < 0) continue;
+        dataframe::Series& col = r.columns[static_cast<std::size_t>(ci)];
+        if (col.type() != dataframe::TypeId::Int64) continue;
+        const std::int64_t n = col.length();
+        const std::int64_t* src = col.data<std::int64_t>();
+        std::vector<double> vals(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i)
+            vals[static_cast<std::size_t>(i)] = static_cast<double>(src[i]);
         col = dataframe::Series::flat_f64(vals.data(), n);
     }
     co_return r;

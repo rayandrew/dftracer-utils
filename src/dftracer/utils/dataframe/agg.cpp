@@ -530,7 +530,10 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                     st.argmax_has[as] = 1;
                     const Series* vc = values[static_cast<std::size_t>(
                         st.argmax_val_col[slot])];
-                    st.argmax_repr[as] = cell_repr(*vc, i);
+                    // A missing value at the max-by row reprs as "" (matches
+                    // the View fold's src.value(field) for an absent field).
+                    st.argmax_repr[as] =
+                        vc->is_null(i) ? std::string() : cell_repr(*vc, i);
                 }
             }
         }
@@ -857,6 +860,12 @@ DataFrame agg_finalize(const AggState& st,
             for (std::int64_t g = 0; g < ng; ++g)
                 v[static_cast<std::size_t>(g)] = static_cast<std::int64_t>(
                     st.counts[static_cast<std::size_t>(g)]);
+            out.columns.push_back(Series::flat_i64(v.data(), ng));
+        } else if (sp.op == AggOp::CountValid) {
+            std::vector<std::int64_t> v(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g)
+                v[static_cast<std::size_t>(g)] =
+                    static_cast<std::int64_t>(fs_at(g).n);
             out.columns.push_back(Series::flat_i64(v.data(), ng));
         } else if (sp.op == AggOp::Sum || sp.op == AggOp::Min ||
                    sp.op == AggOp::Max) {

@@ -44,7 +44,12 @@ enum class AggOp {
     Busy = 16,         ///< exact interval-union length (us) where depth > 0
     Concurrency = 17,  ///< sum(dur) / busy
     Utilization = 18,  ///< busy / (max_end - min_ts)
-    Active = 19        ///< peak overlap depth
+    Active = 19,       ///< peak overlap depth
+    /// Count of non-null (present) values in `value_col`, an Int64 column.
+    /// Unlike Count (the group's row count) this reads the field's
+    /// FieldStat::n, so it counts only the rows where the value column was
+    /// present.
+    CountValid = 20
 };
 
 /// Occupancy ops take a second (dur) input through `by_col`, like ArgMax.

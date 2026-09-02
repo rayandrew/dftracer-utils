@@ -49,7 +49,8 @@ enum class Agg {
     Busy,         ///< occupancy: exact interval-union length over (ts, dur)
     Concurrency,  ///< occupancy: sum(dur) / busy
     Utilization,  ///< occupancy: busy / makespan
-    Active        ///< occupancy: peak overlap depth
+    Active,       ///< occupancy: peak overlap depth
+    CountValid    ///< count of present (non-null) values in `column`, Int64
 };
 
 /// Canonical lowercase name of `agg` (the string the C ABI accepts).

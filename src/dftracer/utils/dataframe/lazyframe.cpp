@@ -663,6 +663,8 @@ AggOp to_agg_op(Agg a) {
             return AggOp::Utilization;
         case Agg::Active:
             return AggOp::Active;
+        case Agg::CountValid:
+            return AggOp::CountValid;
     }
     return AggOp::Count;
 }
@@ -709,6 +711,8 @@ Agg from_agg_op(AggOp a) {
             return Agg::Utilization;
         case AggOp::Active:
             return Agg::Active;
+        case AggOp::CountValid:
+            return Agg::CountValid;
     }
     return Agg::Count;
 }
