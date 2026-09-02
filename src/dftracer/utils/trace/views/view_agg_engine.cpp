@@ -1,11 +1,14 @@
 #include <dftracer/utils/core/common/error.h>
+#include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/string_intern.h>
+#include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/trace/views/aggfold.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
+#include <dftracer/utils/trace/views/rollup_store.h>
 #include <dftracer/utils/trace/views/view_agg_engine.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_executor.h>
@@ -335,7 +338,134 @@ coro::CoroTask<std::vector<std::string>> harvest_numeric_arg_names(
     co_return std::vector<std::string>(names.begin(), names.end());
 }
 
+// The shared engine-aggregation tail (key rendering, busy_cell_us, resolver
+// relabel, dyn fixes), matching to_batch byte-for-byte. Reused by the streaming
+// serve path and finalize_engine_result.
+dataframe::DataFrame finalize_engine_frame(dataframe::DataFrame r,
+                                           const ViewPlan& plan,
+                                           const std::vector<DynFix>& dyn) {
+    const std::size_t ng = plan.group_by.size();
+    const std::size_t off = plan.time_bucket_us > 0 ? 1 : 0;
+    std::vector<std::string> key_names(ng);
+    std::vector<char> key_transformed(ng, 0);
+    for (std::size_t j = 0; j < ng; ++j) {
+        key_names[j] = group_col_name(plan.group_by[j]);
+        key_transformed[j] =
+            plan.group_by[j].transform != GroupKey::Transform::None ? 1 : 0;
+    }
+    std::optional<std::size_t> cat_pos;
+    for (std::size_t j = 0; j < ng; ++j)
+        if (plan.group_by[j].kind == GroupKey::Kind::Cat && !key_transformed[j])
+            cat_pos = j;
+    std::size_t n_plan_value = 0;
+    for (const auto& s : plan.agg)
+        if (s.op != AggOp::ArgMax && s.op != AggOp::SetUnion) ++n_plan_value;
+    if (plan.agg.empty()) n_plan_value = 1;
+    const std::size_t n_value_cols = n_plan_value + dyn.size();
+
+    if (off) r.names[0] = "time_bucket";
+    if (cat_pos) r.names[off + *cat_pos] = "cat";
+    for (std::size_t j = 0; j < ng; ++j) {
+        const GroupKey::Kind k = plan.group_by[j].kind;
+        if (key_transformed[j] || k == GroupKey::Kind::Arg ||
+            k == GroupKey::Kind::Field)
+            r.names[off + j] = key_names[j];
+    }
+    for (std::size_t i = 0; i < off + ng; ++i)
+        r.columns[i] = key_column_to_string(r.columns[i]);
+
+    const bool occ_cell_col =
+        std::any_of(plan.agg.begin(), plan.agg.end(), [](const AggSpec& s) {
+            return s.op == AggOp::Busy || s.op == AggOp::Concurrency ||
+                   s.op == AggOp::Utilization;
+        });
+    if (occ_cell_col) {
+        const std::int64_t nrows = r.num_rows();
+        std::vector<std::int64_t> cell(
+            static_cast<std::size_t>(nrows),
+            static_cast<std::int64_t>(plan.occ_cell_us));
+        const std::size_t at = off + ng + n_value_cols;
+        r.names.insert(r.names.begin() + static_cast<std::ptrdiff_t>(at),
+                       "busy_cell_us");
+        r.columns.insert(r.columns.begin() + static_cast<std::ptrdiff_t>(at),
+                         dataframe::Series::flat_i64(cell.data(), nrows));
+    }
+
+    bool needs_resolver = false;
+    for (std::size_t j = 0; j < ng; ++j)
+        needs_resolver =
+            needs_resolver ||
+            (key_is_resolved(plan.group_by[j].kind) && !key_transformed[j]);
+    if (needs_resolver) {
+        const GroupResolver* resolver = ensure_resolver(plan);
+        for (std::size_t j = 0; j < ng; ++j) {
+            if (!key_is_resolved(plan.group_by[j].kind) || key_transformed[j])
+                continue;
+            const std::size_t idx = off + j;
+            r.columns[idx] = resolve_key_column(r.columns[idx], *resolver,
+                                                plan.group_by[j].kind);
+            r.names[idx] = key_names[j];
+        }
+    }
+
+    for (const DynFix& d : dyn) {
+        if (!d.pct) continue;
+        const std::int64_t ci = r.column_index(d.out);
+        if (ci < 0) continue;
+        dataframe::Series& col = r.columns[static_cast<std::size_t>(ci)];
+        if (col.type() != dataframe::TypeId::Float64) continue;
+        const std::int64_t n = col.length();
+        const double* src = col.data<double>();
+        std::vector<double> vals(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i)
+            vals[static_cast<std::size_t>(i)] =
+                std::isnan(src[i]) ? 0.0 : src[i];
+        col = dataframe::Series::flat_f64(vals.data(), n);
+    }
+    for (const DynFix& d : dyn) {
+        if (!d.count) continue;
+        const std::int64_t ci = r.column_index(d.out);
+        if (ci < 0) continue;
+        dataframe::Series& col = r.columns[static_cast<std::size_t>(ci)];
+        if (col.type() != dataframe::TypeId::Int64) continue;
+        const std::int64_t n = col.length();
+        const std::int64_t* src = col.data<std::int64_t>();
+        std::vector<double> vals(static_cast<std::size_t>(n));
+        for (std::int64_t i = 0; i < n; ++i)
+            vals[static_cast<std::size_t>(i)] = static_cast<double>(src[i]);
+        col = dataframe::Series::flat_f64(vals.data(), n);
+    }
+    return r;
+}
+
 }  // namespace
+
+dataframe::DataFrame finalize_engine_result(const dataframe::AggState& st,
+                                            const ViewPlan& plan) {
+    std::vector<std::string> names;
+    names.reserve(1 + plan.group_by.size());
+    if (plan.time_bucket_us > 0) names.push_back("time_bucket");
+    for (const auto& gk : plan.group_by) names.push_back(group_col_name(gk));
+    dataframe::DataFrame r = dataframe::agg_finalize(st, names);
+
+    // Recover the dyn (auto_numeric_metrics) columns from the stored specs:
+    // they sit between the plan's value specs and its text specs. dyn Count was
+    // built as CountValid; dyn Pct stays Pct.
+    const std::vector<dataframe::AggSpec>& specs = dataframe::agg_specs(st);
+    std::size_t n_plan_value = 0, n_plan_text = 0;
+    for (const auto& s : plan.agg) {
+        if (s.op == AggOp::ArgMax || s.op == AggOp::SetUnion)
+            ++n_plan_text;
+        else
+            ++n_plan_value;
+    }
+    if (plan.agg.empty()) n_plan_value = 1;
+    std::vector<DynFix> dyn;
+    for (std::size_t i = n_plan_value; i + n_plan_text < specs.size(); ++i)
+        dyn.push_back({specs[i].out, specs[i].op == dataframe::AggOp::Pct,
+                       specs[i].op == dataframe::AggOp::CountValid});
+    return finalize_engine_frame(std::move(r), plan, dyn);
+}
 
 bool agg_engine_eligible(const ViewPlan& plan) {
     if (plan.group_by.empty() && plan.time_bucket_us == 0) return false;
@@ -352,17 +482,7 @@ bool agg_engine_eligible(const ViewPlan& plan) {
     return true;
 }
 
-coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
-    const ViewPlan& plan_in) {
-    const ViewPlan plan = resolve_bucket_origin(plan_in);
-    ensure_schema(plan);
-
-    {
-        GroupMap served;
-        if (co_await try_serve_aggregate_no_scan(plan, served))
-            co_return finalize_collect_batch(served, plan);
-    }
-
+coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
     // A Rank key groups on pid and relabels to the PR-metadata rank; harvest
     // that map into the resolver before the scan, mirroring run_scan_aggregate.
     if (std::any_of(
@@ -375,14 +495,10 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         std::any_of(plan.agg.begin(), plan.agg.end(),
                     [](const AggSpec& s) { return is_occupancy_op(s.op); });
 
-    std::vector<std::string> key_names;
     std::vector<std::string> key_fields;
-    key_names.reserve(plan.group_by.size());
     key_fields.reserve(plan.group_by.size());
-    for (const GroupKey& gk : plan.group_by) {
-        key_names.push_back(group_col_name(gk));
+    for (const GroupKey& gk : plan.group_by)
         key_fields.push_back(key_group_field(gk));
-    }
 
     // Scaled-field renaming: a scaled value field (ts/dur/te) routes through a
     // hidden pre-scaled column instead of the raw field name. Needed whenever
@@ -475,9 +591,6 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         g.column = d.column;
         gaggs.push_back(std::move(g));
     }
-    // Value columns precede the text (ArgMax/SetUnion) columns in to_batch;
-    // busy_cell_us (below) slots in right after them, so capture the count now.
-    const std::size_t n_value_cols = gaggs.size();
     gaggs.insert(gaggs.end(), std::make_move_iterator(text_gaggs.begin()),
                  std::make_move_iterator(text_gaggs.end()));
 
@@ -591,11 +704,9 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     std::vector<std::string> group_key_names = key_fields;
     for (std::size_t i = 0; i < plan.group_by.size(); ++i)
         if (key_transformed[i]) group_key_names[i] = tf_col[i];
-    std::optional<std::size_t> cat_pos;
     for (std::size_t i = 0; i < plan.group_by.size(); ++i) {
         if (plan.group_by[i].kind != GroupKey::Kind::Cat) continue;
         if (key_transformed[i]) continue;  // transform path lowercased it
-        cat_pos = i;
         group_key_names[i] = CAT_KEY_COL;
         lf = lf.with_column(CAT_KEY_COL,
                             dataframe::expr_lower(dataframe::expr_col(
@@ -656,103 +767,64 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         if (need_te) scale_col(value_select_token("te"), SCALED_TE_COL);
     }
 
-    dataframe::DataFrame r =
-        co_await lf.group_by(group_key_names, gaggs).collect();
-    const std::size_t off = has_bucket ? 1 : 0;
-    if (has_bucket) r.names[0] = "time_bucket";
-    if (cat_pos) r.names[off + *cat_pos] = "cat";
-    // An Arg/Field key (or any transformed key, grouped on a hidden column)
-    // relabels to its user-facing group_col_name (== key_names[j]).
-    for (std::size_t j = 0; j < plan.group_by.size(); ++j) {
-        const GroupKey::Kind k = plan.group_by[j].kind;
-        if (key_transformed[j] || k == GroupKey::Kind::Arg ||
-            k == GroupKey::Kind::Field)
-            r.names[off + j] = key_names[j];
-    }
-    for (std::size_t i = 0; i < off + key_names.size(); ++i)
-        r.columns[i] = key_column_to_string(r.columns[i]);
+    std::vector<DynFix> dynfix;
+    dynfix.reserve(dyn_aggs.size());
+    for (const DynAgg& d : dyn_aggs)
+        dynfix.push_back({d.out, d.op == AggOp::Pct, d.op == AggOp::Count});
 
-    // to_batch appends a busy_cell_us column (the effective occ_cell tolerance)
-    // right after the value columns whenever a Busy/Concurrency/Utilization
-    // spec is present (Active alone does not emit it). Reproduce it as an Int64
-    // constant so the two paths match column-for-column.
-    const bool occ_cell_col =
-        std::any_of(plan.agg.begin(), plan.agg.end(), [](const AggSpec& s) {
-            return s.op == AggOp::Busy || s.op == AggOp::Concurrency ||
-                   s.op == AggOp::Utilization;
-        });
-    if (occ_cell_col) {
-        const std::int64_t nrows = r.num_rows();
-        std::vector<std::int64_t> cell(
-            static_cast<std::size_t>(nrows),
-            static_cast<std::int64_t>(plan.occ_cell_us));
-        const std::size_t at = off + key_names.size() + n_value_cols;
-        r.names.insert(r.names.begin() + static_cast<std::ptrdiff_t>(at),
-                       "busy_cell_us");
-        r.columns.insert(r.columns.begin() + static_cast<std::ptrdiff_t>(at),
-                         dataframe::Series::flat_i64(cell.data(), nrows));
+    co_return EnginePrep{std::move(lf), std::move(group_key_names),
+                         std::move(gaggs), std::move(dynfix)};
+}
+
+coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
+    const ViewPlan& plan_in) {
+    const ViewPlan plan = resolve_bucket_origin(plan_in);
+    ensure_schema(plan);
+
+    // The rollup carries occupancy delta-maps (bootstrap/tier do not), so it is
+    // tried first and is the only fast path that can serve occupancy.
+    if (auto df = try_serve_rollup(plan)) co_return std::move(*df);
+    {
+        GroupMap served;
+        if (co_await try_serve_aggregate_no_scan(plan, served))
+            co_return finalize_collect_batch(served, plan);
     }
 
-    // Post-aggregation re-key: relabel each resolved-name key column (grouped
-    // on its raw hash, a bijection) to the resolved name, same as
-    // resolve_group_keys/resolve_group_value in the GroupMap path. Runs on the
-    // small distinct-group result, never per event.
-    bool needs_resolver = false;
-    for (std::size_t j = 0; j < plan.group_by.size(); ++j)
-        needs_resolver =
-            needs_resolver ||
-            (key_is_resolved(plan.group_by[j].kind) && !key_transformed[j]);
-    if (needs_resolver) {
-        const GroupResolver* resolver = ensure_resolver(plan);
-        for (std::size_t j = 0; j < plan.group_by.size(); ++j) {
-            // A transformed resolved key already holds the resolved+transformed
-            // string (built pre-group); do not re-resolve it here.
-            if (!key_is_resolved(plan.group_by[j].kind) || key_transformed[j])
-                continue;
-            const std::size_t idx = off + j;
-            r.columns[idx] = resolve_key_column(r.columns[idx], *resolver,
-                                                plan.group_by[j].kind);
-            r.names[idx] = key_names[j];
+    EnginePrep ep = co_await prepare_engine_group(plan);
+
+    // materialize() persists the AggState partials as a rollup (opt-in); a
+    // paginated result is never cached.
+    if (plan.materialize && !plan.limit && !plan.offset) {
+        auto state =
+            co_await ep.lf->collect_group_state(ep.group_key_names, ep.gaggs);
+        const std::string rdir = rollup_index_path(plan);
+        if (!rdir.empty()) {
+            try {
+                auto db = open_rollup_db(
+                    rdir, rocksdb::RocksDatabase::OpenMode::ReadWrite);
+                if (db)
+                    persist_rollup(*db, plan_signature(plan),
+                                   rest_signature(plan), plan.time_bucket_us,
+                                   plan.group_by, *state);
+            } catch (const std::exception& e) {
+                DFTRACER_UTILS_LOG_WARN("rollup materialize skipped: %s",
+                                        e.what());
+            }
         }
+        co_return finalize_engine_result(*state, plan);
     }
 
-    // A dyn Pct on a group where the arg never appeared: the engine reads an
-    // empty per-group DDSketch, whose quantile is NaN, while the GroupMap dyn
-    // path emits 0.0 (dyn_sketches has no entry for the arg). Rewrite that NaN
-    // to 0.0 so the two paths match. Only an empty sketch yields NaN, so this
-    // touches exactly the absent-arg groups.
-    for (const DynAgg& d : dyn_aggs) {
-        if (d.op != AggOp::Pct) continue;
-        const std::int64_t ci = r.column_index(d.out);
-        if (ci < 0) continue;
-        dataframe::Series& col = r.columns[static_cast<std::size_t>(ci)];
-        if (col.type() != dataframe::TypeId::Float64) continue;
-        const std::int64_t n = col.length();
-        const double* src = col.data<double>();
-        std::vector<double> vals(static_cast<std::size_t>(n));
-        for (std::int64_t i = 0; i < n; ++i)
-            vals[static_cast<std::size_t>(i)] =
-                std::isnan(src[i]) ? 0.0 : src[i];
-        col = dataframe::Series::flat_f64(vals.data(), n);
-    }
+    dataframe::DataFrame r =
+        co_await ep.lf->group_by(ep.group_key_names, ep.gaggs).collect();
+    co_return finalize_engine_frame(std::move(r), plan, ep.dynfix);
+}
 
-    // A dyn Count is emitted as Int64 by CountValid but the GroupMap dyn path
-    // renders every dyn column Float64 (reduce_dyn returns a double); cast to
-    // match column-for-column.
-    for (const DynAgg& d : dyn_aggs) {
-        if (d.op != AggOp::Count) continue;
-        const std::int64_t ci = r.column_index(d.out);
-        if (ci < 0) continue;
-        dataframe::Series& col = r.columns[static_cast<std::size_t>(ci)];
-        if (col.type() != dataframe::TypeId::Int64) continue;
-        const std::int64_t n = col.length();
-        const std::int64_t* src = col.data<std::int64_t>();
-        std::vector<double> vals(static_cast<std::size_t>(n));
-        for (std::int64_t i = 0; i < n; ++i)
-            vals[static_cast<std::size_t>(i)] = static_cast<double>(src[i]);
-        col = dataframe::Series::flat_f64(vals.data(), n);
-    }
-    co_return r;
+coro::CoroTask<dataframe::AggStatePtr> build_engine_agg_state(
+    const ViewPlan& plan_in) {
+    const ViewPlan plan = resolve_bucket_origin(plan_in);
+    ensure_schema(plan);
+    EnginePrep ep = co_await prepare_engine_group(plan);
+    co_return co_await ep.lf->collect_group_state(ep.group_key_names, ep.gaggs);
 }
 
 }  // namespace dftracer::utils::trace::views::detail

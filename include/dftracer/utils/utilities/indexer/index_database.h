@@ -101,7 +101,10 @@ class IndexDatabase {
     /// records), so an older rollup lacks those bytes and would misparse.
     /// v11 -> v12 gave each harvested column record a one-byte value type
     /// (ColumnType), so an older index's columns read back with type Unknown.
-    static constexpr std::uint32_t SCHEMA_VERSION = 12;
+    /// v12 -> v13 changed the persisted rollup from serialized
+    /// GroupMap/AggAccum records to per-group engine AggState blobs
+    /// (agg_serialize), so an older rollup's rows are an incompatible layout.
+    static constexpr std::uint32_t SCHEMA_VERSION = 13;
 
     /// True if the stored schema predates the current build's layout.
     bool schema_outdated() const;

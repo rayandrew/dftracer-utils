@@ -4,6 +4,7 @@
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/coro/async_generator.h>
 #include <dftracer/utils/core/coro/task.h>
+#include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
 
@@ -240,6 +241,15 @@ class LazyFrame {
     /// the scan chunk size; <= 0 (the default) means auto; one pass over a
     /// resident source, the bounded streaming default otherwise.
     coro::CoroTask<DataFrame> collect(std::int64_t morsel_rows = 0) const;
+
+    /// Group `keys` with `aggs` and return the mergeable partial instead of a
+    /// finalized frame: streams this pipeline (no group op appended) and folds
+    /// every morsel into one AggState. The caller finalizes (agg_finalize),
+    /// coarsens (agg_regroup), or persists it. State is bounded by the distinct
+    /// group count, not the input; used by the rollup materialize path.
+    coro::CoroTask<AggStatePtr> collect_group_state(
+        std::vector<std::string> keys, std::vector<GroupAgg> aggs,
+        std::int64_t morsel_rows = 0) const;
 
    private:
     LazyFrame(std::shared_ptr<const Source> source,

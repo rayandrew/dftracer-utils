@@ -274,6 +274,11 @@ struct ViewSessionState;
 /// raw row-query LazyFrame the streaming group_by runs over.
 coro::CoroTask<dftracer::utils::dataframe::DataFrame> run_collect_via_engine(
     const ViewPlan& plan);
+
+// Builds the engine group-by inputs (and the raw scan View) for a plan; needs
+// View's private constructor.
+struct EnginePrep;
+coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan);
 }  // namespace detail
 
 /// A result handle from a ViewSession op, resolved when execute() completes.
@@ -838,6 +843,8 @@ class View {
     friend class ViewSource;
     friend coro::CoroTask<dftracer::utils::dataframe::DataFrame>
     detail::run_collect_via_engine(const detail::ViewPlan& plan);
+    friend coro::CoroTask<detail::EnginePrep> detail::prepare_engine_group(
+        const detail::ViewPlan& plan);
     explicit View(std::shared_ptr<const detail::ViewPlan> plan);
 };
 

@@ -1986,6 +1986,126 @@ TEST_SUITE("View") {
             check_match(expect, engine_served, "cat");
         }
 
+        // A same-grain rollup must serve every reduction, the DDSketch (Pct),
+        // SetUnion and ArgMax byte-for-byte (agg_regroup identity), matching a
+        // fresh scan.
+        SUBCASE("subsuming rollup: same-grain full vocab matches a scan") {
+            auto q = [&] {
+                return View::from_file(gz, idx)
+                    .group_by({GroupKey::cat()})
+                    .agg({
+                        {AggOp::Count, "", "n"},
+                        {AggOp::Sum, "dur", "sum_dur"},
+                        {AggOp::Mean, "dur", "mean_dur"},
+                        {AggOp::Min, "dur", "min_dur"},
+                        {AggOp::Max, "dur", "max_dur"},
+                        {AggOp::Var, "dur", "var_dur"},
+                        {AggOp::Std, "dur", "std_dur"},
+                        {AggOp::Pct, "dur", "p90_dur", "", 0.9},
+                        {AggOp::SetUnion, "cat", "cats"},
+                        {AggOp::ArgMax, "name", "top_name", "dur"},
+                    });
+            };
+            dataframe::DataFrame expect = collect_groupmap(q());
+            q().run().get();
+            check_match(expect, collect_engine(q()), "cat");
+        }
+
+        // Coarsening a finer rollup must re-aggregate the sketch (Pct) and the
+        // distinct-value set (SetUnion) exactly (ArgMax is excluded: its
+        // representative on a by-value tie is order-dependent across a merge).
+        SUBCASE("subsuming rollup: coarsening Pct/SetUnion matches a scan") {
+            auto specs = [] {
+                return std::vector<AggSpec>{
+                    {AggOp::Count, "", "n"},
+                    {AggOp::Sum, "dur", "sum_dur"},
+                    {AggOp::Mean, "dur", "mean_dur"},
+                    {AggOp::Var, "dur", "var_dur"},
+                    {AggOp::Pct, "dur", "p90_dur", "", 0.9},
+                    {AggOp::SetUnion, "name", "names"}};
+            };
+            auto fine = [&] {
+                return View::from_file(gz, idx)
+                    .group_by({GroupKey::cat(), GroupKey::name()})
+                    .agg(specs());
+            };
+            auto coarse = [&] {
+                return View::from_file(gz, idx)
+                    .group_by({GroupKey::cat()})
+                    .agg(specs());
+            };
+            dataframe::DataFrame expect = collect_groupmap(coarse());
+            fine().run().get();
+            check_match(expect, collect_engine(coarse()), "cat");
+        }
+
+        // Occupancy (busy/active) must stay exact through the rollup: the
+        // per-group +1/-1 delta-map serializes, and coarsening merges
+        // delta-maps key-wise so the interval union and peak depth match a
+        // fresh scan.
+        SUBCASE("subsuming rollup: occupancy exact same-grain and coarsening") {
+            auto occ = [&](std::vector<GroupKey> gb) {
+                return View::from_file(gz, idx)
+                    .group_by(std::move(gb))
+                    .agg({
+                        {AggOp::Busy, "", "busy"},
+                        {AggOp::Active, "", "active"},
+                    });
+            };
+            dataframe::DataFrame same_expect =
+                collect_groupmap(occ({GroupKey::cat()}));
+            occ({GroupKey::cat()}).run().get();
+            check_match(same_expect, collect_engine(occ({GroupKey::cat()})),
+                        "cat");
+
+            dataframe::DataFrame coarse_expect =
+                collect_groupmap(occ({GroupKey::cat()}));
+            occ({GroupKey::cat(), GroupKey::name()}).run().get();
+            check_match(coarse_expect, collect_engine(occ({GroupKey::cat()})),
+                        "cat");
+        }
+
+        // Hist (a DDSketch list<struct> per group) must survive the rollup and
+        // coarsening bin for bin.
+        SUBCASE("subsuming rollup: Hist same-grain and coarsening") {
+            auto check_hist = [&](const dataframe::DataFrame& expect,
+                                  const dataframe::DataFrame& got) {
+                REQUIRE(expect.num_rows() == got.num_rows());
+                for (std::int64_t lr = 0; lr < expect.num_rows(); ++lr) {
+                    const std::string cat = bstr(expect, lr, "cat");
+                    std::int64_t er = -1;
+                    for (std::int64_t r = 0; r < got.num_rows(); ++r)
+                        if (bstr(got, r, "cat") == cat) {
+                            er = r;
+                            break;
+                        }
+                    REQUIRE(er >= 0);
+                    const auto lb = hist_bins(expect, lr, "h");
+                    const auto eb = hist_bins(got, er, "h");
+                    REQUIRE(lb.size() == eb.size());
+                    for (std::size_t i = 0; i < lb.size(); ++i) {
+                        CHECK(lb[i].lower == doctest::Approx(eb[i].lower));
+                        CHECK(lb[i].upper == doctest::Approx(eb[i].upper));
+                        CHECK(lb[i].count == eb[i].count);
+                    }
+                }
+            };
+            auto hv = [&](std::vector<GroupKey> gb) {
+                return View::from_file(gz, idx)
+                    .group_by(std::move(gb))
+                    .agg({{AggOp::Count, "", "n"}, {AggOp::Hist, "dur", "h"}});
+            };
+            dataframe::DataFrame same_expect =
+                collect_groupmap(hv({GroupKey::cat()}));
+            hv({GroupKey::cat()}).run().get();
+            check_hist(same_expect, collect_engine(hv({GroupKey::cat()})));
+
+            dataframe::DataFrame coarse_expect =
+                collect_groupmap(hv({GroupKey::cat()}));
+            hv({GroupKey::cat(), GroupKey::name()}).run().get();
+            check_hist(coarse_expect, collect_engine(hv({GroupKey::cat()})));
+        }
+
         // Composite (multi-dim) direct-column keys: pairs rows by their
         // composite key text (exact, not Approx) so a differently-ordered
         // group set from the two paths still compares row for row.

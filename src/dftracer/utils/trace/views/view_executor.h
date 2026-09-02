@@ -47,11 +47,18 @@ coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan);
 /// requested, so callers can apply it defensively.
 ViewPlan resolve_bucket_origin(const ViewPlan& plan);
 
-/// The no-scan aggregation fast paths, in order: a subsuming rollup, the
-/// first-touch raw-gzip bootstrap, then the aggregation tier. On a hit fills
-/// `out` (resolved) and returns true; false means the query must scan.
+/// The no-scan GroupMap fast paths, in order: the first-touch raw-gzip
+/// bootstrap, then the aggregation tier. On a hit fills `out` (resolved) and
+/// returns true; false means the query must scan. The AggState rollup is served
+/// separately by try_serve_rollup (it returns a finalized DataFrame).
 coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
                                                  GroupMap& out);
+
+/// Serve `plan` from a subsuming persisted rollup with no scan: re-aggregate
+/// the stored AggState partials to `plan`'s grouping and finalize. nullopt when
+/// no rollup subsumes it (the query must scan or use another fast path).
+std::optional<dftracer::utils::dataframe::DataFrame> try_serve_rollup(
+    const ViewPlan& plan);
 
 /// True for a row query (no group_by / agg / numeric-args): collect() returns
 /// the matching events, not an aggregate.

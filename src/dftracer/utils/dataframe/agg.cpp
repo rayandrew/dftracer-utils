@@ -422,6 +422,105 @@ class AggState {
             key_buckets[static_cast<std::uint64_t>(h)].push_back(g);
         }
     }
+
+    // Merge group `j` of `other` into this state's group `g` (already located).
+    // Shared by agg_merge (1:1 keys) and agg_regroup (projected keys); assumes
+    // this state adopted `other`'s spec/field layout.
+    void merge_group(std::int64_t g, const AggState& other, std::int64_t j) {
+        counts[static_cast<std::size_t>(g)] +=
+            other.counts[static_cast<std::size_t>(j)];
+        const std::size_t db = static_cast<std::size_t>(g) * nf;
+        const std::size_t sb = static_cast<std::size_t>(j) * nf;
+        for (std::size_t fj = 0; fj < nf; ++fj)
+            fstats[db + fj].merge(other.fstats[sb + fj]);
+        if (has_fl) {
+            for (std::size_t fj = 0; fj < nf; ++fj) {
+                const std::size_t d = db + fj, s = sb + fj;
+                const std::int64_t ofi = other.fl_first_idx[s];
+                if (ofi >= 0 &&
+                    (fl_first_idx[d] < 0 || ofi < fl_first_idx[d])) {
+                    fl_first_idx[d] = ofi;
+                    fl_first[d] = other.fl_first[s];
+                    fl_first_s[d] = other.fl_first_s[s];
+                }
+                const std::int64_t oli = other.fl_last_idx[s];
+                if (oli > fl_last_idx[d]) {
+                    fl_last_idx[d] = oli;
+                    fl_last[d] = other.fl_last[s];
+                    fl_last_s[d] = other.fl_last_s[s];
+                }
+            }
+        }
+        if (has_sketch) {
+            const std::size_t ds = static_cast<std::size_t>(g) * n_sketch;
+            const std::size_t ss = static_cast<std::size_t>(j) * n_sketch;
+            for (std::size_t sk = 0; sk < n_sketch; ++sk)
+                sketches[ds + sk].merge(other.sketches[ss + sk]);
+        }
+        if (has_argmax) {
+            const std::size_t da = static_cast<std::size_t>(g) * n_argmax;
+            const std::size_t sa = static_cast<std::size_t>(j) * n_argmax;
+            for (std::size_t slot = 0; slot < n_argmax; ++slot) {
+                if (!other.argmax_has[sa + slot]) continue;
+                if (!argmax_has[da + slot] ||
+                    other.argmax_by[sa + slot] > argmax_by[da + slot]) {
+                    argmax_by[da + slot] = other.argmax_by[sa + slot];
+                    argmax_has[da + slot] = 1;
+                    argmax_repr[da + slot] = other.argmax_repr[sa + slot];
+                }
+            }
+        }
+        if (has_set) {
+            const std::size_t ds = static_cast<std::size_t>(g) * n_set;
+            const std::size_t ss = static_cast<std::size_t>(j) * n_set;
+            for (std::size_t slot = 0; slot < n_set; ++slot)
+                sets[ds + slot].insert(other.sets[ss + slot].begin(),
+                                       other.sets[ss + slot].end());
+        }
+        if (has_occ) {
+            const std::size_t ds = static_cast<std::size_t>(g) * n_occ;
+            const std::size_t ss = static_cast<std::size_t>(j) * n_occ;
+            for (std::size_t slot = 0; slot < n_occ; ++slot) {
+                occ_total[ds + slot] += other.occ_total[ss + slot];
+                if (other.occ_ts[ss + slot] < occ_ts[ds + slot])
+                    occ_ts[ds + slot] = other.occ_ts[ss + slot];
+                if (other.occ_te[ss + slot] > occ_te[ds + slot])
+                    occ_te[ds + slot] = other.occ_te[ss + slot];
+                for (const auto& [t, dlt] : other.occ_deltas[ss + slot])
+                    occ_deltas[ds + slot][t] += dlt;
+            }
+        }
+    }
+
+    // Adopt `other`'s spec/field/layout metadata into an empty (uninited) state
+    // without copying any group data. Shared by agg_merge and agg_regroup.
+    void adopt_layout(const AggState& other) {
+        specs = other.specs;
+        spec_field = other.spec_field;
+        field_vc = other.field_vc;
+        field_domain = other.field_domain;
+        field_is_str = other.field_is_str;
+        nf = other.nf;
+        has_fl = other.has_fl;
+        has_sketch = other.has_sketch;
+        n_sketch = other.n_sketch;
+        field_sketch = other.field_sketch;
+        has_argmax = other.has_argmax;
+        n_argmax = other.n_argmax;
+        spec_argmax = other.spec_argmax;
+        argmax_by_col = other.argmax_by_col;
+        argmax_val_col = other.argmax_val_col;
+        has_set = other.has_set;
+        n_set = other.n_set;
+        spec_set = other.spec_set;
+        set_val_col = other.set_val_col;
+        has_occ = other.has_occ;
+        n_occ = other.n_occ;
+        spec_occ = other.spec_occ;
+        occ_val_col = other.occ_val_col;
+        occ_by_col = other.occ_by_col;
+        occ_cell = other.occ_cell;
+    }
 };
 
 void AggStateDeleter::operator()(AggState* p) const noexcept { delete p; }
@@ -588,31 +687,7 @@ void agg_accumulate(AggState& st, const Series& key,
 void agg_merge(AggState& into, const AggState& other) {
     if (!other.inited) return;
     if (!into.inited) {
-        into.specs = other.specs;
-        into.spec_field = other.spec_field;
-        into.field_vc = other.field_vc;
-        into.field_domain = other.field_domain;
-        into.field_is_str = other.field_is_str;
-        into.nf = other.nf;
-        into.has_fl = other.has_fl;
-        into.has_sketch = other.has_sketch;
-        into.n_sketch = other.n_sketch;
-        into.field_sketch = other.field_sketch;
-        into.has_argmax = other.has_argmax;
-        into.n_argmax = other.n_argmax;
-        into.spec_argmax = other.spec_argmax;
-        into.argmax_by_col = other.argmax_by_col;
-        into.argmax_val_col = other.argmax_val_col;
-        into.has_set = other.has_set;
-        into.n_set = other.n_set;
-        into.spec_set = other.spec_set;
-        into.set_val_col = other.set_val_col;
-        into.has_occ = other.has_occ;
-        into.n_occ = other.n_occ;
-        into.spec_occ = other.spec_occ;
-        into.occ_val_col = other.occ_val_col;
-        into.occ_by_col = other.occ_by_col;
-        into.occ_cell = other.occ_cell;
+        into.adopt_layout(other);
         into.nkeys = other.nkeys;
         into.key_is_str = other.key_is_str;
         into.ikey_cols.assign(into.nkeys, {});
@@ -620,72 +695,43 @@ void agg_merge(AggState& into, const AggState& other) {
         into.inited = true;
     }
     const std::int64_t og = other.ngroups();
-    for (std::int64_t j = 0; j < og; ++j) {
-        std::int64_t g = into.group_of_other(other, j);
-        into.counts[static_cast<std::size_t>(g)] +=
-            other.counts[static_cast<std::size_t>(j)];
-        const std::size_t db = static_cast<std::size_t>(g) * into.nf;
-        const std::size_t sb = static_cast<std::size_t>(j) * into.nf;
-        for (std::size_t fj = 0; fj < into.nf; ++fj)
-            into.fstats[db + fj].merge(other.fstats[sb + fj]);
-        if (into.has_fl) {
-            for (std::size_t fj = 0; fj < into.nf; ++fj) {
-                const std::size_t d = db + fj, s = sb + fj;
-                const std::int64_t ofi = other.fl_first_idx[s];
-                if (ofi >= 0 &&
-                    (into.fl_first_idx[d] < 0 || ofi < into.fl_first_idx[d])) {
-                    into.fl_first_idx[d] = ofi;
-                    into.fl_first[d] = other.fl_first[s];
-                    into.fl_first_s[d] = other.fl_first_s[s];
-                }
-                const std::int64_t oli = other.fl_last_idx[s];
-                if (oli > into.fl_last_idx[d]) {
-                    into.fl_last_idx[d] = oli;
-                    into.fl_last[d] = other.fl_last[s];
-                    into.fl_last_s[d] = other.fl_last_s[s];
-                }
-            }
-        }
-        if (into.has_sketch) {
-            const std::size_t ds = static_cast<std::size_t>(g) * into.n_sketch;
-            const std::size_t ss = static_cast<std::size_t>(j) * into.n_sketch;
-            for (std::size_t sk = 0; sk < into.n_sketch; ++sk)
-                into.sketches[ds + sk].merge(other.sketches[ss + sk]);
-        }
-        if (into.has_argmax) {
-            const std::size_t da = static_cast<std::size_t>(g) * into.n_argmax;
-            const std::size_t sa = static_cast<std::size_t>(j) * into.n_argmax;
-            for (std::size_t slot = 0; slot < into.n_argmax; ++slot) {
-                if (!other.argmax_has[sa + slot]) continue;
-                if (!into.argmax_has[da + slot] ||
-                    other.argmax_by[sa + slot] > into.argmax_by[da + slot]) {
-                    into.argmax_by[da + slot] = other.argmax_by[sa + slot];
-                    into.argmax_has[da + slot] = 1;
-                    into.argmax_repr[da + slot] = other.argmax_repr[sa + slot];
-                }
-            }
-        }
-        if (into.has_set) {
-            const std::size_t ds = static_cast<std::size_t>(g) * into.n_set;
-            const std::size_t ss = static_cast<std::size_t>(j) * into.n_set;
-            for (std::size_t slot = 0; slot < into.n_set; ++slot)
-                into.sets[ds + slot].insert(other.sets[ss + slot].begin(),
-                                            other.sets[ss + slot].end());
-        }
-        if (into.has_occ) {
-            const std::size_t ds = static_cast<std::size_t>(g) * into.n_occ;
-            const std::size_t ss = static_cast<std::size_t>(j) * into.n_occ;
-            for (std::size_t slot = 0; slot < into.n_occ; ++slot) {
-                into.occ_total[ds + slot] += other.occ_total[ss + slot];
-                if (other.occ_ts[ss + slot] < into.occ_ts[ds + slot])
-                    into.occ_ts[ds + slot] = other.occ_ts[ss + slot];
-                if (other.occ_te[ss + slot] > into.occ_te[ds + slot])
-                    into.occ_te[ds + slot] = other.occ_te[ss + slot];
-                for (const auto& [t, dlt] : other.occ_deltas[ss + slot])
-                    into.occ_deltas[ds + slot][t] += dlt;
-            }
-        }
+    for (std::int64_t j = 0; j < og; ++j)
+        into.merge_group(into.group_of_other(other, j), other, j);
+}
+
+AggStatePtr agg_regroup(const AggState& src,
+                        const std::vector<std::int32_t>& keep,
+                        std::int64_t bucket_recut) {
+    AggStatePtr dst(new AggState());
+    dst->specs = src.specs;
+    dst->init_layout();
+    dst->adopt_layout(src);  // field_domain/field_is_str are value-derived
+    dst->nkeys = keep.size();
+    dst->key_is_str.resize(dst->nkeys);
+    for (std::size_t k = 0; k < dst->nkeys; ++k)
+        dst->key_is_str[k] = src.key_is_str[static_cast<std::size_t>(keep[k])];
+    dst->ikey_cols.assign(dst->nkeys, {});
+    dst->skey_cols.assign(dst->nkeys, {});
+    dst->inited = true;
+
+    const std::int64_t ng = src.ngroups();
+    for (std::int64_t j = 0; j < ng; ++j) {
+        const std::int64_t g = dst->find_or_add_group(
+            [&](std::size_t k) -> std::int64_t {
+                std::int64_t v =
+                    src.ikey_cols[static_cast<std::size_t>(keep[k])]
+                                 [static_cast<std::size_t>(j)];
+                if (k == 0 && bucket_recut > 0)
+                    v = (v / bucket_recut) * bucket_recut;
+                return v;
+            },
+            [&](std::size_t k) -> std::string_view {
+                return src.skey_cols[static_cast<std::size_t>(keep[k])]
+                                    [static_cast<std::size_t>(j)];
+            });
+        dst->merge_group(g, src, j);
     }
+    return dst;
 }
 
 DataFrame agg_finalize(const AggState& st,
@@ -931,6 +977,21 @@ DataFrame agg_finalize(const AggState& st, const std::string& key_name) {
 }
 
 std::int64_t agg_num_groups(const AggState& st) { return st.ngroups(); }
+
+const std::vector<AggSpec>& agg_specs(const AggState& st) { return st.specs; }
+
+std::vector<std::string> agg_group_key(const AggState& st, std::int64_t g) {
+    std::vector<std::string> out;
+    out.reserve(st.nkeys);
+    for (std::size_t k = 0; k < st.nkeys; ++k) {
+        if (st.key_is_str[k])
+            out.push_back(st.skey_cols[k][static_cast<std::size_t>(g)]);
+        else
+            out.push_back(
+                std::to_string(st.ikey_cols[k][static_cast<std::size_t>(g)]));
+    }
+    return out;
+}
 
 std::size_t agg_approx_bytes(const AggState& st) {
     std::size_t total = 0;
@@ -1344,15 +1405,14 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     return st;
 }
 
-DataFrame group_agg(const std::vector<const Series*>& keys,
-                    const std::vector<const Series*>& values,
-                    std::vector<AggSpec> specs,
-                    const std::vector<std::string>& key_names) {
+AggStatePtr group_agg_state(const std::vector<const Series*>& keys,
+                            const std::vector<const Series*>& values,
+                            std::vector<AggSpec> specs) {
     const std::int64_t n = keys.empty() ? 0 : keys[0]->length();
     if (n <= AGG_GRAIN) {
         auto st = agg_new(std::move(specs));
         agg_accumulate(*st, keys, values);
-        return agg_finalize(*st, key_names);
+        return st;
     }
     // Parallel driver: each chunk folds into its own partial (no locks), then
     // the partials merge. parallel_for runs serial when no backend is
@@ -1367,7 +1427,15 @@ DataFrame group_agg(const std::vector<const Series*>& keys,
     auto acc = agg_new(std::move(specs));
     for (auto& p : partials)
         if (p) agg_merge(*acc, *p);
-    return agg_finalize(*acc, key_names);
+    return acc;
+}
+
+DataFrame group_agg(const std::vector<const Series*>& keys,
+                    const std::vector<const Series*>& values,
+                    std::vector<AggSpec> specs,
+                    const std::vector<std::string>& key_names) {
+    return agg_finalize(*group_agg_state(keys, values, std::move(specs)),
+                        key_names);
 }
 
 DataFrame group_agg(const Series& key, const std::vector<const Series*>& values,

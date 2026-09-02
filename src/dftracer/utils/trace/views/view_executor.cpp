@@ -4,6 +4,7 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/rocksdb/column_families.h>
 #include <dftracer/utils/core/rocksdb/database.h>
+#include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/trace/views/aggfold.h>
 #include <dftracer/utils/trace/views/bloom_fold.h>
@@ -16,6 +17,7 @@
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <dftracer/utils/trace/views/typed_collect_fold.h>
+#include <dftracer/utils/trace/views/view_agg_engine.h>
 #include <dftracer/utils/trace/views/view_agg_tier.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_counter_format.h>
@@ -549,59 +551,53 @@ coro::CoroTask<ExportStats> run_materialize(const ViewPlan& plan,
         }
     }
 
-    // A build wants full coverage, so scan through the fused fold with no
-    // tier/agg_source fast path, then persist the complete raw-keyed result.
-    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/true);
-    dftracer::utils::StringIntern intern;
-    AggFold agg(plan, intern);
-    std::array<Fold*, 1> folds{&agg};
-    ExportStats stats = co_await fuse(plan, vdef, folds, intern, nullptr);
-
-    GroupMap merged = agg.finish_map();
+    // A build wants full coverage: scan through the engine group-by to a
+    // complete mergeable AggState, then persist its per-group partials.
+    auto state = co_await build_engine_agg_state(plan);
     if (!rdir.empty()) {
         try {
             auto db = open_rollup_db(
                 rdir, rocksdb::RocksDatabase::OpenMode::ReadWrite);
             if (db)
                 persist_rollup(*db, plan_signature(plan), rest_signature(plan),
-                               plan.time_bucket_us, plan.group_by, merged);
+                               plan.time_bucket_us, plan.group_by, *state);
         } catch (const std::exception& e) {
             DFTRACER_UTILS_LOG_WARN("rollup materialize skipped: %s", e.what());
         }
     }
-    co_return stats;
+    co_return ExportStats{};
 }
 
-// The no-scan aggregation fast paths, in order: a subsuming rollup, the
-// first-touch raw-gzip bootstrap, then the aggregation tier. On a hit fills
-// `out` (resolved) and returns true; false means the query must scan. Shared by
-// run_collect and the session so the two agree on what answers without a scan.
+// Serve `plan` from a subsuming persisted rollup with no scan: re-aggregate the
+// stored AggState partials to `plan`'s grouping and finalize. Shared by the
+// engine collect path and the session so the two agree on what a rollup
+// answers.
+std::optional<dataframe::DataFrame> try_serve_rollup(const ViewPlan& plan) {
+    const std::string rdir = rollup_index_path(plan);
+    if (rdir.empty() || !fs::exists(fs::path(rdir) / "CURRENT"))
+        return std::nullopt;
+    // A materialize() query opens ReadWrite so a miss reuses the handle to
+    // persist below (avoids a RO-then-RW conflict).
+    const auto mode = plan.materialize
+                          ? rocksdb::RocksDatabase::OpenMode::ReadWrite
+                          : rocksdb::RocksDatabase::OpenMode::ReadOnly;
+    try {
+        auto db = open_rollup_db(rdir, mode);
+        if (db) return find_subsuming_rollup(*db, plan);
+    } catch (const std::exception& e) {
+        // A locked/unreadable rollup just falls through to a normal compute;
+        // never fail the query over the cache.
+        DFTRACER_UTILS_LOG_WARN("rollup read skipped: %s", e.what());
+    }
+    return std::nullopt;
+}
+
+// The no-scan GroupMap fast paths: the first-touch raw-gzip bootstrap, then the
+// aggregation tier. On a hit fills `out` (resolved) and returns true; false
+// means the query must scan. The AggState rollup is served separately by
+// try_serve_rollup (a finalized DataFrame).
 coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
                                                  GroupMap& out) {
-    {
-        // A materialize() query opens ReadWrite so a miss reuses the handle to
-        // persist below (avoids a RO-then-RW conflict).
-        const std::string rdir = rollup_index_path(plan);
-        if (!rdir.empty() && fs::exists(fs::path(rdir) / "CURRENT")) {
-            const auto mode = plan.materialize
-                                  ? rocksdb::RocksDatabase::OpenMode::ReadWrite
-                                  : rocksdb::RocksDatabase::OpenMode::ReadOnly;
-            try {
-                auto db = open_rollup_db(rdir, mode);
-                if (db) {
-                    if (auto r = find_subsuming_rollup(*db, plan)) {
-                        resolve_group_keys(*r, plan);
-                        out = std::move(*r);
-                        co_return true;
-                    }
-                }
-            } catch (const std::exception& e) {
-                // A locked/unreadable rollup just falls through to a normal
-                // compute; never fail the query over the cache.
-                DFTRACER_UTILS_LOG_WARN("rollup read skipped: %s", e.what());
-            }
-        }
-    }
     if (co_await try_collect_bootstrap(plan, out)) {
         resolve_group_keys(out, plan);
         co_return true;
@@ -746,28 +742,9 @@ static coro::CoroTask<GroupMap> run_scan_aggregate(const ViewPlan& plan_in) {
             merged.emplace(k, std::move(a));
     }
 
-    // materialize() persists this query's result as a rollup (opt-in), so a
-    // later matching query hits the fast path. Raw-keyed; a read-back
-    // re-resolves. Skipped for a paginated (partial) result.
-    if (plan.materialize && !plan.limit && !plan.offset) {
-        const std::string rdir = rollup_index_path(plan);
-        if (!rdir.empty()) {
-            try {
-                auto db = open_rollup_db(
-                    rdir, rocksdb::RocksDatabase::OpenMode::ReadWrite);
-                if (db)
-                    persist_rollup(*db, plan_signature(plan),
-                                   rest_signature(plan), plan.time_bucket_us,
-                                   plan.group_by, merged);
-            } catch (const std::exception& e) {
-                // A locked or read-only index persists nothing rather than
-                // failing the query; single-flight coordination comes later.
-                DFTRACER_UTILS_LOG_WARN("rollup materialize skipped: %s",
-                                        e.what());
-            }
-        }
-    }
-
+    // materialize() persist for this GroupMap scan path is handled by the
+    // engine (run_collect_via_engine builds and stores AggState partials); this
+    // fallback path only computes the result.
     apply_ranks(plan, agg.ranks());
     resolve_group_keys(merged, plan);
     co_return std::move(merged);
@@ -921,28 +898,29 @@ coro::CoroTask<std::string> run_flamegraph_partial(
     co_return fold.flamegraph_partial();
 }
 
-static GroupMap merge_partials_into_map(
-    const ViewPlan& plan, const std::vector<std::string_view>& partials);
-
-// Distributed materialize: reduce rank-local partials (from aggregate_partial)
-// app-side into one GroupMap and persist it as the rollup - the distributed
-// analog of run_materialize, with no re-scan.
+// Distributed materialize: persist `plan`'s rollup as engine AggState partials.
+// The rank-local `partials` are GroupMap blobs (the format the counter/collect
+// merge paths share) and cannot be turned into an engine AggState, so the
+// rollup is (re-)built through the engine over the plan's shared-index files -
+// correct on the shared filesystem the tier already assumes. Converting the
+// partial wire format to AggState (dropping this re-aggregation) is a later
+// step.
 coro::CoroTask<void> run_materialize_partials(
     const ViewPlan& plan, const std::vector<std::string_view>& partials) {
+    (void)partials;
     ensure_schema(plan);
-    GroupMap merged = merge_partials_into_map(plan, partials);
     const std::string rdir = rollup_index_path(plan);
-    if (!rdir.empty()) {
-        try {
-            auto db = open_rollup_db(
-                rdir, rocksdb::RocksDatabase::OpenMode::ReadWrite);
-            if (db)
-                persist_rollup(*db, plan_signature(plan), rest_signature(plan),
-                               plan.time_bucket_us, plan.group_by, merged);
-        } catch (const std::exception& e) {
-            DFTRACER_UTILS_LOG_WARN("rollup materialize (partials) skipped: %s",
-                                    e.what());
-        }
+    if (rdir.empty()) co_return;
+    auto state = co_await build_engine_agg_state(plan);
+    try {
+        auto db =
+            open_rollup_db(rdir, rocksdb::RocksDatabase::OpenMode::ReadWrite);
+        if (db)
+            persist_rollup(*db, plan_signature(plan), rest_signature(plan),
+                           plan.time_bucket_us, plan.group_by, *state);
+    } catch (const std::exception& e) {
+        DFTRACER_UTILS_LOG_WARN("rollup materialize (partials) skipped: %s",
+                                e.what());
     }
     co_return;
 }
@@ -951,22 +929,7 @@ std::optional<dataframe::DataFrame> run_reconstruct_if_cached(
     const ViewPlan& plan) {
     if (plan.group_by.empty() && plan.agg.empty()) return std::nullopt;
     ensure_schema(plan);
-    const std::string rdir = rollup_index_path(plan);
-    if (rdir.empty() || !fs::exists(fs::path(rdir) / "CURRENT"))
-        return std::nullopt;
-    try {
-        auto db =
-            open_rollup_db(rdir, rocksdb::RocksDatabase::OpenMode::ReadOnly);
-        if (db) {
-            if (auto r = find_subsuming_rollup(*db, plan)) {
-                resolve_group_keys(*r, plan);
-                return to_batch(*r, plan);
-            }
-        }
-    } catch (const std::exception& e) {
-        DFTRACER_UTILS_LOG_WARN("rollup reconstruct skipped: %s", e.what());
-    }
-    return std::nullopt;
+    return try_serve_rollup(plan);
 }
 
 coro::CoroTask<ExportStats> run_scan_batches(
@@ -1078,30 +1041,30 @@ void add_materialize_branch(ViewSessionState& state,
     plan->schema.reset();
     plan->resolver.reset();
     ensure_schema(*plan);
-    const std::size_t slots = state.num_slots ? state.num_slots : 1;
-    auto partials = std::make_shared<std::vector<GroupMap>>(slots);
-    auto keybufs = std::make_shared<std::vector<std::string>>(slots);
 
     BranchHooks h;
-    h.consume = [plan, partials, keybufs](std::size_t slot,
-                                          const json::JsonValue& jv,
-                                          std::string_view) {
-        fold_event((*partials)[slot], jv.element(), *plan, (*keybufs)[slot]);
-    };
-    // Persist the raw-keyed merged map (read-back re-resolves), matching
-    // run_materialize; a locked/read-only index degrades to a skip.
-    h.finalize = [plan, partials]() {
-        GroupMap merged;
-        for (const auto& p : *partials) merge_maps(merged, p, *plan);
+    // The engine builds AggState partials from columnar batches, which the
+    // session's per-event fold cannot feed, so the materialize branch does no
+    // per-event work and (re)builds the rollup through the engine in finalize.
+    h.consume = [](std::size_t, const json::JsonValue&, std::string_view) {};
+    h.finalize = [plan]() {
         const std::string rdir = rollup_index_path(*plan);
         if (rdir.empty()) return;
         try {
+            dataframe::AggStatePtr state_out;
+            dftracer::utils::default_runtime().run_blocking(
+                "session_materialize",
+                [&](dftracer::utils::CoroScope&) -> coro::CoroTask<void> {
+                    state_out = co_await build_engine_agg_state(*plan);
+                    co_return;
+                });
+            if (!state_out) return;
             auto db = open_rollup_db(
                 rdir, rocksdb::RocksDatabase::OpenMode::ReadWrite);
             if (db)
                 persist_rollup(*db, plan_signature(*plan),
                                rest_signature(*plan), plan->time_bucket_us,
-                               plan->group_by, merged);
+                               plan->group_by, *state_out);
         } catch (const std::exception& e) {
             DFTRACER_UTILS_LOG_WARN("fused rollup materialize skipped: %s",
                                     e.what());
@@ -1210,6 +1173,10 @@ coro::CoroTask<ExportStats> run_session(
             // A per-branch predicate is not servable from a match-all rollup or
             // the tier; a partial wants the raw (unresolved) map. Both scan.
             if (!br.agg->apply_query && !br.agg->partial_out) {
+                if (auto df = try_serve_rollup(*full)) {
+                    *br.agg->out = apply_agg_post_ops(std::move(*df), *full);
+                    continue;
+                }
                 GroupMap served;
                 if (co_await try_serve_aggregate_no_scan(*full, served)) {
                     *br.agg->out = apply_agg_post_ops(
@@ -1406,7 +1373,7 @@ ExportStats merge_counters_partials(
     return st;
 }
 
-// Merge partials into a materialized Batch (distributed collect()).
+// Merge partials into a materialized DataFrame (distributed collect()).
 dataframe::DataFrame merge_partials_to_table(
     const ViewPlan& plan, const std::vector<std::string_view>& partials) {
     GroupMap merged = merge_partials_into_map(plan, partials);

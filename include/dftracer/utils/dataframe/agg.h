@@ -97,6 +97,19 @@ void agg_accumulate(AggState& state, const Series& key,
 /// Combine `other` into `into` (associative; for spill + distributed merge).
 void agg_merge(AggState& into, const AggState& other);
 
+/// Re-key `src` to a coarser grouping and merge groups that collapse together.
+/// `keep` lists src key-column indices in destination order (a subset and/or
+/// reorder of src's keys); each src group is re-keyed to just those columns and
+/// merged (agg_merge semantics) into the result, so groups sharing the coarse
+/// key combine exactly. When `bucket_recut > 0`, the first kept key must be an
+/// integer bucket column and is re-floored to (v / bucket_recut) * bucket_recut
+/// before regrouping (coarsening a finer time grain to a coarser one). The
+/// result shares src's specs and value/field layout; finalize with
+/// agg_finalize. Every index in `keep` must be a valid src key column.
+AggStatePtr agg_regroup(const AggState& src,
+                        const std::vector<std::int32_t>& keep,
+                        std::int64_t bucket_recut = 0);
+
 /// Materialize the result: one key column per `key_names` (in order, each
 /// keeping its original type) plus one column per spec, in spec order.
 DataFrame agg_finalize(const AggState& state,
@@ -111,6 +124,16 @@ AggStatePtr agg_deserialize(const std::string& blob);
 
 /// Number of groups currently held by `state`.
 std::int64_t agg_num_groups(const AggState& state);
+
+/// The specs `state` was built with, in order (key layout excluded). Lets a
+/// consumer finalizing a persisted or regrouped state recover each value
+/// column's op and output name without re-deriving them.
+const std::vector<AggSpec>& agg_specs(const AggState& state);
+
+/// Render group `g`'s composite key to one string per key column (integer keys
+/// as decimal, string keys verbatim) - a stable per-group identity, e.g. a
+/// rollup row key. `g` must be in [0, agg_num_groups(state)).
+std::vector<std::string> agg_group_key(const AggState& state, std::int64_t g);
 
 /// Approximate in-memory bytes held by `state` (spill trigger; not exact).
 std::size_t agg_approx_bytes(const AggState& state);
@@ -129,6 +152,15 @@ void agg_sort_groups(AggState& state);
 /// layout - serializable via agg_serialize and mergeable via agg_merge into
 /// another state. The unit written to and read back from a spill run.
 AggStatePtr agg_extract_group(const AggState& state, std::int64_t g);
+
+/// Like group_agg but returns the mergeable partial instead of finalizing: the
+/// same one-pass parallel accumulate over `keys`/`values`, stopping before
+/// agg_finalize. The caller finalizes (agg_finalize), coarsens (agg_regroup),
+/// or persists (agg_extract_group + agg_serialize) the state. Used by the
+/// rollup materialize path to store per-group partials.
+AggStatePtr group_agg_state(const std::vector<const Series*>& keys,
+                            const std::vector<const Series*>& values,
+                            std::vector<AggSpec> specs);
 
 /// Fused group-by: accumulate the whole batch in one pass over all specs (the
 /// sync driver chunks via the parallel_for seam and merges), then finalize.

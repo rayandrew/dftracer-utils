@@ -3025,6 +3025,49 @@ coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
     co_return co_await drain_stream(stream(morsel_rows));
 }
 
+coro::CoroTask<AggStatePtr> LazyFrame::collect_group_state(
+    std::vector<std::string> keys, std::vector<GroupAgg> aggs,
+    std::int64_t morsel_rows) const {
+    std::vector<std::string> value_names;  // deduped, matching GroupByCursor
+    ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
+    auto resolve = [&](const std::string& name) -> std::int32_t {
+        auto it = dedup.find(name);
+        if (it != dedup.end()) return it->second;
+        const std::int32_t idx = static_cast<std::int32_t>(value_names.size());
+        value_names.push_back(name);
+        dedup.emplace(name, idx);
+        return idx;
+    };
+    std::vector<AggSpec> specs;
+    specs.reserve(aggs.size());
+    for (const GroupAgg& a : aggs) {
+        AggSpec sp;
+        sp.op = to_agg_op(a.op);
+        sp.out = a.out;
+        sp.param = a.param;
+        sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
+        if (agg_uses_by_col(sp.op)) sp.by_col = resolve(a.by);
+        specs.push_back(std::move(sp));
+    }
+
+    AggStatePtr state = agg_new(specs);
+    auto gen = stream(morsel_rows);
+    while (auto df = co_await gen.next()) {
+        std::vector<const Series*> kcols;
+        kcols.reserve(keys.size());
+        for (const std::string& k : keys)
+            kcols.push_back(
+                &df->columns[static_cast<std::size_t>(df->column_index(k))]);
+        std::vector<const Series*> vcols;
+        vcols.reserve(value_names.size());
+        for (const std::string& v : value_names)
+            vcols.push_back(
+                &df->columns[static_cast<std::size_t>(df->column_index(v))]);
+        agg_accumulate(*state, kcols, vcols);
+    }
+    co_return state;
+}
+
 LazyFrame DataFrame::lazy() const {
     DataFrame shared;
     shared.names = names;
