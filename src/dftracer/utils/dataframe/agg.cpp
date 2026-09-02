@@ -1360,6 +1360,70 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
     return out;
 }
 
+void agg_seed_begin(AggState& st, std::size_t nkeys) {
+    st.nkeys = nkeys;
+    st.key_is_str.assign(nkeys, 1);
+    st.ikey_cols.assign(nkeys, {});
+    st.skey_cols.assign(nkeys, {});
+    st.field_domain.assign(st.nf, FieldStatDomain::F64);
+    st.field_is_str.assign(st.nf, 0);
+    st.inited = true;
+}
+
+void agg_seed_group(AggState& st, const std::vector<std::string>& str_keys,
+                    std::uint64_t count,
+                    const std::vector<AggSeedValue>& values) {
+    if (!st.inited) agg_seed_begin(st, str_keys.size());
+    const std::int64_t g = st.find_or_add_group(
+        [](std::size_t) -> std::int64_t { return 0; },
+        [&](std::size_t k) -> std::string_view { return str_keys[k]; });
+    st.counts[static_cast<std::size_t>(g)] += count;
+    for (const AggSeedValue& v : values) {
+        int fj = -1;
+        for (std::size_t f = 0; f < st.nf; ++f)
+            if (st.field_vc[f] == v.value_col) {
+                fj = static_cast<int>(f);
+                break;
+            }
+        if (fj < 0) continue;
+        st.fstats[static_cast<std::size_t>(g) * st.nf +
+                  static_cast<std::size_t>(fj)]
+            .merge(v.stat);
+        if (v.sketch && st.has_sketch) {
+            const int sk = st.field_sketch[static_cast<std::size_t>(fj)];
+            if (sk >= 0)
+                st.sketches[static_cast<std::size_t>(g) * st.n_sketch +
+                            static_cast<std::size_t>(sk)]
+                    .merge(*v.sketch);
+        }
+    }
+}
+
+void agg_seed_finalize(AggState& st) {
+    st.inited = true;
+    const std::int64_t ng = st.ngroups();
+    for (std::size_t fj = 0; fj < st.nf; ++fj) {
+        // The columnar materializer picks a column's domain from the first
+        // group then downgrades to F64 on any mismatch, treating an absent
+        // (n == 0) group as F64. Reproduce that so a field present in every
+        // group stays exact-integer and one absent from some groups is Float64.
+        bool first = true;
+        FieldStatDomain dom = FieldStatDomain::F64;
+        for (std::int64_t g = 0; g < ng; ++g) {
+            const FieldStat& f =
+                st.fstats[static_cast<std::size_t>(g) * st.nf + fj];
+            const FieldStatDomain e = f.n > 0 ? f.domain : FieldStatDomain::F64;
+            if (first) {
+                dom = e;
+                first = false;
+            } else if (e != dom) {
+                dom = FieldStatDomain::F64;
+            }
+        }
+        st.field_domain[fj] = dom;
+    }
+}
+
 namespace {
 
 template <class T>

@@ -489,12 +489,6 @@ View View::metadata(bool include) const {
     return View(std::move(next));
 }
 
-View View::with_partial_source(const detail::PartialSource* source) const {
-    auto next = clone(plan_);
-    next->agg_source = source;
-    return View(std::move(next));
-}
-
 View View::cancel_when(std::function<bool()> pred) const {
     auto next = clone(plan_);
     next->cancelled = std::move(pred);
@@ -736,9 +730,17 @@ Deferred<dataframe::DataFrame> ViewSession::collect(
     auto out = std::make_shared<dataframe::DataFrame>();
     key_counts_.emplace_back(out.get(),
                              static_cast<std::int64_t>(group_by.size()));
-    detail::BranchHooks h = detail::make_collect_branch(
-        std::move(group_by), std::move(agg), out, num_slots_);
-    h.predicate = std::move(predicate);
+    // A predicated collect runs as an engine agg branch that filters per event
+    // (apply_query), overlaying the predicate onto the base plan on the shared
+    // scan; no per-branch predicate, so it does not also join the raw driver.
+    detail::BranchHooks h;
+    h.agg = detail::AggBranch{std::move(group_by),
+                              std::move(agg),
+                              out,
+                              nullptr,
+                              /*apply_query=*/true,
+                              nullptr,
+                              std::move(predicate)};
     detail::add_branch(*state_, std::move(h));
     return {out, executed_};
 }
@@ -748,12 +750,12 @@ Deferred<dataframe::DataFrame> ViewSession::collect(
     auto out = std::make_shared<dataframe::DataFrame>();
     key_counts_.emplace_back(out.get(),
                              static_cast<std::int64_t>(group_by.size()));
-    detail::BranchHooks h =
-        detail::make_collect_branch(group_by, agg, out, num_slots_);
-    // predicate left unset: match all scanned events. The descriptor lets
-    // execute() serve this branch from a rollup instead of scanning.
+    // No predicate: match all scanned events. The descriptor lets execute()
+    // serve this branch from a rollup or the tier instead of scanning.
+    detail::BranchHooks h;
     h.agg = detail::AggBranch{
-        std::move(group_by), std::move(agg), out, nullptr, false, nullptr};
+        std::move(group_by), std::move(agg), out, nullptr, false, nullptr,
+        std::nullopt};
     detail::add_branch(*state_, std::move(h));
     return {out, executed_};
 }
@@ -766,10 +768,10 @@ Deferred<dataframe::DataFrame> ViewSession::collect(const View& branch) {
     key_counts_.emplace_back(out.get(),
                              static_cast<std::int64_t>(bp.group_by.size()) +
                                  (bp.time_bucket_us > 0 ? 1 : 0));
-    detail::BranchHooks h =
-        detail::make_collect_branch(bp.group_by, bp.agg, out, num_slots_);
-    h.agg = detail::AggBranch{bp.group_by,          bp.agg, out, branch.plan_,
-                              bp.query.has_value(), nullptr};
+    detail::BranchHooks h;
+    h.agg = detail::AggBranch{
+        bp.group_by,          bp.agg,  out,         branch.plan_,
+        bp.query.has_value(), nullptr, std::nullopt};
     detail::add_branch(*state_, std::move(h));
     return {out, executed_};
 }
@@ -829,10 +831,10 @@ Deferred<std::string> ViewSession::aggregate_partial(const View& branch) {
         std::make_shared<dataframe::DataFrame>();  // unused; partial path
     auto partial = std::make_shared<std::string>();
     const auto& bp = *branch.plan_;
-    detail::BranchHooks h =
-        detail::make_collect_branch(bp.group_by, bp.agg, out, num_slots_);
-    h.agg = detail::AggBranch{bp.group_by,          bp.agg, out, branch.plan_,
-                              bp.query.has_value(), partial};
+    detail::BranchHooks h;
+    h.agg = detail::AggBranch{
+        bp.group_by,          bp.agg,  out,         branch.plan_,
+        bp.query.has_value(), partial, std::nullopt};
     detail::add_branch(*state_, std::move(h));
     return {partial, executed_};
 }

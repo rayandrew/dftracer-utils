@@ -265,7 +265,6 @@ namespace detail {
 /// templates below build on are private members of View/ViewSession, defined
 /// in the .cpp - no engine surface is exposed in this public header.
 struct ViewPlan;
-class PartialSource;
 class Fold;
 struct ViewSessionState;
 
@@ -597,9 +596,6 @@ class View {
     /// Harvest every hash-metadata (FH/HH/SH) record even when no scanned event
     /// references it (default: off). For whole-trace metadata collection.
     View emit_all_metadata(bool v) const;
-    /// Use a materialized-aggregate source for collect() when the
-    /// aggregation is reducible (covered chunks answered without decode).
-    View with_partial_source(const detail::PartialSource* source) const;
     /// Override the root directory for the aggregation cache (persist/
     /// reconstruct); empty derives it from the files' index location.
     View rollup_root(std::string dir) const;
@@ -940,10 +936,6 @@ class AggregatedView : public View {
     }
     AggregatedView emit_all_metadata(bool v) const {
         return {View::emit_all_metadata(v)};
-    }
-    AggregatedView with_partial_source(
-        const detail::PartialSource* source) const {
-        return {View::with_partial_source(source)};
     }
     AggregatedView rollup_root(std::string dir) const {
         return {View::rollup_root(std::move(dir))};

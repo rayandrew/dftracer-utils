@@ -28,7 +28,6 @@
 #include <dftracer/utils/trace/views/view_resolver.h>
 #include <dftracer/utils/trace/views/view_scan.h>
 #include <dftracer/utils/trace/views/view_scanner_utility.h>
-#include <dftracer/utils/trace/views/view_spill.h>
 #include <dftracer/utils/utilities/common/serialization/binary_codec.h>
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/fileio/parallel/merge.h>
@@ -418,21 +417,6 @@ coro::CoroTask<ExportStats> run_export_trace(const ViewPlan& plan,
     co_return st;
 }
 
-// Aggregate the plan through the fused fold and invoke `on_group` once per
-// folded group (order unspecified). memory_budget bounds peak via AggFold
-// spill.
-static coro::CoroTask<ExportStats> fused_aggregate(
-    const ViewPlan& plan, const ViewDefinition& vdef,
-    const std::function<void(const std::string&, const AggAccum&)>& on_group) {
-    ensure_schema(plan);  // AggFold reads plan.schema; fuse does not build it
-    dftracer::utils::StringIntern intern;
-    AggFold agg(plan, intern);
-    std::array<Fold*, 1> folds{&agg};
-    auto stats = co_await fuse(plan, vdef, folds, intern);
-    agg.for_each_sorted_group(on_group);  // streaming, bounded memory
-    co_return stats;
-}
-
 coro::CoroTask<ExportStats> run_folds(const ViewPlan& plan,
                                       std::span<Fold* const> folds,
                                       dftracer::utils::StringIntern& intern) {
@@ -448,7 +432,7 @@ namespace {
 // build. Returns false (caller falls through to the indexed path) unless every
 // file is a clean first touch and nothing materialized can answer instead.
 coro::CoroTask<bool> try_collect_bootstrap(const ViewPlan& plan,
-                                           GroupMap& merged) {
+                                           dataframe::AggStatePtr& merged) {
     namespace idx = utilities::indexer;
     namespace gzi = utilities::indexer::internal::gzip;
     // A time window still needs the indexed path (the bootstrap has no ts
@@ -456,9 +440,22 @@ coro::CoroTask<bool> try_collect_bootstrap(const ViewPlan& plan,
     // is POD-evaluable; otherwise defer to the scan, which filters properly.
     if (!collect_bootstrap_eligible(plan)) co_return false;
 
+    // A transform on a resolved (hash-backed) group key must resolve the hash
+    // to its name before transforming, but the name tables are still being
+    // built during this pass. Build the index in this pass, then re-aggregate
+    // through the normal engine scan (which reads the now-complete tables).
+    const bool resolved_transform = std::any_of(
+        plan.group_by.begin(), plan.group_by.end(), [](const GroupKey& g) {
+            return g.transform != GroupKey::Transform::None &&
+                   (g.kind == GroupKey::Kind::FilePath ||
+                    g.kind == GroupKey::Kind::FileName ||
+                    g.kind == GroupKey::Kind::HostName ||
+                    g.kind == GroupKey::Kind::Rank);
+        });
+
     for (const auto& f : plan.files) {
         dftracer::utils::StringIntern intern;
-        AggFold agg(plan, intern, /*apply_query=*/true);
+        EngineAggFold agg(plan, intern, /*apply_query=*/true);
         BloomFold bloom(intern);
         DictFold dict(intern);
         std::array<Fold*, 3> folds{&agg, &bloom, &dict};
@@ -484,13 +481,22 @@ coro::CoroTask<bool> try_collect_bootstrap(const ViewPlan& plan,
         if (!ok) co_return false;
         driver.seal();
         persist_bootstrap_index(f.index_path, f.file_path, arts, bloom, dict);
-        for (auto& [k, a] : agg.finish_map()) {
-            if (auto it = merged.find(k); it != merged.end())
-                merge_accum(it->second, a, plan);
-            else
-                merged.emplace(k, std::move(a));
-        }
+        if (resolved_transform) continue;  // index only; re-scan below
+        if (!merged)
+            merged = dataframe::agg_deserialize(
+                dataframe::agg_serialize(agg.state()));
+        else
+            dataframe::agg_merge(*merged, agg.state());
         apply_ranks(plan, agg.ranks());
+    }
+    // The index now carries the name tables; a normal engine scan resolves the
+    // transformed key correctly. Reset the resolver the per-file folds cached
+    // before the tables existed so the re-scan rebuilds it from the fresh
+    // index.
+    if (resolved_transform) {
+        ViewPlan rescan = plan;
+        rescan.resolver.reset();
+        merged = co_await build_engine_agg_state(rescan);
     }
     co_return true;
 }
@@ -594,24 +600,14 @@ std::optional<dataframe::DataFrame> try_serve_rollup(const ViewPlan& plan) {
     return std::nullopt;
 }
 
-// The no-scan GroupMap fast paths: the first-touch raw-gzip bootstrap, then the
-// aggregation tier. On a hit fills `out` (resolved) and returns true; false
-// means the query must scan. The AggState rollup is served separately by
-// try_serve_rollup (a finalized DataFrame).
+// The no-scan fast paths: the first-touch raw-gzip bootstrap, then the
+// aggregation tier. On a hit fills `out` (a mergeable engine AggState, finalize
+// with finalize_engine_result) and returns true; false means the query must
+// scan. The AggState rollup is served separately by try_serve_rollup.
 coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
-                                                 GroupMap& out) {
-    if (co_await try_collect_bootstrap(plan, out)) {
-        resolve_group_keys(out, plan);
-        co_return true;
-    }
-    {
-        GroupMap tier;
-        if (agg_tier_collect(plan, tier)) {
-            resolve_group_keys(tier, plan);
-            out = std::move(tier);
-            co_return true;
-        }
-    }
+                                                 dataframe::AggStatePtr& out) {
+    if (co_await try_collect_bootstrap(plan, out)) co_return true;
+    if (agg_tier_collect(plan, out)) co_return true;
     co_return false;
 }
 
@@ -769,11 +765,10 @@ coro::CoroTask<std::string> run_flamegraph_partial(
 namespace {
 
 // One-byte wire tag prefixing every aggregate partial (distributed merge; never
-// persisted), so the merge side knows which codec produced it. The engine scan
-// path emits AggState; the index-only tier fast path still emits the legacy
-// GroupMap (its GroupMap->AggState convergence is Unit T). A partial with any
-// other leading byte is rejected loudly, not misparsed.
-enum class AggWireTag : std::uint8_t { GroupMap = 1, AggState = 2 };
+// persisted), so the merge side can reject a foreign blob. Every partial is now
+// a mergeable engine AggState (the scan path and the index-only tier fast path
+// both emit it); a partial with any other leading byte is rejected loudly.
+enum class AggWireTag : std::uint8_t { AggState = 2 };
 
 std::string encode_agg_partial(const dataframe::AggState& st) {
     std::string out(1, static_cast<char>(AggWireTag::AggState));
@@ -781,70 +776,55 @@ std::string encode_agg_partial(const dataframe::AggState& st) {
     return out;
 }
 
-std::string encode_groupmap_partial(const GroupMap& map) {
-    std::string out(1, static_cast<char>(AggWireTag::GroupMap));
-    for (const auto& [k, a] : map) serialize_accum(out, k, a);
-    return out;
-}
-
-// Split partials by tag: AggState blobs merge into `state`, GroupMap blobs into
-// `map`. A mix of the two in one merge cannot be combined (no cross-codec
-// accumulator) and is rejected; an unknown tag is rejected too.
-void decode_partials(const std::vector<std::string_view>& partials,
-                     const ViewPlan& plan, dataframe::AggStatePtr& state,
-                     GroupMap& map, bool& have_map) {
+// Merge every partial into one AggState. An empty or unknown-tagged blob is
+// rejected, not misparsed.
+dataframe::AggStatePtr decode_partials(
+    const std::vector<std::string_view>& partials) {
+    dataframe::AggStatePtr state;
     for (std::string_view p : partials) {
         if (p.empty())
             throw DFTUtilsException::cat(
                 ErrorCode::AGGREGATION,
                 "aggregate partial: empty (missing wire tag)");
-        const auto tag = static_cast<std::uint8_t>(p[0]);
-        const std::string_view body = p.substr(1);
-        if (tag == static_cast<std::uint8_t>(AggWireTag::AggState)) {
-            dataframe::AggStatePtr st =
-                dataframe::agg_deserialize(std::string(body));
-            if (!state)
-                state = std::move(st);
-            else
-                dataframe::agg_merge(*state, *st);
-        } else if (tag == static_cast<std::uint8_t>(AggWireTag::GroupMap)) {
-            have_map = true;
-            codec::BinaryReader br(body);
-            while (br.has_remaining()) {
-                std::string key;
-                AggAccum a;
-                deserialize_accum(br, key, a);
-                merge_accum(map[key], a, plan);
-            }
-        } else {
+        if (static_cast<std::uint8_t>(p[0]) !=
+            static_cast<std::uint8_t>(AggWireTag::AggState))
             throw DFTUtilsException::cat(ErrorCode::AGGREGATION,
                                          "aggregate partial: unknown wire tag");
-        }
+        dataframe::AggStatePtr st =
+            dataframe::agg_deserialize(std::string(p.substr(1)));
+        if (!state)
+            state = std::move(st);
+        else
+            dataframe::agg_merge(*state, *st);
     }
-    if (state && have_map)
-        throw DFTUtilsException::cat(
-            ErrorCode::AGGREGATION,
-            "aggregate partial: mixed AggState and GroupMap partials cannot be "
-            "merged");
+    return state;
+}
+
+// An empty engine AggState shaped like `plan`'s aggregation (right specs and
+// key columns, zero groups), so a merge with no partials still finalizes to the
+// correct empty columns.
+dataframe::AggStatePtr empty_engine_state(const ViewPlan& plan) {
+    AggInputSpec spec = make_agg_input_spec(plan);
+    dataframe::LoweredGroupAggs lowered =
+        dataframe::lower_group_aggs(spec.gaggs);
+    auto st = dataframe::agg_new(lowered.specs, spec.dyn_specs);
+    const std::size_t nkeys =
+        (plan.time_bucket_us > 0 ? 1u : 0u) + plan.group_by.size();
+    dataframe::agg_seed_begin(*st, nkeys);
+    dataframe::agg_seed_finalize(*st);
+    return st;
 }
 
 }  // namespace
 
 // Distributed materialize: combine the rank-local partials and persist the
-// merged rollup. AggState partials persist directly; a legacy GroupMap partial
-// has no AggState rollup form, so its plan is re-scanned through the engine.
+// merged rollup.
 coro::CoroTask<void> run_materialize_partials(
     const ViewPlan& plan, const std::vector<std::string_view>& partials) {
     ensure_schema(plan);
     const std::string rdir = rollup_index_path(plan);
     if (rdir.empty()) co_return;
-    dataframe::AggStatePtr state;
-    GroupMap map;
-    bool have_map = false;
-    decode_partials(partials, plan, state, map, have_map);
-    // A legacy GroupMap partial has no AggState rollup form; re-scan to build
-    // one. (The GroupMap->AggState convergence is Unit T.)
-    if (have_map) state = co_await build_engine_agg_state(plan);
+    dataframe::AggStatePtr state = decode_partials(partials);
     if (!state) co_return;
     try {
         auto db =
@@ -936,34 +916,6 @@ void add_fold_branch(
     h.consume = std::move(consume);
     h.finalize = std::move(finalize);
     add_branch(state, std::move(h));
-}
-
-BranchHooks make_collect_branch(std::vector<GroupKey> group_by,
-                                std::vector<AggSpec> agg,
-                                std::shared_ptr<dataframe::DataFrame> out,
-                                std::size_t num_slots) {
-    auto plan = std::make_shared<ViewPlan>();
-    plan->group_by = std::move(group_by);
-    plan->agg = std::move(agg);
-    ensure_schema(*plan);  // before the per-slot consume callbacks fold
-    const std::size_t slots = num_slots ? num_slots : 1;
-    auto partials = std::make_shared<std::vector<GroupMap>>(slots);
-    // Per-slot key buffers: each slot folds single-threaded, so no sharing.
-    auto keybufs = std::make_shared<std::vector<std::string>>(slots);
-
-    BranchHooks h;
-    h.consume = [plan, partials, keybufs](std::size_t slot,
-                                          const json::JsonValue& jv,
-                                          std::string_view) {
-        fold_event((*partials)[slot], jv.element(), *plan, (*keybufs)[slot]);
-    };
-    h.finalize = [plan, partials, out]() {
-        GroupMap merged;
-        for (const auto& p : *partials) merge_maps(merged, p, *plan);
-        resolve_group_keys(merged, *plan);
-        *out = to_batch(merged, *plan);
-    };
-    return h;
 }
 
 void add_materialize_branch(ViewSessionState& state,
@@ -1100,6 +1052,7 @@ coro::CoroTask<ExportStats> run_session(
             if (!br.agg->plan) {
                 full->group_by = br.agg->group_by;
                 full->agg = br.agg->agg;
+                if (br.agg->query) full->query = br.agg->query;
             }
             full->schema.reset();
             full->resolver.reset();
@@ -1111,10 +1064,10 @@ coro::CoroTask<ExportStats> run_session(
                     *br.agg->out = apply_agg_post_ops(std::move(*df), *full);
                     continue;
                 }
-                GroupMap served;
+                dataframe::AggStatePtr served;
                 if (co_await try_serve_aggregate_no_scan(*full, served)) {
-                    *br.agg->out =
-                        apply_agg_post_ops(to_batch(served, *full), *full);
+                    *br.agg->out = apply_agg_post_ops(
+                        finalize_engine_result(*served, *full), *full);
                     continue;
                 }
             }
@@ -1232,11 +1185,15 @@ coro::CoroTask<ExportStats> run_session(
 // the group cardinality. memory_budget == 0 keeps it purely in-memory.
 coro::CoroTask<ExportStats> run_export_counters(const ViewPlan& plan,
                                                 ExportSink& sink) {
+    ensure_schema(plan);
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/true);
-    co_return co_await fused_aggregate(
-        plan, vdef, [&](const std::string& k, const AggAccum& a) {
-            emit_group_counter(k, a, plan, sink);
-        });
+    dftracer::utils::StringIntern intern;
+    EngineAggFold agg(plan, intern);
+    std::array<Fold*, 1> folds{&agg};
+    ExportStats stats = co_await fuse(plan, vdef, folds, intern);
+    apply_ranks(plan, agg.ranks());
+    emit_counters_from_state(agg.state(), plan, sink);
+    co_return stats;
 }
 
 // Rank-local counter aggregation for distributed runs: aggregate this view's
@@ -1244,17 +1201,15 @@ coro::CoroTask<ExportStats> run_export_counters(const ViewPlan& plan,
 // buffer. The transport (MPI etc.) lives in the caller; only bytes cross ranks.
 coro::CoroTask<std::string> run_aggregate_partial(const ViewPlan& plan) {
     // Index-only fast path: the EVENT-only tier answers without reading traces
-    // (a sharded reader merges straight from indexes), still as a GroupMap
-    // partial (its AggState convergence is Unit T). Everything else scans to a
-    // mergeable AggState.
+    // (a sharded reader merges straight from indexes). Everything else scans;
+    // both emit the same mergeable AggState wire partial.
     const bool has_occupancy =
         std::any_of(plan.agg.begin(), plan.agg.end(),
                     [](const AggSpec& s) { return is_occupancy_op(s.op); });
     if (plan.phase != Phase::Counters && !plan.auto_numeric_metrics &&
         !has_occupancy) {
-        GroupMap tier;
-        if (agg_tier_collect(plan, tier))
-            co_return encode_groupmap_partial(tier);
+        dataframe::AggStatePtr tier;
+        if (agg_tier_collect(plan, tier)) co_return encode_agg_partial(*tier);
     }
     auto state = co_await build_engine_agg_state(plan);
     co_return encode_agg_partial(*state);
@@ -1266,20 +1221,12 @@ ExportStats merge_counters_partials(
     ExportSink& sink) {
     const ViewPlan p = resolve_bucket_origin(plan);
     ensure_schema(p);
-    dataframe::AggStatePtr state;
-    GroupMap map;
-    bool have_map = false;
-    decode_partials(partials, p, state, map, have_map);
+    dataframe::AggStatePtr state = decode_partials(partials);
     ExportStats st;
     if (state) {
         emit_counters_from_state(*state, p, sink);
         st.events_matched =
             static_cast<std::uint64_t>(dataframe::agg_num_groups(*state));
-    } else {
-        for (const auto& [k, a] : map) {
-            emit_group_counter(k, a, p, sink);
-            ++st.events_matched;
-        }
     }
     return st;
 }
@@ -1289,13 +1236,9 @@ dataframe::DataFrame merge_partials_to_table(
     const ViewPlan& plan, const std::vector<std::string_view>& partials) {
     const ViewPlan p = resolve_bucket_origin(plan);
     ensure_schema(p);
-    dataframe::AggStatePtr state;
-    GroupMap map;
-    bool have_map = false;
-    decode_partials(partials, p, state, map, have_map);
-    if (state) return finalize_engine_result(*state, p);
-    resolve_group_keys(map, p);
-    return to_batch(map, p);
+    dataframe::AggStatePtr state = decode_partials(partials);
+    if (!state) state = empty_engine_state(p);
+    return finalize_engine_result(*state, p);
 }
 
 }  // namespace dftracer::utils::trace::views::detail

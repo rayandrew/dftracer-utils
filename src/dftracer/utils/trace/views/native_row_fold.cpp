@@ -1,6 +1,7 @@
 #include <dftracer/utils/core/common/field_ref.h>
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/dataframe/types.h>
+#include <dftracer/utils/trace/aggregators/reserved_args.h>
 #include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/views/agg_fold.h>
 #include <dftracer/utils/trace/views/event_source.h>

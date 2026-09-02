@@ -62,6 +62,11 @@ class EngineAggFold : public Fold {
             if (spec.op == AggOp::ArgMax && !arg_free_field(spec.by))
                 return true;
         }
+        // A predicated collect filters per event, so the scan must carry any
+        // arg field the predicate reads (cat/name/pid/... are arg-free).
+        if (apply_query_ && plan_->query)
+            for (std::string_view f : plan_->query->fields())
+                if (!arg_free_field(std::string(f))) return true;
         return false;
     }
 

@@ -118,6 +118,13 @@ dftracer::utils::dataframe::DataFrame build_agg_input_frame(
 
 coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan);
 
+/// The base trace field a group-agg value column name reduces over, inverting
+/// the scaled-column rename make_agg_input_spec applies (SCALED_{TS,DUR,TE} map
+/// back to ts/dur/te); any other name is returned unchanged. The tier's seed
+/// path uses this to fill a value column's FieldStat from the stored metric for
+/// the underlying field.
+std::string agg_value_base_field(const std::string& value_name);
+
 }  // namespace dftracer::utils::trace::views::detail
 
 #endif  // DFTRACER_UTILS_TRACE_VIEWS_VIEW_AGG_ENGINE_H

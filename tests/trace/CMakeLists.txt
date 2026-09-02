@@ -45,7 +45,6 @@ set(TRACE_TEST_SOURCES
     views/test_bloom_fold.cpp
     views/test_raw_gzip_fuse.cpp
     views/test_event_source.cpp
-    views/test_aggfold.cpp
     views/test_sharded_view.cpp
     views/test_result_join.cpp
     views/test_view_join.cpp

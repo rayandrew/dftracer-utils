@@ -498,6 +498,13 @@ dataframe::DataFrame finalize_engine_frame(
 
 }  // namespace
 
+std::string agg_value_base_field(const std::string& value_name) {
+    if (value_name == SCALED_TS_COL) return "ts";
+    if (value_name == SCALED_DUR_COL) return "dur";
+    if (value_name == SCALED_TE_COL) return "te";
+    return value_name;
+}
+
 dataframe::DataFrame finalize_engine_result(const dataframe::AggState& st,
                                             const ViewPlan& plan) {
     std::vector<std::string> names;
@@ -908,11 +915,9 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // tried first and is the only fast path that can serve occupancy.
     if (auto df = try_serve_rollup(plan)) co_return std::move(*df);
     {
-        // The tier/bootstrap fast paths are GroupMap-native (agg_tier_collect,
-        // the raw-gzip bootstrap); to_batch is their finalizer.
-        GroupMap served;
+        dataframe::AggStatePtr served;
         if (co_await try_serve_aggregate_no_scan(plan, served))
-            co_return to_batch(served, plan);
+            co_return finalize_engine_result(*served, plan);
     }
 
     EnginePrep ep = co_await prepare_engine_group(plan);

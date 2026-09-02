@@ -11,7 +11,6 @@
 #include <dftracer/utils/trace/indexing/resolve_and_build.h>
 #include <dftracer/utils/trace/indexing/shard_manifest.h>
 #include <dftracer/utils/trace/internal/utils.h>
-#include <dftracer/utils/trace/views/chunk_stats_source.h>
 #include <dftracer/utils/trace/views/result_batch.h>
 #include <dftracer/utils/trace/views/sharded_view.h>
 #include <dftracer/utils/trace/views/view.h>
@@ -879,7 +878,6 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         cli::build_pipeline_config("DFTracer View", cli->pipeline);
     Pipeline pipeline(pipeline_config);
 
-    ChunkStatsSource source;
     ExportStats stats;
     // Apply the parsed view options to a base View; shared by the single-node
     // and distributed paths so both aggregate identically.
@@ -1071,8 +1069,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
                 co_return;
             }
 
-            View v = configure(
-                View::from_files(view_files).with_partial_source(&source));
+            View v = configure(View::from_files(view_files));
 
             // Skip the eager pre-build when the query would take the raw-gzip
             // bootstrap (answer the query and build the index in one pass);

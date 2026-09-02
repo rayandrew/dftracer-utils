@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 
+#include "groupmap_oracle.h"
 #include "test_view_common.h"
 
 using namespace dftracer::utils::trace::views::detail;
@@ -124,16 +125,16 @@ TEST_SUITE("RawGzipFuse") {
             StringSink s;
             View::from_file(gz, ref_idx).export_json(s).get();
         }
-        GroupMap ref;
+        gmoracle::GroupMap ref;
         {
             ViewPlan rp = count_plan(gz, ref_idx);
             ensure_schema(rp);
             StringIntern intern;
-            AggFold a(rp, intern);
+            gmoracle::OracleAggFold a(rp, intern);
             std::array<Fold*, 1> folds{&a};
             ViewDefinition vd = make_vdef(rp, /*for_aggregation=*/true);
             fuse(rp, vd, folds, intern).get();
-            ref = a.finish_map();
+            ref = a.map();
         }
         REQUIRE(ref.size() == 2);  // POSIX + STDIO
 
@@ -143,7 +144,7 @@ TEST_SUITE("RawGzipFuse") {
         ViewPlan pp = count_plan(gz, idx);
         ensure_schema(pp);
         StringIntern intern;
-        AggFold agg(pp, intern);
+        gmoracle::OracleAggFold agg(pp, intern);
         BloomFold bloom(intern);
         DictFold dict(intern);
         std::array<Fold*, 3> folds{&agg, &bloom, &dict};
@@ -191,7 +192,7 @@ TEST_SUITE("RawGzipFuse") {
         // Per-consumer filtering: the aggregation from the one pass matches the
         // eager path's groups (the data-event cats), and the ph="M" metadata is
         // NOT counted as a "dftracer" group despite the folds being fed it.
-        GroupMap proto = agg.finish_map();
+        gmoracle::GroupMap proto = agg.map();
         CHECK(proto.size() == ref.size());
         for (const auto& [k, v] : ref) CHECK(proto.count(k) == 1);
         CHECK(proto.count("dftracer") == 0);  // metadata kept out of the agg

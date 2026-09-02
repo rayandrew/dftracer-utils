@@ -89,33 +89,6 @@ std::string counter_line(const std::vector<std::string>& group_cols,
     return s;
 }
 
-void emit_group_counter(const std::string& /*key*/, const AggAccum& a,
-                        const ViewPlan& plan, ExportSink& sink) {
-    std::vector<std::string> group_cols;
-    if (plan.time_bucket_us > 0) group_cols.push_back("time_bucket");
-    for (const auto& gk : plan.group_by)
-        group_cols.push_back(group_col_name(gk));
-    std::vector<std::string> value_cols;
-    std::vector<double> values;
-    if (plan.agg.empty()) {
-        value_cols.push_back("count");
-        values.push_back(static_cast<double>(a.count));
-    } else {
-        for (std::size_t i = 0; i < plan.agg.size(); ++i) {
-            const auto& spec = plan.agg[i];
-            if (spec.op == AggOp::ArgMax) continue;  // counter args are numeric
-            value_cols.push_back(agg_col_name(spec));
-            values.push_back(finalize_value(a, plan, i));
-        }
-    }
-    for (const auto& [name, m] : a.dyn) {
-        value_cols.push_back(name);
-        values.push_back(m.n ? m.sum / static_cast<double>(m.n) : 0.0);
-    }
-    sink.write(counter_line(group_cols, a.keys, value_cols, values));
-    sink.write("\n");
-}
-
 namespace {
 
 double col_cell_double(const dftracer::utils::dataframe::Series& c,

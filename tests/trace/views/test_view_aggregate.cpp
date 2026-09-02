@@ -22,6 +22,7 @@
 #include <map>
 #include <utility>
 
+#include "groupmap_oracle.h"
 #include "test_view_common.h"
 
 namespace {
@@ -84,41 +85,7 @@ std::vector<HistBin> hist_bins(const dataframe::DataFrame& b, std::int64_t row,
     return out;
 }
 
-// The GroupMap fold as an independent oracle for engine parity, mirroring the
-// pre-engine collect path: the bootstrap/tier no-scan fast paths (which also
-// build a first-touch index), else an AggFold scan resolved via to_batch. No
-// agg_source / MV redirect - the tests use neither.
-dataframe::DataFrame groupmap_oracle(const View& v) {
-    namespace detail = dftracer::utils::trace::views::detail;
-    detail::ViewPlan plan = detail::resolve_bucket_origin(v.plan());
-    // Occupancy intervals live in the accumulator and are not serialized, so
-    // the fold must not spill and cannot take a no-scan fast path.
-    const bool occ =
-        std::any_of(plan.agg.begin(), plan.agg.end(),
-                    [](const AggSpec& s) { return is_occupancy_op(s.op); });
-    if (occ) plan.memory_budget = 0;
-    detail::ensure_schema(plan);
-    ViewDefinition vdef = detail::make_vdef(plan, /*for_aggregation=*/true);
-    Runtime rt;
-    dataframe::DataFrame result;
-    rt.run_blocking("groupmap-oracle", [&](CoroScope&) -> coro::CoroTask<void> {
-        detail::GroupMap served;
-        if (!occ &&
-            co_await detail::try_serve_aggregate_no_scan(plan, served)) {
-            result = detail::to_batch(served, plan);
-            co_return;
-        }
-        StringIntern intern;
-        detail::AggFold agg(plan, intern);
-        std::array<detail::Fold*, 1> folds{&agg};
-        co_await detail::fuse(plan, vdef, folds, intern);
-        detail::GroupMap m = agg.finish_map();
-        detail::apply_ranks(plan, agg.ranks());
-        detail::resolve_group_keys(m, plan);
-        result = detail::to_batch(m, plan);
-    });
-    return detail::apply_agg_post_ops(std::move(result), plan);
-}
+using gmoracle::groupmap_oracle;
 
 // The engine collect path (run_collect_via_engine + post-ops), the production
 // aggregation path every non-row-query View::collect() takes.
@@ -1539,100 +1506,6 @@ TEST_SUITE("View") {
         // One scan fed all three branches.
         CHECK(stats.events_matched == 50);
         CHECK(stats.truncated == false);
-    }
-
-    TEST_CASE("View - ChunkStatsSource matches a full scan (A/B)") {
-        TestEnvironment env(200);
-        REQUIRE(env.is_valid());
-        std::string gz = create_mixed_trace(env, 30, 20);
-        std::string idx = determine_index_path(gz, "");
-
-        View base = View::from_file(gz, idx)
-                        .group_by({GroupKey::cat()})
-                        .agg({{AggOp::Count, "dur", "n"},
-                              {AggOp::Sum, "dur", "sum_dur"},
-                              {AggOp::Min, "dur", "min_dur"},
-                              {AggOp::Max, "dur", "max_dur"}});
-
-        auto slow = base.collect().collect().get();
-        ChunkStatsSource source;
-        auto fast = base.with_partial_source(&source).collect().collect().get();
-
-        auto row_of = [](const dataframe::DataFrame& b,
-                         const std::string& cat) -> std::int64_t {
-            for (std::int64_t i = 0; i < b.num_rows(); ++i)
-                if (bstr(b, i, "cat") == cat) return i;
-            return -1;
-        };
-        REQUIRE(slow.num_rows() == fast.num_rows());
-        for (const char* c : {"posix", "stdio"}) {
-            const std::int64_t s = row_of(slow, c);
-            const std::int64_t f = row_of(fast, c);
-            REQUIRE(s >= 0);
-            REQUIRE(f >= 0);
-            for (const char* col : {"n", "sum_dur", "min_dur", "max_dur"})
-                CHECK(bnum(fast, f, col) ==
-                      doctest::Approx(bnum(slow, s, col)));
-        }
-    }
-
-    TEST_CASE("View - ChunkStatsSource reads stored per-key sketches") {
-        using dftracer::utils::trace::indexing::ChunkStatistics;
-        using dftracer::utils::utilities::indexer::IndexDatabase;
-        using dftracer::utils::utilities::indexer::internal::get_logical_path;
-
-        auto dir = make_unique_test_path("source");
-        fs::create_directories(dir);
-        const std::string index_path = (dir / "idx").string();
-        const std::string file_path = (dir / "trace.pfw.gz").string();
-        {
-            IndexDatabase db(index_path);
-            auto w = db.begin_write();
-            w->init_schema();
-            int fid =
-                w->get_or_create_file_info(get_logical_path(file_path), 10000);
-            ChunkStatistics stats;
-            for (std::uint64_t dur : {10u, 20u, 30u})
-                stats.update_from_event("read", "POSIX", 1, 1, 1000, dur, true);
-            stats.min_timestamp_us = 1000;
-            stats.max_timestamp_us = 2000;
-            w->insert_chunk_statistics(fid, 0, stats);
-            w->commit();
-        }
-
-        namespace vdetail = dftracer::utils::trace::views::detail;
-        vdetail::ViewPlan plan;
-        plan.group_by = {GroupKey::cat()};
-        plan.agg = {{AggOp::Count, "", "n"},
-                    {AggOp::Sum, "dur", "total"},
-                    {AggOp::Min, "dur", "mn"},
-                    {AggOp::Max, "dur", "mx"}};
-        vdetail::ensure_schema(plan);
-
-        ChunkStatsSource source;
-        vdetail::PartialRequest req;
-        req.files.push_back(ViewFile{file_path, index_path, 0, 0, 0});
-        req.schema = plan.schema.get();
-        req.group_by = plan.group_by;
-        req.agg_field = "dur";
-
-        std::vector<vdetail::AggAccum> got;
-        auto res = source.lookup(
-            req, [&](vdetail::AggAccum&& a) { got.push_back(std::move(a)); });
-
-        CHECK(res.handled);
-        REQUIRE(got.size() == 1);
-        REQUIRE(got[0].keys.size() == 1);
-        CHECK(got[0].keys[0] == "posix");
-        CHECK(got[0].count == 3);
-        const int fi = vdetail::schema_field_index(*plan.schema, "dur");
-        REQUIRE(fi >= 0);
-        CHECK(got[0].fields[fi].n == 3);
-        CHECK(got[0].fields[fi].sum == doctest::Approx(60));
-        CHECK(got[0].fields[fi].min == doctest::Approx(10));
-        CHECK(got[0].fields[fi].max == doctest::Approx(30));
-        REQUIRE(res.covered_chunks.size() == 1);
-        CHECK(res.covered_chunks[0].second == 0);
     }
 
     TEST_CASE(

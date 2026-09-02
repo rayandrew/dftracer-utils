@@ -195,13 +195,11 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/aggregation_fold.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/fold.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/view_counter_format.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/view_spill.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/rollup_store.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/mv_store.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/view_executor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/sharded_view.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/view_export_index.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/chunk_stats_source.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/result_join.cpp
 
     # Plugins (C ABI fold adapter + dlopen host + config tree builder)

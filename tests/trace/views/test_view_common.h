@@ -7,7 +7,6 @@
 #include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/indexing/chunk_statistics.h>
 #include <dftracer/utils/trace/internal/utils.h>
-#include <dftracer/utils/trace/views/chunk_stats_source.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/index_database_writer_context.h>

@@ -23,10 +23,6 @@ namespace dftracer::utils::trace::views::detail {
 /// it once, not per event. Defined in view_aggregate.h.
 struct AggSchema;
 
-/// Materialized-aggregate source consulted by collect(). Defined in
-/// view_aggregate.h.
-class PartialSource;
-
 /// Index-backed name maps for resolved-name group keys. Defined in
 /// view_resolver.h.
 class GroupResolver;
@@ -126,8 +122,6 @@ struct ViewPlan {
     /// which the write rolls to a new part file. 0 = engine defaults.
     std::uint64_t mv_checkpoint_size = 0;
     std::uint64_t mv_part_size = 0;
-
-    const PartialSource* agg_source = nullptr;
 
     /// Cooperative cancellation, polled by every terminal at its loop
     /// boundaries; empty = never cancelled.

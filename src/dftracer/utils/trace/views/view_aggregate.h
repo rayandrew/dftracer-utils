@@ -1,29 +1,20 @@
 #ifndef DFTRACER_UTILS_TRACE_VIEWS_VIEW_AGGREGATE_H
 #define DFTRACER_UTILS_TRACE_VIEWS_VIEW_AGGREGATE_H
 
-#include <ankerl/unordered_dense.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/field_stat.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/trace/views/view_plan.h>
 #include <dftracer/utils/trace/views/view_resolver.h>
-#include <dftracer/utils/utilities/common/statistics/ddsketch.h>
-#include <simdjson.h>
 
 #include <cstdint>
-#include <functional>
-#include <limits>
-#include <map>
-#include <optional>
-#include <set>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
-// The group-by/aggregate core shared by every terminal that folds events into
-// groups (collect, counters, distributed partials, spill). Pure functions over
-// a GroupMap: fold events/cells in, merge partials, and materialize a table.
+// The query-derived aggregation schema (make_agg_schema/AggSchema) plus the
+// group-key/column-name and name-resolution helpers shared by the engine
+// aggregation path, the tier, and result post-processing.
 namespace dftracer::utils::trace::views::detail {
 
 // Unit separator between composite group-key parts (never appears in field
@@ -35,47 +26,8 @@ inline constexpr char GROUP_SEP = '\x1f';
 inline constexpr char SET_SEP = '\x1e';
 
 // The per-field aggregation atom (shared with the aggregation tier). See
-// vec/field_stat.h.
+// dataframe/field_stat.h.
 using dftracer::utils::dataframe::FieldStat;
-
-// ArgMax(field, by) representative: the `field` text at the group's max `by`.
-struct ArgMaxState {
-    double by = 0;
-    std::string repr;
-    bool has = false;
-};
-
-// One group's running aggregate. `fields` aligns to AggSchema.fields (the
-// distinct agg fields), `argmax` to AggSchema's ArgMax slots; both stay empty
-// when unused. `dyn` holds the auto-discovered numeric args (agg_numeric_args).
-struct AggAccum {
-    std::vector<std::string> keys;  // aligned to plan.group_by (+ time bucket)
-    std::uint64_t count = 0;        // group rows (mean/var denominator)
-    std::vector<FieldStat> fields;
-    std::vector<ArgMaxState> argmax;
-    // Per-field DDSketch for percentile/histogram aggs, aligned to
-    // AggSchema.field_sketch slots; empty unless a Pct op is present.
-    std::vector<utilities::common::statistics::DDSketch> sketches;
-    // Distinct string values per SetUnion slot, aligned to AggSchema.spec_set
-    // (which maps into these). Sorted set = deterministic joined output.
-    std::vector<std::set<std::string>> sets;
-    std::map<std::string, FieldStat> dyn;  // sorted for a stable column union
-    // Per-arg quantile sketch, keyed like `dyn`; populated only when a dyn Pct
-    // reduction is requested (AggSchema.dyn_sketch), so the common counter path
-    // pays nothing for it.
-    std::map<std::string, utilities::common::statistics::DDSketch> dyn_sketches;
-    // Occupancy (the time-window reduction): a sparse endpoint delta-map per
-    // group (deltas[s] += 1, deltas[s+dur] -= 1 per event). Finalize sorts the
-    // keys and sweeps a running depth: busy = union length where depth > 0
-    // (exact), active = max depth. Mergeable by key-wise add.
-    ankerl::unordered_dense::map<std::uint64_t, std::int64_t> occ_deltas;
-    std::uint64_t occ_cell_us = 0;  // quantization tolerance applied; 0 = exact
-    std::uint64_t occ_total = 0;    // sum(dur), for concurrency
-    std::uint64_t occ_ts = (std::numeric_limits<std::uint64_t>::max)();
-    std::uint64_t occ_te = 0;
-};
-
-using GroupMap = ankerl::unordered_dense::map<std::string, AggAccum>;
 
 // Query-derived fold schema: the distinct agg fields and how each AggSpec maps
 // onto them. A pure function of the plan, built once per terminal (cached on
@@ -105,76 +57,6 @@ struct AggSchema {
 AggSchema make_agg_schema(const ViewPlan& plan);
 const AggSchema& ensure_schema(const ViewPlan& plan);
 
-// Finalize one non-ArgMax agg spec from a group's stats (the value column).
-double finalize_value(const AggAccum& a, const ViewPlan& plan, std::size_t i);
-
-// Finalize a Hist agg spec: the group's raw histogram buckets (empty if the
-// field had no sketch).
-std::vector<utilities::common::statistics::HistogramBin> finalize_hist(
-    const AggAccum& a, const ViewPlan& plan, std::size_t i);
-
-// simdjson value coercion helpers.
-std::optional<double> to_number(simdjson::dom::element e);
-std::string to_str(simdjson::dom::element e);
-std::string top_or_args_str(simdjson::dom::element root,
-                            const std::string& key);
-std::optional<double> agg_field(simdjson::dom::element root,
-                                const std::string& field);
-
-// Fold one decoded event into `map`. `keybuf` is a caller-owned scratch string
-// reused across events, so the hot path allocates no per-event key strings.
-void fold_event(GroupMap& map, simdjson::dom::element root,
-                const ViewPlan& plan, std::string& keybuf);
-
-// A group_by + agg request a PartialSource may answer from a materialized
-// aggregate (per-chunk stats, a summary mipmap, the aggregation tier, the
-// viewcache) instead of decoding events. `schema` is the field layout the
-// source fills AggAccum.fields against.
-struct PartialRequest {
-    std::vector<ViewFile> files;
-    const AggSchema* schema = nullptr;
-    std::vector<GroupKey> group_by;
-    std::uint64_t time_bucket_us = 0;
-    std::string agg_field;  // the single reduced field, or empty
-    bool needs_argmax = false;
-    std::string argmax_value;
-    std::string argmax_by;
-    bool has_window = false;
-    double begin = 0;  // microseconds
-    double end = 0;
-};
-
-// Pluggable materialized-aggregate source. lookup() emits each AggAccum partial
-// it can answer (at its own grain) and returns the chunks it fully covered, so
-// the executor merges the partials with merge_accum and scans only the
-// remainder. handled=false declines entirely (scan everything).
-class PartialSource {
-   public:
-    virtual ~PartialSource() = default;
-    struct Result {
-        std::vector<std::pair<std::string, std::uint64_t>> covered_chunks;
-        bool handled = false;
-    };
-    virtual Result lookup(
-        const PartialRequest& req,
-        const std::function<void(AggAccum&&)>& emit) const = 0;
-};
-
-// Index of `field` in schema.fields, or -1; a source uses it to pick the
-// AggAccum.fields slot to fill.
-int schema_field_index(const AggSchema& s, const std::string& field);
-
-// Merge `sa` into `da` (same group key); associative, so it serves per-unit
-// partials and the k-way merge of spilled runs alike.
-void merge_accum(AggAccum& da, const AggAccum& sa, const ViewPlan& plan);
-void merge_maps(GroupMap& dst, const GroupMap& src, const ViewPlan& plan);
-
-// Post-aggregation re-key: relabel FileName/HostName group columns to the
-// resolved name (a bijection, so the fold groups on the hash) and merge groups
-// that now collide. No-op when the plan has no resolved-name key. Runs on
-// distinct groups, so the resolver never touches events.
-void resolve_group_keys(GroupMap& map, const ViewPlan& plan);
-
 // Lazily build (and cache on the plan) the index-backed name resolver; null
 // when the plan has no resolved-name group key.
 const GroupResolver* ensure_resolver(const ViewPlan& plan);
@@ -194,12 +76,7 @@ std::string resolve_group_value(const GroupResolver& r, GroupKey::Kind kind,
 // answers differently depending on which path served it.
 std::string apply_group_transform(const GroupKey& gk, std::string v);
 
-// Aggregate-source fast-path helpers: the single reduced field ({_, false} if
-// the aggs mix fields) and the ArgMax spec if any.
-std::pair<std::string, bool> source_agg_field(const ViewPlan& plan);
-const AggSpec* find_argmax(const ViewPlan& plan);
-
-// Column names and the final materialized result.
+// Column names for group-key and aggregate output columns.
 std::string group_col_name(const GroupKey& gk);
 std::string agg_col_name(const AggSpec& spec);
 
@@ -207,12 +84,6 @@ std::string agg_col_name(const AggSpec& spec);
 // "<op>_<arg>" (Pct uses the spec's out_name prefix). The legacy bare-mean
 // column keeps the bare arg name and does not go through here.
 std::string dyn_col_name(const AggSpec& spec, const std::string& key);
-
-// Materialize the group map straight into a columnar dataframe::DataFrame
-// (count as Int64, integer Sum/Min/Max exact as Int64/Uint64, other value
-// columns Float64, text as String, hist as list<struct>).
-dftracer::utils::dataframe::DataFrame to_batch(const GroupMap& map,
-                                               const ViewPlan& plan);
 
 // Drop every column whose name is not in `select`, preserving result order. A
 // no-op when `select` is empty or names a column that is not present. Apply

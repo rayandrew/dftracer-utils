@@ -1,7 +1,9 @@
 #ifndef DFTRACER_UTILS_DATAFRAME_AGG_H
 #define DFTRACER_UTILS_DATAFRAME_AGG_H
 
+#include <dftracer/utils/dataframe/field_stat.h>
 #include <dftracer/utils/dataframe/series.h>
+#include <dftracer/utils/dataframe/sketch.h>
 
 #include <cstdint>
 #include <memory>
@@ -193,6 +195,41 @@ AggStatePtr agg_extract_group(const AggState& state, std::int64_t g);
 AggStatePtr group_agg_state(const std::vector<const Series*>& keys,
                             const std::vector<const Series*>& values,
                             std::vector<AggSpec> specs);
+
+/// One value column's already-reduced statistics to seed into an AggState,
+/// identified by `value_col` (the AggSpec value_col index the state was built
+/// with). `sketch` is set only for a Pct/Hist field, and merged into that
+/// field's shared sketch slot.
+struct AggSeedValue {
+    std::int32_t value_col = -1;
+    FieldStat stat;
+    const DDSketch* sketch = nullptr;
+};
+
+/// Initialize `state`'s key layout for the seed path: `nkeys` String key
+/// columns. Call once before agg_seed_group so a state that ends up with zero
+/// seeded groups still finalizes with the right key columns.
+void agg_seed_begin(AggState& state, std::size_t nkeys);
+
+/// Seed one already-reduced group observation into `state` with no raw events,
+/// for a fast path that reads per-group stats (the aggregation tier) instead of
+/// events. `state` must have been built by agg_new with the same specs the
+/// equivalent scan uses. `str_keys` is the composite key, one string per key
+/// column (every seeded key column is a String column). `count` is the group's
+/// row count; each `values` entry merges its FieldStat (and sketch) into the
+/// value column's per-group slot. Repeated calls for the same composite key
+/// merge (FieldStat/sketch merge), exactly like accumulating then merging the
+/// equivalent events. Call agg_seed_finalize once, after all agg_seed_group
+/// calls and before agg_finalize/agg_serialize.
+void agg_seed_group(AggState& state, const std::vector<std::string>& str_keys,
+                    std::uint64_t count,
+                    const std::vector<AggSeedValue>& values);
+
+/// Fix each value column's finalized integer/float domain from the seeded
+/// per-group stats, matching the columnar materializer's per-column rule (a
+/// field absent from some groups finalizes as Float64). Marks `state` ready for
+/// finalize/serialize/merge. Call once after all agg_seed_group calls.
+void agg_seed_finalize(AggState& state);
 
 /// Fused group-by: accumulate the whole batch in one pass over all specs (the
 /// sync driver chunks via the parallel_for seam and merges), then finalize.

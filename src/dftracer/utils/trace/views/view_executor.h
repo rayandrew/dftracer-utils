@@ -2,6 +2,7 @@
 #define DFTRACER_UTILS_TRACE_VIEWS_VIEW_EXECUTOR_H
 
 #include <dftracer/utils/core/coro/task.h>
+#include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_plan.h>
@@ -45,12 +46,13 @@ coro::CoroTask<ExportStats> run_export_trace_indexed(
 /// requested, so callers can apply it defensively.
 ViewPlan resolve_bucket_origin(const ViewPlan& plan);
 
-/// The no-scan GroupMap fast paths, in order: the first-touch raw-gzip
-/// bootstrap, then the aggregation tier. On a hit fills `out` (resolved) and
-/// returns true; false means the query must scan. The AggState rollup is served
-/// separately by try_serve_rollup (it returns a finalized DataFrame).
-coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
-                                                 GroupMap& out);
+/// The no-scan fast paths, in order: the first-touch raw-gzip bootstrap, then
+/// the aggregation tier. On a hit fills `out` (a mergeable engine AggState,
+/// finalize with finalize_engine_result) and returns true; false means the
+/// query must scan. The AggState rollup is served separately by
+/// try_serve_rollup (it returns a finalized DataFrame).
+coro::CoroTask<bool> try_serve_aggregate_no_scan(
+    const ViewPlan& plan, dftracer::utils::dataframe::AggStatePtr& out);
 
 /// Serve `plan` from a subsuming persisted rollup with no scan: re-aggregate
 /// the stored AggState partials to `plan`'s grouping and finalize. nullopt when
@@ -160,6 +162,9 @@ struct AggBranch {
     // `partial_out` for a distributed merge instead of a DataFrame into `out`.
     // Forces a scan (raw partial, no rollup relabel).
     std::shared_ptr<std::string> partial_out;
+    // A predicated collect (no branch plan): the per-event filter overlaid onto
+    // the base plan, applied by the branch's engine fold (apply_query).
+    std::optional<query::Query> query;
 };
 
 // One branch of a fused session: a predicate selecting events, a per-event
@@ -208,10 +213,6 @@ coro::CoroTask<ExportStats> run_session(
     std::shared_ptr<ViewSessionState> state);
 
 // Built-in branch terminals; the caller sets `predicate` on the returned hooks.
-BranchHooks make_collect_branch(std::vector<GroupKey> group_by,
-                                std::vector<AggSpec> agg,
-                                std::shared_ptr<dataframe::DataFrame> out,
-                                std::size_t num_slots);
 BranchHooks make_export_branch(ExportSink& sink,
                                std::shared_ptr<ExportStats> out);
 
