@@ -5,6 +5,7 @@
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
+#include <dftracer/utils/trace/aggregators/aggregator_utility.h>
 #include <dftracer/utils/trace/comparator/compare_view.h>
 #include <dftracer/utils/trace/views/aggfold.h>
 #include <dftracer/utils/trace/views/fold.h>
@@ -97,6 +98,36 @@ dataframe::DataFrame engine_collect(const View& v) {
         result = co_await detail::run_collect_via_engine(v.plan());
     });
     return detail::apply_agg_post_ops(std::move(result), v.plan());
+}
+
+// The engine scan with the tier/rollup fast paths bypassed:
+// build_engine_agg_state always folds events, so this is the ground-truth full
+// scan a tier answer must match.
+dataframe::DataFrame scan_only(const View& v) {
+    namespace detail = dftracer::utils::trace::views::detail;
+    Runtime rt;
+    dataframe::DataFrame result;
+    rt.run_blocking("scan-only", [&](CoroScope&) -> coro::CoroTask<void> {
+        auto st = co_await detail::build_engine_agg_state(v.plan());
+        result = detail::finalize_engine_result(*st, v.plan());
+    });
+    return detail::apply_agg_post_ops(std::move(result), v.plan());
+}
+
+// Build the sidecar aggregation tier the way the aggregator does, so
+// agg_tier_collect can answer without a scan.
+void build_tier_index(const std::string& gz) {
+    namespace aggregators = dftracer::utils::trace::aggregators;
+    aggregators::AggregatorInput input;
+    input.directory = fs::path(gz).parent_path().string();
+    input.force_rebuild = true;
+    Runtime rt(4);
+    rt.run_blocking("build-tier", [&](CoroScope& ctx) -> coro::CoroTask<void> {
+        aggregators::AggregatorUtility agg;
+        auto gen = agg(ctx, input);
+        while (auto batch = co_await gen.next()) (void)batch;
+        co_return;
+    });
 }
 
 // A trace with a numeric arg ("level") and overlapping durations, so one trace
@@ -1810,6 +1841,87 @@ TEST_SUITE("View") {
             CHECK(bnum(b1, 0, "busy") <=
                   static_cast<double>(expect_exact + 2 * cell));
         }
+    }
+
+    TEST_CASE(
+        "View - occupancy over a built tier declines the tier and matches the "
+        "scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = write_agg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        build_tier_index(gz);  // an EVENT tier answerable() would try
+
+        auto make = [&] {
+            return View::from_file(gz, idx)
+                .group_by({GroupKey::cat()})
+                .agg({{AggOp::Busy, "", "busy"},
+                      {AggOp::Active, "", "active"},
+                      {AggOp::Count, "", "n"}});
+        };
+        // No time_range: answerable() would previously serve occupancy from the
+        // tier's per-key stats, which carry no per-event intervals -> zeros.
+        dataframe::DataFrame tier = engine_collect(make());
+        dataframe::DataFrame scan = scan_only(make());
+        frames_equal(tier, scan, {"cat"});
+        double max_busy = 0;
+        for (std::int64_t r = 0; r < tier.num_rows(); ++r)
+            max_busy = std::max(max_busy, bnum(tier, r, "busy"));
+        CHECK(max_busy > 0);  // a tier-zeroed answer would fail here
+    }
+
+    TEST_CASE(
+        "View - session occupancy branch declines the tier and matches the "
+        "scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = write_agg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        build_tier_index(gz);
+        View base = View::from_file(gz, idx);
+
+        auto occ = [&](View v) {
+            return v.group_by({GroupKey::cat()})
+                .agg({{AggOp::Busy, "", "busy"},
+                      {AggOp::Active, "", "active"},
+                      {AggOp::Count, "", "n"}});
+        };
+        auto run = base.session();
+        auto got = run.collect(occ(base));
+        run.execute().get();
+
+        dataframe::DataFrame scan = scan_only(occ(base));
+        frames_equal(*got, scan, {"cat"});
+        double max_busy = 0;
+        for (std::int64_t r = 0; r < got->num_rows(); ++r)
+            max_busy = std::max(max_busy, bnum(*got, r, "busy"));
+        CHECK(max_busy > 0);
+    }
+
+    TEST_CASE(
+        "View - a scaled-field tier agg declines so time_scale matches the "
+        "scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = write_agg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        build_tier_index(gz);
+
+        auto make = [&] {
+            return View::from_file(gz, idx)
+                .time_scale(0.001)
+                .group_by({GroupKey::cat()})
+                .agg({{AggOp::Sum, "dur", "total"},
+                      {AggOp::Mean, "dur", "avg"},
+                      {AggOp::Count, "", "n"}});
+        };
+        // The tier stores raw dur; without declining it would answer an
+        // unscaled Sum/Mean while the scan scales dur by time_scale.
+        dataframe::DataFrame tier = engine_collect(make());
+        dataframe::DataFrame scan = scan_only(make());
+        frames_equal(tier, scan, {"cat"});
+        CHECK(bnum(tier, 0, "total") ==
+              doctest::Approx(bnum(scan, 0, "total")));
     }
 
     TEST_CASE("View - group_by resolves any field, top-level and nested") {

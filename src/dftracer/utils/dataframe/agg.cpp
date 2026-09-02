@@ -15,6 +15,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -1360,6 +1361,38 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
     return out;
 }
 
+// The seed path rebuilds a group only from a FieldStat + optional DDSketch;
+// First/Last, ArgMax, SetUnion and occupancy keep no such state. No default:
+// -Wswitch keeps this complete.
+static bool agg_op_seedable(AggOp op) {
+    switch (op) {
+        case AggOp::Count:
+        case AggOp::Sum:
+        case AggOp::Min:
+        case AggOp::Max:
+        case AggOp::Mean:
+        case AggOp::Var:
+        case AggOp::Std:
+        case AggOp::Skew:
+        case AggOp::Kurt:
+        case AggOp::Pct:
+        case AggOp::Hist:
+        case AggOp::SumSq:
+        case AggOp::CountValid:
+            return true;
+        case AggOp::First:
+        case AggOp::Last:
+        case AggOp::ArgMax:
+        case AggOp::SetUnion:
+        case AggOp::Busy:
+        case AggOp::Concurrency:
+        case AggOp::Utilization:
+        case AggOp::Active:
+            return false;
+    }
+    return false;
+}
+
 void agg_seed_begin(AggState& st, std::size_t nkeys) {
     st.nkeys = nkeys;
     st.key_is_str.assign(nkeys, 1);
@@ -1374,6 +1407,11 @@ void agg_seed_group(AggState& st, const std::vector<std::string>& str_keys,
                     std::uint64_t count,
                     const std::vector<AggSeedValue>& values) {
     if (!st.inited) agg_seed_begin(st, str_keys.size());
+    for (const AggSpec& sp : st.specs)
+        if (!agg_op_seedable(sp.op))
+            throw std::logic_error(
+                "agg_seed_group: an aggregate op has no FieldStat/sketch seed "
+                "representation (First/Last/ArgMax/SetUnion/occupancy)");
     const std::int64_t g = st.find_or_add_group(
         [](std::size_t) -> std::int64_t { return 0; },
         [&](std::size_t k) -> std::string_view { return str_keys[k]; });

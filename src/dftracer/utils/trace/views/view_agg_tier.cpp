@@ -135,11 +135,40 @@ bool query_answerable(const query::Query& q) {
     return cat_foldable(q.root());
 }
 
+// Ops the seed path can reconstruct from stored FieldStat + optional DDSketch.
+// Occupancy and ArgMax/SetUnion keep no such state, so they decline to the
+// scan. No default: -Wswitch flags a newly added op.
+bool tier_serves_op(AggOp op) {
+    switch (op) {
+        case AggOp::Count:
+        case AggOp::Sum:
+        case AggOp::Min:
+        case AggOp::Max:
+        case AggOp::Mean:
+        case AggOp::Var:
+        case AggOp::Std:
+        case AggOp::Skew:
+        case AggOp::Kurt:
+        case AggOp::SumSq:
+        case AggOp::Pct:
+        case AggOp::Hist:
+            return true;
+        case AggOp::ArgMax:
+        case AggOp::SetUnion:
+        case AggOp::Busy:
+        case AggOp::Concurrency:
+        case AggOp::Utilization:
+        case AggOp::Active:
+            return false;
+    }
+    return false;
+}
+
 // Agg ops + reduced fields the tier can serve, shared by the EVENT-only and the
 // unified events+profiles paths (which differ only on group-key allowances).
 bool aggs_and_fields_answerable(const ViewPlan& plan, const AggSchema& sch) {
     for (const auto& s : plan.agg) {
-        if (s.op == AggOp::ArgMax) return false;
+        if (!tier_serves_op(s.op)) return false;
         // Only dur/size persist m3/m4 and a DDSketch; skew/kurtosis,
         // percentiles and histograms on any other field must scan.
         if ((s.op == AggOp::Skew || s.op == AggOp::Kurt || s.op == AggOp::Pct ||
@@ -149,6 +178,12 @@ bool aggs_and_fields_answerable(const ViewPlan& plan, const AggSchema& sch) {
         if (s.op == AggOp::Count && !s.field.empty()) return false;
         if (s.field == "ts" && s.op != AggOp::Min) return false;
         if (s.field == "te" && s.op != AggOp::Max) return false;
+        // The scan scales ts/dur/te by time_scale; the tier stores raw metrics,
+        // so a scaled-field agg would diverge. Decline it.
+        if (plan.time_scale != 1.0 &&
+            (s.field == "ts" || s.field == "dur" || s.field == "te" ||
+             s.by == "ts" || s.by == "dur" || s.by == "te"))
+            return false;
     }
     for (const auto& f : sch.fields)
         if (!answerable_field(f)) return false;

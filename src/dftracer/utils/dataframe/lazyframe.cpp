@@ -2632,7 +2632,16 @@ std::optional<DataFrame> run_ops_in_memory(
                     return df.with_row_index(o.name);
                 },
                 [&](const NullCountOp&) { return df.null_count(); },
-                [&](const GroupByOp& o) { return df.group_by(o.keys, o.aggs); },
+                [&](const GroupByOp& o) {
+                    if (o.dyn.empty()) return df.group_by(o.keys, o.aggs);
+                    // DataFrame::group_by drops the dyn side-channel; run the
+                    // same AggState path the streaming cursor uses.
+                    LoweredGroupAggs lowered = lower_group_aggs(o.aggs);
+                    AggStatePtr state = agg_new(lowered.specs, o.dyn);
+                    agg_accumulate_chunk(*state, df, o.keys,
+                                         lowered.value_names, o.dyn_prefix);
+                    return agg_finalize(*state, o.keys);
+                },
                 [&](const auto&) {
                     ok = false;
                     return DataFrame{};

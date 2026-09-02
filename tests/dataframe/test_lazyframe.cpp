@@ -472,6 +472,46 @@ TEST_SUITE("lazyframe") {
         }
     }
 
+    TEST_CASE("group_by dyn resident collect() matches the streaming path") {
+        using dftracer::utils::dataframe::AggDynSpec;
+        using dftracer::utils::dataframe::AggOp;
+        std::vector<std::int64_t> g{0, 0, 1, 1};
+        std::vector<double> x{1, 2, 3, 4};
+        std::vector<double> y{10, 20, 30, 40};
+        DataFrame df;
+        df.names = {"g", "arg.x", "arg.y"};
+        df.columns.push_back(Series::flat_i64(g.data(), 4));
+        df.columns.push_back(Series::flat_f64(x.data(), 4));
+        df.columns.push_back(Series::flat_f64(y.data(), 4));
+
+        std::vector<GroupAgg> aggs{{Agg::Count, "", "n", 0.0}};
+        std::vector<AggDynSpec> dyn{{AggOp::Sum, 0.0, "sum_"}};
+        const std::vector<std::string> keys{"g"};
+
+        // collect() (no morsel size, no budget) takes the resident whole-column
+        // path; collect(2) forces the streaming GroupByCursor, which honors
+        // dyn.
+        DataFrame resident =
+            run(df.lazy().group_by(keys, aggs, dyn, "arg.").collect());
+        DataFrame streamed =
+            run(df.lazy().group_by(keys, aggs, dyn, "arg.").collect(2));
+
+        DataFrame a = resident.sort_by_multi(keys);
+        DataFrame b = streamed.sort_by_multi(keys);
+        REQUIRE(a.names ==
+                b.names);  // dyn columns must survive the resident path
+        REQUIRE(a.column_index("sum_x") >= 0);
+        REQUIRE(a.num_rows() == b.num_rows());
+        for (std::int64_t i = 0; i < a.num_rows(); ++i) {
+            CHECK(a.column("n").data<std::int64_t>()[i] ==
+                  b.column("n").data<std::int64_t>()[i]);
+            CHECK(a.column("sum_x").data<double>()[i] ==
+                  doctest::Approx(b.column("sum_x").data<double>()[i]));
+            CHECK(a.column("sum_y").data<double>()[i] ==
+                  doctest::Approx(b.column("sum_y").data<double>()[i]));
+        }
+    }
+
     TEST_CASE(
         "group_by spill with high-cardinality keys triggers multiple "
         "flushes, matches eager") {

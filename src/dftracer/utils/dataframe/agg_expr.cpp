@@ -108,7 +108,14 @@ DataFrame group_agg_expr(const std::vector<Expr>& keys,
         } else {
             cs.value_col = dedup(sp.value);
         }
-        if (sp.op == AggOp::ArgMax && sp.by.valid()) cs.by_col = dedup(sp.by);
+        // ArgMax and occupancy read a second column via by_col; leaving it -1
+        // would index values[SIZE_MAX] at accumulate.
+        if (agg_uses_by_col(sp.op)) {
+            if (!sp.by.valid())
+                throw std::invalid_argument(
+                    "group_agg_expr: this aggregate requires a `by` column");
+            cs.by_col = dedup(sp.by);
+        }
         col_specs.push_back(std::move(cs));
     }
 
