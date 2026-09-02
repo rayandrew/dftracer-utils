@@ -2417,9 +2417,15 @@ void PluginFold::step_columns(const FoldBatch& batch) {
     dftu_dataframe* cdf =
         dftu_dataframe_new(names.data(), handles.data(),
                            static_cast<std::int32_t>(handles.size()));
-    // The seam is synchronous (a returned task would outlive cdf).
-    plugin_->on_batch_columns(slice_, cdf, &host_);
+    // The seam is contractually synchronous (abi.h: must return NULL); a
+    // returned task would reference the now-freed cdf and cannot be driven.
+    ::dftu_task* t = plugin_->on_batch_columns(slice_, cdf, &host_);
     dftu_dataframe_free(cdf);
+    if (t)
+        DFTRACER_UTILS_LOG_ERROR(
+            "[plugin:%s] on_batch_columns returned a non-null task; the seam "
+            "is synchronous, dropping it",
+            plugin_name().empty() ? "plugin" : plugin_name().c_str());
     pending_ = nullptr;
 }
 

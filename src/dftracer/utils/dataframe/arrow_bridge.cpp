@@ -446,6 +446,9 @@ Series import_dict(const ArrowSchema* schema, const ArrowArray* arr,
     if (!values.valid()) return Series{};
 
     const std::int64_t n = arr->length;
+    // A sliced array starts its index buffer at arr->offset (mirrors
+    // import_flat adding offset*width to the data pointer).
+    const std::size_t off = static_cast<std::size_t>(arr->offset);
     auto* col = new dftu_series();
     col->type = static_cast<TypeId>(dftu_series_type(values.handle()));
     col->length = n;
@@ -459,7 +462,8 @@ Series import_dict(const ArrowSchema* schema, const ArrowArray* arr,
     if (index_type == TypeId::Int64) {
         col->encoding = Encoding::Selection;
         col->data = Buffer::wrap(
-            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[1])),
+            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[1])) +
+                off * sizeof(std::int64_t),
             static_cast<std::size_t>(n) * sizeof(std::int64_t),
             [owner](void*) {});
         return Series{col};
@@ -467,7 +471,8 @@ Series import_dict(const ArrowSchema* schema, const ArrowArray* arr,
     if (index_type == TypeId::Int32) {
         col->encoding = Encoding::Dictionary;
         col->data = Buffer::wrap(
-            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[1])),
+            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[1])) +
+                off * sizeof(std::int32_t),
             static_cast<std::size_t>(n) * sizeof(std::int32_t),
             [owner](void*) {});
         return Series{col};
@@ -479,7 +484,8 @@ Series import_dict(const ArrowSchema* schema, const ArrowArray* arr,
         Buffer::allocate(static_cast<std::size_t>(n) * sizeof(std::int32_t));
     auto* codes = reinterpret_cast<std::int32_t*>(col->data->data());
     const std::size_t w = byte_width(index_type);
-    const auto* raw = static_cast<const std::uint8_t*>(arr->buffers[1]);
+    const auto* raw =
+        static_cast<const std::uint8_t*>(arr->buffers[1]) + off * w;
     const bool is_signed =
         index_type == TypeId::Int8 || index_type == TypeId::Int16;
     for (std::int64_t i = 0; i < n; ++i) {

@@ -22,7 +22,7 @@ struct AggExprSpec {
     Expr value;
     std::string out;
     double param = 0.0;  ///< Pct: the quantile level q in [0, 1]
-    Expr by;             ///< ArgMax: the value maximized (value is the field
+    Expr by{};           ///< ArgMax: the value maximized (value is the field
                          ///< represented); unused otherwise
 
     /// Rename the output column (fluent), e.g. `agg_sum(a + b).as("sum_ab")`.

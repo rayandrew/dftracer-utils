@@ -68,12 +68,66 @@ TEST_CASE("group_agg_state + agg_finalize matches group_agg") {
     DataFrame b = df::group_agg(s.keys1, s.values, mixed_specs(),
                                 std::vector<std::string>{"k1"});
     REQUIRE(a.num_rows() == b.num_rows());
+    REQUIRE(a.names == b.names);
     for (std::int64_t r = 0; r < a.num_rows(); ++r) {
         CHECK(a.column("sum").data<std::int64_t>()[r] ==
               b.column("sum").data<std::int64_t>()[r]);
         CHECK(a.column("cnt").data<std::int64_t>()[r] ==
               b.column("cnt").data<std::int64_t>()[r]);
+        CHECK(a.column("mean").data<double>()[r] ==
+              doctest::Approx(b.column("mean").data<double>()[r]));
+        CHECK(a.column("p50").data<double>()[r] ==
+              doctest::Approx(b.column("p50").data<double>()[r]));
+        CHECK(a.column("hist").length() == b.column("hist").length());
+        CHECK(std::string(a.column("tags").string_at(r)) ==
+              std::string(b.column("tags").string_at(r)));
+        CHECK(std::string(a.column("argmax").string_at(r)) ==
+              std::string(b.column("argmax").string_at(r)));
     }
+}
+
+TEST_CASE("group_agg keeps a Uint64 key's type and its > 2^63 value") {
+    const std::uint64_t big = (std::uint64_t{1} << 63) + 7;  // negative as i64
+    std::vector<std::uint64_t> k{big, big, 3, 3};
+    std::vector<std::int64_t> v{1, 2, 3, 4};
+    Series sk = Series::flat(TypeId::Uint64, k.data(), 4);
+    Series sv = Series::flat_i64(v.data(), 4);
+    std::vector<const Series*> keys{&sk};
+    std::vector<const Series*> values{&sv};
+    DataFrame r = df::group_agg(keys, values, {AggSpec{AggOp::Sum, 0, "sum"}},
+                                std::vector<std::string>{"k"});
+    REQUIRE(r.column("k").type() == TypeId::Uint64);
+    REQUIRE(r.num_rows() == 2);
+    const std::uint64_t* kc = r.column("k").data<std::uint64_t>();
+    bool saw_big = false, saw_small = false;
+    for (std::int64_t i = 0; i < r.num_rows(); ++i) {
+        if (kc[i] == big) saw_big = true;
+        if (kc[i] == 3) saw_small = true;
+    }
+    CHECK(saw_big);
+    CHECK(saw_small);
+}
+
+TEST_CASE("group_agg keeps a Float64 key's type and value") {
+    std::vector<double> k{1.5, 1.5, 2.5, 2.5};
+    std::vector<std::int64_t> v{1, 2, 3, 4};
+    Series sk = Series::flat_f64(k.data(), 4);
+    Series sv = Series::flat_i64(v.data(), 4);
+    std::vector<const Series*> keys{&sk};
+    std::vector<const Series*> values{&sv};
+    DataFrame r =
+        df::group_agg(keys, values, {AggSpec{AggOp::Count, -1, "cnt"}},
+                      std::vector<std::string>{"k"});
+    REQUIRE(r.column("k").type() == TypeId::Float64);
+    REQUIRE(r.num_rows() == 2);
+    const double* kc = r.column("k").data<double>();
+    bool saw15 = false, saw25 = false;
+    for (std::int64_t i = 0; i < r.num_rows(); ++i) {
+        if (kc[i] == 1.5) saw15 = true;
+        if (kc[i] == 2.5) saw25 = true;
+    }
+    CHECK(saw15);
+    CHECK(saw25);
 }
 
 TEST_CASE("agg_regroup coarsens (k1,k2)->k1 matching a direct k1 group_agg") {

@@ -68,6 +68,20 @@ double read_as_double(const Series& c, std::int64_t i, FieldStatDomain d) {
     }
 }
 
+// Exact occupancy-endpoint read: an integer column keeps its raw u64/i64 so a
+// timestamp above 2^53 stays exact; a Float64 column goes through double.
+std::uint64_t read_u64_exact(const Series& c, std::int64_t i,
+                             FieldStatDomain d) {
+    switch (d) {
+        case FieldStatDomain::F64:
+            return static_cast<std::uint64_t>(read_f64(c, i));
+        case FieldStatDomain::U64:
+            return read_u64(c, i);
+        default:
+            return static_cast<std::uint64_t>(read_i64(c, i));
+    }
+}
+
 void fs_add(FieldStat& fs, const Series& c, std::int64_t i, FieldStatDomain d) {
     switch (d) {
         case FieldStatDomain::F64:
@@ -158,7 +172,10 @@ class AggState {
     // are located by a combined hash of the N cells (hash_combine, no string
     // concatenation) with a column-by-column equality check on collision.
     std::size_t nkeys = 0;
-    std::vector<char> key_is_str;                      // nkeys
+    std::vector<char> key_is_str;  // nkeys
+    // Domain the raw bits in ikey_cols reinterpret to on finalize/render, so a
+    // Uint64 hash key > 2^63 or a Float64 key keeps its real type.
+    std::vector<FieldStatDomain> key_domain;           // nkeys
     std::vector<std::vector<std::int64_t>> ikey_cols;  // nkeys * ngroups
     std::vector<std::vector<std::string>> skey_cols;   // nkeys * ngroups
     std::unordered_map<std::uint64_t, std::vector<std::int64_t>> key_buckets;
@@ -265,6 +282,11 @@ class AggState {
             }
         }
         nf = field_vc.size();
+        // Size the per-field layout up front (domain refined on first
+        // accumulate) so a state finalized with no accumulate/seed still has
+        // valid slots.
+        field_domain.assign(nf, FieldStatDomain::F64);
+        field_is_str.assign(nf, 0);
         has_fl = false;
         for (const AggSpec& sp : specs)
             if (sp.op == AggOp::First || sp.op == AggOp::Last) has_fl = true;
@@ -286,6 +308,7 @@ class AggState {
         spec_argmax.assign(specs.size(), -1);
         argmax_by_col.clear();
         argmax_val_col.clear();
+        n_argmax = 0;
         for (std::size_t s = 0; s < specs.size(); ++s) {
             if (specs[s].op != AggOp::ArgMax) continue;
             spec_argmax[s] = static_cast<int>(n_argmax++);
@@ -296,6 +319,7 @@ class AggState {
 
         spec_set.assign(specs.size(), -1);
         set_val_col.clear();
+        n_set = 0;
         for (std::size_t s = 0; s < specs.size(); ++s) {
             if (specs[s].op != AggOp::SetUnion) continue;
             spec_set[s] = static_cast<int>(n_set++);
@@ -587,10 +611,13 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
     if (!st.inited) {
         st.nkeys = keys.size();
         st.key_is_str.resize(st.nkeys);
+        st.key_domain.resize(st.nkeys);
         st.ikey_cols.resize(st.nkeys);
         st.skey_cols.resize(st.nkeys);
-        for (std::size_t k = 0; k < st.nkeys; ++k)
+        for (std::size_t k = 0; k < st.nkeys; ++k) {
             st.key_is_str[k] = keys[k]->type() == TypeId::String ? 1 : 0;
+            st.key_domain[k] = col_domain(keys[k]->type());
+        }
         st.field_domain.resize(st.nf);
         st.field_is_str.resize(st.nf);
         for (std::size_t fj = 0; fj < st.nf; ++fj) {
@@ -669,6 +696,9 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                 const Series* byc =
                     values[static_cast<std::size_t>(st.argmax_by_col[slot])];
                 if (byc->is_null(i)) continue;
+                // argmax_by is double-keyed (storage, merge compare,
+                // serialize), so an integer by-value above 2^53 loses exactness
+                // here.
                 const double byv =
                     read_as_double(*byc, i, col_domain(byc->type()));
                 const std::size_t as =
@@ -703,12 +733,23 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                 const Series* durc =
                     values[static_cast<std::size_t>(st.occ_by_col[slot])];
                 if (tsc->is_null(i) || durc->is_null(i)) continue;
-                const double durv =
-                    read_as_double(*durc, i, col_domain(durc->type()));
-                if (!(durv > 0)) continue;
-                std::uint64_t s0 = static_cast<std::uint64_t>(
-                    read_as_double(*tsc, i, col_domain(tsc->type())));
-                std::uint64_t e0 = s0 + static_cast<std::uint64_t>(durv);
+                const FieldStatDomain durd = col_domain(durc->type());
+                std::uint64_t dur;
+                if (durd == FieldStatDomain::I64) {
+                    const std::int64_t d = read_i64(*durc, i);
+                    if (d <= 0) continue;
+                    dur = static_cast<std::uint64_t>(d);
+                } else if (durd == FieldStatDomain::U64) {
+                    dur = read_u64(*durc, i);
+                    if (dur == 0) continue;
+                } else {
+                    const double d = read_f64(*durc, i);
+                    if (!(d > 0)) continue;
+                    dur = static_cast<std::uint64_t>(d);
+                }
+                std::uint64_t s0 =
+                    read_u64_exact(*tsc, i, col_domain(tsc->type()));
+                std::uint64_t e0 = s0 + dur;
                 const std::uint64_t cell = st.occ_cell[slot];
                 if (cell) {  // optional tolerance: snap start down, end up
                     s0 = s0 / cell * cell;
@@ -716,7 +757,7 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                 }
                 const std::size_t base =
                     static_cast<std::size_t>(g) * st.n_occ + slot;
-                st.occ_total[base] += static_cast<std::uint64_t>(durv);
+                st.occ_total[base] += dur;
                 if (s0 < st.occ_ts[base]) st.occ_ts[base] = s0;
                 if (e0 > st.occ_te[base]) st.occ_te[base] = e0;
                 st.occ_deltas[base][s0] += 1;
@@ -751,6 +792,7 @@ void agg_merge(AggState& into, const AggState& other) {
         into.adopt_layout(other);
         into.nkeys = other.nkeys;
         into.key_is_str = other.key_is_str;
+        into.key_domain = other.key_domain;
         into.ikey_cols.assign(into.nkeys, {});
         into.skey_cols.assign(into.nkeys, {});
         into.inited = true;
@@ -771,8 +813,11 @@ AggStatePtr agg_regroup(const AggState& src,
     dst->adopt_layout(src);  // field_domain/field_is_str are value-derived
     dst->nkeys = keep.size();
     dst->key_is_str.resize(dst->nkeys);
-    for (std::size_t k = 0; k < dst->nkeys; ++k)
+    dst->key_domain.resize(dst->nkeys);
+    for (std::size_t k = 0; k < dst->nkeys; ++k) {
         dst->key_is_str[k] = src.key_is_str[static_cast<std::size_t>(keep[k])];
+        dst->key_domain[k] = src.key_domain[static_cast<std::size_t>(keep[k])];
+    }
     dst->ikey_cols.assign(dst->nkeys, {});
     dst->skey_cols.assign(dst->nkeys, {});
     dst->inited = true;
@@ -802,13 +847,40 @@ DataFrame agg_finalize(const AggState& st,
     const std::int64_t ng = st.ngroups();
     const std::size_t ns = st.nspecs();
     DataFrame out;
-    for (std::size_t k = 0; k < st.nkeys; ++k) {
+    // A state finalized without accumulating (empty stream) has no key layout;
+    // still emit one empty column per requested key so the schema is complete.
+    const std::size_t nk =
+        st.nkeys > key_names.size() ? st.nkeys : key_names.size();
+    for (std::size_t k = 0; k < nk; ++k) {
         out.names.push_back(k < key_names.size() ? key_names[k]
                                                  : "key" + std::to_string(k));
-        if (st.key_is_str[k])
+        if (k >= st.nkeys) {
+            out.columns.push_back(Series::strings(
+                std::vector<std::string>(static_cast<std::size_t>(ng))));
+            continue;
+        }
+        if (st.key_is_str[k]) {
             out.columns.push_back(Series::strings(st.skey_cols[k]));
-        else
-            out.columns.push_back(Series::flat_i64(st.ikey_cols[k].data(), ng));
+            continue;
+        }
+        const FieldStatDomain kd =
+            k < st.key_domain.size() ? st.key_domain[k] : FieldStatDomain::I64;
+        const std::vector<std::int64_t>& bits = st.ikey_cols[k];
+        if (kd == FieldStatDomain::U64) {
+            std::vector<std::uint64_t> v(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g)
+                v[static_cast<std::size_t>(g)] = std::bit_cast<std::uint64_t>(
+                    bits[static_cast<std::size_t>(g)]);
+            out.columns.push_back(Series::flat(TypeId::Uint64, v.data(), ng));
+        } else if (kd == FieldStatDomain::F64) {
+            std::vector<double> v(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g)
+                v[static_cast<std::size_t>(g)] =
+                    std::bit_cast<double>(bits[static_cast<std::size_t>(g)]);
+            out.columns.push_back(Series::flat_f64(v.data(), ng));
+        } else {
+            out.columns.push_back(Series::flat_i64(bits.data(), ng));
+        }
     }
 
     for (std::size_t s = 0; s < ns; ++s) {
@@ -1155,11 +1227,19 @@ std::vector<std::string> agg_group_key(const AggState& st, std::int64_t g) {
     std::vector<std::string> out;
     out.reserve(st.nkeys);
     for (std::size_t k = 0; k < st.nkeys; ++k) {
-        if (st.key_is_str[k])
+        if (st.key_is_str[k]) {
             out.push_back(st.skey_cols[k][static_cast<std::size_t>(g)]);
+            continue;
+        }
+        const std::int64_t bits = st.ikey_cols[k][static_cast<std::size_t>(g)];
+        const FieldStatDomain kd =
+            k < st.key_domain.size() ? st.key_domain[k] : FieldStatDomain::I64;
+        if (kd == FieldStatDomain::U64)
+            out.push_back(std::to_string(std::bit_cast<std::uint64_t>(bits)));
+        else if (kd == FieldStatDomain::F64)
+            out.push_back(std::to_string(std::bit_cast<double>(bits)));
         else
-            out.push_back(
-                std::to_string(st.ikey_cols[k][static_cast<std::size_t>(g)]));
+            out.push_back(std::to_string(bits));
     }
     return out;
 }
@@ -1297,6 +1377,7 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
     out->init_layout();
     out->nkeys = st.nkeys;
     out->key_is_str = st.key_is_str;
+    out->key_domain = st.key_domain;
     out->ikey_cols.assign(out->nkeys, {});
     out->skey_cols.assign(out->nkeys, {});
     out->field_domain = st.field_domain;
@@ -1396,6 +1477,7 @@ static bool agg_op_seedable(AggOp op) {
 void agg_seed_begin(AggState& st, std::size_t nkeys) {
     st.nkeys = nkeys;
     st.key_is_str.assign(nkeys, 1);
+    st.key_domain.assign(nkeys, FieldStatDomain::I64);
     st.ikey_cols.assign(nkeys, {});
     st.skey_cols.assign(nkeys, {});
     st.field_domain.assign(st.nf, FieldStatDomain::F64);
@@ -1498,6 +1580,10 @@ std::string agg_serialize(const AggState& st) {
     put(s, static_cast<std::uint32_t>(st.specs.size()));
     put(s, static_cast<std::uint32_t>(st.nkeys));
     for (char b : st.key_is_str) put(s, static_cast<std::uint8_t>(b));
+    for (std::size_t k = 0; k < st.nkeys; ++k)
+        put(s, static_cast<std::uint8_t>(k < st.key_domain.size()
+                                             ? st.key_domain[k]
+                                             : FieldStatDomain::I64));
     for (const AggSpec& sp : st.specs) {
         put(s, static_cast<std::int32_t>(sp.op));
         put(s, sp.value_col);
@@ -1617,6 +1703,9 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     st->key_is_str.resize(nkeys);
     for (std::uint32_t k = 0; k < nkeys; ++k)
         st->key_is_str[k] = static_cast<char>(r.get<std::uint8_t>());
+    st->key_domain.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k)
+        st->key_domain[k] = static_cast<FieldStatDomain>(r.get<std::uint8_t>());
     st->specs.resize(ns);
     for (std::uint32_t i = 0; i < ns; ++i) {
         st->specs[i].op = static_cast<AggOp>(r.get<std::int32_t>());

@@ -831,8 +831,10 @@ class _ViewerFilters:
         return self._rewrap(self._native.agg_numeric_args(*reductions))
 
     def collect(self) -> "LazyFrame":
-        """Build the query plan; nothing scans until the result's own
-        .collect() (-> DataFrame) or .to_arrow()/.to_pandas()/etc."""
+        """Build the query plan and return a LazyFrame; nothing scans until you
+        call .collect() on it (-> DataFrame). The LazyFrame itself has no
+        to_arrow/to_pandas/to_numpy/to_polars - convert the DataFrame from its
+        own .collect()."""
         # Local import: lazyframe.py imports DataFrame from this module, so a
         # module-level import here would be circular.
         from .lazyframe import LazyFrame
@@ -848,8 +850,8 @@ class _ViewerFilters:
     ) -> "Iterator[DataFrame]":
         """Iterate matching events as native DataFrame chunks (parallel, bounded
         memory) - the streaming form of collect(). Each chunk carries its own
-        schema; call .to_arrow() on a chunk at the edge. ``workers=0`` uses the
-        runtime's worker count."""
+        schema; call .to_arrow() on a chunk at the edge. ``workers`` is
+        currently ignored (reserved)."""
         return (
             _wrap(chunk)
             for chunk in self._native.stream(
@@ -956,13 +958,14 @@ class _ViewerFilters:
 
 
 class AggregatedTraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
-    """The aggregated form of a TraceViewer (after group_by/agg); terminals
-    return a wrapped DataFrame."""
+    """The aggregated form of a TraceViewer (after group_by/agg); collect()
+    returns a LazyFrame (call its own .collect() for a DataFrame)."""
 
 
 class TraceViewer(_ViewerFilters, _Wrapper["_ext._TraceViewer"]):
-    """A lazy view over trace files. Builder methods chain; terminals
-    (``collect`` / ``collect_typed`` / ``join``) return a wrapped DataFrame."""
+    """A lazy view over trace files. Builder methods chain; ``collect`` returns
+    a LazyFrame (call its own ``.collect()`` for a DataFrame), while
+    ``collect_typed`` / ``join`` return a DataFrame directly."""
 
     @overload
     def __init__(self, native: "_ext._TraceViewer", /) -> None: ...

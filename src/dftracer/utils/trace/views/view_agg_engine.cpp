@@ -150,24 +150,39 @@ dataframe::GroupAgg to_group_agg(const AggSpec& spec) {
 }
 
 // to_batch's group key column is always a String (the fold's key is text);
-// agg_finalize instead keeps a non-string key's native domain collapsed to
-// Int64. Render that back to the same decimal text the GroupMap path would
-// have produced (plain integer text - the group key values reachable here are
-// pid/tid, always small enough that the int64/uint64 bit pattern round-trips
-// through decimal identically).
+// agg_finalize keeps a non-string key's native type (Int64/Uint64/Float64).
+// Render it back to the decimal text the GroupMap path would have produced.
 dataframe::Series key_column_to_string(const dataframe::Series& col) {
     using dataframe::TypeId;
-    if (col.type() == TypeId::String) return col.share();
-    if (col.type() == TypeId::Int64) {
-        const std::int64_t n = col.length();
-        std::vector<std::string> vals(static_cast<std::size_t>(n));
-        const std::int64_t* d = col.data<std::int64_t>();
-        for (std::int64_t i = 0; i < n; ++i)
-            vals[static_cast<std::size_t>(i)] = std::to_string(d[i]);
-        return dataframe::Series::strings(vals);
+    const std::int64_t n = col.length();
+    std::vector<std::string> vals(static_cast<std::size_t>(n));
+    switch (col.type()) {
+        case TypeId::String:
+            return col.share();
+        case TypeId::Int64: {
+            const std::int64_t* d = col.data<std::int64_t>();
+            for (std::int64_t i = 0; i < n; ++i)
+                vals[static_cast<std::size_t>(i)] = std::to_string(d[i]);
+            break;
+        }
+        case TypeId::Uint64: {
+            const std::uint64_t* d = col.data<std::uint64_t>();
+            for (std::int64_t i = 0; i < n; ++i)
+                vals[static_cast<std::size_t>(i)] = std::to_string(d[i]);
+            break;
+        }
+        case TypeId::Float64: {
+            const double* d = col.data<double>();
+            for (std::int64_t i = 0; i < n; ++i)
+                vals[static_cast<std::size_t>(i)] = std::to_string(d[i]);
+            break;
+        }
+        default:
+            throw DFTUtilsException::cat(
+                ErrorCode::INTERNAL,
+                "agg engine: unexpected group-key column type");
     }
-    throw DFTUtilsException::cat(
-        ErrorCode::INTERNAL, "agg engine: unexpected group-key column type");
+    return dataframe::Series::strings(vals);
 }
 
 // Keys whose group column is an opaque identifier the post-aggregation re-key

@@ -69,7 +69,7 @@ struct GroupAgg {
     std::string out;
     double param = 0.0;  ///< Pct: quantile q in [0, 1]; occupancy: occ_cell_us
     std::string
-        by;       ///< ArgMax: the column maximized; occupancy: the dur column
+        by{};     ///< ArgMax: the column maximized; occupancy: the dur column
                   ///< (`column` is ts); unused otherwise
 };
 

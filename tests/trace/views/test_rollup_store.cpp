@@ -8,7 +8,9 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace dftracer::utils::trace::views::detail;
@@ -19,6 +21,20 @@ namespace {
 // A single-key AggState (group "grp") with Count + Sum(v) over `values`.
 df::AggStatePtr make_state(const std::vector<double>& values) {
     std::vector<std::string> keys(values.size(), "grp");
+    std::vector<double> vd = values;
+    df::Series key = df::Series::strings(keys);
+    df::Series val =
+        df::Series::flat_f64(vd.data(), static_cast<std::int64_t>(vd.size()));
+    std::vector<const df::Series*> vals{&val};
+    return df::group_agg_state({&key}, vals,
+                               {df::AggSpec{df::AggOp::Count, -1, "n"},
+                                df::AggSpec{df::AggOp::Sum, 0, "total"}});
+}
+
+// A multi-group AggState: row i belongs to group gkeys[i] with value values[i].
+df::AggStatePtr make_state_kv(const std::vector<std::string>& gkeys,
+                              const std::vector<double>& values) {
+    std::vector<std::string> keys = gkeys;
     std::vector<double> vd = values;
     df::Series key = df::Series::strings(keys);
     df::Series val =
@@ -86,6 +102,52 @@ TEST_SUITE("RollupStore") {
         // A different signature is isolated and absent.
         CHECK_FALSE(rollup_exists(*db, 0x99999999));
         CHECK(read_rollup(*db, 0x99999999) == nullptr);
+
+        rdb::RocksDBManager::instance().reset(dir);
+        fs::remove_all(dir);
+    }
+
+    // Two ranks' partials over three distinct groups round-trip: every group's
+    // per-group blob persists and reads back into an equivalent merged state.
+    TEST_CASE("multiple groups persist and read back") {
+        namespace rdb = dftracer::utils::rocksdb;
+        const std::string dir =
+            (fs::temp_directory_path() / "dftu_rollup_store_multi_test")
+                .string();
+        fs::remove_all(dir);
+        rdb::RocksDBManager::instance().reset(dir);
+
+        auto db = open_rollup_db(dir, rdb::RocksDatabase::OpenMode::ReadWrite);
+        REQUIRE(db);
+        const std::uint64_t sig = 0xBEEF01;
+
+        auto a = make_state_kv({"g1", "g1", "g2"}, {10, 20, 100});
+        auto b = make_state_kv({"g2", "g3"}, {50, 7});
+        df::agg_merge(*a, *b);  // g1: n=2 t=30; g2: n=2 t=150; g3: n=1 t=7
+        persist_rollup(*db, sig, /*rest_sig=*/0, /*time_bucket_us=*/0,
+                       /*group_by=*/{}, *a);
+
+        CHECK(rollup_exists(*db, sig));
+        auto got = read_rollup(*db, sig);
+        REQUIRE(got);
+        df::DataFrame r = df::agg_finalize(*got, "grp");
+        REQUIRE(r.num_rows() == 3);
+
+        std::map<std::string, std::pair<std::int64_t, double>> by_group;
+        for (std::int64_t i = 0; i < r.num_rows(); ++i)
+            by_group[std::string(r.column("grp").string_at(i))] = {
+                r.column("n").data<std::int64_t>()[i],
+                r.column("total").data<double>()[i]};
+
+        REQUIRE(by_group.count("g1"));
+        REQUIRE(by_group.count("g2"));
+        REQUIRE(by_group.count("g3"));
+        CHECK(by_group["g1"].first == 2);
+        CHECK(by_group["g1"].second == doctest::Approx(30));
+        CHECK(by_group["g2"].first == 2);
+        CHECK(by_group["g2"].second == doctest::Approx(150));
+        CHECK(by_group["g3"].first == 1);
+        CHECK(by_group["g3"].second == doctest::Approx(7));
 
         rdb::RocksDBManager::instance().reset(dir);
         fs::remove_all(dir);

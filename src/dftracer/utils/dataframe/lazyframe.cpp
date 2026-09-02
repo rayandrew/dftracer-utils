@@ -17,6 +17,7 @@
 #include <fstream>
 #include <memory>
 #include <numeric>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -2275,6 +2276,9 @@ std::vector<std::string> out_schema(const LazyOp& op,
                 return s;
             },
             [&](const GroupByOp& o) {
+                // Dyn column names are discovered at run time: data-dependent
+                // schema, signalled empty like pivot (collect() relabels).
+                if (!o.dyn.empty()) return std::vector<std::string>{};
                 std::vector<std::string> s = o.keys;
                 for (const GroupAgg& a : o.aggs) s.push_back(a.out);
                 return s;
@@ -2893,18 +2897,17 @@ LazyFrame LazyFrame::group_by(std::vector<std::string> keys,
     return with_ops(std::move(ops));
 }
 
-LazyFrame LazyFrame::group_by(Expr key, std::vector<AggExprSpec> aggs) const {
-    return group_by(std::vector<Expr>{std::move(key)}, std::move(aggs));
-}
-
-LazyFrame LazyFrame::group_by(std::vector<Expr> keys,
-                              std::vector<AggExprSpec> aggs) const {
-    LazyFrame lf = *this;
+namespace {
+// A computed KEY becomes the output key column, so it must be named as the
+// eager DataFrame::group_by(Expr) path does ("key" for one key, "key<k>" for N)
+// or lazy and eager schemas diverge; value/by temps stay hidden ("__gb_").
+LazyFrame desugar_expr_group_by(const LazyFrame& self, std::vector<Expr> keys,
+                                std::vector<AggExprSpec> aggs,
+                                bool single_key) {
+    LazyFrame lf = self;
     std::vector<std::string> sch = lf.schema();
     int tmp = 0;
-    // Route a bare column-ref expr to its schema name directly; otherwise
-    // materialize it into a hidden temp column and route to that.
-    auto resolve = [&](const Expr& e, const char* prefix) -> std::string {
+    auto resolve_val = [&](const Expr& e, const char* prefix) -> std::string {
         const std::int32_t idx = expr_col_index(e);
         if (idx >= 0 && static_cast<std::size_t>(idx) < sch.size())
             return sch[static_cast<std::size_t>(idx)];
@@ -2917,7 +2920,17 @@ LazyFrame LazyFrame::group_by(std::vector<Expr> keys,
 
     std::vector<std::string> key_names;
     key_names.reserve(keys.size());
-    for (const Expr& key : keys) key_names.push_back(resolve(key, "key"));
+    for (std::size_t k = 0; k < keys.size(); ++k) {
+        const std::int32_t idx = expr_col_index(keys[k]);
+        if (idx >= 0 && static_cast<std::size_t>(idx) < sch.size()) {
+            key_names.push_back(sch[static_cast<std::size_t>(idx)]);
+            continue;
+        }
+        std::string name = single_key ? "key" : "key" + std::to_string(k);
+        lf = lf.with_column(name, keys[k]);
+        sch.push_back(name);
+        key_names.push_back(std::move(name));
+    }
 
     std::vector<GroupAgg> gaggs;
     gaggs.reserve(aggs.size());
@@ -2926,11 +2939,23 @@ LazyFrame LazyFrame::group_by(std::vector<Expr> keys,
         g.op = from_agg_op(a.op);
         g.out = a.out;
         g.param = a.param;
-        if (a.op != AggOp::Count) g.column = resolve(a.value, "v");
-        if (a.op == AggOp::ArgMax) g.by = resolve(a.by, "by");
+        if (a.op != AggOp::Count) g.column = resolve_val(a.value, "v");
+        if (a.op == AggOp::ArgMax) g.by = resolve_val(a.by, "by");
         gaggs.push_back(std::move(g));
     }
     return lf.group_by(std::move(key_names), std::move(gaggs));
+}
+}  // namespace
+
+LazyFrame LazyFrame::group_by(Expr key, std::vector<AggExprSpec> aggs) const {
+    return desugar_expr_group_by(*this, std::vector<Expr>{std::move(key)},
+                                 std::move(aggs), /*single_key=*/true);
+}
+
+LazyFrame LazyFrame::group_by(std::vector<Expr> keys,
+                              std::vector<AggExprSpec> aggs) const {
+    return desugar_expr_group_by(*this, std::move(keys), std::move(aggs),
+                                 /*single_key=*/false);
 }
 
 LazyFrame LazyFrame::sort_by(std::string name, bool descending) const {
@@ -3136,14 +3161,18 @@ void agg_accumulate_chunk(AggState& state, const DataFrame& frame,
                           const std::string& dyn_prefix) {
     std::vector<const Series*> kcols;
     kcols.reserve(keys.size());
-    for (const std::string& k : keys)
-        kcols.push_back(
-            &frame.columns[static_cast<std::size_t>(frame.column_index(k))]);
+    for (const std::string& k : keys) {
+        const std::int64_t ki = frame.column_index(k);
+        if (ki < 0) throw std::out_of_range("group_by: no column named " + k);
+        kcols.push_back(&frame.columns[static_cast<std::size_t>(ki)]);
+    }
     std::vector<const Series*> vcols;
     vcols.reserve(value_names.size());
-    for (const std::string& v : value_names)
-        vcols.push_back(
-            &frame.columns[static_cast<std::size_t>(frame.column_index(v))]);
+    for (const std::string& v : value_names) {
+        const std::int64_t vi = frame.column_index(v);
+        if (vi < 0) throw std::out_of_range("group_by: no column named " + v);
+        vcols.push_back(&frame.columns[static_cast<std::size_t>(vi)]);
+    }
     // Pass the row count explicitly: an empty key list (a global reduce to one
     // group) carries no key column to infer the length from.
     if (dyn_prefix.empty()) {

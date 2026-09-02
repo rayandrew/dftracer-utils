@@ -2098,7 +2098,7 @@ PyObject* tv_stream(TraceViewerObject* self, PyObject* args, PyObject* kwds) {
     static const char* kwlist[] = {"batch_size", "workers", "normalize", "dict",
                                    nullptr};
     long long batch_size = 65536;
-    long long workers = 0;  // 0 -> runtime worker count
+    long long workers = 0;
     int normalize = 0;
     int dict_strings = 1;
     if (!PyArg_ParseTupleAndKeywords(args, kwds, "|LLpp",

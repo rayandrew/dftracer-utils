@@ -666,6 +666,38 @@ TEST_SUITE("lazyframe") {
         }
     }
 
+    TEST_CASE("lazy Expr-keyed group_by output schema matches eager") {
+        std::vector<std::int64_t> a{0, 0, 1, 1, 0, 1};
+        std::vector<std::int64_t> b{0, 1, 0, 0, 1, 1};
+        std::vector<std::int64_t> x{10, 20, 30, 40, 50, 60};
+        DataFrame df;
+        df.names = {"a", "b", "x"};
+        df.columns.push_back(Series::flat_i64(a.data(), 6));
+        df.columns.push_back(Series::flat_i64(b.data(), 6));
+        df.columns.push_back(Series::flat_i64(x.data(), 6));
+
+        std::vector<AggExprSpec> specs{agg_sum(col(2), "s")};
+
+        // Single computed key: named "key" (not the hidden __gb temp) both
+        // ways.
+        DataFrame eager1 = df.group_by(col(0) + col(1), specs);
+        DataFrame lazy1 =
+            run(df.lazy().group_by(col(0) + col(1), specs).collect(2));
+        CHECK(lazy1.names == eager1.names);
+        CHECK(lazy1.names[0] == "key");
+
+        // N keys: one computed ("key0"), one bare column-ref ("a").
+        DataFrame eager2 =
+            df.group_by(std::vector<Expr>{col(0) + col(1), col(0)}, specs);
+        DataFrame lazy2 =
+            run(df.lazy()
+                    .group_by(std::vector<Expr>{col(0) + col(1), col(0)}, specs)
+                    .collect(2));
+        CHECK(lazy2.names == eager2.names);
+        CHECK(lazy2.names[0] == "key0");
+        CHECK(lazy2.names[1] == "a");
+    }
+
     TEST_CASE("sort_by (in-memory) and unique") {
         DataFrame s = run(make_df().lazy().sort_by("a", true).collect(2));
         CHECK(s.num_rows() == 6);

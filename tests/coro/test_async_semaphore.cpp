@@ -8,6 +8,8 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <chrono>
+#include <thread>
 #include <vector>
 
 using namespace dftracer::utils;
@@ -100,5 +102,43 @@ TEST_SUITE("CoroSemaphore") {
         });
 
         CHECK(completed.load() == n);
+    }
+
+    // A waiter parked on acquire() must resume when release() is called from a
+    // thread with no Executor::current() (a plain std::thread). Bounded wait: a
+    // regression manifests as a hang, so time out and fail rather than block.
+    TEST_CASE("release() from an off-executor thread wakes a parked waiter") {
+        coro::CoroSemaphore sem(10);
+        std::atomic<bool> waiter_done{false};
+        std::atomic<bool> finished{false};
+
+        std::thread worker([&] {
+            run_coro([&](CoroScope&) -> coro::CoroTask<void> {
+                co_await sem.acquire(10);  // take all capacity
+                std::thread releaser([&sem] {
+                    // No Executor::current() here.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    sem.release(10);
+                });
+                co_await sem.acquire(10);  // parks until the foreign release
+                waiter_done.store(true);
+                sem.release(10);
+                releaser.join();
+                co_return;
+            });
+            finished.store(true);
+        });
+
+        for (int i = 0; i < 200 && !finished.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+
+        if (!finished.load()) {
+            worker.detach();
+            FAIL(
+                "off-executor release() did not wake the parked waiter (hang)");
+        } else {
+            worker.join();
+            CHECK(waiter_done.load());
+        }
     }
 }

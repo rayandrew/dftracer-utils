@@ -101,6 +101,31 @@ TEST_SUITE("dataframe_arrow_public") {
             CHECK(flat.string_at(i) == expected[i]);
     }
 
+    TEST_CASE("Sliced dictionary array round-trips through the Arrow bridge") {
+        Series s = Series::strings({"a", "b", "a", "c", "b", "a"});
+        Series dict = s.dictionary_encode();
+        REQUIRE(dict.valid());
+
+        OwnedArrow a = dict.to_arrow();
+        CHECK(static_cast<bool>(a));
+
+        // Slice off the first 2 rows via the Arrow offset, keeping the same
+        // index/dictionary buffers: import must honor the index-buffer offset.
+        a.array()->offset = 2;
+        a.array()->length = 4;
+
+        Series back = Series::from_arrow(a.schema(), a.array());
+        REQUIRE(back.valid());
+        REQUIRE(back.length() == 4);
+
+        Series flat = back.materialize();
+        REQUIRE(flat.valid());
+        REQUIRE(flat.length() == 4);
+        const char* expected[] = {"a", "c", "b", "a"};
+        for (std::int64_t i = 0; i < 4; ++i)
+            CHECK(flat.string_at(i) == expected[i]);
+    }
+
     TEST_CASE("Struct column round-trips through the Arrow bridge") {
         std::vector<std::int64_t> a = {10, 20, 30};
         std::vector<double> b = {1.5, 2.5, 3.5};
