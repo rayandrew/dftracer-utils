@@ -701,6 +701,14 @@ Agg from_agg_op(AggOp a) {
             return Agg::SumSq;
         case AggOp::SetUnion:
             return Agg::SetUnion;
+        case AggOp::Busy:
+            return Agg::Busy;
+        case AggOp::Concurrency:
+            return Agg::Concurrency;
+        case AggOp::Utilization:
+            return Agg::Utilization;
+        case AggOp::Active:
+            return Agg::Active;
     }
     return Agg::Count;
 }
