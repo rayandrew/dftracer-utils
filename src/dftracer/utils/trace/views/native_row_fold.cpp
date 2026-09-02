@@ -598,6 +598,31 @@ dataframe::DataFrame build_row_frame(
     return out;
 }
 
+std::vector<std::pair<std::string, dataframe::Series>>
+build_dyn_numeric_columns(const std::vector<FoldEvent>& evs,
+                          const dftracer::utils::StringIntern& intern) {
+    namespace agg = trace::aggregators;
+    // Discover the numeric-arg names present in this batch, matching
+    // fold_numeric_args_t: the io-cat-derived "size" plus every non-reserved,
+    // non-preagg numeric arg. Sorted (std::set) is not required (the agg
+    // finalize sorts the name union), but keeps a deterministic layout.
+    std::set<std::string> names;
+    for (const FoldEvent& ev : evs) {
+        PodSource src(ev, intern);
+        if (derived_size_t(src)) names.insert("size");
+        src.for_each_numeric_arg([&](std::string_view key, double) {
+            if (agg::is_reserved_arg(key) || agg::is_preagg_suffix(key)) return;
+            names.insert(std::string(key));
+        });
+    }
+    std::vector<std::pair<std::string, dataframe::Series>> out;
+    out.reserve(names.size());
+    for (const std::string& name : names)
+        out.emplace_back(std::string(AGG_NUM_ARG_PREFIX) + name,
+                         num_arg_column(evs, name, intern));
+    return out;
+}
+
 dataframe::DataFrame NativeRowFold::build() {
     dataframe::DataFrame out = build_row_frame(events_, *intern_, select_,
                                                time_scale_, resolver_.get());

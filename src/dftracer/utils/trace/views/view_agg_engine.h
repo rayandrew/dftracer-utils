@@ -33,8 +33,8 @@ coro::CoroTask<dftracer::utils::dataframe::AggStatePtr> build_engine_agg_state(
     const ViewPlan& plan);
 
 /// One dyn (auto_numeric_metrics) output column needing a post-finalize fix: a
-/// Pct on an absent arg reads an empty sketch (NaN -> 0), a Count is emitted
-/// Int64 by CountValid but the dyn convention is Float64.
+/// Pct on an absent arg reads an empty sketch (NaN -> 0), a Count is folded as
+/// a present-count (Int64) but the dyn convention is Float64.
 struct DynFix {
     std::string out;
     bool pct = false;
@@ -43,12 +43,14 @@ struct DynFix {
 
 /// The engine group-by inputs for a bucket-resolved plan: the raw scan
 /// LazyFrame with its hidden key/scale columns, the group key column names, the
-/// gaggs in [value, dyn, text] order, and the dyn column fixes.
+/// fixed gaggs in [value, text] order, and the name-keyed dyn side-table
+/// reductions (auto_numeric_metrics) plus the column-name tag they carry.
 struct EnginePrep {
     std::optional<dftracer::utils::dataframe::LazyFrame> lf;
     std::vector<std::string> group_key_names;
     std::vector<dftracer::utils::dataframe::GroupAgg> gaggs;
-    std::vector<DynFix> dynfix;
+    std::vector<dftracer::utils::dataframe::AggDynSpec> dyn_specs;
+    std::string dyn_prefix;
 };
 
 coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan);

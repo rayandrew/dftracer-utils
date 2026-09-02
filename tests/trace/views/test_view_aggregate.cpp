@@ -2561,6 +2561,51 @@ TEST_SUITE("View") {
             check_match(collect_groupmap(build()), collect_engine(build()),
                         "name");
         }
+        // Single-scan dyn: the engine (no name pre-scan) must byte-match the
+        // GroupMap oracle for an auto_numeric_metrics plan, in-memory and
+        // spilled.
+        auto run_single_scan_dyn = [&](std::uint64_t mem_budget) {
+            auto build = [&] {
+                View v = View::from_file(gz7, idx7);
+                if (mem_budget) v = v.memory_budget(mem_budget);
+                return v.group_by({GroupKey::name()})
+                    .agg_numeric_args({AggSpec(AggOp::Mean),
+                                       AggSpec(AggOp::Sum), AggSpec(AggOp::Min),
+                                       AggSpec(AggOp::Max)});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        };
+        SUBCASE("group_by name + auto_numeric single scan") {
+            run_single_scan_dyn(0);
+        }
+        SUBCASE("group_by name + auto_numeric single scan, forced spill") {
+            run_single_scan_dyn(128);
+        }
+        // Dyn coexists with fixed value/text columns and occupancy in one scan:
+        // explicit group key + auto-numeric args + an explicit value agg +
+        // occupancy, byte-matching the oracle in-memory and spilled.
+        auto run_mixed = [&](std::uint64_t mem_budget) {
+            auto build = [&] {
+                View v = View::from_file(gz7, idx7);
+                if (mem_budget) v = v.memory_budget(mem_budget);
+                return v.group_by({GroupKey::name()})
+                    .agg({{AggOp::Sum, "dur", "sum_dur"},
+                          {AggOp::Busy, "", "busy"}})
+                    .agg_numeric_args(
+                        {AggSpec(AggOp::Mean), AggSpec(AggOp::Sum)});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        };
+        SUBCASE("group_by name + value agg + occupancy + auto_numeric") {
+            run_mixed(0);
+        }
+        SUBCASE(
+            "group_by name + value agg + occupancy + auto_numeric, forced "
+            "spill") {
+            run_mixed(128);
+        }
 
         // time_bucket is a computed key too: the bucket column goes first
         // (agg_fold.h prepends it before plan.group_by), so pair rows by

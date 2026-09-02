@@ -26,6 +26,13 @@ struct Morsel {
     /// (the common case). One interned id per column, resolved via `intern`.
     std::vector<std::uint32_t> name_ids;
     std::shared_ptr<const dftracer::utils::StringIntern> intern;
+    /// Name-keyed dyn value columns, carried out of band from `columns` so the
+    /// positional plan schema stays fixed while the dyn set varies per morsel.
+    /// `dyn_names[i]` (producer-tagged) labels `dyn_columns[i]`; a dyn group_by
+    /// folds these through agg_accumulate's dyn feed. Empty for a non-dyn
+    /// morsel.
+    std::vector<std::string> dyn_names;
+    std::vector<Series> dyn_columns;
 };
 
 /// A stateful reader over one Source. next() returns the next morsel, or
@@ -160,9 +167,16 @@ class LazyFrame {
     LazyFrame group_by(std::string key, std::vector<GroupAgg> aggs) const;
     /// Group by N key columns (a composite key: hashed and compared
     /// column-by-column, each keeping its own type). Streaming, as the
-    /// single-key overload.
+    /// single-key overload. `dyn` (optional) enables the name-keyed dyn
+    /// side-table: each morsel's dyn columns (its own out-of-band dyn set, or a
+    /// resident source's columns whose name starts with `dyn_prefix`) are
+    /// folded through agg_accumulate's dyn feed, with `dyn_prefix` stripped
+    /// from each name. The dyn output columns are appended after the fixed
+    /// aggregates.
     LazyFrame group_by(std::vector<std::string> keys,
-                       std::vector<GroupAgg> aggs) const;
+                       std::vector<GroupAgg> aggs,
+                       std::vector<AggDynSpec> dyn = {},
+                       std::string dyn_prefix = {}) const;
     /// Group by an expression key and compute each expression aggregate.
     /// Desugars to with_column + the string group_by: a bare column-ref key or
     /// aggregate value is used directly, a computed one is materialized into a
@@ -249,6 +263,7 @@ class LazyFrame {
     /// group count, not the input; used by the rollup materialize path.
     coro::CoroTask<AggStatePtr> collect_group_state(
         std::vector<std::string> keys, std::vector<GroupAgg> aggs,
+        std::vector<AggDynSpec> dyn = {}, std::string dyn_prefix = {},
         std::int64_t morsel_rows = 0) const;
 
    private:

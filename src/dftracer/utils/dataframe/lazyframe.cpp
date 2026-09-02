@@ -52,6 +52,12 @@ DataFrame frame_from_morsel(
     } else {
         out.names = static_names;
     }
+    // Fold the out-of-band dyn set back in as trailing named columns, so a
+    // DataFrame-terminal consumer sees the per-morsel dyn columns by name.
+    for (std::size_t i = 0; i < m.dyn_columns.size(); ++i) {
+        out.names.push_back(std::move(m.dyn_names[i]));
+        out.columns.push_back(std::move(m.dyn_columns[i]));
+    }
     return out;
 }
 
@@ -320,6 +326,8 @@ class WithColumnCursor : public Cursor {
         Morsel out;
         out.rows = m->rows;
         out.columns = std::move(m->columns);
+        out.dyn_names = std::move(m->dyn_names);
+        out.dyn_columns = std::move(m->dyn_columns);
         if (replace_ >= 0)
             out.columns[static_cast<std::size_t>(replace_)] = std::move(nc);
         else
@@ -769,12 +777,19 @@ class GroupByCursor : public Cursor {
    public:
     GroupByCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
                   std::vector<std::string> keys, std::vector<GroupAgg> aggs,
-                  std::uint64_t budget)
+                  std::uint64_t budget, std::vector<AggDynSpec> dyn = {},
+                  std::string dyn_prefix = {})
         : in_(std::move(in)),
           sch_(std::move(sch)),
           keys_(std::move(keys)),
           aggs_(std::move(aggs)),
-          budget_(budget) {}
+          budget_(budget),
+          dyn_specs_(std::move(dyn)),
+          dyn_prefix_(std::move(dyn_prefix)) {}
+
+    std::optional<std::vector<std::string>> out_names() const override {
+        return out_names_;
+    }
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         if (!built_) co_await build(max_rows);
@@ -828,7 +843,16 @@ class GroupByCursor : public Cursor {
             specs_.push_back(std::move(sp));
         }
 
-        AggStatePtr state = agg_new(specs_);
+        // A resident source carries dyn columns in-band (prefix-tagged in
+        // sch_); a streaming source carries them out of band (Morsel::dyn_*).
+        std::vector<std::pair<int, std::string>> sch_dyn;
+        if (!dyn_specs_.empty() && !dyn_prefix_.empty())
+            for (std::size_t i = 0; i < sch_.size(); ++i)
+                if (sch_[i].rfind(dyn_prefix_, 0) == 0)
+                    sch_dyn.emplace_back(static_cast<int>(i),
+                                         sch_[i].substr(dyn_prefix_.size()));
+
+        AggStatePtr state = agg_new(specs_, dyn_specs_);
         // Bounded parallel sink: pull a batch of morsels, accumulate each into
         // its own partial AggState in parallel (the mergeable agg IR), then
         // merge the partials into the running state. Memory stays bounded to
@@ -856,7 +880,23 @@ class GroupByCursor : public Cursor {
                 std::vector<const Series*> values;
                 values.reserve(value_idx.size());
                 for (int vi : value_idx) values.push_back(&m.columns[vi]);
-                agg_accumulate(st, keys, values);
+                if (dyn_specs_.empty()) {
+                    agg_accumulate(st, keys, values);
+                    return;
+                }
+                std::vector<AggDynInput> dyn;
+                dyn.reserve(sch_dyn.size() + m.dyn_columns.size());
+                for (const auto& [ci, name] : sch_dyn)
+                    dyn.push_back(
+                        {name, &m.columns[static_cast<std::size_t>(ci)]});
+                for (std::size_t i = 0; i < m.dyn_columns.size(); ++i) {
+                    const std::string& raw = m.dyn_names[i];
+                    std::string name = raw.rfind(dyn_prefix_, 0) == 0
+                                           ? raw.substr(dyn_prefix_.size())
+                                           : raw;
+                    dyn.push_back({std::move(name), &m.dyn_columns[i]});
+                }
+                agg_accumulate(st, keys, values, dyn);
             };
             if (batch.size() == 1) {
                 accumulate(*state, batch[0]);
@@ -866,7 +906,7 @@ class GroupByCursor : public Cursor {
                     static_cast<std::int64_t>(batch.size()), 1,
                     [&](std::int64_t bi, std::int64_t ei) {
                         for (std::int64_t j = bi; j < ei; ++j) {
-                            auto st = agg_new(specs_);
+                            auto st = agg_new(specs_, dyn_specs_);
                             accumulate(*st, batch[static_cast<std::size_t>(j)]);
                             partials[static_cast<std::size_t>(j)] =
                                 std::move(st);
@@ -877,12 +917,14 @@ class GroupByCursor : public Cursor {
             }
             if (budget_ > 0 && agg_approx_bytes(*state) > budget_) {
                 agg_write_run(*state, dir_.run_path(run_id++));
-                state = agg_new(specs_);
+                state = agg_new(specs_, dyn_specs_);
             }
         }
 
         if (run_id == 0) {
-            result_ = to_morsel(agg_finalize(*state, keys_));
+            DataFrame r = agg_finalize(*state, keys_);
+            out_names_ = r.names;
+            result_ = to_morsel(r);
             spilled_ = false;
         } else {
             if (agg_num_groups(*state) > 0)
@@ -901,7 +943,24 @@ class GroupByCursor : public Cursor {
     // agg_finalize at the end (not per group + concat_columns) lets a nested
     // Hist column, which concat_columns cannot rejoin, survive spill.
     std::optional<Morsel> merge_next(std::int64_t max_rows) {
-        AggStatePtr merged = agg_new(specs_);
+        // The dyn column set is the global name union, so a k-way streamed
+        // emission would give per-batch-varying dyn columns that cannot
+        // vertically concat. Merge all runs into one state, finalize once.
+        if (!dyn_specs_.empty()) {
+            if (dyn_drained_) return std::nullopt;
+            dyn_drained_ = true;
+            AggStatePtr merged = agg_new(specs_, dyn_specs_);
+            for (auto& run : runs_)
+                while (run->valid()) {
+                    agg_merge(*merged, run->state());
+                    run->advance();
+                }
+            if (agg_num_groups(*merged) == 0) return std::nullopt;
+            DataFrame r = agg_finalize(*merged, keys_);
+            out_names_ = r.names;
+            return to_morsel(r);
+        }
+        AggStatePtr merged = agg_new(specs_, dyn_specs_);
         std::int64_t produced = 0;
         while (produced < max_rows) {
             int best = -1;
@@ -928,7 +987,9 @@ class GroupByCursor : public Cursor {
             ++produced;
         }
         if (produced == 0) return std::nullopt;
-        return to_morsel(agg_finalize(*merged, keys_));
+        DataFrame r = agg_finalize(*merged, keys_);
+        out_names_ = r.names;
+        return to_morsel(r);
     }
 
     std::unique_ptr<Cursor> in_;
@@ -936,10 +997,14 @@ class GroupByCursor : public Cursor {
     std::vector<std::string> keys_;
     std::vector<GroupAgg> aggs_;
     std::uint64_t budget_;
+    std::vector<AggDynSpec> dyn_specs_;
+    std::string dyn_prefix_;
     std::vector<AggSpec> specs_;
+    std::optional<std::vector<std::string>> out_names_;
     bool built_ = false;
     bool done_ = false;
     bool spilled_ = false;
+    bool dyn_drained_ = false;
     Morsel result_;
     spill::Dir dir_;
     std::vector<std::unique_ptr<AggRunReader>> runs_;
@@ -2117,6 +2182,8 @@ struct TopkOp {
 struct GroupByOp {
     std::vector<std::string> keys;
     std::vector<GroupAgg> aggs;
+    std::vector<AggDynSpec> dyn;
+    std::string dyn_prefix;
 };
 struct SortByOp {
     std::string name;
@@ -2636,7 +2703,8 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             },
             [&](const GroupByOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<GroupByCursor>(std::move(in), sch,
-                                                       o.keys, o.aggs, budget);
+                                                       o.keys, o.aggs, budget,
+                                                       o.dyn, o.dyn_prefix);
             },
             [&](const SortByOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<SortMergeCursor>(
@@ -2806,10 +2874,13 @@ LazyFrame LazyFrame::group_by(std::string key,
 }
 
 LazyFrame LazyFrame::group_by(std::vector<std::string> keys,
-                              std::vector<GroupAgg> aggs) const {
+                              std::vector<GroupAgg> aggs,
+                              std::vector<AggDynSpec> dyn,
+                              std::string dyn_prefix) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(
-        LazyOp{GroupByOp{std::move(keys), std::move(aggs)}}));
+        LazyOp{GroupByOp{std::move(keys), std::move(aggs), std::move(dyn),
+                         std::move(dyn_prefix)}}));
     return with_ops(std::move(ops));
 }
 
@@ -3027,6 +3098,7 @@ coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
 
 coro::CoroTask<AggStatePtr> LazyFrame::collect_group_state(
     std::vector<std::string> keys, std::vector<GroupAgg> aggs,
+    std::vector<AggDynSpec> dyn, std::string dyn_prefix,
     std::int64_t morsel_rows) const {
     std::vector<std::string> value_names;  // deduped, matching GroupByCursor
     ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
@@ -3050,7 +3122,7 @@ coro::CoroTask<AggStatePtr> LazyFrame::collect_group_state(
         specs.push_back(std::move(sp));
     }
 
-    AggStatePtr state = agg_new(specs);
+    AggStatePtr state = agg_new(specs, dyn);
     auto gen = stream(morsel_rows);
     while (auto df = co_await gen.next()) {
         std::vector<const Series*> kcols;
@@ -3063,9 +3135,19 @@ coro::CoroTask<AggStatePtr> LazyFrame::collect_group_state(
         for (const std::string& v : value_names)
             vcols.push_back(
                 &df->columns[static_cast<std::size_t>(df->column_index(v))]);
-        // Pass the morsel row count explicitly: an empty key list (a global
-        // reduce to one group) carries no key column to infer the length from.
-        agg_accumulate(*state, kcols, vcols, 0, df->num_rows());
+        if (dyn.empty()) {
+            // Pass the morsel row count explicitly: an empty key list (a global
+            // reduce to one group) carries no key column to infer the length
+            // from.
+            agg_accumulate(*state, kcols, vcols, 0, df->num_rows());
+            continue;
+        }
+        std::vector<AggDynInput> dcols;
+        for (std::size_t i = 0; i < df->names.size(); ++i)
+            if (!dyn_prefix.empty() && df->names[i].rfind(dyn_prefix, 0) == 0)
+                dcols.push_back(
+                    {df->names[i].substr(dyn_prefix.size()), &df->columns[i]});
+        agg_accumulate(*state, kcols, vcols, dcols, 0, df->num_rows());
     }
     co_return state;
 }

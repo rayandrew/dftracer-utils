@@ -39,7 +39,11 @@ class ViewCursor : public dftracer::utils::dataframe::Cursor {
 /// instead, so collect() never buffers the whole matching set.
 class ViewSource : public dftracer::utils::dataframe::Source {
    public:
-    explicit ViewSource(View view) : view_(std::move(view)) {}
+    /// `emit_dyn` makes the streaming cursor attach per-morsel auto-numeric-arg
+    /// dyn columns (the aggregation engine's single-scan dyn feed); it is
+    /// independent of the plan's row-query classification.
+    explicit ViewSource(View view, bool emit_dyn = false)
+        : view_(std::move(view)), emit_dyn_(emit_dyn) {}
 
     dftracer::utils::dataframe::Schema schema() const override;
     const dftracer::utils::dataframe::DataFrame* as_frame() const override;
@@ -73,6 +77,7 @@ class ViewSource : public dftracer::utils::dataframe::Source {
     }
 
     View view_;
+    bool emit_dyn_ = false;
     mutable std::shared_ptr<const dftracer::utils::dataframe::DataFrame> buf_;
 };
 

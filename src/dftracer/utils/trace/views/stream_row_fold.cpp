@@ -48,6 +48,16 @@ void StreamRowFold::step(const FoldBatch& batch) {
         m.name_ids.push_back(intern_->get_or_insert(nm));
     m.intern = intern_;
 
+    if (emit_dyn_) {
+        auto dyn = build_dyn_numeric_columns(events, *intern_);
+        m.dyn_names.reserve(dyn.size());
+        m.dyn_columns.reserve(dyn.size());
+        for (auto& [name, col] : dyn) {
+            m.dyn_names.push_back(std::move(name));
+            m.dyn_columns.push_back(std::move(col));
+        }
+    }
+
     const std::uint64_t bytes = morsel_bytes(m);
     pending_task_.emplace(send(std::move(m), bytes));
     pending_ = reinterpret_cast<::dftu_task*>(&*pending_task_);

@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace dftracer::utils::trace::views::detail {
@@ -51,6 +52,16 @@ dataframe::DataFrame build_row_frame(
     const dftracer::utils::StringIntern& intern,
     const std::vector<std::string>& select, double time_scale = 1.0,
     const GroupResolver* resolver = nullptr);
+
+/// The per-batch auto-numeric dyn value columns for `events`: one Float64
+/// column per discovered numeric arg (fold_numeric_args_t's rule - the
+/// io-cat-derived "size" plus every non-reserved, non-preagg numeric arg),
+/// each named `AGG_NUM_ARG_PREFIX + arg`. The set varies batch to batch; the
+/// streaming aggregation carries these out of band (Morsel::dyn_*) so the fixed
+/// column layout is unchanged. Empty when the batch holds no numeric arg.
+std::vector<std::pair<std::string, dataframe::Series>>
+build_dyn_numeric_columns(const std::vector<FoldEvent>& events,
+                          const dftracer::utils::StringIntern& intern);
 
 /// True if `select` names any resolved.*/r.* field, so the caller should build
 /// a GroupResolver (which opens the index name tables) for build_row_frame.

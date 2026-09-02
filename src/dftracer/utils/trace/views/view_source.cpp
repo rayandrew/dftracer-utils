@@ -156,16 +156,27 @@ dftracer::utils::dataframe::Morsel slice_morsel(
     const dftracer::utils::dataframe::Morsel& m, std::int64_t offset,
     std::int64_t n) {
     dftracer::utils::dataframe::DataFrame tmp;
-    tmp.names.assign(m.columns.size(), std::string());
+    tmp.names.assign(m.columns.size() + m.dyn_columns.size(), std::string());
     for (const dftracer::utils::dataframe::Series& c : m.columns)
+        tmp.columns.push_back(c.share());
+    for (const dftracer::utils::dataframe::Series& c : m.dyn_columns)
         tmp.columns.push_back(c.share());
     dftracer::utils::dataframe::DataFrame s = tmp.slice(offset, n);
 
     dftracer::utils::dataframe::Morsel out;
     out.rows = n;
-    out.columns = std::move(s.columns);
     out.name_ids = m.name_ids;
     out.intern = m.intern;
+    out.dyn_names = m.dyn_names;
+    const std::size_t nc = m.columns.size();
+    out.columns.assign(
+        std::make_move_iterator(s.columns.begin()),
+        std::make_move_iterator(s.columns.begin() +
+                                static_cast<std::ptrdiff_t>(nc)));
+    out.dyn_columns.assign(
+        std::make_move_iterator(s.columns.begin() +
+                                static_cast<std::ptrdiff_t>(nc)),
+        std::make_move_iterator(s.columns.end()));
     return out;
 }
 
@@ -318,13 +329,14 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open_stream(
            std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>>
                ch,
            std::shared_ptr<coro::CoroSemaphore> sem,
-           std::shared_ptr<dftracer::utils::StringIntern> iv)
-        -> coro::CoroTask<void> {
+           std::shared_ptr<dftracer::utils::StringIntern> iv,
+           bool emit_dyn) -> coro::CoroTask<void> {
         detail::StreamRowFold fold(ch, sem, iv, vv.plan_->select, ts, nullptr,
-                                   vv.plan_->phase == Phase::Metadata);
+                                   vv.plan_->phase == Phase::Metadata,
+                                   emit_dyn);
         std::array<detail::Fold*, 1> folds{&fold};
         co_await vv.run_folds(folds, *iv);
-    }(v, time_scale, channel, budget, intern);
+    }(v, time_scale, channel, budget, intern, emit_dyn_);
 
     std::shared_future<void> producer =
         spawn_on_current_executor(std::move(task));

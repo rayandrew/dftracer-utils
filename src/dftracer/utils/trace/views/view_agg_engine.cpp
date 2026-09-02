@@ -275,58 +275,58 @@ class RankHarvestFold : public Fold {
     std::unordered_map<std::uint64_t, std::string> ranks_;
 };
 
-// Collects, without building any group state, the numeric-arg names an
-// auto_numeric_metrics plan discovers: the io-cat-derived "size" plus every
-// non-reserved, non-preagg numeric arg (fold_numeric_args_t's rule), over the
-// plan's target phase - the same set the GroupMap dyn keys carry.
-class NumericArgNamesFold : public Fold {
-   public:
-    NumericArgNamesFold(const ViewPlan& plan,
-                        const dftracer::utils::StringIntern& intern)
-        : plan_(&plan),
-          intern_(&intern),
-          phase_target_(agg_phase_target(plan)) {}
-    bool accepts(const ScanShape&) const override { return true; }
-    bool needs_args() const override { return true; }
-    std::unique_ptr<Fold> slice() const override {
-        return std::make_unique<NumericArgNamesFold>(*plan_, *intern_);
+dataframe::AggOp to_dyn_op(AggOp op) {
+    switch (op) {
+        case AggOp::Count:
+            return dataframe::AggOp::Count;
+        case AggOp::Sum:
+            return dataframe::AggOp::Sum;
+        case AggOp::Min:
+            return dataframe::AggOp::Min;
+        case AggOp::Max:
+            return dataframe::AggOp::Max;
+        case AggOp::Mean:
+            return dataframe::AggOp::Mean;
+        case AggOp::Var:
+            return dataframe::AggOp::Var;
+        case AggOp::Std:
+            return dataframe::AggOp::Std;
+        case AggOp::SumSq:
+            return dataframe::AggOp::SumSq;
+        case AggOp::Skew:
+            return dataframe::AggOp::Skew;
+        case AggOp::Kurt:
+            return dataframe::AggOp::Kurt;
+        case AggOp::Pct:
+            return dataframe::AggOp::Pct;
+        case AggOp::ArgMax:
+        case AggOp::Hist:
+        case AggOp::SetUnion:
+        case AggOp::Busy:
+        case AggOp::Concurrency:
+        case AggOp::Utilization:
+        case AggOp::Active:
+            break;
     }
-    void step(const FoldBatch& batch) override {
-        namespace agg = trace::aggregators;
-        for (const auto& ev : batch.events) {
-            if (ev.phase == RecordPhase::METADATA &&
-                phase_target_ != RecordPhase::METADATA)
-                continue;
-            if (phase_target_ != RecordPhase::UNKNOWN &&
-                ev.phase != phase_target_)
-                continue;
-            PodSource src(ev, *intern_);
-            if (derived_size_t(src)) names_.insert("size");
-            src.for_each_numeric_arg([&](std::string_view key, double) {
-                if (agg::is_reserved_arg(key) || agg::is_preagg_suffix(key))
-                    return;
-                names_.insert(std::string(key));
-            });
-        }
-    }
-    void seal_unit(const ScanUnit&) override {}
-    void drop_unit(const ScanUnit&) override {}
-    void merge(Fold& other) override {
-        auto& o = static_cast<NumericArgNamesFold&>(other);
-        names_.insert(o.names_.begin(), o.names_.end());
-        o.names_.clear();
-    }
-    coro::CoroTask<bool> finalize(const CoverageSet&) override {
-        co_return true;
-    }
-    std::set<std::string>& names() { return names_; }
+    throw DFTUtilsException::cat(ErrorCode::INTERNAL,
+                                 "agg engine: op has no per-arg dyn reduction");
+}
 
-   private:
-    const ViewPlan* plan_;
-    const dftracer::utils::StringIntern* intern_;
-    RecordPhase phase_target_;
-    std::set<std::string> names_;  // sorted, matching the GroupMap dyn key set
-};
+// The dyn reductions for an auto_numeric_metrics plan, matching to_batch's dyn
+// columns: an empty numeric_arg_aggs is the legacy bare-named per-arg mean;
+// each explicit reduction becomes one AggDynSpec whose out_prefix (dyn_col_name
+// with an empty key) gives the finalized column name out_prefix + arg.
+std::vector<dataframe::AggDynSpec> build_dyn_specs(const ViewPlan& plan) {
+    std::vector<dataframe::AggDynSpec> out;
+    if (!plan.auto_numeric_metrics) return out;
+    if (plan.numeric_arg_aggs.empty()) {
+        out.push_back({dataframe::AggOp::Mean, 0.0, std::string()});
+        return out;
+    }
+    for (const AggSpec& r : plan.numeric_arg_aggs)
+        out.push_back({to_dyn_op(r.op), r.q, dyn_col_name(r, std::string())});
+    return out;
+}
 
 // Rank is a query-time side channel: pid -> rank lives in PR metadata records,
 // not the event columns the engine streams. The rank group_by makes make_vdef
@@ -357,42 +357,13 @@ coro::CoroTask<void> harvest_ranks(const ViewPlan& plan) {
     apply_ranks(plan, rf.ranks());
 }
 
-// The numeric args auto_numeric_metrics discovers are data-dependent (the arg
-// set is only known after a scan; see docs/plans
-// lazyframe_async_unification 3.3 / 5.4). Discover them with a name-collecting
-// fold, then feed each back as an engine value column.
-coro::CoroTask<std::vector<std::string>> harvest_numeric_arg_names(
-    const ViewPlan& plan) {
-    ViewPlan hp = plan;
-    hp.group_by.clear();
-    hp.agg.clear();
-    hp.auto_numeric_metrics = true;
-    hp.numeric_arg_aggs.clear();
-    hp.time_bucket_us = 0;
-    hp.bucket_origin_us = 0;
-    hp.bucket_origin_min = false;
-    hp.materialize = false;
-    hp.sort_col.clear();
-    hp.topk_col.clear();
-    hp.offset = 0;
-    hp.limit = 0;
-    hp.select.clear();
-    hp.schema.reset();
-    ensure_schema(hp);
-    ViewDefinition vdef = make_vdef(hp, /*for_aggregation=*/true);
-    dftracer::utils::StringIntern intern;
-    NumericArgNamesFold nf(hp, intern);
-    std::array<Fold*, 1> folds{&nf};
-    co_await fuse(hp, vdef, folds, intern);
-    co_return std::vector<std::string>(nf.names().begin(), nf.names().end());
-}
-
-// The shared engine-aggregation tail (key rendering, busy_cell_us, resolver
-// relabel, dyn fixes), matching to_batch byte-for-byte. Reused by the streaming
-// serve path and finalize_engine_result.
-dataframe::DataFrame finalize_engine_frame(dataframe::DataFrame r,
-                                           const ViewPlan& plan,
-                                           const std::vector<DynFix>& dyn) {
+// The shared engine-aggregation tail (dyn reorder/fixes, key rendering,
+// busy_cell_us, resolver relabel), matching to_batch byte-for-byte. `r` arrives
+// from agg_finalize as [keys, value specs, text specs, dyn]; `dyn_specs` are
+// the AggState's dyn side-table reductions.
+dataframe::DataFrame finalize_engine_frame(
+    dataframe::DataFrame r, const ViewPlan& plan,
+    const std::vector<dataframe::AggDynSpec>& dyn_specs) {
     const std::size_t ng = plan.group_by.size();
     const std::size_t off = plan.time_bucket_us > 0 ? 1 : 0;
     std::vector<std::string> key_names(ng);
@@ -406,11 +377,38 @@ dataframe::DataFrame finalize_engine_frame(dataframe::DataFrame r,
     for (std::size_t j = 0; j < ng; ++j)
         if (plan.group_by[j].kind == GroupKey::Kind::Cat && !key_transformed[j])
             cat_pos = j;
-    std::size_t n_plan_value = 0;
-    for (const auto& s : plan.agg)
-        if (s.op != AggOp::ArgMax && s.op != AggOp::SetUnion) ++n_plan_value;
+    std::size_t n_plan_value = 0, n_plan_text = 0;
+    for (const auto& s : plan.agg) {
+        if (s.op == AggOp::ArgMax || s.op == AggOp::SetUnion)
+            ++n_plan_text;
+        else
+            ++n_plan_value;
+    }
     if (plan.agg.empty()) n_plan_value = 1;
-    const std::size_t n_value_cols = n_plan_value + dyn.size();
+
+    // agg_finalize appends dyn last; to_batch slots it between the value and
+    // text columns. Rotate the [value..end) tail so [text, dyn] becomes [dyn,
+    // text], then build the post-finalize dyn fixes from the reductions.
+    const std::size_t dyn_count =
+        r.columns.size() - (off + ng) - (n_plan_value + n_plan_text);
+    const std::size_t dyn_at = off + ng + n_plan_value;
+    if (dyn_count && n_plan_text) {
+        const auto first = static_cast<std::ptrdiff_t>(dyn_at);
+        const auto mid = static_cast<std::ptrdiff_t>(dyn_at + n_plan_text);
+        const auto last =
+            static_cast<std::ptrdiff_t>(dyn_at + n_plan_text + dyn_count);
+        std::rotate(r.names.begin() + first, r.names.begin() + mid,
+                    r.names.begin() + last);
+        std::rotate(r.columns.begin() + first, r.columns.begin() + mid,
+                    r.columns.begin() + last);
+    }
+    std::vector<DynFix> dyn;
+    for (std::size_t k = 0; k < dyn_count && !dyn_specs.empty(); ++k) {
+        const dataframe::AggDynSpec& sp = dyn_specs[k % dyn_specs.size()];
+        dyn.push_back({r.names[dyn_at + k], sp.op == dataframe::AggOp::Pct,
+                       sp.op == dataframe::AggOp::Count});
+    }
+    const std::size_t n_value_cols = n_plan_value + dyn_count;
 
     if (off) r.names[0] = "time_bucket";
     if (cat_pos) r.names[off + *cat_pos] = "cat";
@@ -496,24 +494,7 @@ dataframe::DataFrame finalize_engine_result(const dataframe::AggState& st,
     if (plan.time_bucket_us > 0) names.push_back("time_bucket");
     for (const auto& gk : plan.group_by) names.push_back(group_col_name(gk));
     dataframe::DataFrame r = dataframe::agg_finalize(st, names);
-
-    // Recover the dyn (auto_numeric_metrics) columns from the stored specs:
-    // they sit between the plan's value specs and its text specs. dyn Count was
-    // built as CountValid; dyn Pct stays Pct.
-    const std::vector<dataframe::AggSpec>& specs = dataframe::agg_specs(st);
-    std::size_t n_plan_value = 0, n_plan_text = 0;
-    for (const auto& s : plan.agg) {
-        if (s.op == AggOp::ArgMax || s.op == AggOp::SetUnion)
-            ++n_plan_text;
-        else
-            ++n_plan_value;
-    }
-    if (plan.agg.empty()) n_plan_value = 1;
-    std::vector<DynFix> dyn;
-    for (std::size_t i = n_plan_value; i + n_plan_text < specs.size(); ++i)
-        dyn.push_back({specs[i].out, specs[i].op == dataframe::AggOp::Pct,
-                       specs[i].op == dataframe::AggOp::CountValid});
-    return finalize_engine_frame(std::move(r), plan, dyn);
+    return finalize_engine_frame(std::move(r), plan, build_dyn_specs(plan));
 }
 
 coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
@@ -558,37 +539,13 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
         return f;
     };
 
-    // Auto-discovered numeric-arg reductions (the auto_numeric_metrics / dyn
-    // path). The arg set is only known after a scan, so discover it first, then
-    // feed each (arg, reduction) to the engine as a Float64 value column.
-    // Output column names and order match to_batch's dyn columns exactly (arg
-    // outer, reduction inner; legacy empty-reductions = one bare-named per-arg
-    // mean).
-    struct DynAgg {
-        std::string column;  // AGG_NUM_ARG_PREFIX + arg (the frame column name)
-        std::string out;  // dyn_col_name(spec, arg), or the bare arg (legacy)
-        AggOp op;
-        double q;
-    };
-    std::vector<DynAgg> dyn_aggs;
-    if (plan.auto_numeric_metrics) {
-        std::vector<std::string> names =
-            co_await harvest_numeric_arg_names(plan);
-        for (const std::string& name : names) {
-            const std::string col = std::string(AGG_NUM_ARG_PREFIX) + name;
-            if (plan.numeric_arg_aggs.empty()) {
-                dyn_aggs.push_back({col, name, AggOp::Mean, 0.0});
-            } else {
-                for (const AggSpec& r : plan.numeric_arg_aggs)
-                    dyn_aggs.push_back({col, dyn_col_name(r, name), r.op, r.q});
-            }
-        }
-    }
+    // Auto-discovered numeric args stream as the AggState dyn side-table
+    // (per-morsel dyn columns), so no name pre-scan and no dyn gaggs; the
+    // reductions and the raw scan's dyn emission both key off the same specs.
+    std::vector<dataframe::AggDynSpec> dyn_specs = build_dyn_specs(plan);
 
-    // to_batch lays out value columns as [named non-text/hist aggs, dyn cols]
-    // then text columns (ArgMax/SetUnion) then hist. The engine emits columns
-    // in gaggs order, so partition named specs into value vs text and slot the
-    // dyn columns between them to reproduce that order.
+    // Fixed gaggs in [value, text] order (dyn is separate); the engine emits
+    // columns in gagg order.
     std::vector<dataframe::GroupAgg> gaggs;
     std::vector<dataframe::GroupAgg> text_gaggs;
     if (plan.agg.empty()) {
@@ -613,18 +570,6 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
                 gaggs.push_back(std::move(g));
         }
     }
-    for (const DynAgg& d : dyn_aggs) {
-        dataframe::GroupAgg g;
-        // A dyn Count is the arg-present count (FieldStat::n), not the group's
-        // row count, so it maps to CountValid over the sentinel column; the
-        // Int64 result is cast to Float64 below to match the dyn column type.
-        g.op = d.op == AggOp::Count ? dataframe::Agg::CountValid
-                                    : to_engine_agg(d.op);
-        g.out = d.out;
-        g.param = d.q;
-        g.column = d.column;
-        gaggs.push_back(std::move(g));
-    }
     gaggs.insert(gaggs.end(), std::make_move_iterator(text_gaggs.begin()),
                  std::make_move_iterator(text_gaggs.end()));
 
@@ -646,7 +591,6 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
         add_field(value_select_token(spec.field));
         add_field(value_select_token(spec.by));
     }
-    for (const DynAgg& d : dyn_aggs) add_field(d.column);
     if (has_bucket) add_field("ts");
     if (has_occ) {
         add_field("ts");
@@ -656,6 +600,9 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
     auto next = std::make_shared<ViewPlan>(plan);
     next->group_by.clear();
     next->agg.clear();
+    // auto_numeric_metrics stays off here: it would make the raw view a non-row
+    // query (is_row_query), so the ViewSource would buffer/re-aggregate instead
+    // of streaming. The dyn emission is signalled to the ViewSource directly.
     next->auto_numeric_metrics = false;
     next->numeric_arg_aggs.clear();
     next->sort_col.clear();
@@ -682,7 +629,8 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
 
     View raw(std::move(next));
     dataframe::LazyFrame lf =
-        dataframe::LazyFrame::scan(std::make_shared<ViewSource>(raw))
+        dataframe::LazyFrame::scan(
+            std::make_shared<ViewSource>(raw, plan.auto_numeric_metrics))
             .memory_budget(plan.memory_budget);
 
     // Group-key transforms (dirname/basename/lower/bucket) coarsen the key:
@@ -801,13 +749,9 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
         if (need_te) scale_col(value_select_token("te"), SCALED_TE_COL);
     }
 
-    std::vector<DynFix> dynfix;
-    dynfix.reserve(dyn_aggs.size());
-    for (const DynAgg& d : dyn_aggs)
-        dynfix.push_back({d.out, d.op == AggOp::Pct, d.op == AggOp::Count});
-
     co_return EnginePrep{std::move(lf), std::move(group_key_names),
-                         std::move(gaggs), std::move(dynfix)};
+                         std::move(gaggs), std::move(dyn_specs),
+                         std::string(AGG_NUM_ARG_PREFIX)};
 }
 
 coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
@@ -831,8 +775,8 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // materialize() persists the AggState partials as a rollup (opt-in); a
     // paginated result is never cached.
     if (plan.materialize && !plan.limit && !plan.offset) {
-        auto state =
-            co_await ep.lf->collect_group_state(ep.group_key_names, ep.gaggs);
+        auto state = co_await ep.lf->collect_group_state(
+            ep.group_key_names, ep.gaggs, ep.dyn_specs, ep.dyn_prefix);
         const std::string rdir = rollup_index_path(plan);
         if (!rdir.empty()) {
             try {
@@ -854,14 +798,16 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // streaming group_by wants at least one key column, so fold it into a
     // single AggState (empty key list) and finalize that.
     if (plan.group_by.empty() && plan.time_bucket_us == 0) {
-        auto state =
-            co_await ep.lf->collect_group_state(ep.group_key_names, ep.gaggs);
+        auto state = co_await ep.lf->collect_group_state(
+            ep.group_key_names, ep.gaggs, ep.dyn_specs, ep.dyn_prefix);
         co_return finalize_engine_result(*state, plan);
     }
 
-    dataframe::DataFrame r =
-        co_await ep.lf->group_by(ep.group_key_names, ep.gaggs).collect();
-    co_return finalize_engine_frame(std::move(r), plan, ep.dynfix);
+    dataframe::DataFrame r = co_await ep.lf
+                                 ->group_by(ep.group_key_names, ep.gaggs,
+                                            ep.dyn_specs, ep.dyn_prefix)
+                                 .collect();
+    co_return finalize_engine_frame(std::move(r), plan, ep.dyn_specs);
 }
 
 coro::CoroTask<dataframe::AggStatePtr> build_engine_agg_state(
@@ -869,7 +815,8 @@ coro::CoroTask<dataframe::AggStatePtr> build_engine_agg_state(
     const ViewPlan plan = resolve_bucket_origin(plan_in);
     ensure_schema(plan);
     EnginePrep ep = co_await prepare_engine_group(plan);
-    co_return co_await ep.lf->collect_group_state(ep.group_key_names, ep.gaggs);
+    co_return co_await ep.lf->collect_group_state(ep.group_key_names, ep.gaggs,
+                                                  ep.dyn_specs, ep.dyn_prefix);
 }
 
 }  // namespace dftracer::utils::trace::views::detail
