@@ -71,6 +71,27 @@ struct AggSpec {
                                ///< (value_col is ts); unused otherwise
 };
 
+/// One reduction applied to every auto-discovered dyn (per-argument) column.
+/// The finalized column for argument `name` is `out_prefix + name`;
+/// `op`/`param` select the reduction (Pct reads a per-name sketch, every other
+/// op the per-name FieldStat). Configured once at agg_new - the argument names
+/// themselves are discovered during accumulate, so a single pass can build the
+/// per-argument aggregates without a name pre-scan.
+struct AggDynSpec {
+    AggOp op;
+    double param = 0.0;      ///< Pct quantile q in [0, 1]
+    std::string out_prefix;  ///< finalized column name is `out_prefix + name`
+};
+
+/// One dyn value column fed to accumulate, named by its discovered argument.
+/// The column set may differ per batch; a group's dyn set is the union of the
+/// names seen for it, and an absent name is simply not accumulated
+/// (present-count semantics). `col` is borrowed for the accumulate call only.
+struct AggDynInput {
+    std::string name;
+    const Series* col;
+};
+
 class AggState;  // opaque, mergeable partial group state (defined in agg.cpp)
 
 struct AggStateDeleter {
@@ -78,8 +99,11 @@ struct AggStateDeleter {
 };
 using AggStatePtr = std::unique_ptr<AggState, AggStateDeleter>;
 
-/// A fresh partial for `specs`, grouping by N key columns.
-AggStatePtr agg_new(std::vector<AggSpec> specs);
+/// A fresh partial for `specs`, grouping by N key columns. `dyn` (optional)
+/// enables the name-keyed dyn side-table: each spec in `dyn` is one reduction
+/// applied to every argument name fed through agg_accumulate's dyn inputs.
+AggStatePtr agg_new(std::vector<AggSpec> specs,
+                    std::vector<AggDynSpec> dyn = {});
 
 /// Fold rows [begin, end) of a batch (the N `keys` columns + the value columns
 /// the specs reference) into `state`. The composite key is hashed and compared
@@ -89,6 +113,14 @@ AggStatePtr agg_new(std::vector<AggSpec> specs);
 void agg_accumulate(AggState& state, const std::vector<const Series*>& keys,
                     const std::vector<const Series*>& values,
                     std::int64_t begin = 0, std::int64_t end = -1);
+/// As above plus the dyn inputs: each `AggDynInput` feeds a per-argument value
+/// column whose name is discovered here. Requires `state` to have been built
+/// with a non-empty `dyn` spec list; the column set may differ from batch to
+/// batch, and a group's dyn set grows to the union of names seen for it.
+void agg_accumulate(AggState& state, const std::vector<const Series*>& keys,
+                    const std::vector<const Series*>& values,
+                    const std::vector<AggDynInput>& dyn, std::int64_t begin = 0,
+                    std::int64_t end = -1);
 /// Single-key convenience: forwards to the N-key form with `keys = {&key}`.
 void agg_accumulate(AggState& state, const Series& key,
                     const std::vector<const Series*>& values,

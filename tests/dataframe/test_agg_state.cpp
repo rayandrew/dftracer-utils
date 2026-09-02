@@ -8,10 +8,13 @@
 #include <vector>
 
 namespace df = dftracer::utils::dataframe;
+using df::AggDynInput;
+using df::AggDynSpec;
 using df::AggOp;
 using df::AggSpec;
 using df::DataFrame;
 using df::Series;
+using df::TypeId;
 
 namespace {
 
@@ -191,6 +194,139 @@ TEST_CASE("agg_regroup with bucket_recut coarsens the time grain") {
         CHECK(got.column("cnt").data<std::int64_t>()[r] ==
               want.column("cnt").data<std::int64_t>()[r]);
     }
+}
+
+namespace {
+
+// Two dyn reductions (sum, mean) plus a present-count over each discovered arg.
+std::vector<AggDynSpec> dyn_specs() {
+    return {{AggOp::Sum, 0.0, "sum_"},
+            {AggOp::Mean, 0.0, "mean_"},
+            {AggOp::Count, 0.0, "count_"}};
+}
+
+// One key column {0,0,1,1} plus two Float64 dyn args over rows [0,4).
+struct DynSample {
+    std::vector<std::int64_t> k{0, 0, 1, 1};
+    std::vector<double> x{1, 2, 3, 4};
+    std::vector<double> y{10, 20, 30, 40};
+    Series sk = Series::flat_i64(k.data(), 4);
+    Series sx = Series::flat_f64(x.data(), 4);
+    Series sy = Series::flat_f64(y.data(), 4);
+    std::vector<const Series*> keys{&sk};
+};
+
+}  // namespace
+
+TEST_CASE("AggState dyn: per-batch name discovery unions into each group") {
+    DynSample s;
+    auto st = df::agg_new({AggSpec{AggOp::Count, -1, "n"}}, dyn_specs());
+    // Two batches over the same groups discover disjoint arg names (x then y);
+    // each group's dyn set is the union, and the finalized columns are sorted.
+    agg_accumulate(*st, s.keys, {}, std::vector<AggDynInput>{{"x", &s.sx}});
+    agg_accumulate(*st, s.keys, {}, std::vector<AggDynInput>{{"y", &s.sy}});
+    df::agg_sort_groups(*st);
+    DataFrame r = df::agg_finalize(*st, "k");
+
+    REQUIRE(r.num_rows() == 2);
+    const std::vector<std::string> expect{
+        "k", "n", "sum_x", "mean_x", "count_x", "sum_y", "mean_y", "count_y"};
+    REQUIRE(r.names == expect);
+    // Sum/Mean over a Float64 arg stay Float64; the present-count is Int64.
+    CHECK(r.column("sum_x").type() == TypeId::Float64);
+    CHECK(r.column("count_x").type() == TypeId::Int64);
+
+    // group k=0 has x={1,2}, y={10,20}; k=1 has x={3,4}, y={30,40}.
+    CHECK(r.column("sum_x").data<double>()[0] == doctest::Approx(3.0));
+    CHECK(r.column("mean_x").data<double>()[0] == doctest::Approx(1.5));
+    CHECK(r.column("count_x").data<std::int64_t>()[0] == 2);
+    CHECK(r.column("sum_y").data<double>()[1] == doctest::Approx(70.0));
+    CHECK(r.column("count_y").data<std::int64_t>()[1] == 2);
+}
+
+TEST_CASE("AggState dyn: an Int64 arg keeps a stable exact Int64 sum column") {
+    std::vector<std::int64_t> k{0, 0, 1, 1};
+    std::vector<std::int64_t> z{5, 7, 11, 13};
+    Series sk = Series::flat_i64(k.data(), 4);
+    Series sz = Series::flat_i64(z.data(), 4);
+    std::vector<const Series*> keys{&sk};
+    auto st = df::agg_new({AggSpec{AggOp::Count, -1, "n"}},
+                          {{AggOp::Sum, 0.0, "sum_"}});
+    agg_accumulate(*st, keys, {}, std::vector<AggDynInput>{{"z", &sz}});
+    df::agg_sort_groups(*st);
+    DataFrame r = df::agg_finalize(*st, "k");
+    CHECK(r.column("sum_z").type() == TypeId::Int64);
+    CHECK(r.column("sum_z").data<std::int64_t>()[0] == 12);
+    CHECK(r.column("sum_z").data<std::int64_t>()[1] == 24);
+}
+
+TEST_CASE("AggState dyn: merge unions disjoint and overlapping names") {
+    DynSample s;
+    // State A sees x and y; state B sees y and w, in the same groups.
+    std::vector<double> w{100, 200, 300, 400};
+    Series sw = Series::flat_f64(w.data(), 4);
+    auto a = df::agg_new({AggSpec{AggOp::Count, -1, "n"}}, dyn_specs());
+    agg_accumulate(*a, s.keys, {},
+                   std::vector<AggDynInput>{{"x", &s.sx}, {"y", &s.sy}});
+    auto b = df::agg_new({AggSpec{AggOp::Count, -1, "n"}}, dyn_specs());
+    agg_accumulate(*b, s.keys, {},
+                   std::vector<AggDynInput>{{"y", &s.sy}, {"w", &sw}});
+    df::agg_merge(*a, *b);
+    df::agg_sort_groups(*a);
+    DataFrame r = df::agg_finalize(*a, "k");
+
+    // Union of names: w, x, y (sorted). y was seen in both, so its count is the
+    // sum of both contributions.
+    CHECK(r.column_index("sum_w") >= 0);
+    CHECK(r.column_index("sum_x") >= 0);
+    CHECK(r.column("count_y").data<std::int64_t>()[0] == 4);  // 2 from each
+    CHECK(r.column("sum_y").data<double>()[0] ==
+          doctest::Approx(60.0));                             // 30+30
+    // x only in A, so its group-0 count is the single contribution.
+    CHECK(r.column("count_x").data<std::int64_t>()[0] == 2);
+    // w only in B.
+    CHECK(r.column("sum_w").data<double>()[0] == doctest::Approx(300.0));
+}
+
+TEST_CASE("AggState dyn: serialize/deserialize round-trips the side-table") {
+    DynSample s;
+    auto st = df::agg_new({AggSpec{AggOp::Count, -1, "n"}}, dyn_specs());
+    agg_accumulate(*st, s.keys, {},
+                   std::vector<AggDynInput>{{"x", &s.sx}, {"y", &s.sy}});
+    df::agg_sort_groups(*st);
+    DataFrame want = df::agg_finalize(*st, "k");
+
+    std::string blob = df::agg_serialize(*st);
+    auto back = df::agg_deserialize(blob);
+    DataFrame got = df::agg_finalize(*back, "k");
+
+    REQUIRE(got.names == want.names);
+    REQUIRE(got.num_rows() == want.num_rows());
+    for (std::int64_t r = 0; r < got.num_rows(); ++r) {
+        CHECK(got.column("sum_x").data<double>()[r] ==
+              doctest::Approx(want.column("sum_x").data<double>()[r]));
+        CHECK(got.column("count_y").data<std::int64_t>()[r] ==
+              want.column("count_y").data<std::int64_t>()[r]);
+    }
+}
+
+TEST_CASE("AggState dyn: a Pct reduction round-trips its per-name sketch") {
+    std::vector<std::int64_t> k(1000, 0);
+    std::vector<double> x(1000);
+    for (std::int64_t i = 0; i < 1000; ++i) x[static_cast<std::size_t>(i)] = i;
+    Series sk = Series::flat_i64(k.data(), 1000);
+    Series sx = Series::flat_f64(x.data(), 1000);
+    std::vector<const Series*> keys{&sk};
+    auto st = df::agg_new({AggSpec{AggOp::Count, -1, "n"}},
+                          {{AggOp::Pct, 0.9, "p90_"}});
+    agg_accumulate(*st, keys, {}, std::vector<AggDynInput>{{"x", &sx}});
+    DataFrame direct = df::agg_finalize(*st, "k");
+    const double q = direct.column("p90_x").data<double>()[0];
+    CHECK(q == doctest::Approx(900.0).epsilon(0.02));
+
+    auto back = df::agg_deserialize(df::agg_serialize(*st));
+    DataFrame r = df::agg_finalize(*back, "k");
+    CHECK(r.column("p90_x").data<double>()[0] == doctest::Approx(q));
 }
 
 TEST_CASE("agg_regroup over serialize/deserialize round-trip is exact") {

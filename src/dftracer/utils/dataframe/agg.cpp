@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <set>
 #include <string>
@@ -223,6 +224,20 @@ class AggState {
     std::vector<std::uint64_t> occ_ts;      // groups * n_occ (min; init max)
     std::vector<std::uint64_t> occ_te;      // groups * n_occ (max; init 0)
 
+    // Name-keyed dyn side-table: per group, one FieldStat (and, when a Pct
+    // reduction is configured, one DDSketch) per auto-discovered argument name.
+    // The name set is data-dependent (grows during accumulate) and merges by
+    // name-union, so a single streaming pass builds per-argument aggregates
+    // without a name pre-scan. `dyn_domain` fixes each name's finalized column
+    // type once (the domain of the first input column seen for it), so a group
+    // missing a name still lands in that name's stable column type.
+    bool has_dyn = false;
+    bool dyn_has_sketch = false;
+    std::vector<AggDynSpec> dyn_specs;
+    std::vector<std::map<std::string, FieldStat>> dyn_fs;     // ngroups
+    std::vector<std::map<std::string, DDSketch>> dyn_sketch;  // ngroups
+    std::map<std::string, FieldStatDomain> dyn_domain;
+
     std::size_t nspecs() const { return specs.size(); }
     std::int64_t ngroups() const {
         return static_cast<std::int64_t>(counts.size());
@@ -314,6 +329,11 @@ class AggState {
             spec_occ[s] = slot;
         }
         has_occ = n_occ > 0;
+
+        has_dyn = !dyn_specs.empty();
+        dyn_has_sketch = false;
+        for (const AggDynSpec& d : dyn_specs)
+            if (d.op == AggOp::Pct) dyn_has_sketch = true;
     }
 
     void grow_group() {
@@ -340,6 +360,10 @@ class AggState {
             occ_ts.resize(occ_ts.size() + n_occ,
                           (std::numeric_limits<std::uint64_t>::max)());
             occ_te.resize(occ_te.size() + n_occ, 0);
+        }
+        if (has_dyn) {
+            dyn_fs.emplace_back();
+            if (dyn_has_sketch) dyn_sketch.emplace_back();
         }
     }
     // Shared lookup for both live rows (get_int/get_str read a Series cell) and
@@ -490,6 +514,15 @@ class AggState {
                     occ_deltas[ds + slot][t] += dlt;
             }
         }
+        if (has_dyn) {
+            for (const auto& [name, sm] :
+                 other.dyn_fs[static_cast<std::size_t>(j)])
+                dyn_fs[static_cast<std::size_t>(g)][name].merge(sm);
+            if (dyn_has_sketch)
+                for (const auto& [name, sk] :
+                     other.dyn_sketch[static_cast<std::size_t>(j)])
+                    dyn_sketch[static_cast<std::size_t>(g)][name].merge(sk);
+        }
     }
 
     // Adopt `other`'s spec/field/layout metadata into an empty (uninited) state
@@ -520,14 +553,19 @@ class AggState {
         occ_val_col = other.occ_val_col;
         occ_by_col = other.occ_by_col;
         occ_cell = other.occ_cell;
+        has_dyn = other.has_dyn;
+        dyn_has_sketch = other.dyn_has_sketch;
+        dyn_specs = other.dyn_specs;
+        dyn_domain = other.dyn_domain;
     }
 };
 
 void AggStateDeleter::operator()(AggState* p) const noexcept { delete p; }
 
-AggStatePtr agg_new(std::vector<AggSpec> specs) {
+AggStatePtr agg_new(std::vector<AggSpec> specs, std::vector<AggDynSpec> dyn) {
     AggStatePtr s(new AggState());
     s->specs = std::move(specs);
+    s->dyn_specs = std::move(dyn);
     s->init_layout();
     return s;
 }
@@ -535,6 +573,16 @@ AggStatePtr agg_new(std::vector<AggSpec> specs) {
 void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                     const std::vector<const Series*>& values,
                     std::int64_t begin, std::int64_t end) {
+    agg_accumulate(st, keys, values, std::vector<AggDynInput>{}, begin, end);
+}
+
+void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
+                    const std::vector<const Series*>& values,
+                    const std::vector<AggDynInput>& dyn_in, std::int64_t begin,
+                    std::int64_t end) {
+    if (st.has_dyn)
+        for (const AggDynInput& di : dyn_in)
+            st.dyn_domain.emplace(di.name, col_domain(di.col->type()));
     if (!st.inited) {
         st.nkeys = keys.size();
         st.key_is_str.resize(st.nkeys);
@@ -674,6 +722,18 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                 st.occ_deltas[base][e0] -= 1;
             }
         }
+        if (st.has_dyn) {
+            for (const AggDynInput& di : dyn_in) {
+                if (di.col->is_null(i)) continue;
+                const FieldStatDomain d = col_domain(di.col->type());
+                std::map<std::string, FieldStat>& gmap =
+                    st.dyn_fs[static_cast<std::size_t>(g)];
+                fs_add(gmap[di.name], *di.col, i, d);
+                if (st.dyn_has_sketch)
+                    st.dyn_sketch[static_cast<std::size_t>(g)][di.name].add(
+                        read_as_double(*di.col, i, d));
+            }
+        }
     }
 }
 
@@ -694,6 +754,8 @@ void agg_merge(AggState& into, const AggState& other) {
         into.skey_cols.assign(into.nkeys, {});
         into.inited = true;
     }
+    for (const auto& [name, d] : other.dyn_domain)
+        into.dyn_domain.emplace(name, d);
     const std::int64_t og = other.ngroups();
     for (std::int64_t j = 0; j < og; ++j)
         into.merge_group(into.group_of_other(other, j), other, j);
@@ -969,6 +1031,114 @@ DataFrame agg_finalize(const AggState& st,
             out.columns.push_back(Series::flat_f64(v.data(), ng));
         }
     }
+
+    if (st.has_dyn) {
+        // Union of discovered argument names, sorted (std::set) so the dyn
+        // column order is deterministic and matches the GroupMap path. Columns
+        // are laid out name-outer, reduction-inner.
+        std::set<std::string> names;
+        for (const std::map<std::string, FieldStat>& gmap : st.dyn_fs)
+            for (const auto& [name, fs] : gmap) names.insert(name);
+        for (const std::string& name : names) {
+            const auto dit = st.dyn_domain.find(name);
+            const FieldStatDomain dom =
+                dit != st.dyn_domain.end() ? dit->second : FieldStatDomain::I64;
+            for (const AggDynSpec& d : st.dyn_specs) {
+                out.names.push_back(d.out_prefix + name);
+                auto fs_of = [&](std::int64_t g) -> const FieldStat* {
+                    const std::map<std::string, FieldStat>& gmap =
+                        st.dyn_fs[static_cast<std::size_t>(g)];
+                    const auto it = gmap.find(name);
+                    return it != gmap.end() ? &it->second : nullptr;
+                };
+                if (d.op == AggOp::Pct) {
+                    std::vector<double> v(static_cast<std::size_t>(ng), 0.0);
+                    for (std::int64_t g = 0; g < ng; ++g) {
+                        const std::map<std::string, DDSketch>& gsk =
+                            st.dyn_sketch[static_cast<std::size_t>(g)];
+                        const auto it = gsk.find(name);
+                        if (it != gsk.end())
+                            v[static_cast<std::size_t>(g)] =
+                                it->second.quantile(d.param);
+                    }
+                    out.columns.push_back(Series::flat_f64(v.data(), ng));
+                } else if (d.op == AggOp::Count) {
+                    std::vector<std::int64_t> v(static_cast<std::size_t>(ng),
+                                                0);
+                    for (std::int64_t g = 0; g < ng; ++g)
+                        if (const FieldStat* f = fs_of(g))
+                            v[static_cast<std::size_t>(g)] =
+                                static_cast<std::int64_t>(f->n);
+                    out.columns.push_back(Series::flat_i64(v.data(), ng));
+                } else if ((d.op == AggOp::Sum || d.op == AggOp::Min ||
+                            d.op == AggOp::Max) &&
+                           dom != FieldStatDomain::F64) {
+                    auto exact = [&](const FieldStat& f) -> std::int64_t {
+                        return d.op == AggOp::Sum   ? f.esum
+                               : d.op == AggOp::Min ? f.emin
+                                                    : f.emax;
+                    };
+                    if (dom == FieldStatDomain::U64) {
+                        std::vector<std::uint64_t> v(
+                            static_cast<std::size_t>(ng), 0);
+                        for (std::int64_t g = 0; g < ng; ++g)
+                            if (const FieldStat* f = fs_of(g))
+                                v[static_cast<std::size_t>(g)] =
+                                    std::bit_cast<std::uint64_t>(exact(*f));
+                        out.columns.push_back(
+                            Series::flat(TypeId::Uint64, v.data(), ng));
+                    } else {
+                        std::vector<std::int64_t> v(
+                            static_cast<std::size_t>(ng), 0);
+                        for (std::int64_t g = 0; g < ng; ++g)
+                            if (const FieldStat* f = fs_of(g))
+                                v[static_cast<std::size_t>(g)] = exact(*f);
+                        out.columns.push_back(Series::flat_i64(v.data(), ng));
+                    }
+                } else {
+                    std::vector<double> v(static_cast<std::size_t>(ng), 0.0);
+                    for (std::int64_t g = 0; g < ng; ++g) {
+                        const FieldStat* f = fs_of(g);
+                        if (!f) continue;
+                        double r = 0.0;
+                        switch (d.op) {
+                            case AggOp::Sum:
+                                r = f->sum;
+                                break;
+                            case AggOp::Min:
+                                r = f->n ? f->min : 0.0;
+                                break;
+                            case AggOp::Max:
+                                r = f->n ? f->max : 0.0;
+                                break;
+                            case AggOp::SumSq:
+                                r = f->sumsq;
+                                break;
+                            case AggOp::Mean:
+                                r = f->mean();
+                                break;
+                            case AggOp::Var:
+                                r = f->variance(true);
+                                break;
+                            case AggOp::Std:
+                                r = f->stddev(true);
+                                break;
+                            case AggOp::Skew:
+                                r = f->skewness();
+                                break;
+                            case AggOp::Kurt:
+                                r = f->kurtosis();
+                                break;
+                            default:
+                                r = 0.0;
+                        }
+                        v[static_cast<std::size_t>(g)] = r;
+                    }
+                    out.columns.push_back(Series::flat_f64(v.data(), ng));
+                }
+            }
+        }
+    }
     return out;
 }
 
@@ -1027,6 +1197,15 @@ std::size_t agg_approx_bytes(const AggState& st) {
                  sizeof(std::uint64_t);
         for (const AggState::OccDeltas& d : st.occ_deltas)
             total += d.size() * (sizeof(std::uint64_t) + sizeof(std::int64_t));
+    }
+    if (st.has_dyn) {
+        for (const std::map<std::string, FieldStat>& gmap : st.dyn_fs)
+            for (const auto& [name, fs] : gmap)
+                total += name.size() + sizeof(FieldStat) + 48;
+        if (st.dyn_has_sketch)
+            for (const std::map<std::string, DDSketch>& gsk : st.dyn_sketch)
+                for (const auto& [name, sk] : gsk)
+                    total += name.size() + sk.bins().size() * 24 + 64;
     }
     return total;
 }
@@ -1101,6 +1280,10 @@ void agg_sort_groups(AggState& st) {
         permute_blocks(st.occ_ts, perm, st.n_occ);
         permute_blocks(st.occ_te, perm, st.n_occ);
     }
+    if (st.has_dyn) {
+        permute_blocks(st.dyn_fs, perm, 1);
+        if (st.dyn_has_sketch) permute_blocks(st.dyn_sketch, perm, 1);
+    }
 
     st.rebuild_key_buckets(ng);
 }
@@ -1108,6 +1291,8 @@ void agg_sort_groups(AggState& st) {
 AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
     AggStatePtr out(new AggState());
     out->specs = st.specs;
+    out->dyn_specs = st.dyn_specs;
+    out->dyn_domain = st.dyn_domain;
     out->init_layout();
     out->nkeys = st.nkeys;
     out->key_is_str = st.key_is_str;
@@ -1166,6 +1351,11 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
             out->occ_ts[slot] = st.occ_ts[obase + slot];
             out->occ_te[slot] = st.occ_te[obase + slot];
         }
+    }
+    if (st.has_dyn) {
+        out->dyn_fs[0] = st.dyn_fs[static_cast<std::size_t>(g)];
+        if (st.dyn_has_sketch)
+            out->dyn_sketch[0] = st.dyn_sketch[static_cast<std::size_t>(g)];
     }
     return out;
 }
@@ -1271,6 +1461,45 @@ std::string agg_serialize(const AggState& st) {
             for (const auto& [t, dlt] : st.occ_deltas[i]) {
                 put(s, t);
                 put(s, dlt);
+            }
+        }
+    }
+    put(s, static_cast<std::uint8_t>(st.has_dyn ? 1 : 0));
+    if (st.has_dyn) {
+        put(s, static_cast<std::uint32_t>(st.dyn_specs.size()));
+        for (const AggDynSpec& d : st.dyn_specs) {
+            put(s, static_cast<std::int32_t>(d.op));
+            put(s, d.param);
+            put_bytes(s, d.out_prefix);
+        }
+        put(s, static_cast<std::uint8_t>(st.dyn_has_sketch ? 1 : 0));
+        put(s, static_cast<std::uint32_t>(st.dyn_domain.size()));
+        for (const auto& [name, dom] : st.dyn_domain) {
+            put_bytes(s, name);
+            put(s, static_cast<std::uint8_t>(dom));
+        }
+        for (std::int64_t g = 0; g < ng; ++g) {
+            const std::map<std::string, FieldStat>& gmap =
+                st.dyn_fs[static_cast<std::size_t>(g)];
+            put(s, static_cast<std::uint64_t>(gmap.size()));
+            for (const auto& [name, fs] : gmap) {
+                put_bytes(s, name);
+                put(s, fs);
+            }
+        }
+        if (st.dyn_has_sketch) {
+            std::vector<std::uint8_t> blob;
+            for (std::int64_t g = 0; g < ng; ++g) {
+                const std::map<std::string, DDSketch>& gsk =
+                    st.dyn_sketch[static_cast<std::size_t>(g)];
+                put(s, static_cast<std::uint64_t>(gsk.size()));
+                for (const auto& [name, sk] : gsk) {
+                    put_bytes(s, name);
+                    sk.serialize_into(blob);
+                    put(s, static_cast<std::uint32_t>(blob.size()));
+                    s.append(reinterpret_cast<const char*>(blob.data()),
+                             blob.size());
+                }
             }
         }
     }
@@ -1398,6 +1627,48 @@ AggStatePtr agg_deserialize(const std::string& blob) {
                 const std::uint64_t t = r.get<std::uint64_t>();
                 const std::int64_t dlt = r.get<std::int64_t>();
                 st->occ_deltas[i][t] = dlt;
+            }
+        }
+    }
+    st->has_dyn = r.get<std::uint8_t>() != 0;
+    if (st->has_dyn) {
+        const std::uint32_t nd = r.get<std::uint32_t>();
+        st->dyn_specs.resize(nd);
+        for (std::uint32_t i = 0; i < nd; ++i) {
+            st->dyn_specs[i].op = static_cast<AggOp>(r.get<std::int32_t>());
+            st->dyn_specs[i].param = r.get<double>();
+            st->dyn_specs[i].out_prefix = r.get_bytes();
+        }
+        st->dyn_has_sketch = r.get<std::uint8_t>() != 0;
+        const std::uint32_t ndom = r.get<std::uint32_t>();
+        for (std::uint32_t i = 0; i < ndom; ++i) {
+            std::string name = r.get_bytes();
+            st->dyn_domain.emplace(
+                std::move(name),
+                static_cast<FieldStatDomain>(r.get<std::uint8_t>()));
+        }
+        st->dyn_fs.resize(static_cast<std::size_t>(ng));
+        for (std::int64_t g = 0; g < ng; ++g) {
+            const std::uint64_t cnt = r.get<std::uint64_t>();
+            for (std::uint64_t j = 0; j < cnt; ++j) {
+                std::string name = r.get_bytes();
+                st->dyn_fs[static_cast<std::size_t>(g)].emplace(
+                    std::move(name), r.get<FieldStat>());
+            }
+        }
+        if (st->dyn_has_sketch) {
+            st->dyn_sketch.resize(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g) {
+                const std::uint64_t cnt = r.get<std::uint64_t>();
+                for (std::uint64_t j = 0; j < cnt; ++j) {
+                    std::string name = r.get_bytes();
+                    const std::uint32_t blen = r.get<std::uint32_t>();
+                    st->dyn_sketch[static_cast<std::size_t>(g)].emplace(
+                        std::move(name),
+                        DDSketch::deserialize(
+                            reinterpret_cast<const std::uint8_t*>(r.p), blen));
+                    r.p += blen;
+                }
             }
         }
     }

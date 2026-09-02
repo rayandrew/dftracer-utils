@@ -96,8 +96,9 @@ void add_rest_fields(std::string& sig, const ViewPlan& plan) {
     // a persisted rollup from an older layout is never misread (it lands under
     // a different signature and is recomputed). accumfmt3 = per-group engine
     // AggState blobs (agg_serialize), replacing the earlier serialized
-    // GroupMap/AggAccum layout.
-    add("accumfmt3");
+    // GroupMap/AggAccum layout. accumfmt4 appended the name-keyed dyn
+    // side-table to that blob.
+    add("accumfmt4");
     for (const auto& s : plan.select) add(s);
 }
 

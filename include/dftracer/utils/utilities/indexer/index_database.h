@@ -104,7 +104,10 @@ class IndexDatabase {
     /// v12 -> v13 changed the persisted rollup from serialized
     /// GroupMap/AggAccum records to per-group engine AggState blobs
     /// (agg_serialize), so an older rollup's rows are an incompatible layout.
-    static constexpr std::uint32_t SCHEMA_VERSION = 13;
+    /// v13 -> v14 appended the name-keyed dyn side-table to the AggState blob
+    /// (a trailing has_dyn byte plus, when set, the dyn specs/domain/stats), so
+    /// an older rollup blob lacks those bytes and would misparse.
+    static constexpr std::uint32_t SCHEMA_VERSION = 14;
 
     /// True if the stored schema predates the current build's layout.
     bool schema_outdated() const;
