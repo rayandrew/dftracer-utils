@@ -1,3 +1,4 @@
+#include <ankerl/unordered_dense.h>
 #include <dftracer/utils/core/common/hash/hash_combine.h>
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/dataframe.h>
@@ -10,6 +11,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <set>
 #include <string>
@@ -96,6 +98,44 @@ std::string cell_repr(const Series& c, std::int64_t i) {
 // matches views/view_aggregate.h SET_SEP so the two engines agree.
 constexpr char AGG_SET_SEP = '\x1e';
 
+// One group's occupancy scalars from its endpoint delta-map. Reproduces
+// view_aggregate.cpp occupancy_summary byte-for-byte: busy is the exact
+// interval union (depth-sweep over sorted deltas), active the peak depth, span
+// the makespan, total the raw sum(dur).
+struct OccResult {
+    std::uint64_t busy = 0;
+    std::uint64_t active = 0;
+    std::uint64_t total = 0;
+    std::uint64_t span = 0;
+};
+
+OccResult occ_summarize(
+    const ankerl::unordered_dense::map<std::uint64_t, std::int64_t>& deltas,
+    std::uint64_t total, std::uint64_t ts, std::uint64_t te) {
+    OccResult o;
+    o.total = total;
+    o.span = te > ts ? te - ts : 0;
+    if (deltas.empty()) return o;
+    std::vector<std::pair<std::uint64_t, std::int64_t>> pts(deltas.begin(),
+                                                            deltas.end());
+    std::sort(pts.begin(), pts.end(),
+              [](const auto& x, const auto& y) { return x.first < y.first; });
+    std::int64_t depth = 0;
+    std::uint64_t last = 0, busy = 0, peak = 0;
+    bool started = false;
+    for (const auto& [t, dlt] : pts) {
+        if (started && depth > 0) busy += t - last;
+        depth += dlt;
+        if (depth > 0 && static_cast<std::uint64_t>(depth) > peak)
+            peak = static_cast<std::uint64_t>(depth);
+        last = t;
+        started = true;
+    }
+    o.busy = busy;
+    o.active = peak;
+    return o;
+}
+
 }  // namespace
 
 // Groups fold by distinct value column, not by spec: sum(dur), mean(dur) and
@@ -166,6 +206,23 @@ class AggState {
     std::vector<std::int32_t> set_val_col;
     std::vector<std::set<std::string>> sets;  // groups * n_set
 
+    // Occupancy: one slot per distinct (ts col, dur col, occ_cell) triple (all
+    // occupancy ops on the same inputs share one delta-map, mirroring the
+    // View's single per-group state). A slot holds a sparse +1/-1 endpoint
+    // delta-map plus sum(dur)/min(ts)/max(end), all associative so
+    // parallel/spilled partials merge exactly.
+    using OccDeltas = ankerl::unordered_dense::map<std::uint64_t, std::int64_t>;
+    bool has_occ = false;
+    std::size_t n_occ = 0;
+    std::vector<int> spec_occ;              // spec -> occ slot, or -1
+    std::vector<std::int32_t> occ_val_col;  // slot -> ts value_col
+    std::vector<std::int32_t> occ_by_col;   // slot -> dur by_col
+    std::vector<std::uint64_t> occ_cell;    // slot -> endpoint-snap tolerance
+    std::vector<OccDeltas> occ_deltas;      // groups * n_occ
+    std::vector<std::uint64_t> occ_total;   // groups * n_occ
+    std::vector<std::uint64_t> occ_ts;      // groups * n_occ (min; init max)
+    std::vector<std::uint64_t> occ_te;      // groups * n_occ (max; init 0)
+
     std::size_t nspecs() const { return specs.size(); }
     std::int64_t ngroups() const {
         return static_cast<std::int64_t>(counts.size());
@@ -178,8 +235,8 @@ class AggState {
         std::unordered_map<std::int32_t, int> seen;
         for (std::size_t s = 0; s < specs.size(); ++s) {
             const AggSpec& sp = specs[s];
-            if (sp.op == AggOp::Count || sp.op == AggOp::ArgMax ||
-                sp.op == AggOp::SetUnion || sp.value_col < 0)
+            if (sp.op == AggOp::Count || sp.op == AggOp::SetUnion ||
+                agg_uses_by_col(sp.op) || sp.value_col < 0)
                 continue;
             auto it = seen.find(sp.value_col);
             if (it == seen.end()) {
@@ -229,6 +286,34 @@ class AggState {
             set_val_col.push_back(specs[s].value_col);
         }
         has_set = n_set > 0;
+
+        spec_occ.assign(specs.size(), -1);
+        occ_val_col.clear();
+        occ_by_col.clear();
+        occ_cell.clear();
+        n_occ = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            const AggSpec& sp = specs[s];
+            if (sp.op != AggOp::Busy && sp.op != AggOp::Concurrency &&
+                sp.op != AggOp::Utilization && sp.op != AggOp::Active)
+                continue;
+            const std::uint64_t cell = static_cast<std::uint64_t>(sp.param);
+            int slot = -1;
+            for (std::size_t k = 0; k < n_occ; ++k)
+                if (occ_val_col[k] == sp.value_col &&
+                    occ_by_col[k] == sp.by_col && occ_cell[k] == cell) {
+                    slot = static_cast<int>(k);
+                    break;
+                }
+            if (slot < 0) {
+                slot = static_cast<int>(n_occ++);
+                occ_val_col.push_back(sp.value_col);
+                occ_by_col.push_back(sp.by_col);
+                occ_cell.push_back(cell);
+            }
+            spec_occ[s] = slot;
+        }
+        has_occ = n_occ > 0;
     }
 
     void grow_group() {
@@ -249,6 +334,13 @@ class AggState {
             argmax_repr.resize(argmax_repr.size() + n_argmax);
         }
         if (has_set) sets.resize(sets.size() + n_set);
+        if (has_occ) {
+            occ_deltas.resize(occ_deltas.size() + n_occ);
+            occ_total.resize(occ_total.size() + n_occ, 0);
+            occ_ts.resize(occ_ts.size() + n_occ,
+                          (std::numeric_limits<std::uint64_t>::max)());
+            occ_te.resize(occ_te.size() + n_occ, 0);
+        }
     }
     // Shared lookup for both live rows (get_int/get_str read a Series cell) and
     // merge (they read another AggState's already-materialized key columns):
@@ -453,6 +545,33 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                         .insert(std::move(v));
             }
         }
+        if (st.has_occ) {
+            for (std::size_t slot = 0; slot < st.n_occ; ++slot) {
+                const Series* tsc =
+                    values[static_cast<std::size_t>(st.occ_val_col[slot])];
+                const Series* durc =
+                    values[static_cast<std::size_t>(st.occ_by_col[slot])];
+                if (tsc->is_null(i) || durc->is_null(i)) continue;
+                const double durv =
+                    read_as_double(*durc, i, col_domain(durc->type()));
+                if (!(durv > 0)) continue;
+                std::uint64_t s0 = static_cast<std::uint64_t>(
+                    read_as_double(*tsc, i, col_domain(tsc->type())));
+                std::uint64_t e0 = s0 + static_cast<std::uint64_t>(durv);
+                const std::uint64_t cell = st.occ_cell[slot];
+                if (cell) {  // optional tolerance: snap start down, end up
+                    s0 = s0 / cell * cell;
+                    e0 = (e0 + cell - 1) / cell * cell;
+                }
+                const std::size_t base =
+                    static_cast<std::size_t>(g) * st.n_occ + slot;
+                st.occ_total[base] += static_cast<std::uint64_t>(durv);
+                if (s0 < st.occ_ts[base]) st.occ_ts[base] = s0;
+                if (e0 > st.occ_te[base]) st.occ_te[base] = e0;
+                st.occ_deltas[base][s0] += 1;
+                st.occ_deltas[base][e0] -= 1;
+            }
+        }
     }
 }
 
@@ -485,6 +604,12 @@ void agg_merge(AggState& into, const AggState& other) {
         into.n_set = other.n_set;
         into.spec_set = other.spec_set;
         into.set_val_col = other.set_val_col;
+        into.has_occ = other.has_occ;
+        into.n_occ = other.n_occ;
+        into.spec_occ = other.spec_occ;
+        into.occ_val_col = other.occ_val_col;
+        into.occ_by_col = other.occ_by_col;
+        into.occ_cell = other.occ_cell;
         into.nkeys = other.nkeys;
         into.key_is_str = other.key_is_str;
         into.ikey_cols.assign(into.nkeys, {});
@@ -543,6 +668,19 @@ void agg_merge(AggState& into, const AggState& other) {
             for (std::size_t slot = 0; slot < into.n_set; ++slot)
                 into.sets[ds + slot].insert(other.sets[ss + slot].begin(),
                                             other.sets[ss + slot].end());
+        }
+        if (into.has_occ) {
+            const std::size_t ds = static_cast<std::size_t>(g) * into.n_occ;
+            const std::size_t ss = static_cast<std::size_t>(j) * into.n_occ;
+            for (std::size_t slot = 0; slot < into.n_occ; ++slot) {
+                into.occ_total[ds + slot] += other.occ_total[ss + slot];
+                if (other.occ_ts[ss + slot] < into.occ_ts[ds + slot])
+                    into.occ_ts[ds + slot] = other.occ_ts[ss + slot];
+                if (other.occ_te[ss + slot] > into.occ_te[ds + slot])
+                    into.occ_te[ds + slot] = other.occ_te[ss + slot];
+                for (const auto& [t, dlt] : other.occ_deltas[ss + slot])
+                    into.occ_deltas[ds + slot][t] += dlt;
+            }
         }
     }
 }
@@ -682,6 +820,38 @@ DataFrame agg_finalize(const AggState& st,
                 v[static_cast<std::size_t>(g)] = std::move(joined);
             }
             out.columns.push_back(Series::strings(v));
+        } else if (sp.op == AggOp::Busy || sp.op == AggOp::Concurrency ||
+                   sp.op == AggOp::Utilization || sp.op == AggOp::Active) {
+            const int slot = st.spec_occ[s];
+            std::vector<double> v(static_cast<std::size_t>(ng), 0.0);
+            for (std::int64_t g = 0; g < ng; ++g) {
+                if (slot < 0) continue;
+                const std::size_t b = static_cast<std::size_t>(g) * st.n_occ +
+                                      static_cast<std::size_t>(slot);
+                const OccResult o =
+                    occ_summarize(st.occ_deltas[b], st.occ_total[b],
+                                  st.occ_ts[b], st.occ_te[b]);
+                double r = 0.0;
+                switch (sp.op) {
+                    case AggOp::Busy:
+                        r = static_cast<double>(o.busy);
+                        break;
+                    case AggOp::Concurrency:
+                        r = o.busy ? static_cast<double>(o.total) /
+                                         static_cast<double>(o.busy)
+                                   : 0.0;
+                        break;
+                    case AggOp::Utilization:
+                        r = (o.busy && o.span) ? static_cast<double>(o.busy) /
+                                                     static_cast<double>(o.span)
+                                               : 0.0;
+                        break;
+                    default:  // Active
+                        r = static_cast<double>(o.active);
+                }
+                v[static_cast<std::size_t>(g)] = r;
+            }
+            out.columns.push_back(Series::flat_f64(v.data(), ng));
         } else if (sp.op == AggOp::Count) {
             std::vector<std::int64_t> v(static_cast<std::size_t>(ng));
             for (std::int64_t g = 0; g < ng; ++g)
@@ -782,6 +952,12 @@ std::size_t agg_approx_bytes(const AggState& st) {
     if (st.has_set)
         for (const std::set<std::string>& gset : st.sets)
             for (const std::string& v : gset) total += v.size() + 32;
+    if (st.has_occ) {
+        total += (st.occ_total.size() + st.occ_ts.size() + st.occ_te.size()) *
+                 sizeof(std::uint64_t);
+        for (const AggState::OccDeltas& d : st.occ_deltas)
+            total += d.size() * (sizeof(std::uint64_t) + sizeof(std::int64_t));
+    }
     return total;
 }
 
@@ -849,6 +1025,12 @@ void agg_sort_groups(AggState& st) {
         permute_blocks(st.argmax_repr, perm, st.n_argmax);
     }
     if (st.has_set) permute_blocks(st.sets, perm, st.n_set);
+    if (st.has_occ) {
+        permute_blocks(st.occ_deltas, perm, st.n_occ);
+        permute_blocks(st.occ_total, perm, st.n_occ);
+        permute_blocks(st.occ_ts, perm, st.n_occ);
+        permute_blocks(st.occ_te, perm, st.n_occ);
+    }
 
     st.rebuild_key_buckets(ng);
 }
@@ -905,6 +1087,15 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
         const std::size_t setbase = static_cast<std::size_t>(g) * st.n_set;
         for (std::size_t slot = 0; slot < st.n_set; ++slot)
             out->sets[slot] = st.sets[setbase + slot];
+    }
+    if (st.has_occ) {
+        const std::size_t obase = static_cast<std::size_t>(g) * st.n_occ;
+        for (std::size_t slot = 0; slot < st.n_occ; ++slot) {
+            out->occ_deltas[slot] = st.occ_deltas[obase + slot];
+            out->occ_total[slot] = st.occ_total[obase + slot];
+            out->occ_ts[slot] = st.occ_ts[obase + slot];
+            out->occ_te[slot] = st.occ_te[obase + slot];
+        }
     }
     return out;
 }
@@ -997,6 +1188,20 @@ std::string agg_serialize(const AggState& st) {
         for (const std::set<std::string>& gset : st.sets) {
             put(s, static_cast<std::uint32_t>(gset.size()));
             for (const std::string& v : gset) put_bytes(s, v);
+        }
+    }
+    put(s, static_cast<std::uint8_t>(st.has_occ ? 1 : 0));
+    if (st.has_occ) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st.n_occ;
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.occ_total[i]);
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.occ_ts[i]);
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.occ_te[i]);
+        for (std::size_t i = 0; i < sz; ++i) {
+            put(s, static_cast<std::uint64_t>(st.occ_deltas[i].size()));
+            for (const auto& [t, dlt] : st.occ_deltas[i]) {
+                put(s, t);
+                put(s, dlt);
+            }
         }
     }
     return s;
@@ -1101,6 +1306,29 @@ AggStatePtr agg_deserialize(const std::string& blob) {
             const std::uint32_t cnt = r.get<std::uint32_t>();
             for (std::uint32_t j = 0; j < cnt; ++j)
                 st->sets[i].insert(r.get_bytes());
+        }
+    }
+    st->has_occ = r.get<std::uint8_t>() != 0;
+    if (st->has_occ) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_occ;
+        st->occ_total.resize(sz);
+        st->occ_ts.resize(sz);
+        st->occ_te.resize(sz);
+        st->occ_deltas.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i)
+            st->occ_total[i] = r.get<std::uint64_t>();
+        for (std::size_t i = 0; i < sz; ++i)
+            st->occ_ts[i] = r.get<std::uint64_t>();
+        for (std::size_t i = 0; i < sz; ++i)
+            st->occ_te[i] = r.get<std::uint64_t>();
+        for (std::size_t i = 0; i < sz; ++i) {
+            const std::uint64_t cnt = r.get<std::uint64_t>();
+            st->occ_deltas[i].reserve(static_cast<std::size_t>(cnt));
+            for (std::uint64_t j = 0; j < cnt; ++j) {
+                const std::uint64_t t = r.get<std::uint64_t>();
+                const std::int64_t dlt = r.get<std::int64_t>();
+                st->occ_deltas[i][t] = dlt;
+            }
         }
     }
     st->inited = true;

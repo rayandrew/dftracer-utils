@@ -53,12 +53,11 @@ bool agg_op_engine_supported(AggOp op) {
         case AggOp::Hist:
         case AggOp::ArgMax:
         case AggOp::SetUnion:
-            return true;
         case AggOp::Busy:
         case AggOp::Concurrency:
         case AggOp::Utilization:
         case AggOp::Active:
-            return false;
+            return true;
     }
     return false;
 }
@@ -94,14 +93,16 @@ dataframe::Agg to_engine_agg(AggOp op) {
         case AggOp::SetUnion:
             return dataframe::Agg::SetUnion;
         case AggOp::Busy:
+            return dataframe::Agg::Busy;
         case AggOp::Concurrency:
+            return dataframe::Agg::Concurrency;
         case AggOp::Utilization:
+            return dataframe::Agg::Utilization;
         case AggOp::Active:
-            break;
+            return dataframe::Agg::Active;
     }
-    throw DFTUtilsException::cat(
-        ErrorCode::INTERNAL,
-        "agg engine: occupancy ops are not engine-eligible");
+    throw DFTUtilsException::cat(ErrorCode::INTERNAL,
+                                 "agg engine: unknown aggregate op");
 }
 
 dataframe::GroupAgg to_group_agg(const AggSpec& spec) {
@@ -112,6 +113,11 @@ dataframe::GroupAgg to_group_agg(const AggSpec& spec) {
     if (spec.op == AggOp::ArgMax) {
         g.column = spec.field;
         g.by = spec.by;
+    } else if (is_occupancy_op(spec.op)) {
+        // Occupancy has no value field; it reads the raw (ts, dur) pair, with
+        // the endpoint-snap tolerance carried in param.
+        g.column = "ts";
+        g.by = "dur";
     } else if (spec.op != AggOp::Count) {
         g.column = spec.field;
     }
@@ -297,6 +303,10 @@ bool agg_engine_eligible(const ViewPlan& plan) {
         // The engine's Count is always the group's row count; the View's
         // Count(field) counts only the field-present rows, a different value.
         if (spec.op == AggOp::Count && !spec.field.empty()) return false;
+        // Occupancy reads raw ts/dur; under a non-identity time_scale the
+        // GroupMap path splits raw-occupancy from scaled value aggs per field,
+        // which the single-scan engine path cannot reproduce, so defer to it.
+        if (is_occupancy_op(spec.op) && plan.time_scale != 1.0) return false;
         if (!is_stable_field(spec.field) || !is_stable_field(spec.by))
             return false;
     }
@@ -388,6 +398,7 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
             dataframe::GroupAgg g = to_group_agg(spec);
             g.column = scaled_name(g.column);
             g.by = scaled_name(g.by);
+            if (is_occupancy_op(spec.op)) g.param = plan.occ_cell_us;
             if (spec.op == AggOp::ArgMax || spec.op == AggOp::SetUnion)
                 text_gaggs.push_back(std::move(g));
             else
@@ -402,6 +413,9 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         g.column = d.column;
         gaggs.push_back(std::move(g));
     }
+    // Value columns precede the text (ArgMax/SetUnion) columns in to_batch;
+    // busy_cell_us (below) slots in right after them, so capture the count now.
+    const std::size_t n_value_cols = gaggs.size();
     gaggs.insert(gaggs.end(), std::make_move_iterator(text_gaggs.begin()),
                  std::make_move_iterator(text_gaggs.end()));
 
@@ -424,6 +438,13 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     }
     for (const DynAgg& d : dyn_aggs) add_field(d.column);
     if (has_bucket) add_field("ts");
+    const bool has_occ =
+        std::any_of(plan.agg.begin(), plan.agg.end(),
+                    [](const AggSpec& s) { return is_occupancy_op(s.op); });
+    if (has_occ) {
+        add_field("ts");
+        add_field("dur");
+    }
 
     auto next = std::make_shared<ViewPlan>(plan);
     next->group_by.clear();
@@ -446,7 +467,9 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // at bucket/aggregate time (agg_fold.h). Bucketing needs the exact
     // fold formula, so pull the raw (unscaled) values here and reapply
     // time_scale ourselves below, byte-for-byte like the fold.
-    if (has_bucket) next->time_scale = 1.0;
+    // Occupancy is a time-native reduction over raw ts/dur (agg_fold.h reads
+    // them unscaled); the raw scan must not pre-scale them.
+    if (has_bucket || has_occ) next->time_scale = 1.0;
 
     View raw(std::move(next));
     dataframe::LazyFrame lf =
@@ -534,6 +557,27 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     }
     for (std::size_t i = 0; i < off + key_names.size(); ++i)
         r.columns[i] = key_column_to_string(r.columns[i]);
+
+    // to_batch appends a busy_cell_us column (the effective occ_cell tolerance)
+    // right after the value columns whenever a Busy/Concurrency/Utilization
+    // spec is present (Active alone does not emit it). Reproduce it as an Int64
+    // constant so the two paths match column-for-column.
+    const bool occ_cell_col =
+        std::any_of(plan.agg.begin(), plan.agg.end(), [](const AggSpec& s) {
+            return s.op == AggOp::Busy || s.op == AggOp::Concurrency ||
+                   s.op == AggOp::Utilization;
+        });
+    if (occ_cell_col) {
+        const std::int64_t nrows = r.num_rows();
+        std::vector<std::int64_t> cell(
+            static_cast<std::size_t>(nrows),
+            static_cast<std::int64_t>(plan.occ_cell_us));
+        const std::size_t at = off + key_names.size() + n_value_cols;
+        r.names.insert(r.names.begin() + static_cast<std::ptrdiff_t>(at),
+                       "busy_cell_us");
+        r.columns.insert(r.columns.begin() + static_cast<std::ptrdiff_t>(at),
+                         dataframe::Series::flat_i64(cell.data(), nrows));
+    }
 
     // Post-aggregation re-key: relabel each resolved-name key column (grouped
     // on its raw hash, a bijection) to the resolved name, same as

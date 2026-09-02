@@ -2538,4 +2538,110 @@ TEST_SUITE("View") {
             check_match(expect, engine_served, "cat");
         }
     }
+
+    TEST_CASE("View - occupancy engine path matches the GroupMap path") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        // Overlapping intervals per name group: same-name events are 150 us
+        // apart but each lasts 200 us, so pairs overlap (busy < sum(dur), peak
+        // depth 2) while a third never joins them.
+        std::string pfw = env.get_dir() + "/occ_engine.pfw";
+        {
+            std::ofstream ofs(pfw);
+            const char* names[] = {"read", "write", "open"};
+            int ts = 1000;
+            for (int i = 0; i < 90; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 3]
+                    << R"(","cat":"POSIX","pid":1,"tid":10,"ts":)" << ts
+                    << R"(,"dur":200,"args":{}})" << "\n";
+                ts += 50;
+            }
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        namespace detail = dftracer::utils::trace::views::detail;
+        auto collect_engine = [](const View& v) {
+            dftracer::utils::Runtime rt;
+            dataframe::DataFrame result;
+            rt.run_blocking(
+                "occ-engine",
+                [&](dftracer::utils::CoroScope&)
+                    -> dftracer::utils::coro::CoroTask<void> {
+                    result = co_await detail::run_collect_via_engine(v.plan());
+                });
+            return detail::apply_agg_post_ops(std::move(result), v.plan());
+        };
+        auto collect_groupmap = [](const View& v) {
+            dftracer::utils::Runtime rt;
+            dataframe::DataFrame result;
+            rt.run_blocking(
+                "occ-groupmap",
+                [&](dftracer::utils::CoroScope&)
+                    -> dftracer::utils::coro::CoroTask<void> {
+                    detail::GroupMap m = co_await detail::run_collect(v.plan());
+                    result = detail::finalize_collect_batch(m, v.plan());
+                });
+            return detail::apply_agg_post_ops(std::move(result), v.plan());
+        };
+        auto check_match = [](const dataframe::DataFrame& a0,
+                              const dataframe::DataFrame& b0,
+                              const std::string& key) {
+            dataframe::DataFrame a = a0.sort_by(key, false);
+            dataframe::DataFrame b = b0.sort_by(key, false);
+            REQUIRE(a.names.size() == b.names.size());
+            for (std::size_t i = 0; i < a.names.size(); ++i) {
+                CHECK(a.names[i] == b.names[i]);
+                CHECK(a.columns[i].type() == b.columns[i].type());
+            }
+            REQUIRE(a.num_rows() == b.num_rows());
+            for (std::int64_t r = 0; r < a.num_rows(); ++r)
+                for (const auto& name : a.names) {
+                    const auto c = static_cast<std::size_t>(bcol(a, name));
+                    if (a.columns[c].type() == dataframe::TypeId::String)
+                        CHECK(bstr(a, r, name) == bstr(b, r, name));
+                    else
+                        CHECK(bnum(a, r, name) ==
+                              doctest::Approx(bnum(b, r, name)));
+                }
+        };
+
+        auto run_both = [&](std::uint64_t occ_cell, std::uint64_t mem_budget) {
+            auto build = [&] {
+                View v = View::from_file(gz, idx);
+                if (mem_budget) v = v.memory_budget(mem_budget);
+                if (occ_cell) v = v.occ_cell(occ_cell);
+                return v.group_by({GroupKey::name()})
+                    .agg({
+                        {AggOp::Sum, "dur", "sum_dur"},
+                        {AggOp::Busy, "", "busy"},
+                        {AggOp::Concurrency, "", "concurrency"},
+                        {AggOp::Utilization, "", "utilization"},
+                        {AggOp::Active, "", "active"},
+                    });
+            };
+            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            dataframe::DataFrame legacy = collect_groupmap(build());
+            dataframe::DataFrame engine = collect_engine(build());
+            check_match(legacy, engine, "name");
+            // Overlap invariants on the exact-union engine result: busy is
+            // strictly below sum(dur) and the peak overlap depth is 2.
+            if (occ_cell == 0)
+                for (std::int64_t r = 0; r < engine.num_rows(); ++r) {
+                    CHECK(bnum(engine, r, "busy") < bnum(engine, r, "sum_dur"));
+                    CHECK(bnum(engine, r, "active") == doctest::Approx(2.0));
+                }
+        };
+
+        SUBCASE("group_by name, exact union") { run_both(0, 0); }
+        SUBCASE("group_by name, exact union, forced spill") {
+            run_both(0, 128);
+        }
+        SUBCASE("group_by name, occ_cell tolerance") { run_both(64, 0); }
+        SUBCASE("group_by name, occ_cell tolerance, forced spill") {
+            run_both(64, 128);
+        }
+    }
 }

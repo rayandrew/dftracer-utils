@@ -45,7 +45,11 @@ enum class Agg {
     Hist,
     ArgMax,
     SumSq,
-    SetUnion
+    SetUnion,
+    Busy,         ///< occupancy: exact interval-union length over (ts, dur)
+    Concurrency,  ///< occupancy: sum(dur) / busy
+    Utilization,  ///< occupancy: busy / makespan
+    Active        ///< occupancy: peak overlap depth
 };
 
 /// Canonical lowercase name of `agg` (the string the C ABI accepts).
@@ -62,11 +66,13 @@ struct GroupAgg {
     Agg op = Agg::Count;
     std::string column;
     std::string out;
-    double param = 0.0;  ///< Pct: the quantile level q in [0, 1]
-    std::string by;      ///< ArgMax: the column maximized; unused otherwise
+    double param = 0.0;  ///< Pct: quantile q in [0, 1]; occupancy: occ_cell_us
+    std::string
+        by;       ///< ArgMax: the column maximized; occupancy: the dur column
+                  ///< (`column` is ts); unused otherwise
 };
 
-class LazyFrame;         // dataframe/lazyframe.h
+class LazyFrame;  // dataframe/lazyframe.h
 
 /// A named ordered set of columns (the RecordBatch / DataChunk analogue). The
 /// eager methods return a new DataFrame (move-only); projection ops share the

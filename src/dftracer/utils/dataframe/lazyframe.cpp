@@ -655,6 +655,14 @@ AggOp to_agg_op(Agg a) {
             return AggOp::SumSq;
         case Agg::SetUnion:
             return AggOp::SetUnion;
+        case Agg::Busy:
+            return AggOp::Busy;
+        case Agg::Concurrency:
+            return AggOp::Concurrency;
+        case Agg::Utilization:
+            return AggOp::Utilization;
+        case Agg::Active:
+            return AggOp::Active;
     }
     return AggOp::Count;
 }
@@ -804,7 +812,7 @@ class GroupByCursor : public Cursor {
             sp.out = a.out;
             sp.param = a.param;
             sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
-            if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
+            if (agg_uses_by_col(sp.op)) sp.by_col = resolve(a.by);
             specs_.push_back(std::move(sp));
         }
 
@@ -977,7 +985,7 @@ class GroupByDynamicCursor : public Cursor {
             sp.out = a.out;
             sp.param = a.param;
             sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
-            if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
+            if (agg_uses_by_col(sp.op)) sp.by_col = resolve(a.by);
             specs.push_back(std::move(sp));
         }
 

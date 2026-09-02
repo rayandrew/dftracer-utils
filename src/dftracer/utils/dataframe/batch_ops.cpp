@@ -52,6 +52,10 @@ AggOp agg_op_of(const std::string& op) {
     if (op == "argmax") return AggOp::ArgMax;
     if (op == "sumsq") return AggOp::SumSq;
     if (op == "set_union") return AggOp::SetUnion;
+    if (op == "busy") return AggOp::Busy;
+    if (op == "concurrency") return AggOp::Concurrency;
+    if (op == "utilization") return AggOp::Utilization;
+    if (op == "active") return AggOp::Active;
     throw std::out_of_range("group_by: unknown aggregate op " + op);
 }
 
@@ -91,6 +95,14 @@ const char* to_string(Agg agg) noexcept {
             return "sumsq";
         case Agg::SetUnion:
             return "set_union";
+        case Agg::Busy:
+            return "busy";
+        case Agg::Concurrency:
+            return "concurrency";
+        case Agg::Utilization:
+            return "utilization";
+        case Agg::Active:
+            return "active";
     }
     return "count";
 }
@@ -112,6 +124,10 @@ Agg agg_from_string(std::string_view name) {
     if (name == "argmax") return Agg::ArgMax;
     if (name == "sumsq") return Agg::SumSq;
     if (name == "set_union") return Agg::SetUnion;
+    if (name == "busy") return Agg::Busy;
+    if (name == "concurrency") return Agg::Concurrency;
+    if (name == "utilization") return Agg::Utilization;
+    if (name == "active") return Agg::Active;
     throw std::out_of_range("agg_from_string: unknown aggregate op " +
                             std::string(name));
 }
@@ -316,7 +332,7 @@ DataFrame group_by(const DataFrame& b, const std::vector<std::string>& keys,
         sp.out = a.out;
         sp.param = a.param;
         sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
-        if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
+        if (agg_uses_by_col(sp.op)) sp.by_col = resolve(a.by);
         specs.push_back(std::move(sp));
     }
     return group_agg(key_cols, values, std::move(specs), keys);
@@ -1323,7 +1339,7 @@ DataFrame group_by_dynamic(const DataFrame& b, const std::string& time_col,
         sp.out = a.out;
         sp.param = a.param;
         sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
-        if (sp.op == AggOp::ArgMax) sp.by_col = resolve(a.by);
+        if (agg_uses_by_col(sp.op)) sp.by_col = resolve(a.by);
         specs.push_back(std::move(sp));
     }
     std::vector<const Series*> values;

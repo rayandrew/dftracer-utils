@@ -35,9 +35,24 @@ enum class AggOp {
     Hist = 12,  ///< the DDSketch histogram, a list<struct{lo,hi,count}> column
     ArgMax =
         13,  ///< the String repr of `value_col` at the row maximizing `by_col`
-    SumSq = 14,    ///< sum of squares (Float64), from the shared FieldStat
-    SetUnion = 15  ///< distinct String values of `value_col`, sorted and joined
+    SumSq = 14,  ///< sum of squares (Float64), from the shared FieldStat
+    SetUnion =
+        15,      ///< distinct String values of `value_col`, sorted and joined
+    // Occupancy (time-window reductions over the ts=`value_col`, dur=`by_col`
+    // pair; `param` carries the endpoint-snap tolerance occ_cell_us): a
+    // per-group +1/-1 endpoint delta-map, mergeable by key-wise add.
+    Busy = 16,         ///< exact interval-union length (us) where depth > 0
+    Concurrency = 17,  ///< sum(dur) / busy
+    Utilization = 18,  ///< busy / (max_end - min_ts)
+    Active = 19        ///< peak overlap depth
 };
+
+/// Occupancy ops take a second (dur) input through `by_col`, like ArgMax.
+inline bool agg_uses_by_col(AggOp op) {
+    return op == AggOp::ArgMax || op == AggOp::Busy ||
+           op == AggOp::Concurrency || op == AggOp::Utilization ||
+           op == AggOp::Active;
+}
 
 /// One aggregate: `op` over the value column at index `value_col` in the values
 /// passed to accumulate (ignored for Count), named `out` in the result.
@@ -45,9 +60,10 @@ struct AggSpec {
     AggOp op;
     std::int32_t value_col = -1;
     std::string out;
-    double param = 0.0;        ///< Pct: the quantile level q in [0, 1]
+    double param = 0.0;  ///< Pct: quantile q in [0, 1]; occupancy: occ_cell_us
     std::int32_t by_col = -1;  ///< ArgMax: the column maximized (value_col is
-                               ///< the represented field); unused otherwise
+                               ///< the represented field); occupancy: dur
+                               ///< (value_col is ts); unused otherwise
 };
 
 class AggState;  // opaque, mergeable partial group state (defined in agg.cpp)
