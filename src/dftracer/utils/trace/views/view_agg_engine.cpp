@@ -23,6 +23,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace dftracer::utils::trace::views::detail {
@@ -65,31 +66,6 @@ std::string value_select_token(const std::string& field) {
 // field_scaled); a value agg over one needs the engine-side rescale path.
 bool is_scaled_field(const std::string& f) {
     return f == "ts" || f == "dur" || f == "te";
-}
-
-bool agg_op_engine_supported(AggOp op) {
-    switch (op) {
-        case AggOp::Count:
-        case AggOp::Sum:
-        case AggOp::Min:
-        case AggOp::Max:
-        case AggOp::Mean:
-        case AggOp::Var:
-        case AggOp::Std:
-        case AggOp::Skew:
-        case AggOp::Kurt:
-        case AggOp::SumSq:
-        case AggOp::Pct:
-        case AggOp::Hist:
-        case AggOp::ArgMax:
-        case AggOp::SetUnion:
-        case AggOp::Busy:
-        case AggOp::Concurrency:
-        case AggOp::Utilization:
-        case AggOp::Active:
-            return true;
-    }
-    return false;
 }
 
 dataframe::Agg to_engine_agg(AggOp op) {
@@ -265,11 +241,97 @@ std::string transform_key_base(const GroupKey& gk, std::string raw,
     return raw;
 }
 
-// Rank is a query-time side channel: the pid -> rank map lives in PR metadata
-// records, not the index or the event columns the engine streams. Harvest it
-// with the same AggFold logic the GroupMap path uses (identical records over
-// the same trace, so the map is byte-identical) and feed it to the shared
-// resolver the post-aggregation re-key reads.
+// Harvests only the pid -> rank map from PR metadata records, with no group
+// aggregation. The map is byte-identical to the one an AggFold would surface
+// (harvest_pr_rank over the same records).
+class RankHarvestFold : public Fold {
+   public:
+    explicit RankHarvestFold(const dftracer::utils::StringIntern& intern)
+        : intern_(&intern) {}
+    bool accepts(const ScanShape&) const override { return true; }
+    bool needs_args() const override { return true; }  // PR args carry the rank
+    std::unique_ptr<Fold> slice() const override {
+        return std::make_unique<RankHarvestFold>(*intern_);
+    }
+    void step(const FoldBatch& batch) override {
+        for (const auto& ev : batch.events)
+            if (ev.phase == RecordPhase::METADATA)
+                harvest_pr_rank(ev, *intern_, ranks_);
+    }
+    void seal_unit(const ScanUnit&) override {}
+    void drop_unit(const ScanUnit&) override {}
+    void merge(Fold& other) override {
+        auto& o = static_cast<RankHarvestFold&>(other);
+        for (auto& [p, r] : o.ranks_) ranks_.emplace(p, std::move(r));
+        o.ranks_.clear();
+    }
+    coro::CoroTask<bool> finalize(const CoverageSet&) override {
+        co_return true;
+    }
+    std::unordered_map<std::uint64_t, std::string>& ranks() { return ranks_; }
+
+   private:
+    const dftracer::utils::StringIntern* intern_;
+    std::unordered_map<std::uint64_t, std::string> ranks_;
+};
+
+// Collects, without building any group state, the numeric-arg names an
+// auto_numeric_metrics plan discovers: the io-cat-derived "size" plus every
+// non-reserved, non-preagg numeric arg (fold_numeric_args_t's rule), over the
+// plan's target phase - the same set the GroupMap dyn keys carry.
+class NumericArgNamesFold : public Fold {
+   public:
+    NumericArgNamesFold(const ViewPlan& plan,
+                        const dftracer::utils::StringIntern& intern)
+        : plan_(&plan),
+          intern_(&intern),
+          phase_target_(agg_phase_target(plan)) {}
+    bool accepts(const ScanShape&) const override { return true; }
+    bool needs_args() const override { return true; }
+    std::unique_ptr<Fold> slice() const override {
+        return std::make_unique<NumericArgNamesFold>(*plan_, *intern_);
+    }
+    void step(const FoldBatch& batch) override {
+        namespace agg = trace::aggregators;
+        for (const auto& ev : batch.events) {
+            if (ev.phase == RecordPhase::METADATA &&
+                phase_target_ != RecordPhase::METADATA)
+                continue;
+            if (phase_target_ != RecordPhase::UNKNOWN &&
+                ev.phase != phase_target_)
+                continue;
+            PodSource src(ev, *intern_);
+            if (derived_size_t(src)) names_.insert("size");
+            src.for_each_numeric_arg([&](std::string_view key, double) {
+                if (agg::is_reserved_arg(key) || agg::is_preagg_suffix(key))
+                    return;
+                names_.insert(std::string(key));
+            });
+        }
+    }
+    void seal_unit(const ScanUnit&) override {}
+    void drop_unit(const ScanUnit&) override {}
+    void merge(Fold& other) override {
+        auto& o = static_cast<NumericArgNamesFold&>(other);
+        names_.insert(o.names_.begin(), o.names_.end());
+        o.names_.clear();
+    }
+    coro::CoroTask<bool> finalize(const CoverageSet&) override {
+        co_return true;
+    }
+    std::set<std::string>& names() { return names_; }
+
+   private:
+    const ViewPlan* plan_;
+    const dftracer::utils::StringIntern* intern_;
+    RecordPhase phase_target_;
+    std::set<std::string> names_;  // sorted, matching the GroupMap dyn key set
+};
+
+// Rank is a query-time side channel: pid -> rank lives in PR metadata records,
+// not the event columns the engine streams. The rank group_by makes make_vdef
+// keep the PR metadata; a RankHarvestFold reads the map, fed to the resolver
+// the post-aggregation re-key reads.
 coro::CoroTask<void> harvest_ranks(const ViewPlan& plan) {
     ViewPlan hp = plan;
     hp.group_by.assign(1, GroupKey::rank());
@@ -289,20 +351,16 @@ coro::CoroTask<void> harvest_ranks(const ViewPlan& plan) {
     ensure_schema(hp);
     ViewDefinition vdef = make_vdef(hp, /*for_aggregation=*/true);
     dftracer::utils::StringIntern intern;
-    AggFold agg(hp, intern);
-    std::array<Fold*, 1> folds{&agg};
+    RankHarvestFold rf(intern);
+    std::array<Fold*, 1> folds{&rf};
     co_await fuse(hp, vdef, folds, intern);
-    apply_ranks(plan, agg.ranks());
+    apply_ranks(plan, rf.ranks());
 }
 
 // The numeric args auto_numeric_metrics discovers are data-dependent (the arg
 // set is only known after a scan; see docs/plans
-// lazyframe_async_unification 3.3 / 5.4). Run the SAME GroupMap fold that the
-// legacy path folds with (a single group, no per-arg sketch) and read the
-// sorted union of the arg names it saw - byte-identical to the set to_batch
-// would emit (fold_numeric_args_t discovers, reserved/pre-agg-filtered, plus
-// the io-cat-derived "size"). Its finish_map is discarded; only the names are
-// kept, then fed back as engine value columns.
+// lazyframe_async_unification 3.3 / 5.4). Discover them with a name-collecting
+// fold, then feed each back as an engine value column.
 coro::CoroTask<std::vector<std::string>> harvest_numeric_arg_names(
     const ViewPlan& plan) {
     ViewPlan hp = plan;
@@ -323,19 +381,10 @@ coro::CoroTask<std::vector<std::string>> harvest_numeric_arg_names(
     ensure_schema(hp);
     ViewDefinition vdef = make_vdef(hp, /*for_aggregation=*/true);
     dftracer::utils::StringIntern intern;
-    AggFold agg(hp, intern);
-    std::array<Fold*, 1> folds{&agg};
+    NumericArgNamesFold nf(hp, intern);
+    std::array<Fold*, 1> folds{&nf};
     co_await fuse(hp, vdef, folds, intern);
-    std::set<std::string> names;  // to_batch unions the dyn keys via std::set
-    GroupMap m = agg.finish_map();
-    for (const auto& [k, a] : m) {
-        (void)k;
-        for (const auto& [name, stat] : a.dyn) {
-            (void)stat;
-            names.insert(name);
-        }
-    }
-    co_return std::vector<std::string>(names.begin(), names.end());
+    co_return std::vector<std::string>(nf.names().begin(), nf.names().end());
 }
 
 // The shared engine-aggregation tail (key rendering, busy_cell_us, resolver
@@ -467,24 +516,9 @@ dataframe::DataFrame finalize_engine_result(const dataframe::AggState& st,
     return finalize_engine_frame(std::move(r), plan, dyn);
 }
 
-bool agg_engine_eligible(const ViewPlan& plan) {
-    if (plan.group_by.empty() && plan.time_bucket_us == 0) return false;
-    // Every GroupKey::Kind, transform, key/value field (top-level, arg, nested,
-    // derived size/te), reduction, occupancy (per-column raw ts/dur alongside
-    // scaled value aggs), and numeric-arg reduction is now served by
-    // run_collect_via_engine, so the only gate left is on an unsupported
-    // aggregate op. Note that the engine intentionally diverges from GroupMap
-    // on one point: a domain-sensitive reduction (Sum/Min/Max/SumSq) over an
-    // int field absent from an entire group keeps the engine's stable
-    // per-column type instead of GroupMap's data-dependent Float64 widening.
-    for (const auto& spec : plan.agg)
-        if (!agg_op_engine_supported(spec.op)) return false;
-    return true;
-}
-
 coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
     // A Rank key groups on pid and relabels to the PR-metadata rank; harvest
-    // that map into the resolver before the scan, mirroring run_scan_aggregate.
+    // that map into the resolver before the scan.
     if (std::any_of(
             plan.group_by.begin(), plan.group_by.end(),
             [](const GroupKey& gk) { return gk.kind == GroupKey::Kind::Rank; }))
@@ -785,9 +819,11 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // tried first and is the only fast path that can serve occupancy.
     if (auto df = try_serve_rollup(plan)) co_return std::move(*df);
     {
+        // The tier/bootstrap fast paths are GroupMap-native (agg_tier_collect,
+        // the raw-gzip bootstrap); to_batch is their finalizer.
         GroupMap served;
         if (co_await try_serve_aggregate_no_scan(plan, served))
-            co_return finalize_collect_batch(served, plan);
+            co_return to_batch(served, plan);
     }
 
     EnginePrep ep = co_await prepare_engine_group(plan);
@@ -811,6 +847,15 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
                                         e.what());
             }
         }
+        co_return finalize_engine_result(*state, plan);
+    }
+
+    // A global aggregation (no group_by, no time_bucket) is one group; the
+    // streaming group_by wants at least one key column, so fold it into a
+    // single AggState (empty key list) and finalize that.
+    if (plan.group_by.empty() && plan.time_bucket_us == 0) {
+        auto state =
+            co_await ep.lf->collect_group_state(ep.group_key_names, ep.gaggs);
         co_return finalize_engine_result(*state, plan);
     }
 

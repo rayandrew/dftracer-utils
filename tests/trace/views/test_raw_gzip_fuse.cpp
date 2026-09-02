@@ -210,9 +210,9 @@ TEST_SUITE("RawGzipFuse") {
     }
 
     // End to end through the public View API: a collect on a file with no index
-    // routes through run_collect's bootstrap, so it answers the aggregation AND
-    // leaves a complete bloom index behind. The eager-indexed collect never
-    // builds bloom, so has_bloom_data being set is proof the bootstrap ran.
+    // routes through the bootstrap, so it answers the aggregation AND leaves a
+    // complete bloom index behind. The eager-indexed collect never builds
+    // bloom, so has_bloom_data being set is proof the bootstrap ran.
     TEST_CASE("View.collect on a first-touch file bootstraps the index") {
         TestEnvironment env(200);
         REQUIRE(env.is_valid());

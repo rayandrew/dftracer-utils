@@ -613,8 +613,6 @@ coro::CoroTask<bool> try_serve_aggregate_no_scan(const ViewPlan& plan,
     co_return false;
 }
 
-// Aggregate `plan` by scanning: answer covered chunks from a materialized
-// aggregate source (if any), fold the rest through one spill-capable AggFold
 // Resolve a min-aligned bucket origin to the trace's minimum timestamp, read
 // from the index zone maps (no event scan), in the post-time_scale unit the
 // fold buckets in. Idempotent: a plan not requesting min alignment (or with no
@@ -648,138 +646,6 @@ ViewPlan resolve_bucket_origin(const ViewPlan& plan) {
     return p;
 }
 
-// over a subsuming filtered-trace MV where present, then persist the result as
-// a rollup when materialize() opted in. Assumes the no-scan fast paths already
-// missed. The single-aggregation scan engine shared by run_collect and a
-// single-branch session.
-static coro::CoroTask<GroupMap> run_scan_aggregate(const ViewPlan& plan_in) {
-    const ViewPlan plan = resolve_bucket_origin(plan_in);
-    ensure_schema(plan);
-    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/true);
-
-    GroupMap merged;
-    CoverageSet covered;
-
-    // Answer covered chunks from a materialized aggregate (per-chunk stats,
-    // summary, ...); scan only what it leaves behind. The source emits AggAccum
-    // partials, merged exactly like scanned groups. Skipped for occupancy:
-    // those partials carry no per-event intervals, so the union must see every
-    // event.
-    if (plan.agg_source && !plan.schema->want_occupancy) {
-        auto [field, single_field] = source_agg_field(plan);
-        // Materialized chunk aggregates cover ALL events in a chunk, so they
-        // are only valid when the query constrains nothing but ts (the window,
-        // handled by coverage). Any other predicate needs a real scan.
-        bool ts_only = true;
-        if (plan.query)
-            for (auto f : plan.query->fields())
-                if (f != "ts") {
-                    ts_only = false;
-                    break;
-                }
-        // Var/Std need a sum-of-squares and Pct a DDSketch the chunk aggregates
-        // do not carry, so a partial coverage would be wrong; full scan
-        // instead.
-        bool has_variance = false;
-        for (const auto& s : plan.agg)
-            if (s.op == AggOp::Var || s.op == AggOp::Std ||
-                s.op == AggOp::Pct || s.op == AggOp::Skew ||
-                s.op == AggOp::Kurt)
-                has_variance = true;
-        // A field-less (Count(*)) aggregation is a row count the dur-sketch
-        // a source cannot answer; only field-based aggregations.
-        if (ts_only && !has_variance && single_field && !field.empty()) {
-            PartialRequest req;
-            req.files = plan.files;
-            req.schema = plan.schema.get();
-            req.group_by = plan.group_by;
-            req.time_bucket_us = plan.time_bucket_us;
-            req.agg_field = field;
-            req.has_window = plan.time_range.has_value();
-            if (plan.time_range) {
-                req.begin = plan.time_range->first;
-                req.end = plan.time_range->second;
-            }
-            if (const AggSpec* am = find_argmax(plan)) {
-                req.needs_argmax = true;
-                req.argmax_value = am->field;
-                req.argmax_by = am->by;
-            }
-            std::string keybuf;
-            auto res = plan.agg_source->lookup(req, [&](AggAccum&& a) {
-                keybuf.clear();
-                for (const auto& k : a.keys) {
-                    keybuf += k;
-                    keybuf += GROUP_SEP;
-                }
-                merge_accum(merged[keybuf], a, plan);
-            });
-            if (res.handled)
-                for (const auto& [path, ckpt] : res.covered_chunks)
-                    covered.add(path, ckpt);
-        }
-    }
-
-    // Scan what the fast-path left uncovered through the fused fold, then merge
-    // its groups with any agg_source partials already in `merged`. When no
-    // rollup/tier answered and we must scan, aggregate over a subsuming
-    // filtered-trace MV instead of the base (the fold re-applies the predicate,
-    // so it is correct). Skipped for the agg_source path, whose covered chunks
-    // are keyed to base paths.
-    ViewPlan scan_plan = plan;
-    if (!plan.agg_source) {
-        if (auto mv = find_subsuming_view(plan))
-            scan_plan.files = std::move(*mv);
-    }
-    dftracer::utils::StringIntern intern;
-    AggFold agg(plan, intern);
-    std::array<Fold*, 1> folds{&agg};
-    co_await fuse(scan_plan, vdef, folds, intern, &covered);
-    for (auto& [k, a] : agg.finish_map()) {
-        if (auto it = merged.find(k); it != merged.end())
-            merge_accum(it->second, a, plan);
-        else
-            merged.emplace(k, std::move(a));
-    }
-
-    // materialize() persist for this GroupMap scan path is handled by the
-    // engine (run_collect_via_engine builds and stores AggState partials); this
-    // fallback path only computes the result.
-    apply_ranks(plan, agg.ranks());
-    resolve_group_keys(merged, plan);
-    co_return std::move(merged);
-}
-
-coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan_in) {
-    // Resolve a min-aligned origin up front so the rollup signature matches a
-    // previously materialized min-aligned result.
-    const ViewPlan plan = resolve_bucket_origin(plan_in);
-    ensure_schema(plan);
-
-    // Occupancy is an exact interval union computed in the scan, so it works
-    // for any window/filter/group_by and stays accurate for tiny events a
-    // coarse tier mask would overcount. Go straight to the scan: the
-    // rollup/bootstrap/ tier fast paths carry no per-event intervals. Disable
-    // spill - the intervals live in the accumulator, and the spill format does
-    // not serialize them.
-    const bool has_occupancy =
-        std::any_of(plan.agg.begin(), plan.agg.end(),
-                    [](const AggSpec& s) { return is_occupancy_op(s.op); });
-    if (has_occupancy) {
-        ViewPlan p = plan;
-        p.memory_budget = 0;
-        co_return co_await run_scan_aggregate(p);
-    }
-
-    {
-        GroupMap served;
-        if (co_await try_serve_aggregate_no_scan(plan, served))
-            co_return std::move(served);
-    }
-
-    co_return co_await run_scan_aggregate(plan);
-}
-
 coro::CoroTask<TypedResult> run_collect_typed(const ViewPlan& plan,
                                               int shard_begin, int shard_end,
                                               const ProgressFn* progress) {
@@ -791,7 +657,7 @@ coro::CoroTask<TypedResult> run_collect_typed(const ViewPlan& plan,
         co_return out;
     }
     // The tier could not answer (a ph/ts predicate it cannot key on, or no tier
-    // built); scan the raw trace like run_collect's fallback so collect_typed
+    // built); scan the raw trace so collect_typed
     // returns rows rather than silently empty.
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
     dftracer::utils::StringIntern intern;
@@ -1179,8 +1045,8 @@ coro::CoroTask<ExportStats> run_session(
                 }
                 GroupMap served;
                 if (co_await try_serve_aggregate_no_scan(*full, served)) {
-                    *br.agg->out = apply_agg_post_ops(
-                        finalize_collect_batch(served, *full), *full);
+                    *br.agg->out =
+                        apply_agg_post_ops(to_batch(served, *full), *full);
                     continue;
                 }
             }
@@ -1197,15 +1063,16 @@ coro::CoroTask<ExportStats> run_session(
     for (const auto& sb : scan_branches)
         (sb.agg_plan ? agg_b : raw_b).push_back(&sb);
 
-    // A lone aggregation with no raw branches: the full single-scan engine
-    // (agg_source coverage + rollup persist). A fold factory (plugin) rides the
-    // shared fused scan and a partial wants the raw map, so both disqualify it.
+    // A lone aggregation with no raw branches runs through the engine (the
+    // rollup/tier fast paths already missed above, so this is the scan). A fold
+    // factory (plugin) rides the shared fused scan and a partial wants the raw
+    // map, so both disqualify it.
     if (agg_b.size() == 1 && raw_b.empty() && !has_factories &&
         !agg_b[0]->br->agg->partial_out) {
-        GroupMap m = co_await run_scan_aggregate(*agg_b[0]->agg_plan);
-        *agg_b[0]->br->agg->out =
-            apply_agg_post_ops(finalize_collect_batch(m, *agg_b[0]->agg_plan),
-                               *agg_b[0]->agg_plan);
+        auto agg_state = co_await build_engine_agg_state(*agg_b[0]->agg_plan);
+        *agg_b[0]->br->agg->out = apply_agg_post_ops(
+            finalize_engine_result(*agg_state, *agg_b[0]->agg_plan),
+            *agg_b[0]->agg_plan);
         co_return ExportStats{};
     }
 
@@ -1283,9 +1150,8 @@ coro::CoroTask<ExportStats> run_session(
         }
         apply_ranks(*agg_b[i]->agg_plan, aggs[i]->ranks());
         resolve_group_keys(m, *agg_b[i]->agg_plan);
-        *agg_b[i]->br->agg->out =
-            apply_agg_post_ops(finalize_collect_batch(m, *agg_b[i]->agg_plan),
-                               *agg_b[i]->agg_plan);
+        *agg_b[i]->br->agg->out = apply_agg_post_ops(
+            to_batch(m, *agg_b[i]->agg_plan), *agg_b[i]->agg_plan);
     }
     // Factory folds published their results in Fold::finalize during the fuse;
     // let the caller pull them (while the folds are still alive here).

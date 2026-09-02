@@ -221,10 +221,6 @@ dftracer::utils::dataframe::DataFrame to_batch(const GroupMap& map,
 void project_columns(dftracer::utils::dataframe::DataFrame& batch,
                      const std::vector<std::string>& select);
 
-// Materialize the group map into a DataFrame; no post-ops applied.
-dftracer::utils::dataframe::DataFrame finalize_collect_batch(
-    const GroupMap& map, const ViewPlan& plan);
-
 // The plan's sort_by/topk/offset+limit/select, applied in that order. Apply
 // once at the final result boundary, after all merges.
 dftracer::utils::dataframe::DataFrame apply_agg_post_ops(

@@ -20,7 +20,9 @@
 #include <queue>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace dftracer::utils::trace::views::detail {
@@ -40,6 +42,39 @@ inline bool query_evaluable_by_fold(const query::Query& q) {
     for (std::string_view f : q.fields())
         if (!fold_query_field_supported(f)) return false;
     return true;
+}
+
+/// The scan RecordPhase an aggregation plan folds; UNKNOWN (Any) folds every
+/// phase with no filter.
+inline RecordPhase agg_phase_target(const ViewPlan& plan) {
+    if (plan.phase == Phase::Events) return RecordPhase::COMPLETE;
+    if (plan.phase == Phase::Counters) return RecordPhase::COUNTER;
+    if (plan.phase == Phase::Aggregated) return RecordPhase::AGGREGATED;
+    if (plan.phase == Phase::Metadata) return RecordPhase::METADATA;
+    return RecordPhase::UNKNOWN;
+}
+
+/// Record pid -> rank from a PR metadata event ({"name":"PR","pid":P,
+/// "args":{"name":"rank","value":"N"}}) into `ranks`; a non-PR or malformed
+/// record is ignored.
+inline void harvest_pr_rank(
+    const FoldEvent& ev, const dftracer::utils::StringIntern& intern,
+    std::unordered_map<std::uint64_t, std::string>& ranks) {
+    if (ev.name_id == dftracer::utils::StringIntern::NO_ID ||
+        intern.resolve(ev.name_id) != "PR")
+        return;
+    std::string_view rank;
+    bool is_rank = false;
+    for (const auto& [kid, v] : ev.args) {
+        const auto* sid = std::get_if<std::uint32_t>(&v);
+        if (!sid) continue;
+        const std::string_view key = intern.resolve(kid);
+        if (key == "name")
+            is_rank = intern.resolve(*sid) == "rank";
+        else if (key == "value")
+            rank = intern.resolve(*sid);
+    }
+    if (is_rank && !rank.empty()) ranks[ev.pid] = std::string(rank);
 }
 
 /// The aggregation as a fold on the fused scan. A returning fold: it persists
@@ -62,7 +97,7 @@ class AggFold : public Fold {
         : plan_(&plan),
           intern_(&intern),
           budget_(resolve_spill_budget(plan.memory_budget)),
-          phase_target_(phase_target(plan)),
+          phase_target_(agg_phase_target(plan)),
           apply_query_(apply_query && plan.query.has_value()),
           want_ranks_(std::any_of(plan.group_by.begin(), plan.group_by.end(),
                                   [](const GroupKey& g) {
@@ -112,7 +147,7 @@ class AggFold : public Fold {
             // the raw-gzip path the fold is fed every phase and this is what
             // keeps unwanted phases out of the aggregation.
             if (ev.phase == RecordPhase::METADATA) {
-                if (want_ranks_) harvest_rank(ev);
+                if (want_ranks_) harvest_pr_rank(ev, *intern_, ranks_);
                 if (phase_target_ != RecordPhase::METADATA) continue;
             }
             if (phase_target_ != RecordPhase::UNKNOWN &&
@@ -222,26 +257,6 @@ class AggFold : public Fold {
     }
 
    private:
-    // A PR metadata record is {"name":"PR","pid":P,"args":{"name":"rank",
-    // "value":"N"}}; record pid -> N.
-    void harvest_rank(const FoldEvent& ev) {
-        if (ev.name_id == dftracer::utils::StringIntern::NO_ID ||
-            intern_->resolve(ev.name_id) != "PR")
-            return;
-        std::string_view rank;
-        bool is_rank = false;
-        for (const auto& [kid, v] : ev.args) {
-            const auto* sid = std::get_if<std::uint32_t>(&v);
-            if (!sid) continue;
-            const std::string_view key = intern_->resolve(kid);
-            if (key == "name")
-                is_rank = intern_->resolve(*sid) == "rank";
-            else if (key == "value")
-                rank = intern_->resolve(*sid);
-        }
-        if (is_rank && !rank.empty()) ranks_[ev.pid] = std::string(rank);
-    }
-
     // Fields the POD serves without capturing args.
     static bool arg_free_field(const std::string& f) {
         return f.empty() || f == "ts" || f == "dur" || f == "te" ||
@@ -322,17 +337,10 @@ class AggFold : public Fold {
     // applies it post-merge, like host_name.
     std::unordered_map<std::uint64_t, std::string> ranks_;
 
-    static RecordPhase phase_target(const ViewPlan& plan) {
-        if (plan.phase == Phase::Events) return RecordPhase::COMPLETE;
-        if (plan.phase == Phase::Counters) return RecordPhase::COUNTER;
-        if (plan.phase == Phase::Aggregated) return RecordPhase::AGGREGATED;
-        if (plan.phase == Phase::Metadata) return RecordPhase::METADATA;
-        return RecordPhase::UNKNOWN;  // Any: aggregate every phase, no filter
-    }
-    std::vector<std::string> runs_;   // sorted spill runs, own + adopted
-    std::vector<std::string> dirs_;   // dirs to remove (own + adopted)
-    std::string cur_dir_;             // this fold's own spill dir
-    std::uint64_t own_seq_ = 0;       // names this fold's own runs
+    std::vector<std::string> runs_;  // sorted spill runs, own + adopted
+    std::vector<std::string> dirs_;  // dirs to remove (own + adopted)
+    std::string cur_dir_;            // this fold's own spill dir
+    std::uint64_t own_seq_ = 0;      // names this fold's own runs
 };
 
 }  // namespace dftracer::utils::trace::views::detail

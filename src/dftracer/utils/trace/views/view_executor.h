@@ -19,8 +19,8 @@ namespace dftracer::utils::trace::views::detail {
 class Fold;
 
 // True when a first-touch query would take the raw-gzip bootstrap (answer the
-// query and build the index in one pass); the exact gate run_export/run_collect
-// apply internally, exposed so the CLI does not duplicate them.
+// query and build the index in one pass); the exact gate the export/collect
+// terminals apply internally, exposed so the CLI does not duplicate them.
 bool export_bootstrap_eligible(const ViewPlan& plan);
 bool collect_bootstrap_eligible(const ViewPlan& plan);
 
@@ -38,8 +38,6 @@ coro::CoroTask<ExportStats> run_export_trace(const ViewPlan& plan,
 coro::CoroTask<ExportStats> run_export_trace_indexed(
     const ViewPlan& plan, const TraceWriteOptions& opts,
     const ProgressFn* progress = nullptr);
-
-coro::CoroTask<GroupMap> run_collect(const ViewPlan& plan);
 
 /// Resolve a min-aligned bucket origin (plan.bucket_origin_min) to the trace's
 /// minimum timestamp, read from the index zone maps (no event scan). A no-op

@@ -605,20 +605,10 @@ coro::CoroTask<dataframe::DataFrame> View::collect_frame() const {
     // A row query (no group_by/agg) returns the matching events, not a count.
     if (detail::is_row_query(*plan_))
         co_return co_await detail::run_collect_rows(*plan_);
-    // The View -> dataframe engine aggregation convergence: an eligible
-    // group_by/agg runs through the engine's streaming group_by instead of
-    // the GroupMap fold below (see view_agg_engine.h for the exact
-    // qualifier); this is the default. GroupMap is the fallback for plans
-    // not yet converged.
-    if (detail::agg_engine_eligible(*plan_)) {
-        // The engine serves the result and, when materialize() opted in,
-        // persists its raw AggState partials as the rollup in the same pass.
-        co_return detail::apply_agg_post_ops(
-            co_await detail::run_collect_via_engine(*plan_), *plan_);
-    }
-    detail::GroupMap m = co_await detail::run_collect(*plan_);
+    // Every aggregation runs through the dataframe engine; materialize() opts
+    // in to persisting its AggState partials as the rollup in the same pass.
     co_return detail::apply_agg_post_ops(
-        detail::finalize_collect_batch(m, *plan_), *plan_);
+        co_await detail::run_collect_via_engine(*plan_), *plan_);
 }
 
 bool View::is_row_query() const { return detail::is_row_query(*plan_); }

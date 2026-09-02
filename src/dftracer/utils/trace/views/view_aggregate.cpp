@@ -852,11 +852,6 @@ void project_columns(dftracer::utils::dataframe::DataFrame& batch,
     batch.columns = std::move(columns);
 }
 
-dataframe::DataFrame finalize_collect_batch(const GroupMap& map,
-                                            const ViewPlan& plan) {
-    return to_batch(map, plan);
-}
-
 dataframe::DataFrame apply_agg_post_ops(dataframe::DataFrame batch,
                                         const ViewPlan& plan) {
     if (!plan.sort_col.empty())

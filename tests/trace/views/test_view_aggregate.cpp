@@ -6,11 +6,13 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/trace/comparator/compare_view.h>
+#include <dftracer/utils/trace/views/aggfold.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <dftracer/utils/trace/views/view_agg_engine.h>
 #include <dftracer/utils/trace/views/view_aggregate.h>
 #include <dftracer/utils/trace/views/view_executor.h>
+#include <dftracer/utils/trace/views/view_scan.h>
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -80,6 +82,88 @@ std::vector<HistBin> hist_bins(const dataframe::DataFrame& b, std::int64_t row,
     for (std::int32_t i = off[row]; i < off[row + 1]; ++i)
         out.push_back({lop[i], hip[i], cntp[i]});
     return out;
+}
+
+// The GroupMap fold as an independent oracle for engine parity, mirroring the
+// pre-engine collect path: the bootstrap/tier no-scan fast paths (which also
+// build a first-touch index), else an AggFold scan resolved via to_batch. No
+// agg_source / MV redirect - the tests use neither.
+dataframe::DataFrame groupmap_oracle(const View& v) {
+    namespace detail = dftracer::utils::trace::views::detail;
+    detail::ViewPlan plan = detail::resolve_bucket_origin(v.plan());
+    // Occupancy intervals live in the accumulator and are not serialized, so
+    // the fold must not spill and cannot take a no-scan fast path.
+    const bool occ =
+        std::any_of(plan.agg.begin(), plan.agg.end(),
+                    [](const AggSpec& s) { return is_occupancy_op(s.op); });
+    if (occ) plan.memory_budget = 0;
+    detail::ensure_schema(plan);
+    ViewDefinition vdef = detail::make_vdef(plan, /*for_aggregation=*/true);
+    Runtime rt;
+    dataframe::DataFrame result;
+    rt.run_blocking("groupmap-oracle", [&](CoroScope&) -> coro::CoroTask<void> {
+        detail::GroupMap served;
+        if (!occ &&
+            co_await detail::try_serve_aggregate_no_scan(plan, served)) {
+            result = detail::to_batch(served, plan);
+            co_return;
+        }
+        StringIntern intern;
+        detail::AggFold agg(plan, intern);
+        std::array<detail::Fold*, 1> folds{&agg};
+        co_await detail::fuse(plan, vdef, folds, intern);
+        detail::GroupMap m = agg.finish_map();
+        detail::apply_ranks(plan, agg.ranks());
+        detail::resolve_group_keys(m, plan);
+        result = detail::to_batch(m, plan);
+    });
+    return detail::apply_agg_post_ops(std::move(result), plan);
+}
+
+// The engine collect path (run_collect_via_engine + post-ops), the production
+// aggregation path every non-row-query View::collect() takes.
+dataframe::DataFrame engine_collect(const View& v) {
+    namespace detail = dftracer::utils::trace::views::detail;
+    Runtime rt;
+    dataframe::DataFrame result;
+    rt.run_blocking("engine-collect", [&](CoroScope&) -> coro::CoroTask<void> {
+        result = co_await detail::run_collect_via_engine(v.plan());
+    });
+    return detail::apply_agg_post_ops(std::move(result), v.plan());
+}
+
+// Two aggregation frames equal, pairing rows by their composite key text so a
+// differently-ordered group set still compares row for row.
+void frames_equal(const dataframe::DataFrame& a, const dataframe::DataFrame& b,
+                  const std::vector<std::string>& keys) {
+    REQUIRE(a.names.size() == b.names.size());
+    for (std::size_t i = 0; i < a.names.size(); ++i) {
+        CHECK(a.names[i] == b.names[i]);
+        CHECK(a.columns[i].type() == b.columns[i].type());
+    }
+    REQUIRE(a.num_rows() == b.num_rows());
+    auto keyed = [&](const dataframe::DataFrame& df) {
+        std::vector<std::pair<std::string, std::int64_t>> rows;
+        for (std::int64_t r = 0; r < df.num_rows(); ++r) {
+            std::string s;
+            for (const auto& k : keys) s += bstr(df, r, k) + '\x1f';
+            rows.emplace_back(std::move(s), r);
+        }
+        std::sort(rows.begin(), rows.end());
+        return rows;
+    };
+    const auto ar = keyed(a);
+    const auto br = keyed(b);
+    for (std::size_t i = 0; i < ar.size(); ++i)
+        for (const auto& name : a.names) {
+            const auto c = static_cast<std::size_t>(bcol(a, name));
+            if (a.columns[c].type() == dataframe::TypeId::String)
+                CHECK(bstr(a, ar[i].second, name) ==
+                      bstr(b, br[i].second, name));
+            else
+                CHECK(bnum(a, ar[i].second, name) ==
+                      doctest::Approx(bnum(b, br[i].second, name)));
+        }
 }
 
 }  // namespace
@@ -1873,16 +1957,7 @@ TEST_SUITE("View") {
             return detail::apply_agg_post_ops(std::move(result), v.plan());
         };
         auto collect_groupmap = [](const View& v) {
-            dftracer::utils::Runtime rt;
-            dataframe::DataFrame result;
-            rt.run_blocking(
-                "groupmap",
-                [&](dftracer::utils::CoroScope&)
-                    -> dftracer::utils::coro::CoroTask<void> {
-                    detail::GroupMap m = co_await detail::run_collect(v.plan());
-                    result = detail::finalize_collect_batch(m, v.plan());
-                });
-            return detail::apply_agg_post_ops(std::move(result), v.plan());
+            return groupmap_oracle(v);
         };
 
         auto check_match = [](const dataframe::DataFrame& a0,
@@ -2860,7 +2935,7 @@ TEST_SUITE("View") {
                           {AggOp::Min, "te", "min_te"},
                           {AggOp::Max, "te", "max_te"}});
             };
-            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            REQUIRE(!detail::is_row_query(build().plan()));
             check_match(collect_groupmap(build()), collect_engine(build()),
                         "name");
         }
@@ -2907,7 +2982,7 @@ TEST_SUITE("View") {
                           {AggOp::Mean, "args.n.v", "mean_nv"},
                           {AggOp::ArgMax, "args.n.v", "top_nv", "dur"}});
             };
-            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            REQUIRE(!detail::is_row_query(build().plan()));
             check_match(collect_groupmap(build()), collect_engine(build()),
                         "name");
         }
@@ -2937,7 +3012,7 @@ TEST_SUITE("View") {
                     .group_by({GroupKey::name()})
                     .agg({{AggOp::Sum, "x", "sum_x"}});
             };
-            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            REQUIRE(!detail::is_row_query(build().plan()));
             dataframe::DataFrame legacy = collect_groupmap(build());
             dataframe::DataFrame engine = collect_engine(build());
             CHECK(
@@ -2991,16 +3066,7 @@ TEST_SUITE("View") {
             return detail::apply_agg_post_ops(std::move(result), v.plan());
         };
         auto collect_groupmap = [](const View& v) {
-            dftracer::utils::Runtime rt;
-            dataframe::DataFrame result;
-            rt.run_blocking(
-                "occ-groupmap",
-                [&](dftracer::utils::CoroScope&)
-                    -> dftracer::utils::coro::CoroTask<void> {
-                    detail::GroupMap m = co_await detail::run_collect(v.plan());
-                    result = detail::finalize_collect_batch(m, v.plan());
-                });
-            return detail::apply_agg_post_ops(std::move(result), v.plan());
+            return groupmap_oracle(v);
         };
         auto check_match = [](const dataframe::DataFrame& a0,
                               const dataframe::DataFrame& b0,
@@ -3038,7 +3104,7 @@ TEST_SUITE("View") {
                         {AggOp::Active, "", "active"},
                     });
             };
-            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            REQUIRE(!detail::is_row_query(build().plan()));
             dataframe::DataFrame legacy = collect_groupmap(build());
             dataframe::DataFrame engine = collect_engine(build());
             check_match(legacy, engine, "name");
@@ -3077,7 +3143,7 @@ TEST_SUITE("View") {
                         {AggOp::Mean, "dur", "mean_dur"},
                     });
             };
-            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            REQUIRE(!detail::is_row_query(build().plan()));
             check_match(collect_groupmap(build()), collect_engine(build()),
                         "name");
         };
@@ -3087,5 +3153,175 @@ TEST_SUITE("View") {
         SUBCASE("occupancy + scaled value agg under time_scale, forced spill") {
             run_both_scaled(128);
         }
+    }
+
+    TEST_CASE("View - global aggregation (no group_by) matches GroupMap") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string pfw = env.get_dir() + "/agg_global.pfw";
+        {
+            std::ofstream ofs(pfw);
+            const char* names[] = {"read", "write", "open"};
+            const char* cats[] = {"POSIX", "STDIO"};
+            int ts = 1000;
+            for (int i = 0; i < 90; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 3] << R"(","cat":")"
+                    << cats[i % 2] << R"(","pid":1,"tid":10,"ts":)" << ts
+                    << R"(,"dur":)" << (5 + (i % 17)) << R"(,"args":{"bytes":)"
+                    << (i % 13) << R"(}})" << "\n";
+                ts += 100;
+            }
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        auto build = [&](std::uint64_t mem) {
+            View v = View::from_file(gz, idx);
+            if (mem) v = v.memory_budget(mem);
+            return v.agg({
+                {AggOp::Count, "", "n"},
+                {AggOp::Sum, "dur", "sum_dur"},
+                {AggOp::Mean, "dur", "mean_dur"},
+                {AggOp::Min, "dur", "min_dur"},
+                {AggOp::Max, "dur", "max_dur"},
+                {AggOp::Var, "dur", "var_dur"},
+                {AggOp::Std, "dur", "std_dur"},
+                {AggOp::Pct, "dur", "p90_dur", "", 0.9},
+                {AggOp::ArgMax, "name", "top_name", "dur"},
+                {AggOp::SetUnion, "cat", "cats"},
+            });
+        };
+        // A global result is a single keyless row, so pair the one row
+        // directly.
+        auto cmp_one = [](const dataframe::DataFrame& a,
+                          const dataframe::DataFrame& b) {
+            REQUIRE(a.names.size() == b.names.size());
+            REQUIRE(a.num_rows() == 1);
+            REQUIRE(b.num_rows() == 1);
+            for (std::size_t i = 0; i < a.names.size(); ++i) {
+                CHECK(a.names[i] == b.names[i]);
+                CHECK(a.columns[i].type() == b.columns[i].type());
+                const auto& name = a.names[i];
+                if (a.columns[i].type() == dataframe::TypeId::String)
+                    CHECK(bstr(a, 0, name) == bstr(b, 0, name));
+                else
+                    CHECK(bnum(a, 0, name) ==
+                          doctest::Approx(bnum(b, 0, name)));
+            }
+        };
+        SUBCASE("in-memory") {
+            cmp_one(groupmap_oracle(build(0)), engine_collect(build(0)));
+        }
+        SUBCASE("forced spill") {
+            cmp_one(groupmap_oracle(build(128)), engine_collect(build(128)));
+        }
+        // A bare .agg() with no explicit specs is a global count.
+        SUBCASE("bare count") {
+            auto q = [&] {
+                return View::from_file(gz, idx).agg(std::vector<AggSpec>{});
+            };
+            cmp_one(groupmap_oracle(q()), engine_collect(q()));
+        }
+        SUBCASE("global histogram") {
+            auto q = [&] {
+                return View::from_file(gz, idx).agg(
+                    {{AggOp::Hist, "dur", "h"}});
+            };
+            dataframe::DataFrame a = groupmap_oracle(q());
+            dataframe::DataFrame b = engine_collect(q());
+            REQUIRE(a.num_rows() == 1);
+            REQUIRE(b.num_rows() == 1);
+            auto ha = hist_bins(a, 0, "h");
+            auto hb = hist_bins(b, 0, "h");
+            REQUIRE(ha.size() == hb.size());
+            for (std::size_t i = 0; i < ha.size(); ++i) {
+                CHECK(ha[i].lower == doctest::Approx(hb[i].lower));
+                CHECK(ha[i].upper == doctest::Approx(hb[i].upper));
+                CHECK(ha[i].count == hb[i].count);
+            }
+        }
+        // auto_numeric_metrics discovers "bytes" (and the io-cat "size")
+        // through the name-collecting fold; the engine must emit the same dyn
+        // columns.
+        SUBCASE("global auto numeric metrics") {
+            auto q = [&] {
+                return View::from_file(gz, idx).agg_numeric_args();
+            };
+            frames_equal(groupmap_oracle(q()), engine_collect(q()), {});
+        }
+    }
+
+    TEST_CASE("View - session collect matches a fresh engine scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = create_mixed_trace(env, 30, 20);
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+
+        auto q = [&] {
+            return base.group_by({GroupKey::cat(), GroupKey::name()})
+                .agg({{AggOp::Count, "", "n"},
+                      {AggOp::Sum, "dur", "sum_dur"},
+                      {AggOp::Mean, "dur", "mean_dur"},
+                      {AggOp::Pct, "dur", "p90_dur", "", 0.9},
+                      {AggOp::ArgMax, "name", "top_name", "dur"},
+                      {AggOp::SetUnion, "cat", "cats"}});
+        };
+        const dataframe::DataFrame fresh = engine_collect(q());
+
+        // Lone aggregation branch: run_session routes it through the engine.
+        SUBCASE("lone branch") {
+            auto run = base.session();
+            auto d = run.collect(q());
+            run.execute().get();
+            frames_equal(*d, fresh, {"cat", "name"});
+        }
+        // A second collect branch forces the fused multi-branch scan (AggFold +
+        // to_batch); each branch must still match a fresh scan.
+        SUBCASE("two branches over the shared scan") {
+            auto run = base.session();
+            auto d = run.collect(q());
+            auto d2 = run.collect(base.group_by({GroupKey::pid()})
+                                      .agg({{AggOp::Count, "", "n"}}));
+            run.execute().get();
+            frames_equal(*d, fresh, {"cat", "name"});
+            frames_equal(*d2,
+                         engine_collect(base.group_by({GroupKey::pid()})
+                                            .agg({{AggOp::Count, "", "n"}})),
+                         {"pid"});
+        }
+    }
+
+    TEST_CASE("View - rank harvest resolves identically to the GroupMap path") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string pfw = env.get_dir() + "/agg_rank.pfw";
+        {
+            std::ofstream ofs(pfw);
+            for (int pid : {1, 2, 3})
+                ofs << R"({"name":"PR","cat":"dftracer","pid":)" << pid
+                    << R"(,"tid":1,"ph":"M","args":{"name":"rank","value":")"
+                    << (pid * 10) << R"("}})" << "\n";
+            int ts = 1000;
+            for (int i = 0; i < 60; ++i) {
+                ofs << R"({"ph":"X","name":"read","cat":"POSIX","pid":)"
+                    << (1 + i % 3) << R"(,"tid":10,"ts":)" << ts << R"(,"dur":)"
+                    << (5 + i % 9) << R"(,"args":{}})" << "\n";
+                ts += 100;
+            }
+        }
+        std::string gz = pfw + ".gz";
+        dftu_utils_test::compress_file_to_gzip(pfw, gz);
+        fs::remove(pfw);
+        std::string idx = determine_index_path(gz, "");
+
+        auto q = [&] {
+            return View::from_file(gz, idx)
+                .group_by({GroupKey::rank()})
+                .agg({{AggOp::Count, "", "n"}, {AggOp::Sum, "dur", "sum_dur"}});
+        };
+        frames_equal(groupmap_oracle(q()), engine_collect(q()), {"rank"});
     }
 }

@@ -3063,7 +3063,9 @@ coro::CoroTask<AggStatePtr> LazyFrame::collect_group_state(
         for (const std::string& v : value_names)
             vcols.push_back(
                 &df->columns[static_cast<std::size_t>(df->column_index(v))]);
-        agg_accumulate(*state, kcols, vcols);
+        // Pass the morsel row count explicitly: an empty key list (a global
+        // reduce to one group) carries no key column to infer the length from.
+        agg_accumulate(*state, kcols, vcols, 0, df->num_rows());
     }
     co_return state;
 }

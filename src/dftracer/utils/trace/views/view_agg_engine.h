@@ -11,20 +11,11 @@
 #include <string>
 #include <vector>
 
-// View -> dataframe engine aggregation convergence: an alternate group_by/agg
-// path that routes an eligible group_by/agg View (one or more direct-column
-// keys, no transform) through the dataframe engine's streaming (possibly
-// composite-key) group_by instead of the View's own GroupMap fold. This is
-// the default for every eligible query; the GroupMap path (view_aggregate.h/
-// .cpp) is the fallback for plans agg_engine_eligible rejects.
-// run_collect_via_engine itself is declared (as a friend of View) in view.h;
-// this header only adds the eligibility check.
+// View -> dataframe engine aggregation convergence: every group_by/agg (and
+// global) View aggregation runs through the dataframe engine's streaming
+// group_by. run_collect_via_engine itself is declared (as a friend of View) in
+// view.h; this header adds the finalize/prepare helpers.
 namespace dftracer::utils::trace::views::detail {
-
-/// True when `plan` is a shape the engine path can answer byte-for-byte
-/// identically to the GroupMap path (see view_agg_engine.cpp for the exact
-/// qualifier). False routes to the existing GroupMap fold.
-bool agg_engine_eligible(const ViewPlan& plan);
 
 /// Finalize a raw engine AggState (key layout [time_bucket?, group_by...] with
 /// value/text/dyn specs in engine order) to the result DataFrame, applying the
