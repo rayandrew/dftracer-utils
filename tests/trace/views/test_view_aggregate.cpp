@@ -2704,6 +2704,135 @@ TEST_SUITE("View") {
             check_match(collect_groupmap(build()), collect_engine(build()),
                         "name");
         }
+
+        // Fold-derived value fields as agg targets: "size" is the io-cat byte
+        // size (POSIX read/write ret) and "te" is ts+dur, both computed by the
+        // fold. The engine projects each as a typed U64 column, so Sum/Min/Max
+        // match GroupMap column-for-column. ret>0 on every event, so size is
+        // present in both groups (no all-absent group to widen).
+        std::string gz_sz, idx_sz;
+        {
+            std::string pfw_sz = env.get_dir() + "/agg_engine_size.pfw";
+            std::ofstream ofs(pfw_sz);
+            const char* names[] = {"read", "write"};
+            int ts = 1000;
+            for (int i = 0; i < 60; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 2]
+                    << R"(","cat":"POSIX","pid":1,"tid":10,"ts":)" << ts
+                    << R"(,"dur":)" << (5 + (i % 13)) << R"(,"args":{"ret":)"
+                    << (100 + (i % 7) * 10) << R"(}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz_sz = pfw_sz + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw_sz, gz_sz);
+            fs::remove(pfw_sz);
+            idx_sz = determine_index_path(gz_sz, "");
+        }
+        SUBCASE("group_by name + Sum/Min/Max over derived size and te") {
+            auto build = [&] {
+                return View::from_file(gz_sz, idx_sz)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Sum, "size", "sum_size"},
+                          {AggOp::Min, "size", "min_size"},
+                          {AggOp::Max, "size", "max_size"},
+                          {AggOp::Sum, "te", "sum_te"},
+                          {AggOp::Min, "te", "min_te"},
+                          {AggOp::Max, "te", "max_te"}});
+            };
+            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+        SUBCASE("derived size/te aggs, forced spill") {
+            auto build = [&] {
+                return View::from_file(gz_sz, idx_sz)
+                    .memory_budget(128)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Sum, "size", "sum_size"},
+                          {AggOp::Sum, "te", "sum_te"}});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+
+        // A nested value path (args.n.v) is resolved by the GroupMap fold via
+        // number_typed; the engine projects it as a value column, resolving the
+        // full-name-captured arg exactly like PodSource::find_arg. Present in
+        // every event, so both paths keep the exact integer domain.
+        std::string gz_nv, idx_nv;
+        {
+            std::string pfw_nv = env.get_dir() + "/agg_engine_nested.pfw";
+            std::ofstream ofs(pfw_nv);
+            const char* names[] = {"read", "write"};
+            int ts = 1000;
+            for (int i = 0; i < 60; ++i) {
+                ofs << R"({"ph":"X","name":")" << names[i % 2]
+                    << R"(","cat":"POSIX","pid":1,"tid":10,"ts":)" << ts
+                    << R"(,"dur":)" << (5 + (i % 13)) << R"(,"args":{"n":{"v":)"
+                    << (i % 9) << R"(}}})" << "\n";
+                ts += 100;
+            }
+            ofs.close();
+            gz_nv = pfw_nv + ".gz";
+            dftu_utils_test::compress_file_to_gzip(pfw_nv, gz_nv);
+            fs::remove(pfw_nv);
+            idx_nv = determine_index_path(gz_nv, "");
+        }
+        SUBCASE("group_by name + Sum/Mean/ArgMax over a nested value path") {
+            auto build = [&] {
+                return View::from_file(gz_nv, idx_nv)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Sum, "args.n.v", "sum_nv"},
+                          {AggOp::Mean, "args.n.v", "mean_nv"},
+                          {AggOp::ArgMax, "args.n.v", "top_nv", "dur"}});
+            };
+            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+        SUBCASE("nested value path aggs, forced spill") {
+            auto build = [&] {
+                return View::from_file(gz_nv, idx_nv)
+                    .memory_budget(128)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Sum, "args.n.v", "sum_nv"},
+                          {AggOp::Mean, "args.n.v", "mean_nv"}});
+            };
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        }
+
+        // Intentional divergence (the dropped GroupMap quirk): a domain-
+        // sensitive reduction (Sum) over an int arg absent from an ENTIRE
+        // group. GroupMap widens the whole column to Float64 because the
+        // all-absent group demotes to the F64 default; the engine keeps the
+        // field's stable natural type (Int64). The values still agree, so the
+        // type is asserted directly rather than check_match-ed against
+        // GroupMap. gz7's read events carry x and write events do not, so the
+        // write group is all-absent.
+        SUBCASE("Sum over an int arg absent from a group keeps engine's type") {
+            auto build = [&] {
+                return View::from_file(gz7, idx7)
+                    .group_by({GroupKey::name()})
+                    .agg({{AggOp::Sum, "x", "sum_x"}});
+            };
+            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            dataframe::DataFrame legacy = collect_groupmap(build());
+            dataframe::DataFrame engine = collect_engine(build());
+            CHECK(
+                engine.columns[static_cast<std::size_t>(bcol(engine, "sum_x"))]
+                    .type() == dataframe::TypeId::Int64);
+            CHECK(
+                legacy.columns[static_cast<std::size_t>(bcol(legacy, "sum_x"))]
+                    .type() == dataframe::TypeId::Float64);
+            dataframe::DataFrame a = legacy.sort_by("name", false);
+            dataframe::DataFrame b = engine.sort_by("name", false);
+            REQUIRE(a.num_rows() == b.num_rows());
+            for (std::int64_t r = 0; r < a.num_rows(); ++r)
+                CHECK(bnum(a, r, "sum_x") ==
+                      doctest::Approx(bnum(b, r, "sum_x")));
+        }
     }
 
     TEST_CASE("View - occupancy engine path matches the GroupMap path") {
@@ -2809,6 +2938,34 @@ TEST_SUITE("View") {
         SUBCASE("group_by name, occ_cell tolerance") { run_both(64, 0); }
         SUBCASE("group_by name, occ_cell tolerance, forced spill") {
             run_both(64, 128);
+        }
+
+        // Occupancy alongside a scaled value agg under a non-identity
+        // time_scale: occupancy reads RAW ts/dur (a time-native reduction)
+        // while Sum/Mean(dur) get the unrounded scaled value - per-column, not
+        // a global switch. Both paths must agree.
+        auto run_both_scaled = [&](std::uint64_t mem_budget) {
+            auto build = [&] {
+                View v = View::from_file(gz, idx);
+                if (mem_budget) v = v.memory_budget(mem_budget);
+                return v.time_scale(0.001)
+                    .group_by({GroupKey::name()})
+                    .agg({
+                        {AggOp::Busy, "", "busy"},
+                        {AggOp::Active, "", "active"},
+                        {AggOp::Sum, "dur", "sum_dur"},
+                        {AggOp::Mean, "dur", "mean_dur"},
+                    });
+            };
+            REQUIRE(detail::agg_engine_eligible(build().plan()));
+            check_match(collect_groupmap(build()), collect_engine(build()),
+                        "name");
+        };
+        SUBCASE("occupancy + scaled value agg under time_scale") {
+            run_both_scaled(0);
+        }
+        SUBCASE("occupancy + scaled value agg under time_scale, forced spill") {
+            run_both_scaled(128);
         }
     }
 }

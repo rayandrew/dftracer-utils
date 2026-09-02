@@ -36,35 +36,32 @@ std::string value_col_name(const std::string& field) {
     return field.empty() ? std::string() : canonical_row_column_name(field);
 }
 
-// The always-present top-level numeric fields (plus name/cat). A stable field's
-// scanned column carries a value in every group, so its accumulation domain is
-// uniform; a possibly-absent arg field is not.
-bool is_stable_field(const std::string& f) {
-    return f.empty() || f == "name" || f == "cat" || f == "pid" || f == "tid" ||
-           f == "ts" || f == "dur";
-}
-
 // A field agg_field_typed_t/agg_field_t derives instead of reading straight
-// (size = io-cat byte size, te = ts+dur). A plain arg/top-level column cannot
-// reproduce these, so an agg over one stays on the GroupMap path.
+// (size = io-cat byte size, te = ts+dur). The raw scan builds it as a typed
+// derived column (AGG_DERIVED_PREFIX / derived_agg_column) rather than reading
+// a stored field.
 bool is_derived_field(const std::string& f) { return f == "size" || f == "te"; }
 
-// A single-segment field name (no nested dot/bracket path). The GroupMap fold
-// resolves a nested value field (args.n.v) through number_typed, but the raw
-// scan feeds a value column only by a flat top-level or arg name, so a nested
-// value/by field stays on the GroupMap path.
-bool is_simple_field(const std::string& f) {
-    return f.find('.') == std::string::npos && f.find('[') == std::string::npos;
+// The frame column name a value/by field's group agg reads: a derived field
+// (size/te) keeps its own name (build_row_frame emits it under that name from
+// the derived token), any other field maps through value_col_name.
+std::string value_col(const std::string& field) {
+    return is_derived_field(field) ? field : value_col_name(field);
 }
 
-// Sum/Min/Max/SumSq keep an integer field's exact domain, but the GroupMap path
-// demotes a group with zero present values to the Float64 default, so the whole
-// column widens to Float64 when a field is absent from any group. The engine's
-// per-column domain cannot reproduce that data-dependent widening, so a domain-
-// sensitive reduction stays on the stable (always-present) fields.
-bool is_domain_sensitive(AggOp op) {
-    return op == AggOp::Sum || op == AggOp::Min || op == AggOp::Max ||
-           op == AggOp::SumSq;
+// The raw-scan select token that produces a value/by field's column: a derived
+// field routes through AGG_DERIVED_PREFIX (a typed derived column), any other
+// field is selected by its own name. Empty field stays empty.
+std::string value_select_token(const std::string& field) {
+    if (field.empty()) return std::string();
+    return is_derived_field(field) ? std::string(AGG_DERIVED_PREFIX) + field
+                                   : field;
+}
+
+// ts/dur/te accumulate in the unrounded time_scale domain (agg_fold.h's
+// field_scaled); a value agg over one needs the engine-side rescale path.
+bool is_scaled_field(const std::string& f) {
+    return f == "ts" || f == "dur" || f == "te";
 }
 
 bool agg_op_engine_supported(AggOp op) {
@@ -141,8 +138,8 @@ dataframe::GroupAgg to_group_agg(const AggSpec& spec) {
     g.out = agg_col_name(spec);
     g.param = spec.q;
     if (spec.op == AggOp::ArgMax) {
-        g.column = value_col_name(spec.field);
-        g.by = value_col_name(spec.by);
+        g.column = value_col(spec.field);
+        g.by = value_col(spec.by);
     } else if (is_occupancy_op(spec.op)) {
         // Occupancy has no value field; it reads the raw (ts, dur) pair, with
         // the endpoint-snap tolerance carried in param.
@@ -154,10 +151,10 @@ dataframe::GroupAgg to_group_agg(const AggSpec& spec) {
         // field's per-group stat (FieldStat::n).
         if (!spec.field.empty()) {
             g.op = dataframe::Agg::CountValid;
-            g.column = value_col_name(spec.field);
+            g.column = value_col(spec.field);
         }
     } else {
-        g.column = value_col_name(spec.field);
+        g.column = value_col(spec.field);
     }
     return g;
 }
@@ -342,32 +339,16 @@ coro::CoroTask<std::vector<std::string>> harvest_numeric_arg_names(
 
 bool agg_engine_eligible(const ViewPlan& plan) {
     if (plan.group_by.empty() && plan.time_bucket_us == 0) return false;
-    // Every GroupKey::Kind and every transform is now handled by
-    // run_collect_via_engine (a resolved/computed/arg key folds on its scanned
-    // column; a transform materializes its coarsened key pre-group), so the
-    // only remaining gates are on the aggregate specs below.
-    for (const AggSpec& r : plan.numeric_arg_aggs)
-        if (is_derived_field(r.field)) return false;
-
-    for (const auto& spec : plan.agg) {
+    // Every GroupKey::Kind, transform, key/value field (top-level, arg, nested,
+    // derived size/te), reduction, occupancy (per-column raw ts/dur alongside
+    // scaled value aggs), and numeric-arg reduction is now served by
+    // run_collect_via_engine, so the only gate left is on an unsupported
+    // aggregate op. Note that the engine intentionally diverges from GroupMap
+    // on one point: a domain-sensitive reduction (Sum/Min/Max/SumSq) over an
+    // int field absent from an entire group keeps the engine's stable
+    // per-column type instead of GroupMap's data-dependent Float64 widening.
+    for (const auto& spec : plan.agg)
         if (!agg_op_engine_supported(spec.op)) return false;
-        // Occupancy reads raw ts/dur; under a non-identity time_scale the
-        // GroupMap path splits raw-occupancy from scaled value aggs per field,
-        // which the single-scan engine path cannot reproduce, so defer to it.
-        if (is_occupancy_op(spec.op) && plan.time_scale != 1.0) return false;
-        // size/te are derived at fold time (agg_field_typed_t); a plain scanned
-        // column cannot reproduce them, so an agg over one stays on GroupMap.
-        if (is_derived_field(spec.field) || is_derived_field(spec.by))
-            return false;
-        // A domain-sensitive reduction over a possibly-absent arg field cannot
-        // match GroupMap's per-group integer/float demotion (see above).
-        if (is_domain_sensitive(spec.op) && !is_stable_field(spec.field))
-            return false;
-        // A nested value/by path is resolved by the fold but not by the flat
-        // value-column scan, so it stays on the GroupMap path.
-        if (!is_simple_field(spec.field) || !is_simple_field(spec.by))
-            return false;
-    }
     return true;
 }
 
@@ -390,6 +371,9 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         co_await harvest_ranks(plan);
 
     const bool has_bucket = plan.time_bucket_us > 0;
+    const bool has_occ =
+        std::any_of(plan.agg.begin(), plan.agg.end(),
+                    [](const AggSpec& s) { return is_occupancy_op(s.op); });
 
     std::vector<std::string> key_names;
     std::vector<std::string> key_fields;
@@ -400,16 +384,27 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
         key_fields.push_back(key_group_field(gk));
     }
 
-    // Scaled-field renaming (bucket only, see below): ts/dur route through a
-    // hidden pre-scaled column instead of the raw field name.
+    // Scaled-field renaming: a scaled value field (ts/dur/te) routes through a
+    // hidden pre-scaled column instead of the raw field name. Needed whenever
+    // time_scale is non-identity and the raw scan is read unscaled (a bucket,
+    // or any non-occupancy value agg over a scaled field). Occupancy always
+    // reads raw ts/dur, so it is excluded here and never rescaled.
     static constexpr const char* SCALED_TS_COL = "__view_agg_engine_scaled_ts";
     static constexpr const char* SCALED_DUR_COL =
         "__view_agg_engine_scaled_dur";
-    const bool needs_value_scale = has_bucket && plan.time_scale != 1.0;
+    static constexpr const char* SCALED_TE_COL = "__view_agg_engine_scaled_te";
+    const bool has_scaled_value_agg =
+        std::any_of(plan.agg.begin(), plan.agg.end(), [](const AggSpec& s) {
+            return !is_occupancy_op(s.op) &&
+                   (is_scaled_field(s.field) || is_scaled_field(s.by));
+        });
+    const bool needs_value_scale =
+        plan.time_scale != 1.0 && (has_bucket || has_scaled_value_agg);
     auto scaled_name = [&](const std::string& f) -> std::string {
         if (!needs_value_scale) return f;
         if (f == "ts") return SCALED_TS_COL;
         if (f == "dur") return SCALED_DUR_COL;
+        if (f == "te") return SCALED_TE_COL;
         return f;
     };
 
@@ -454,9 +449,14 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     } else {
         for (const auto& spec : plan.agg) {
             dataframe::GroupAgg g = to_group_agg(spec);
-            g.column = scaled_name(g.column);
-            g.by = scaled_name(g.by);
-            if (is_occupancy_op(spec.op)) g.param = plan.occ_cell_us;
+            // Occupancy reads raw ts/dur (never rescaled); every other value
+            // agg over a scaled field routes to its pre-scaled column.
+            if (is_occupancy_op(spec.op)) {
+                g.param = plan.occ_cell_us;
+            } else {
+                g.column = scaled_name(g.column);
+                g.by = scaled_name(g.by);
+            }
             if (spec.op == AggOp::ArgMax || spec.op == AggOp::SetUnion)
                 text_gaggs.push_back(std::move(g));
             else
@@ -495,14 +495,12 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
             select.push_back(f);
     };
     for (const auto& spec : plan.agg) {
-        add_field(spec.field);
-        add_field(spec.by);
+        // A derived value/by field (size/te) selects its typed derived column.
+        add_field(value_select_token(spec.field));
+        add_field(value_select_token(spec.by));
     }
     for (const DynAgg& d : dyn_aggs) add_field(d.column);
     if (has_bucket) add_field("ts");
-    const bool has_occ =
-        std::any_of(plan.agg.begin(), plan.agg.end(),
-                    [](const AggSpec& s) { return is_occupancy_op(s.op); });
     if (has_occ) {
         add_field("ts");
         add_field("dur");
@@ -530,8 +528,10 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
     // fold formula, so pull the raw (unscaled) values here and reapply
     // time_scale ourselves below, byte-for-byte like the fold.
     // Occupancy is a time-native reduction over raw ts/dur (agg_fold.h reads
-    // them unscaled); the raw scan must not pre-scale them.
-    if (has_bucket || has_occ) next->time_scale = 1.0;
+    // them unscaled); the raw scan must not pre-scale them. A scaled value agg
+    // (ts/dur/te) is rescaled the same unrounded way below, so it too reads
+    // raw.
+    if (has_bucket || has_occ || needs_value_scale) next->time_scale = 1.0;
 
     View raw(std::move(next));
     dataframe::LazyFrame lf =
@@ -627,27 +627,33 @@ coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(
             dataframe::expr_lit(origin);
         lf = lf.with_column(BUCKET_KEY_COL, bucket);
         group_key_names.insert(group_key_names.begin(), BUCKET_KEY_COL);
+    }
 
-        // Value fields that need the same unrounded time_scale (agg_fold.h's
-        // field_scaled: ts/dur; te is derived, never engine-eligible). Only
-        // materialize the ones an agg spec actually references.
-        if (needs_value_scale) {
-            bool need_ts = false, need_dur = false;
-            for (const auto& spec : plan.agg) {
-                need_ts = need_ts || spec.field == "ts" || spec.by == "ts";
-                need_dur = need_dur || spec.field == "dur" || spec.by == "dur";
-            }
-            auto scale_col = [&](const std::string& field, const char* out) {
-                const auto it = std::find(select.begin(), select.end(), field);
-                const auto idx = static_cast<std::int32_t>(it - select.begin());
-                lf = lf.with_column(
-                    out, dataframe::expr_cast(dataframe::TypeId::Float64,
-                                              dataframe::expr_col(idx)) *
-                             dataframe::expr_lit(plan.time_scale));
-            };
-            if (need_ts) scale_col("ts", SCALED_TS_COL);
-            if (need_dur) scale_col("dur", SCALED_DUR_COL);
+    // Value fields that need the same unrounded time_scale (agg_fold.h's
+    // field_scaled: ts/dur/te). The raw scan left them unscaled (time_scale
+    // reset above), so multiply each referenced one by time_scale exactly as
+    // the fold does. Only materialize the columns an agg spec references, keyed
+    // by the select token (te reads its derived column).
+    if (needs_value_scale) {
+        bool need_ts = false, need_dur = false, need_te = false;
+        for (const auto& spec : plan.agg) {
+            if (is_occupancy_op(spec.op)) continue;
+            need_ts = need_ts || spec.field == "ts" || spec.by == "ts";
+            need_dur = need_dur || spec.field == "dur" || spec.by == "dur";
+            need_te = need_te || spec.field == "te" || spec.by == "te";
         }
+        auto scale_col = [&](const std::string& tok, const char* out) {
+            const auto it = std::find(select.begin(), select.end(), tok);
+            if (it == select.end()) return;
+            const auto idx = static_cast<std::int32_t>(it - select.begin());
+            lf = lf.with_column(out,
+                                dataframe::expr_cast(dataframe::TypeId::Float64,
+                                                     dataframe::expr_col(idx)) *
+                                    dataframe::expr_lit(plan.time_scale));
+        };
+        if (need_ts) scale_col("ts", SCALED_TS_COL);
+        if (need_dur) scale_col("dur", SCALED_DUR_COL);
+        if (need_te) scale_col(value_select_token("te"), SCALED_TE_COL);
     }
 
     dataframe::DataFrame r =

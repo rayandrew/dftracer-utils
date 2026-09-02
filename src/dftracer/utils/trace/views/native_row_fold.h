@@ -33,6 +33,13 @@ inline constexpr std::string_view AGG_KEY_FIELD_PREFIX = "__aggkey_field:";
 /// literal numeric "size" arg. Internal to the agg-engine <-> row-fold seam.
 inline constexpr std::string_view AGG_NUM_ARG_PREFIX = "__aggnum_arg:";
 
+/// Sentinel select token the agg engine uses to ask build_row_frame for a
+/// fold-DERIVED typed VALUE column: "size" is the io-cat-derived byte size,
+/// "te" is ts+dur. Built with the U64 domain agg_field_typed_t assigns, so a
+/// Sum/Min/Max over it matches the GroupMap fold column-for-column. Internal to
+/// the agg-engine <-> row-fold seam; never a user-facing select.
+inline constexpr std::string_view AGG_DERIVED_PREFIX = "__aggderiv:";
+
 /// Build one native DataFrame from `events`: top-level columns plus every arg
 /// (empty `select`) or a projected subset. Arg columns infer their type per key
 /// and null-fill absent rows. `fhash`/`hhash` resolve from their dedicated

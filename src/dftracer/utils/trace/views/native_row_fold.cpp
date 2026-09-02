@@ -66,6 +66,15 @@ bool is_num_arg_field(std::string_view sel, std::string_view& name) {
     return true;
 }
 
+// An agg-engine fold-derived value-column request (see native_row_fold.h). Sets
+// `name` to the derived field ("size" or "te").
+bool is_derived_agg_field(std::string_view sel, std::string_view& name) {
+    if (sel.substr(0, AGG_DERIVED_PREFIX.size()) != AGG_DERIVED_PREFIX)
+        return false;
+    name = sel.substr(AGG_DERIVED_PREFIX.size());
+    return true;
+}
+
 // An Arrow-layout validity bitmap (1 = valid) from a per-row present flag;
 // empty (no nulls) when every row is present.
 std::vector<std::uint8_t> validity_of(const std::vector<bool>& present) {
@@ -124,12 +133,21 @@ df::Series str_id_column(const std::vector<FoldEvent>& evs,
 
 // Build one arg column: int64 unless a real forces Float64 or a string value
 // forces String; a row lacking the key (or, in the String case, nothing) is
-// null.
+// null. A nested/extra field is captured under its full name and a flat arg
+// under its bare key, so `keyid` (full) is tried first and `keyid_alt` (bare)
+// as a fallback, matching PodSource::find_arg; pass NO_ID for no fallback.
 df::Series arg_column(const std::vector<FoldEvent>& evs, std::uint32_t keyid,
+                      std::uint32_t keyid_alt,
                       const dftracer::utils::StringIntern& intern) {
+    auto lookup = [&](const FoldEvent& ev) -> const FoldEvent::ArgValue* {
+        if (const auto* v = find_arg(ev, keyid)) return v;
+        return keyid_alt == dftracer::utils::StringIntern::NO_ID
+                   ? nullptr
+                   : find_arg(ev, keyid_alt);
+    };
     bool any_str = false, any_dbl = false;
     for (const auto& ev : evs)
-        if (const auto* v = find_arg(ev, keyid)) {
+        if (const auto* v = lookup(ev)) {
             if (std::holds_alternative<std::uint32_t>(*v))
                 any_str = true;
             else if (std::holds_alternative<double>(*v))
@@ -147,7 +165,7 @@ df::Series arg_column(const std::vector<FoldEvent>& evs, std::uint32_t keyid,
         std::vector<std::string_view> vals;
         vals.reserve(evs.size());
         for (const auto& ev : evs) {
-            const auto* v = find_arg(ev, keyid);
+            const auto* v = lookup(ev);
             if (!v) {
                 owned.emplace_back();
                 present.push_back(false);
@@ -172,7 +190,7 @@ df::Series arg_column(const std::vector<FoldEvent>& evs, std::uint32_t keyid,
         std::vector<double> vals;
         vals.reserve(evs.size());
         for (const auto& ev : evs) {
-            const auto* v = find_arg(ev, keyid);
+            const auto* v = lookup(ev);
             if (!v) {
                 vals.push_back(0.0);
                 present.push_back(false);
@@ -192,7 +210,7 @@ df::Series arg_column(const std::vector<FoldEvent>& evs, std::uint32_t keyid,
     std::vector<std::int64_t> vals;
     vals.reserve(evs.size());
     for (const auto& ev : evs) {
-        const auto* v = find_arg(ev, keyid);
+        const auto* v = lookup(ev);
         if (const auto* i = v ? std::get_if<std::int64_t>(v) : nullptr) {
             vals.push_back(*i);
             present.push_back(true);
@@ -322,6 +340,43 @@ df::Series num_arg_column(const std::vector<FoldEvent>& evs,
                             vbits.empty() ? nullptr : vbits.data());
 }
 
+// One fold-derived field as a Uint64 value column for the agg engine's value
+// path, keeping the U64 domain agg_field_typed_t assigns so a Sum/Min/Max
+// matches the GroupMap fold: "size" is the io-cat-derived byte size
+// (derived_size_t), "te" is ts+dur (null when the event has no dur, matching
+// number_typed("dur")). ts/dur are read RAW; a non-identity time_scale is
+// reapplied on the engine side (SCALED_TE_COL), never baked in here.
+df::Series derived_agg_column(const std::vector<FoldEvent>& evs,
+                              std::string_view name,
+                              const dftracer::utils::StringIntern& intern) {
+    const bool is_size = name == "size";
+    const std::int64_t n = static_cast<std::int64_t>(evs.size());
+    std::vector<std::uint64_t> vals;
+    std::vector<bool> present;
+    vals.reserve(evs.size());
+    present.reserve(evs.size());
+    for (const auto& ev : evs) {
+        std::optional<std::uint64_t> num;
+        if (is_size) {
+            PodSource src(ev, intern);
+            if (auto s = derived_size_t(src))
+                num = static_cast<std::uint64_t>(*s);
+        } else if (ev.has_dur) {
+            num = ev.ts + ev.dur;
+        }
+        if (num) {
+            vals.push_back(*num);
+            present.push_back(true);
+        } else {
+            vals.push_back(0);
+            present.push_back(false);
+        }
+    }
+    auto vbits = validity_of(present);
+    return df::Series::flat(df::TypeId::Uint64, vals.data(), n,
+                            vbits.empty() ? nullptr : vbits.data());
+}
+
 // A resolved.* / r.* virtual field maps to a hash field resolved through the
 // index name tables (fpath <- fhash, hostname/host <- hhash).
 enum class ResolvedKind { None, File, Host };
@@ -420,6 +475,10 @@ std::vector<std::string> row_fold_extra_captures(
             if (nf == "size") continue;
             f = nf;
         }
+        // size (from ret/size_sum/image_size, captured by needs_args) and te
+        // (from ts/dur scalars) are derived, not captured raw.
+        std::string_view df_name;
+        if (is_derived_agg_field(sel, df_name)) continue;
         // resolved.*/r.*, io_cat and acc_pat are computed, not captured raw.
         if (resolved_kind(f) != ResolvedKind::None || is_iocat_field(f) ||
             is_accpat_field(f))
@@ -433,8 +492,10 @@ std::string canonical_row_column_name(std::string_view sel) {
     std::string_view f;
     bool arg_only = false;
     std::string_view num_name;
+    std::string_view deriv_name;
     if (is_agg_key_field(sel, f, arg_only)) return std::string(sel);
     if (is_num_arg_field(sel, num_name)) return std::string(sel);
+    if (is_derived_agg_field(sel, deriv_name)) return std::string(deriv_name);
     if (is_top_level(sel)) return std::string(sel);
     if (resolved_kind(sel) != ResolvedKind::None) return std::string(sel);
     if (is_iocat_field(sel)) return std::string(sel);
@@ -484,7 +545,8 @@ dataframe::DataFrame build_row_frame(
         std::sort(named.begin(), named.end());
         for (const auto& [nm, k] : named) {
             out.names.push_back(std::string(dftracer::utils::ARGS_PREFIX) + nm);
-            out.columns.push_back(arg_column(evs, k, *intern_));
+            out.columns.push_back(arg_column(
+                evs, k, dftracer::utils::StringIntern::NO_ID, *intern_));
         }
     } else {
         for (const std::string& sel : select_) {
@@ -492,12 +554,16 @@ dataframe::DataFrame build_row_frame(
             std::string_view agg_key_f;
             bool agg_key_arg_only = false;
             std::string_view num_arg_name;
+            std::string_view deriv_name;
             if (is_agg_key_field(sel, agg_key_f, agg_key_arg_only)) {
                 out.columns.push_back(group_key_str_column(
                     evs, *intern_, agg_key_f, agg_key_arg_only));
             } else if (is_num_arg_field(sel, num_arg_name)) {
                 out.columns.push_back(
                     num_arg_column(evs, num_arg_name, *intern_));
+            } else if (is_derived_agg_field(sel, deriv_name)) {
+                out.columns.push_back(
+                    derived_agg_column(evs, deriv_name, *intern_));
             } else if (is_top_level(sel)) {
                 out.columns.push_back(
                     top_column(evs, sel, *intern_, time_scale));
@@ -516,10 +582,15 @@ dataframe::DataFrame build_row_frame(
                        is_hash_field(key)) {
                 out.columns.push_back(hash_column(evs, key, *intern_));
             } else {
-                const std::uint32_t id =
-                    const_cast<dftracer::utils::StringIntern&>(*intern_)
-                        .get_or_insert(key);
-                out.columns.push_back(arg_column(evs, id, *intern_));
+                // A nested/extra field (args.n.v) is captured under its full
+                // name, a flat arg under its bare key; try the full name first,
+                // then the stripped key, matching PodSource::find_arg.
+                auto& mut =
+                    const_cast<dftracer::utils::StringIntern&>(*intern_);
+                const std::uint32_t id_full = mut.get_or_insert(sel);
+                const std::uint32_t id_bare = mut.get_or_insert(key);
+                out.columns.push_back(
+                    arg_column(evs, id_full, id_bare, *intern_));
             }
         }
     }
