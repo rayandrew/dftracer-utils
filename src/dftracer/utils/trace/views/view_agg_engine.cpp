@@ -22,13 +22,24 @@
 #include <iterator>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 namespace dftracer::utils::trace::views::detail {
 
 namespace dataframe = dftracer::utils::dataframe;
+
+// Hidden columns the shared derivation materializes on top of the base frame.
+// Both the streaming path (prepare_engine_group's with_column exprs) and the
+// fused fold (build_agg_input_frame) key/scale on these exact names.
+static constexpr const char* SCALED_TS_COL = "__view_agg_engine_scaled_ts";
+static constexpr const char* SCALED_DUR_COL = "__view_agg_engine_scaled_dur";
+static constexpr const char* SCALED_TE_COL = "__view_agg_engine_scaled_te";
+static constexpr const char* CAT_KEY_COL = "__view_agg_engine_cat_key";
+static constexpr const char* BUCKET_KEY_COL = "__view_agg_engine_time_bucket";
 
 namespace {
 
@@ -497,14 +508,8 @@ dataframe::DataFrame finalize_engine_result(const dataframe::AggState& st,
     return finalize_engine_frame(std::move(r), plan, build_dyn_specs(plan));
 }
 
-coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
-    // A Rank key groups on pid and relabels to the PR-metadata rank; harvest
-    // that map into the resolver before the scan.
-    if (std::any_of(
-            plan.group_by.begin(), plan.group_by.end(),
-            [](const GroupKey& gk) { return gk.kind == GroupKey::Kind::Rank; }))
-        co_await harvest_ranks(plan);
-
+AggInputSpec make_agg_input_spec(const ViewPlan& plan) {
+    AggInputSpec spec;
     const bool has_bucket = plan.time_bucket_us > 0;
     const bool has_occ =
         std::any_of(plan.agg.begin(), plan.agg.end(),
@@ -515,15 +520,9 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
     for (const GroupKey& gk : plan.group_by)
         key_fields.push_back(key_group_field(gk));
 
-    // Scaled-field renaming: a scaled value field (ts/dur/te) routes through a
-    // hidden pre-scaled column instead of the raw field name. Needed whenever
-    // time_scale is non-identity and the raw scan is read unscaled (a bucket,
-    // or any non-occupancy value agg over a scaled field). Occupancy always
-    // reads raw ts/dur, so it is excluded here and never rescaled.
-    static constexpr const char* SCALED_TS_COL = "__view_agg_engine_scaled_ts";
-    static constexpr const char* SCALED_DUR_COL =
-        "__view_agg_engine_scaled_dur";
-    static constexpr const char* SCALED_TE_COL = "__view_agg_engine_scaled_te";
+    // A scaled value field (ts/dur/te) routes through a hidden pre-scaled
+    // column when time_scale is non-identity and the raw scan is read unscaled.
+    // Occupancy always reads raw ts/dur, so it is excluded and never rescaled.
     const bool has_scaled_value_agg =
         std::any_of(plan.agg.begin(), plan.agg.end(), [](const AggSpec& s) {
             return !is_occupancy_op(s.op) &&
@@ -542,60 +541,266 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
     // Auto-discovered numeric args stream as the AggState dyn side-table
     // (per-morsel dyn columns), so no name pre-scan and no dyn gaggs; the
     // reductions and the raw scan's dyn emission both key off the same specs.
-    std::vector<dataframe::AggDynSpec> dyn_specs = build_dyn_specs(plan);
+    spec.dyn_specs = build_dyn_specs(plan);
+    spec.emit_dyn = plan.auto_numeric_metrics;
+    spec.dyn_prefix = std::string(AGG_NUM_ARG_PREFIX);
 
     // Fixed gaggs in [value, text] order (dyn is separate); the engine emits
     // columns in gagg order.
-    std::vector<dataframe::GroupAgg> gaggs;
     std::vector<dataframe::GroupAgg> text_gaggs;
     if (plan.agg.empty()) {
         dataframe::GroupAgg g;
         g.op = dataframe::Agg::Count;
         g.out = agg_col_name(AggSpec(AggOp::Count));
-        gaggs.push_back(std::move(g));
+        spec.gaggs.push_back(std::move(g));
     } else {
-        for (const auto& spec : plan.agg) {
-            dataframe::GroupAgg g = to_group_agg(spec);
+        for (const auto& s : plan.agg) {
+            dataframe::GroupAgg g = to_group_agg(s);
             // Occupancy reads raw ts/dur (never rescaled); every other value
             // agg over a scaled field routes to its pre-scaled column.
-            if (is_occupancy_op(spec.op)) {
+            if (is_occupancy_op(s.op)) {
                 g.param = plan.occ_cell_us;
             } else {
                 g.column = scaled_name(g.column);
                 g.by = scaled_name(g.by);
             }
-            if (spec.op == AggOp::ArgMax || spec.op == AggOp::SetUnion)
+            if (s.op == AggOp::ArgMax || s.op == AggOp::SetUnion)
                 text_gaggs.push_back(std::move(g));
             else
-                gaggs.push_back(std::move(g));
+                spec.gaggs.push_back(std::move(g));
         }
     }
-    gaggs.insert(gaggs.end(), std::make_move_iterator(text_gaggs.begin()),
-                 std::make_move_iterator(text_gaggs.end()));
+    spec.gaggs.insert(spec.gaggs.end(),
+                      std::make_move_iterator(text_gaggs.begin()),
+                      std::make_move_iterator(text_gaggs.end()));
 
-    // A fixed select list on the raw scan (instead of the default, per-batch-
-    // discovered schema) guarantees every streamed morsel carries the same
-    // columns in the same order: the streaming group_by resolves key/value
-    // columns once against the Source's schema, so a morsel with a different
-    // column layout would silently misalign otherwise. Group keys select the
-    // field they fold on (key_fields), which for a resolved name key is the
-    // raw hash, not the resolved-name output column.
-    std::vector<std::string> select = key_fields;
+    // A fixed select list keeps every streamed morsel's columns identical, so
+    // the streaming group_by (which resolves columns once against the schema)
+    // cannot misalign. A group key selects the field it folds on (a hash for a
+    // resolved-name key), not the resolved output column.
+    spec.select = key_fields;
     auto add_field = [&](const std::string& f) {
         if (f.empty()) return;
-        if (std::find(select.begin(), select.end(), f) == select.end())
-            select.push_back(f);
+        if (std::find(spec.select.begin(), spec.select.end(), f) ==
+            spec.select.end())
+            spec.select.push_back(f);
     };
-    for (const auto& spec : plan.agg) {
+    for (const auto& s : plan.agg) {
         // A derived value/by field (size/te) selects its typed derived column.
-        add_field(value_select_token(spec.field));
-        add_field(value_select_token(spec.by));
+        add_field(value_select_token(s.field));
+        add_field(value_select_token(s.by));
     }
     if (has_bucket) add_field("ts");
     if (has_occ) {
         add_field("ts");
         add_field("dur");
     }
+
+    // build_row_frame would pre-scale+round ts/dur; bucketing/occupancy/scaled
+    // aggs need the raw values and reapply time_scale below as the fold does
+    // (unrounded), so those read unscaled here.
+    spec.base_time_scale =
+        (has_bucket || has_occ || needs_value_scale) ? 1.0 : plan.time_scale;
+
+    // Group-key transforms coarsen the key, so they apply before the group-by,
+    // matching resolve_group_keys (resolve_group_value then
+    // apply_group_transform).
+    std::vector<char> key_transformed(plan.group_by.size(), 0);
+    std::vector<std::string> tf_col(plan.group_by.size());
+    for (std::size_t i = 0; i < plan.group_by.size(); ++i) {
+        const GroupKey& gk = plan.group_by[i];
+        if (gk.transform == GroupKey::Transform::None) continue;
+        tf_col[i] = "__view_agg_engine_tf_" + std::to_string(i);
+        key_transformed[i] = 1;
+        spec.transforms.push_back({gk, key_fields[i], tf_col[i]});
+        if (key_is_resolved(gk.kind)) spec.transform_wants_resolver = true;
+    }
+
+    spec.group_key_names = key_fields;
+    for (std::size_t i = 0; i < plan.group_by.size(); ++i)
+        if (key_transformed[i]) spec.group_key_names[i] = tf_col[i];
+    // cat lowercases for grouping only, but a value agg (SetUnion(cat)) still
+    // needs the raw case, so the lowered key goes to a hidden column.
+    for (std::size_t i = 0; i < plan.group_by.size(); ++i) {
+        if (plan.group_by[i].kind != GroupKey::Kind::Cat) continue;
+        if (key_transformed[i]) continue;  // transform path lowercased it
+        spec.group_key_names[i] = CAT_KEY_COL;
+        spec.cat_lower_src = key_fields[i];
+    }
+
+    // Bucket key: match agg_fold.h's fold_event_over exactly. `ts` is raw; the
+    // fold applies time_scale, floors (ts*scale - origin)/interval toward -inf,
+    // rescales by the interval width, and shifts back by origin.
+    if (has_bucket) {
+        spec.bucket_ts_src = "ts";
+        spec.bucket_scale = plan.time_scale;
+        spec.bucket_interval = static_cast<double>(plan.time_bucket_us);
+        spec.bucket_w = static_cast<std::int64_t>(plan.time_bucket_us);
+        spec.bucket_origin = static_cast<std::int64_t>(plan.bucket_origin_us);
+        spec.group_key_names.insert(spec.group_key_names.begin(),
+                                    BUCKET_KEY_COL);
+    }
+
+    // Value fields that need the same unrounded time_scale (agg_fold.h's
+    // field_scaled: ts/dur/te). Only the columns an agg spec references and
+    // that the select actually carries are rescaled.
+    if (needs_value_scale) {
+        spec.value_scale = plan.time_scale;
+        bool need_ts = false, need_dur = false, need_te = false;
+        for (const auto& s : plan.agg) {
+            if (is_occupancy_op(s.op)) continue;
+            need_ts = need_ts || s.field == "ts" || s.by == "ts";
+            need_dur = need_dur || s.field == "dur" || s.by == "dur";
+            need_te = need_te || s.field == "te" || s.by == "te";
+        }
+        auto in_select = [&](const std::string& tok) {
+            return std::find(spec.select.begin(), spec.select.end(), tok) !=
+                   spec.select.end();
+        };
+        // Sources are select tokens (positional on the streaming path); the C++
+        // path maps each to its frame column via canonical_row_column_name
+        // (te's derived token becomes "te").
+        if (need_ts && in_select("ts")) spec.scale_ts_src = "ts";
+        if (need_dur && in_select("dur")) spec.scale_dur_src = "dur";
+        if (need_te && in_select(value_select_token("te")))
+            spec.scale_te_src = value_select_token("te");
+    }
+
+    return spec;
+}
+
+// Read numeric cell `r` of `c` (Uint64/Int64/Float64) as a double, for the
+// unrounded time_scale rescale/bucket floor.
+static double cell_as_double(const dataframe::Series& c, std::int64_t r) {
+    switch (c.type()) {
+        case dataframe::TypeId::Uint64:
+            return static_cast<double>(c.data<std::uint64_t>()[r]);
+        case dataframe::TypeId::Int64:
+            return static_cast<double>(c.data<std::int64_t>()[r]);
+        case dataframe::TypeId::Float64:
+            return c.data<double>()[r];
+        default:
+            throw DFTUtilsException::cat(
+                ErrorCode::INTERNAL,
+                "agg engine: unexpected numeric column type");
+    }
+}
+
+dataframe::DataFrame build_agg_input_frame(
+    const std::vector<FoldEvent>& events,
+    const dftracer::utils::StringIntern& intern, const AggInputSpec& spec,
+    const GroupResolver* resolver) {
+    dataframe::DataFrame f = build_row_frame(events, intern, spec.select,
+                                             spec.base_time_scale, nullptr);
+    const std::int64_t n = f.num_rows();
+
+    if (spec.emit_dyn)
+        for (auto& [name, col] : build_dyn_numeric_columns(events, intern)) {
+            f.names.push_back(std::move(name));
+            f.columns.push_back(std::move(col));
+        }
+
+    for (const AggInputSpec::Transform& t : spec.transforms) {
+        const dataframe::Series& src =
+            f.columns[static_cast<std::size_t>(f.column_index(t.src_col))];
+        std::vector<std::string> vals(static_cast<std::size_t>(n));
+        for (std::int64_t r = 0; r < n; ++r)
+            vals[static_cast<std::size_t>(r)] = apply_group_transform(
+                t.gk,
+                transform_key_base(t.gk, cell_to_key_string(src, r), resolver));
+        f.names.push_back(t.out_col);
+        f.columns.push_back(dataframe::Series::strings(vals));
+    }
+
+    // cat/bucket/scale sources are select tokens; map each to its built frame
+    // column (te's derived token resolves to "te").
+    auto col_by_token =
+        [&](const std::string& tok) -> const dataframe::Series& {
+        return f.columns[static_cast<std::size_t>(
+            f.column_index(canonical_row_column_name(tok)))];
+    };
+
+    if (!spec.cat_lower_src.empty()) {
+        const dataframe::Series& src = col_by_token(spec.cat_lower_src);
+        std::vector<std::string> vals(static_cast<std::size_t>(n));
+        std::vector<std::uint8_t> vbits((static_cast<std::size_t>(n) + 7) / 8,
+                                        0);
+        bool any_null = false;
+        for (std::int64_t r = 0; r < n; ++r) {
+            if (src.is_null(r)) {
+                any_null = true;
+                continue;
+            }
+            std::string s(src.string_at(r));
+            for (char& ch : s)
+                ch = static_cast<char>(
+                    ::tolower(static_cast<unsigned char>(ch)));
+            vals[static_cast<std::size_t>(r)] = std::move(s);
+            vbits[static_cast<std::size_t>(r) >> 3] |=
+                static_cast<std::uint8_t>(1u << (r & 7));
+        }
+        f.names.emplace_back(CAT_KEY_COL);
+        if (!any_null) {
+            f.columns.push_back(dataframe::Series::strings(vals));
+        } else {
+            std::vector<std::string_view> views(vals.begin(), vals.end());
+            f.columns.push_back(dataframe::Series::strings(
+                std::span<const std::string_view>(views), vbits.data()));
+        }
+    }
+
+    if (!spec.bucket_ts_src.empty()) {
+        const dataframe::Series& ts = col_by_token(spec.bucket_ts_src);
+        std::vector<std::int64_t> b(static_cast<std::size_t>(n));
+        for (std::int64_t r = 0; r < n; ++r) {
+            const double rel = cell_as_double(ts, r) * spec.bucket_scale -
+                               static_cast<double>(spec.bucket_origin);
+            const auto fl = static_cast<std::int64_t>(
+                std::floor(rel / spec.bucket_interval));
+            b[static_cast<std::size_t>(r)] =
+                fl * spec.bucket_w + spec.bucket_origin;
+        }
+        f.names.emplace_back(BUCKET_KEY_COL);
+        f.columns.push_back(dataframe::Series::flat_i64(b.data(), n));
+    }
+
+    auto scale_into = [&](const std::string& src_tok, const char* out) {
+        if (src_tok.empty()) return;
+        const dataframe::Series& c = col_by_token(src_tok);
+        std::vector<double> vals(static_cast<std::size_t>(n));
+        std::vector<std::uint8_t> vbits((static_cast<std::size_t>(n) + 7) / 8,
+                                        0);
+        bool any_null = false;
+        for (std::int64_t r = 0; r < n; ++r) {
+            if (c.is_null(r)) {
+                any_null = true;
+                continue;
+            }
+            vals[static_cast<std::size_t>(r)] =
+                cell_as_double(c, r) * spec.value_scale;
+            vbits[static_cast<std::size_t>(r) >> 3] |=
+                static_cast<std::uint8_t>(1u << (r & 7));
+        }
+        f.names.emplace_back(out);
+        f.columns.push_back(dataframe::Series::flat_f64(
+            vals.data(), n, any_null ? vbits.data() : nullptr));
+    };
+    scale_into(spec.scale_ts_src, SCALED_TS_COL);
+    scale_into(spec.scale_dur_src, SCALED_DUR_COL);
+    scale_into(spec.scale_te_src, SCALED_TE_COL);
+
+    return f;
+}
+
+coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
+    // A Rank key groups on pid and relabels to the PR-metadata rank; harvest
+    // that map into the resolver before the scan.
+    if (std::any_of(
+            plan.group_by.begin(), plan.group_by.end(),
+            [](const GroupKey& gk) { return gk.kind == GroupKey::Kind::Rank; }))
+        co_await harvest_ranks(plan);
+
+    AggInputSpec spec = make_agg_input_spec(plan);
 
     auto next = std::make_shared<ViewPlan>(plan);
     next->group_by.clear();
@@ -609,23 +814,13 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
     next->topk_col.clear();
     next->offset = 0;
     next->limit = 0;
-    next->select = select;
+    next->select = spec.select;
     next->schema.reset();
     next->resolver.reset();
     next->time_bucket_us = 0;
     next->bucket_origin_us = 0;
     next->bucket_origin_min = false;
-    // The raw scan (native_row_fold.cpp) pre-scales+rounds ts/dur to the
-    // nearest integer via time_scale before this function ever sees them; the
-    // GroupMap fold instead applies time_scale as an unrounded double, once,
-    // at bucket/aggregate time (agg_fold.h). Bucketing needs the exact
-    // fold formula, so pull the raw (unscaled) values here and reapply
-    // time_scale ourselves below, byte-for-byte like the fold.
-    // Occupancy is a time-native reduction over raw ts/dur (agg_fold.h reads
-    // them unscaled); the raw scan must not pre-scale them. A scaled value agg
-    // (ts/dur/te) is rescaled the same unrounded way below, so it too reads
-    // raw.
-    if (has_bucket || has_occ || needs_value_scale) next->time_scale = 1.0;
+    next->time_scale = spec.base_time_scale;
 
     View raw(std::move(next));
     dataframe::LazyFrame lf =
@@ -633,125 +828,75 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
             std::make_shared<ViewSource>(raw, plan.auto_numeric_metrics))
             .memory_budget(plan.memory_budget);
 
-    // Group-key transforms (dirname/basename/lower/bucket) coarsen the key:
-    // many raw values fold to one, so they must be applied BEFORE the group-by,
-    // not by relabeling the finalized result (which cannot re-merge). The
-    // engine has no dirname/basename/bucket string expr, so materialize the raw
-    // scan and build each transformed key column in C++, matching
-    // resolve_group_keys (resolve_group_value then apply_group_transform) byte
-    // for byte, then group over the in-memory frame.
-    std::vector<char> key_transformed(plan.group_by.size(), 0);
-    std::vector<std::string> tf_col(plan.group_by.size());
-    const bool needs_transform = std::any_of(
-        plan.group_by.begin(), plan.group_by.end(), [](const GroupKey& gk) {
-            return gk.transform != GroupKey::Transform::None;
-        });
-    if (needs_transform) {
+    // Group-key transforms: the engine has no dirname/basename/bucket string
+    // expr, so materialize the raw scan and build each transformed key column
+    // in C++ (build_agg_input_frame's transform step over the whole frame),
+    // then group over the in-memory frame.
+    if (!spec.transforms.empty()) {
         dataframe::DataFrame frame = co_await lf.collect();
-        const bool wants_resolver = std::any_of(
-            plan.group_by.begin(), plan.group_by.end(), [](const GroupKey& gk) {
-                return gk.transform != GroupKey::Transform::None &&
-                       key_is_resolved(gk.kind);
-            });
         const GroupResolver* resolver =
-            wants_resolver ? ensure_resolver(plan) : nullptr;
+            spec.transform_wants_resolver ? ensure_resolver(plan) : nullptr;
         const std::int64_t n = frame.num_rows();
-        for (std::size_t i = 0; i < plan.group_by.size(); ++i) {
-            const GroupKey& gk = plan.group_by[i];
-            if (gk.transform == GroupKey::Transform::None) continue;
-            const std::int64_t ci = frame.column_index(key_fields[i]);
+        for (const AggInputSpec::Transform& t : spec.transforms) {
             const dataframe::Series& src =
-                frame.columns[static_cast<std::size_t>(ci)];
+                frame.columns[static_cast<std::size_t>(
+                    frame.column_index(t.src_col))];
             std::vector<std::string> vals(static_cast<std::size_t>(n));
             for (std::int64_t r = 0; r < n; ++r)
                 vals[static_cast<std::size_t>(r)] = apply_group_transform(
-                    gk, transform_key_base(gk, cell_to_key_string(src, r),
-                                           resolver));
-            tf_col[i] = "__view_agg_engine_tf_" + std::to_string(i);
-            frame.names.push_back(tf_col[i]);
+                    t.gk, transform_key_base(t.gk, cell_to_key_string(src, r),
+                                             resolver));
+            frame.names.push_back(t.out_col);
             frame.columns.push_back(dataframe::Series::strings(vals));
-            key_transformed[i] = 1;
         }
         lf =
             dataframe::lazy(std::move(frame)).memory_budget(plan.memory_budget);
     }
 
-    // cat is a computed key: the GroupMap path lowercases it for grouping only
-    // (agg_fold.h's lower_ascii) while a value agg (e.g. SetUnion(cat)) still
-    // sees the raw-case text, so the lowered key is materialized into a hidden
-    // column rather than overwriting "cat" in place.
-    static constexpr const char* CAT_KEY_COL = "__view_agg_engine_cat_key";
-    static constexpr const char* BUCKET_KEY_COL =
-        "__view_agg_engine_time_bucket";
-    std::vector<std::string> group_key_names = key_fields;
-    for (std::size_t i = 0; i < plan.group_by.size(); ++i)
-        if (key_transformed[i]) group_key_names[i] = tf_col[i];
-    for (std::size_t i = 0; i < plan.group_by.size(); ++i) {
-        if (plan.group_by[i].kind != GroupKey::Kind::Cat) continue;
-        if (key_transformed[i]) continue;  // transform path lowercased it
-        group_key_names[i] = CAT_KEY_COL;
+    // Hidden columns index their source by its select position: expr_col is
+    // positional, and the select columns keep positions 0..N-1 in both the
+    // streaming morsel and the re-lazied transform frame.
+    auto col_index = [&](const std::string& tok) {
+        const auto it = std::find(spec.select.begin(), spec.select.end(), tok);
+        return static_cast<std::int32_t>(it - spec.select.begin());
+    };
+
+    if (!spec.cat_lower_src.empty())
         lf = lf.with_column(CAT_KEY_COL,
                             dataframe::expr_lower(dataframe::expr_col(
-                                static_cast<std::int32_t>(i))));
-    }
+                                col_index(spec.cat_lower_src))));
 
-    // Bucket key: match agg_fold.h's fold_event_over exactly. `ts` there is the
-    // raw (unscaled) timestamp; the fold applies time_scale itself, floors
-    // (ts*scale - origin)/interval toward -inf, then rescales by the interval
-    // width and shifts back by origin. All in int64 once floored, so the
-    // multiply-back and origin add cannot introduce float error the fold does
-    // not also have.
-    if (has_bucket) {
-        const auto ts_it = std::find(select.begin(), select.end(), "ts");
-        const auto ts_idx = static_cast<std::int32_t>(ts_it - select.begin());
-        const double interval = static_cast<double>(plan.time_bucket_us);
-        const auto w = static_cast<std::int64_t>(plan.time_bucket_us);
-        const auto origin = static_cast<std::int64_t>(plan.bucket_origin_us);
+    if (!spec.bucket_ts_src.empty()) {
         dataframe::Expr ts_d = dataframe::expr_cast(
-            dataframe::TypeId::Float64, dataframe::expr_col(ts_idx));
-        dataframe::Expr rel = ts_d * dataframe::expr_lit(plan.time_scale) -
-                              dataframe::expr_lit(static_cast<double>(origin));
+            dataframe::TypeId::Float64,
+            dataframe::expr_col(col_index(spec.bucket_ts_src)));
+        dataframe::Expr rel =
+            ts_d * dataframe::expr_lit(spec.bucket_scale) -
+            dataframe::expr_lit(static_cast<double>(spec.bucket_origin));
         dataframe::Expr floored = dataframe::expr_unary(
             static_cast<std::int32_t>(dataframe::UnaryOp::Floor),
-            rel / dataframe::expr_lit(interval));
+            rel / dataframe::expr_lit(spec.bucket_interval));
         dataframe::Expr bucket =
             dataframe::expr_cast(dataframe::TypeId::Int64, floored) *
-                dataframe::expr_lit(w) +
-            dataframe::expr_lit(origin);
+                dataframe::expr_lit(spec.bucket_w) +
+            dataframe::expr_lit(spec.bucket_origin);
         lf = lf.with_column(BUCKET_KEY_COL, bucket);
-        group_key_names.insert(group_key_names.begin(), BUCKET_KEY_COL);
     }
 
-    // Value fields that need the same unrounded time_scale (agg_fold.h's
-    // field_scaled: ts/dur/te). The raw scan left them unscaled (time_scale
-    // reset above), so multiply each referenced one by time_scale exactly as
-    // the fold does. Only materialize the columns an agg spec references, keyed
-    // by the select token (te reads its derived column).
-    if (needs_value_scale) {
-        bool need_ts = false, need_dur = false, need_te = false;
-        for (const auto& spec : plan.agg) {
-            if (is_occupancy_op(spec.op)) continue;
-            need_ts = need_ts || spec.field == "ts" || spec.by == "ts";
-            need_dur = need_dur || spec.field == "dur" || spec.by == "dur";
-            need_te = need_te || spec.field == "te" || spec.by == "te";
-        }
-        auto scale_col = [&](const std::string& tok, const char* out) {
-            const auto it = std::find(select.begin(), select.end(), tok);
-            if (it == select.end()) return;
-            const auto idx = static_cast<std::int32_t>(it - select.begin());
-            lf = lf.with_column(out,
-                                dataframe::expr_cast(dataframe::TypeId::Float64,
-                                                     dataframe::expr_col(idx)) *
-                                    dataframe::expr_lit(plan.time_scale));
-        };
-        if (need_ts) scale_col("ts", SCALED_TS_COL);
-        if (need_dur) scale_col("dur", SCALED_DUR_COL);
-        if (need_te) scale_col(value_select_token("te"), SCALED_TE_COL);
-    }
+    auto scale_col = [&](const std::string& src_name, const char* out) {
+        if (src_name.empty()) return;
+        lf = lf.with_column(out, dataframe::expr_cast(
+                                     dataframe::TypeId::Float64,
+                                     dataframe::expr_col(col_index(src_name))) *
+                                     dataframe::expr_lit(spec.value_scale));
+    };
+    scale_col(spec.scale_ts_src, SCALED_TS_COL);
+    scale_col(spec.scale_dur_src, SCALED_DUR_COL);
+    scale_col(spec.scale_te_src, SCALED_TE_COL);
 
-    co_return EnginePrep{std::move(lf), std::move(group_key_names),
-                         std::move(gaggs), std::move(dyn_specs),
-                         std::string(AGG_NUM_ARG_PREFIX)};
+    co_return EnginePrep{std::move(lf), std::move(spec.group_key_names),
+                         std::move(spec.gaggs), std::move(spec.dyn_specs),
+                         std::move(spec.dyn_prefix)};
 }
 
 coro::CoroTask<dataframe::DataFrame> run_collect_via_engine(

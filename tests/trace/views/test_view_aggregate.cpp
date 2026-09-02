@@ -132,6 +132,28 @@ dataframe::DataFrame engine_collect(const View& v) {
     return detail::apply_agg_post_ops(std::move(result), v.plan());
 }
 
+// A trace with a numeric arg ("level") and overlapping durations, so one trace
+// exercises numeric reductions, per-arg dyn, sketches (Pct/Hist), SetUnion, and
+// occupancy at once. Two names per cat make SetUnion(name) non-trivial.
+std::string write_agg_trace(TestEnvironment& env) {
+    std::string pfw = env.get_dir() + "/agg_parity.pfw";
+    {
+        std::ofstream ofs(pfw);
+        for (int i = 0; i < 30; ++i)
+            ofs << R"({"ph":"X","name":")" << (i % 2 ? "pread" : "read")
+                << R"(","cat":"POSIX","pid":1,"tid":1,"ts":)" << (1000 + i)
+                << R"(,"dur":500,"args":{"level":)" << i << R"(}})" << "\n";
+        for (int i = 0; i < 20; ++i)
+            ofs << R"({"ph":"X","name":"fwrite","cat":"STDIO","pid":2,"tid":2,"ts":)"
+                << (2000 + i * 5) << R"(,"dur":300,"args":{"level":)"
+                << (100 + i) << R"(}})" << "\n";
+    }
+    std::string gz = pfw + ".gz";
+    dftu_utils_test::compress_file_to_gzip(pfw, gz);
+    fs::remove(pfw);
+    return gz;
+}
+
 // Two aggregation frames equal, pairing rows by their composite key text so a
 // differently-ordered group set still compares row for row.
 void frames_equal(const dataframe::DataFrame& a, const dataframe::DataFrame& b,
@@ -1084,6 +1106,146 @@ TEST_SUITE("View") {
         CHECK(ml == sl);
         REQUIRE(ml.size() == 1);
         CHECK(ml[0].find(R"("user_pct":60)") != std::string::npos);
+    }
+
+    TEST_CASE(
+        "View - fused multi-branch session collect matches per-branch engine "
+        "scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = write_agg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+
+        // Mixed keys/ops over one shared scan: numeric + a sketch + SetUnion,
+        // an auto-numeric dyn branch, and an occupancy branch.
+        View va = base.group_by({GroupKey::cat()})
+                      .agg({{AggOp::Count, "", "n"},
+                            {AggOp::Mean, "dur", "md"},
+                            {AggOp::Pct, "dur", "p90", "", 0.9},
+                            {AggOp::SetUnion, "name", "names"}});
+        View vb = base.group_by({GroupKey::name()})
+                      .agg({{AggOp::Count, "", "n"}})
+                      .agg_numeric_args();
+        View vc = base.group_by({GroupKey::cat()})
+                      .agg({{AggOp::Sum, "dur", "sd"},
+                            {AggOp::Busy, "", "busy"},
+                            {AggOp::Active, "", "active"}});
+
+        auto run = base.session();
+        auto a = run.collect(va);
+        auto b = run.collect(vb);
+        auto c = run.collect(vc);
+        run.execute().get();
+
+        frames_equal(*a, engine_collect(va), {"cat"});
+        frames_equal(*b, engine_collect(vb), {"name"});
+        frames_equal(*c, engine_collect(vc), {"cat"});
+    }
+
+    TEST_CASE(
+        "View - distributed AggState partial round-trip matches a single "
+        "scan") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = write_agg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        View base = View::from_file(gz, idx);
+
+        auto check = [&](View v, const std::vector<std::string>& keys) {
+            std::string p = v.aggregate_partial().get();
+            dataframe::DataFrame merged = v.merge_partials_to_table({p});
+            frames_equal(merged, engine_collect(v), keys);
+        };
+        // Numeric reductions, a percentile sketch, and SetUnion survive the
+        // serialize/merge/finalize round-trip.
+        check(base.group_by({GroupKey::cat()})
+                  .agg({{AggOp::Sum, "dur", "s"},
+                        {AggOp::Mean, "dur", "m"},
+                        {AggOp::Pct, "dur", "p90", "", 0.9},
+                        {AggOp::SetUnion, "name", "names"}}),
+              {"cat"});
+        // Occupancy delta-map survives the wire.
+        check(base.group_by({GroupKey::cat()})
+                  .agg({{AggOp::Busy, "", "busy"}, {AggOp::Active, "", "act"}}),
+              {"cat"});
+        // Auto-numeric dyn survives the name-union across the round-trip.
+        check(base.group_by({GroupKey::name()})
+                  .agg({{AggOp::Count, "", "n"}})
+                  .agg_numeric_args(),
+              {"name"});
+
+        // Hist (a list<struct> column) round-trips bin for bin.
+        View vh =
+            base.group_by({GroupKey::cat()}).agg({{AggOp::Hist, "dur", "h"}});
+        dataframe::DataFrame mh =
+            vh.merge_partials_to_table({vh.aggregate_partial().get()});
+        dataframe::DataFrame eh = engine_collect(vh);
+        REQUIRE(mh.num_rows() == eh.num_rows());
+        std::map<std::string, std::int64_t> mrow, erow;
+        for (std::int64_t r = 0; r < mh.num_rows(); ++r)
+            mrow[bstr(mh, r, "cat")] = r;
+        for (std::int64_t r = 0; r < eh.num_rows(); ++r)
+            erow[bstr(eh, r, "cat")] = r;
+        for (const auto& [cat, r] : mrow) {
+            auto mb = hist_bins(mh, r, "h");
+            auto eb = hist_bins(eh, erow[cat], "h");
+            REQUIRE(mb.size() == eb.size());
+            for (std::size_t i = 0; i < mb.size(); ++i) {
+                CHECK(mb[i].lower == doctest::Approx(eb[i].lower));
+                CHECK(mb[i].upper == doctest::Approx(eb[i].upper));
+                CHECK(mb[i].count == eb[i].count);
+            }
+        }
+    }
+
+    TEST_CASE(
+        "View - counter AggState partial merge matches a single-scan export") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string a = create_counter_file(env, "a", {40, 40});
+        std::string b = create_counter_file(env, "b", {80, 80});
+        std::string ia = determine_index_path(a, "");
+        std::string ib = determine_index_path(b, "");
+        auto view = [](std::vector<ViewFile> files) {
+            return View::from_files(std::move(files))
+                .phase(Phase::Counters)
+                .group_by({GroupKey::name()})
+                .agg_numeric_args();
+        };
+
+        std::string pa = view({{a, ia}}).aggregate_partial().get();
+        std::string pb = view({{b, ib}}).aggregate_partial().get();
+        StringSink merged;
+        view({}).merge_counter_partials({pa, pb}, merged);
+
+        StringSink single;
+        view({{a, ia}, {b, ib}}).export_counters(single).get();
+
+        auto ml = merged.lines();
+        auto sl = single.lines();
+        std::sort(ml.begin(), ml.end());
+        std::sort(sl.begin(), sl.end());
+        CHECK(ml == sl);
+    }
+
+    TEST_CASE("View - an aggregate partial with a bad wire tag is rejected") {
+        TestEnvironment env(200);
+        REQUIRE(env.is_valid());
+        std::string gz = write_agg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        View v = View::from_file(gz, idx)
+                     .group_by({GroupKey::cat()})
+                     .agg({{AggOp::Count, "", "n"}});
+
+        std::string good = v.aggregate_partial().get();
+        REQUIRE(!good.empty());
+        std::string bad = good;
+        bad[0] = static_cast<char>(0x7e);  // wrong version tag
+        CHECK_THROWS_AS(v.merge_partials_to_table({bad}), DFTUtilsException);
+        // A present-but-empty partial (no tag byte) is also rejected loudly.
+        CHECK_THROWS_AS(v.merge_partials_to_table({std::string_view()}),
+                        DFTUtilsException);
     }
 
     TEST_CASE("View - group_by + time_bucket yields per-interval rows") {

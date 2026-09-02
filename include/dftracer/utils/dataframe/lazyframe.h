@@ -285,6 +285,27 @@ class LazyFrame {
 /// Free-function form of DataFrame::lazy(), for `lazy(df)` call sites.
 LazyFrame lazy(DataFrame frame);
 
+/// Lower name-based GroupAggs to index-based AggSpecs plus the deduped list of
+/// value column names they reference (Count references none); the i-th spec's
+/// value_col/by_col index into `value_names`. The gagg lowering that
+/// collect_group_state and any external chunk driver share, so a Fold feeding
+/// its own chunks accumulates into a byte-identical AggState.
+struct LoweredGroupAggs {
+    std::vector<AggSpec> specs;
+    std::vector<std::string> value_names;
+};
+LoweredGroupAggs lower_group_aggs(const std::vector<GroupAgg>& aggs);
+
+/// Accumulate one already-built chunk `frame` into `state`: resolve `keys` and
+/// `value_names` (from lower_group_aggs) by name against `frame`, feeding every
+/// column whose name starts with `dyn_prefix` as a dyn input (prefix stripped).
+/// The per-morsel step collect_group_state runs, exposed for a non-LazyFrame
+/// chunk driver (a trace Fold accumulating over a shared scan).
+void agg_accumulate_chunk(AggState& state, const DataFrame& frame,
+                          const std::vector<std::string>& keys,
+                          const std::vector<std::string>& value_names,
+                          const std::string& dyn_prefix);
+
 }  // namespace dftracer::utils::dataframe
 
 #endif  // DFTRACER_UTILS_DATAFRAME_LAZYFRAME_H

@@ -6,11 +6,13 @@
 #include <dftracer/utils/core/rocksdb/database.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/trace/views/aggfold.h>
 #include <dftracer/utils/trace/views/bloom_fold.h>
 #include <dftracer/utils/trace/views/containment_fold.h>
 #include <dftracer/utils/trace/views/coverage.h>
 #include <dftracer/utils/trace/views/dict_fold.h>
+#include <dftracer/utils/trace/views/engine_agg_fold.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/index_fold_driver.h>
 #include <dftracer/utils/trace/views/mv_store.h>
@@ -764,20 +766,86 @@ coro::CoroTask<std::string> run_flamegraph_partial(
     co_return fold.flamegraph_partial();
 }
 
-// Distributed materialize: persist `plan`'s rollup as engine AggState partials.
-// The rank-local `partials` are GroupMap blobs (the format the counter/collect
-// merge paths share) and cannot be turned into an engine AggState, so the
-// rollup is (re-)built through the engine over the plan's shared-index files -
-// correct on the shared filesystem the tier already assumes. Converting the
-// partial wire format to AggState (dropping this re-aggregation) is a later
-// step.
+namespace {
+
+// One-byte wire tag prefixing every aggregate partial (distributed merge; never
+// persisted), so the merge side knows which codec produced it. The engine scan
+// path emits AggState; the index-only tier fast path still emits the legacy
+// GroupMap (its GroupMap->AggState convergence is Unit T). A partial with any
+// other leading byte is rejected loudly, not misparsed.
+enum class AggWireTag : std::uint8_t { GroupMap = 1, AggState = 2 };
+
+std::string encode_agg_partial(const dataframe::AggState& st) {
+    std::string out(1, static_cast<char>(AggWireTag::AggState));
+    out += dataframe::agg_serialize(st);
+    return out;
+}
+
+std::string encode_groupmap_partial(const GroupMap& map) {
+    std::string out(1, static_cast<char>(AggWireTag::GroupMap));
+    for (const auto& [k, a] : map) serialize_accum(out, k, a);
+    return out;
+}
+
+// Split partials by tag: AggState blobs merge into `state`, GroupMap blobs into
+// `map`. A mix of the two in one merge cannot be combined (no cross-codec
+// accumulator) and is rejected; an unknown tag is rejected too.
+void decode_partials(const std::vector<std::string_view>& partials,
+                     const ViewPlan& plan, dataframe::AggStatePtr& state,
+                     GroupMap& map, bool& have_map) {
+    for (std::string_view p : partials) {
+        if (p.empty())
+            throw DFTUtilsException::cat(
+                ErrorCode::AGGREGATION,
+                "aggregate partial: empty (missing wire tag)");
+        const auto tag = static_cast<std::uint8_t>(p[0]);
+        const std::string_view body = p.substr(1);
+        if (tag == static_cast<std::uint8_t>(AggWireTag::AggState)) {
+            dataframe::AggStatePtr st =
+                dataframe::agg_deserialize(std::string(body));
+            if (!state)
+                state = std::move(st);
+            else
+                dataframe::agg_merge(*state, *st);
+        } else if (tag == static_cast<std::uint8_t>(AggWireTag::GroupMap)) {
+            have_map = true;
+            codec::BinaryReader br(body);
+            while (br.has_remaining()) {
+                std::string key;
+                AggAccum a;
+                deserialize_accum(br, key, a);
+                merge_accum(map[key], a, plan);
+            }
+        } else {
+            throw DFTUtilsException::cat(ErrorCode::AGGREGATION,
+                                         "aggregate partial: unknown wire tag");
+        }
+    }
+    if (state && have_map)
+        throw DFTUtilsException::cat(
+            ErrorCode::AGGREGATION,
+            "aggregate partial: mixed AggState and GroupMap partials cannot be "
+            "merged");
+}
+
+}  // namespace
+
+// Distributed materialize: combine the rank-local partials and persist the
+// merged rollup. AggState partials persist directly; a legacy GroupMap partial
+// has no AggState rollup form, so its plan is re-scanned through the engine.
 coro::CoroTask<void> run_materialize_partials(
     const ViewPlan& plan, const std::vector<std::string_view>& partials) {
-    (void)partials;
     ensure_schema(plan);
     const std::string rdir = rollup_index_path(plan);
     if (rdir.empty()) co_return;
-    auto state = co_await build_engine_agg_state(plan);
+    dataframe::AggStatePtr state;
+    GroupMap map;
+    bool have_map = false;
+    decode_partials(partials, plan, state, map, have_map);
+    // A legacy GroupMap partial has no AggState rollup form; re-scan to build
+    // one. (The GroupMap->AggState convergence is Unit T.)
+    if (have_map) state = co_await build_engine_agg_state(plan);
+    if (!state) co_return;
     try {
         auto db =
             open_rollup_db(rdir, rocksdb::RocksDatabase::OpenMode::ReadWrite);
@@ -1098,11 +1166,11 @@ coro::CoroTask<ExportStats> run_session(
     }
     dftracer::utils::StringIntern intern;
 
-    std::vector<std::unique_ptr<AggFold>> aggs;
+    std::vector<std::unique_ptr<EngineAggFold>> aggs;
     aggs.reserve(agg_b.size());
     for (const auto* sb : agg_b)
-        aggs.push_back(
-            std::make_unique<AggFold>(*sb->agg_plan, intern, sb->apply_query));
+        aggs.push_back(std::make_unique<EngineAggFold>(*sb->agg_plan, intern,
+                                                       sb->apply_query));
 
     std::unique_ptr<BranchDriverFold> raw_fold;
     if (!raw_b.empty()) {
@@ -1139,19 +1207,17 @@ coro::CoroTask<ExportStats> run_session(
         co_await fuse(scan_plan, avdef, fold_ptrs, intern, nullptr, scan_cap);
 
     for (std::size_t i = 0; i < agg_b.size(); ++i) {
-        GroupMap m = aggs[i]->finish_map();
-        // A partial serializes the raw (unresolved) map for a distributed
-        // merge; a collect resolves group keys and materializes the DataFrame.
+        // A partial serializes the mergeable AggState for a distributed merge;
+        // a collect finalizes it (rank/resolver relabel) into the DataFrame.
         if (agg_b[i]->br->agg->partial_out) {
-            std::string out;
-            for (const auto& [k, a] : m) serialize_accum(out, k, a);
-            *agg_b[i]->br->agg->partial_out = std::move(out);
+            *agg_b[i]->br->agg->partial_out =
+                encode_agg_partial(aggs[i]->state());
             continue;
         }
         apply_ranks(*agg_b[i]->agg_plan, aggs[i]->ranks());
-        resolve_group_keys(m, *agg_b[i]->agg_plan);
         *agg_b[i]->br->agg->out = apply_agg_post_ops(
-            to_batch(m, *agg_b[i]->agg_plan), *agg_b[i]->agg_plan);
+            finalize_engine_result(aggs[i]->state(), *agg_b[i]->agg_plan),
+            *agg_b[i]->agg_plan);
     }
     // Factory folds published their results in Fold::finalize during the fuse;
     // let the caller pull them (while the folds are still alive here).
@@ -1177,64 +1243,43 @@ coro::CoroTask<ExportStats> run_export_counters(const ViewPlan& plan,
 // (shard of) files in memory and serialize the groups into an opaque partial
 // buffer. The transport (MPI etc.) lives in the caller; only bytes cross ranks.
 coro::CoroTask<std::string> run_aggregate_partial(const ViewPlan& plan) {
-    // Index-only fast path: when the aggregation tier answers the whole plan,
-    // read its pre-folded accumulators instead of scanning the trace files and
-    // serialize them into the same partial format a scan produces. This lets a
-    // sharded/distributed reader merge shards straight from their indexes, with
-    // no trace read. Restricted to plain event aggregations: the tier is
-    // EVENT-only, so counter and dynamic-numeric-args plans still scan (their
-    // values are not in the tier).
-    // Occupancy is computed in the scan fold (the tier carries no per-event
-    // intervals), so it cannot take the tier fast path.
+    // Index-only fast path: the EVENT-only tier answers without reading traces
+    // (a sharded reader merges straight from indexes), still as a GroupMap
+    // partial (its AggState convergence is Unit T). Everything else scans to a
+    // mergeable AggState.
     const bool has_occupancy =
         std::any_of(plan.agg.begin(), plan.agg.end(),
                     [](const AggSpec& s) { return is_occupancy_op(s.op); });
     if (plan.phase != Phase::Counters && !plan.auto_numeric_metrics &&
         !has_occupancy) {
         GroupMap tier;
-        if (agg_tier_collect(plan, tier)) {
-            std::string out;
-            for (const auto& [k, a] : tier) serialize_accum(out, k, a);
-            co_return out;
-        }
+        if (agg_tier_collect(plan, tier))
+            co_return encode_groupmap_partial(tier);
     }
-
-    ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/true);
-    std::string out;
-    co_await fused_aggregate(plan, vdef,
-                             [&](const std::string& k, const AggAccum& a) {
-                                 serialize_accum(out, k, a);
-                             });
-    co_return out;
-}
-
-// Deserialize and combine rank-local partials (from run_aggregate_partial) back
-// into one group map. The plan supplies the group/agg shape.
-static GroupMap merge_partials_into_map(
-    const ViewPlan& plan, const std::vector<std::string_view>& partials) {
-    ensure_schema(plan);
-    GroupMap merged;
-    for (auto p : partials) {
-        codec::BinaryReader br(p);
-        while (br.has_remaining()) {
-            std::string key;
-            AggAccum a;
-            deserialize_accum(br, key, a);
-            merge_accum(merged[key], a, plan);
-        }
-    }
-    return merged;
+    auto state = co_await build_engine_agg_state(plan);
+    co_return encode_agg_partial(*state);
 }
 
 // Merge partials and emit each combined group as a ph="C" counter event.
 ExportStats merge_counters_partials(
     const ViewPlan& plan, const std::vector<std::string_view>& partials,
     ExportSink& sink) {
-    GroupMap merged = merge_partials_into_map(plan, partials);
+    const ViewPlan p = resolve_bucket_origin(plan);
+    ensure_schema(p);
+    dataframe::AggStatePtr state;
+    GroupMap map;
+    bool have_map = false;
+    decode_partials(partials, p, state, map, have_map);
     ExportStats st;
-    for (const auto& [k, a] : merged) {
-        emit_group_counter(k, a, plan, sink);
-        ++st.events_matched;
+    if (state) {
+        emit_counters_from_state(*state, p, sink);
+        st.events_matched =
+            static_cast<std::uint64_t>(dataframe::agg_num_groups(*state));
+    } else {
+        for (const auto& [k, a] : map) {
+            emit_group_counter(k, a, p, sink);
+            ++st.events_matched;
+        }
     }
     return st;
 }
@@ -1242,9 +1287,15 @@ ExportStats merge_counters_partials(
 // Merge partials into a materialized DataFrame (distributed collect()).
 dataframe::DataFrame merge_partials_to_table(
     const ViewPlan& plan, const std::vector<std::string_view>& partials) {
-    GroupMap merged = merge_partials_into_map(plan, partials);
-    resolve_group_keys(merged, plan);
-    return to_batch(merged, plan);
+    const ViewPlan p = resolve_bucket_origin(plan);
+    ensure_schema(p);
+    dataframe::AggStatePtr state;
+    GroupMap map;
+    bool have_map = false;
+    decode_partials(partials, p, state, map, have_map);
+    if (state) return finalize_engine_result(*state, p);
+    resolve_group_keys(map, p);
+    return to_batch(map, p);
 }
 
 }  // namespace dftracer::utils::trace::views::detail

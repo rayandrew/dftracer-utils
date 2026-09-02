@@ -3096,22 +3096,19 @@ coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
     co_return co_await drain_stream(stream(morsel_rows));
 }
 
-coro::CoroTask<AggStatePtr> LazyFrame::collect_group_state(
-    std::vector<std::string> keys, std::vector<GroupAgg> aggs,
-    std::vector<AggDynSpec> dyn, std::string dyn_prefix,
-    std::int64_t morsel_rows) const {
-    std::vector<std::string> value_names;  // deduped, matching GroupByCursor
+LoweredGroupAggs lower_group_aggs(const std::vector<GroupAgg>& aggs) {
+    LoweredGroupAggs out;
     ankerl::unordered_dense::map<std::string, std::int32_t> dedup;
     auto resolve = [&](const std::string& name) -> std::int32_t {
         auto it = dedup.find(name);
         if (it != dedup.end()) return it->second;
-        const std::int32_t idx = static_cast<std::int32_t>(value_names.size());
-        value_names.push_back(name);
+        const std::int32_t idx =
+            static_cast<std::int32_t>(out.value_names.size());
+        out.value_names.push_back(name);
         dedup.emplace(name, idx);
         return idx;
     };
-    std::vector<AggSpec> specs;
-    specs.reserve(aggs.size());
+    out.specs.reserve(aggs.size());
     for (const GroupAgg& a : aggs) {
         AggSpec sp;
         sp.op = to_agg_op(a.op);
@@ -3119,36 +3116,49 @@ coro::CoroTask<AggStatePtr> LazyFrame::collect_group_state(
         sp.param = a.param;
         sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
         if (agg_uses_by_col(sp.op)) sp.by_col = resolve(a.by);
-        specs.push_back(std::move(sp));
+        out.specs.push_back(std::move(sp));
     }
+    return out;
+}
 
-    AggStatePtr state = agg_new(specs, dyn);
-    auto gen = stream(morsel_rows);
-    while (auto df = co_await gen.next()) {
-        std::vector<const Series*> kcols;
-        kcols.reserve(keys.size());
-        for (const std::string& k : keys)
-            kcols.push_back(
-                &df->columns[static_cast<std::size_t>(df->column_index(k))]);
-        std::vector<const Series*> vcols;
-        vcols.reserve(value_names.size());
-        for (const std::string& v : value_names)
-            vcols.push_back(
-                &df->columns[static_cast<std::size_t>(df->column_index(v))]);
-        if (dyn.empty()) {
-            // Pass the morsel row count explicitly: an empty key list (a global
-            // reduce to one group) carries no key column to infer the length
-            // from.
-            agg_accumulate(*state, kcols, vcols, 0, df->num_rows());
-            continue;
-        }
-        std::vector<AggDynInput> dcols;
-        for (std::size_t i = 0; i < df->names.size(); ++i)
-            if (!dyn_prefix.empty() && df->names[i].rfind(dyn_prefix, 0) == 0)
-                dcols.push_back(
-                    {df->names[i].substr(dyn_prefix.size()), &df->columns[i]});
-        agg_accumulate(*state, kcols, vcols, dcols, 0, df->num_rows());
+void agg_accumulate_chunk(AggState& state, const DataFrame& frame,
+                          const std::vector<std::string>& keys,
+                          const std::vector<std::string>& value_names,
+                          const std::string& dyn_prefix) {
+    std::vector<const Series*> kcols;
+    kcols.reserve(keys.size());
+    for (const std::string& k : keys)
+        kcols.push_back(
+            &frame.columns[static_cast<std::size_t>(frame.column_index(k))]);
+    std::vector<const Series*> vcols;
+    vcols.reserve(value_names.size());
+    for (const std::string& v : value_names)
+        vcols.push_back(
+            &frame.columns[static_cast<std::size_t>(frame.column_index(v))]);
+    // Pass the row count explicitly: an empty key list (a global reduce to one
+    // group) carries no key column to infer the length from.
+    if (dyn_prefix.empty()) {
+        agg_accumulate(state, kcols, vcols, 0, frame.num_rows());
+        return;
     }
+    std::vector<AggDynInput> dcols;
+    for (std::size_t i = 0; i < frame.names.size(); ++i)
+        if (frame.names[i].rfind(dyn_prefix, 0) == 0)
+            dcols.push_back(
+                {frame.names[i].substr(dyn_prefix.size()), &frame.columns[i]});
+    agg_accumulate(state, kcols, vcols, dcols, 0, frame.num_rows());
+}
+
+coro::CoroTask<AggStatePtr> LazyFrame::collect_group_state(
+    std::vector<std::string> keys, std::vector<GroupAgg> aggs,
+    std::vector<AggDynSpec> dyn, std::string dyn_prefix,
+    std::int64_t morsel_rows) const {
+    LoweredGroupAggs lowered = lower_group_aggs(aggs);
+    AggStatePtr state = agg_new(lowered.specs, dyn);
+    auto gen = stream(morsel_rows);
+    while (auto df = co_await gen.next())
+        agg_accumulate_chunk(*state, *df, keys, lowered.value_names,
+                             dyn.empty() ? std::string() : dyn_prefix);
     co_return state;
 }
 
