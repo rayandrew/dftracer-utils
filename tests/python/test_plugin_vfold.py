@@ -280,6 +280,97 @@ def test_vfold_keyed_first_last(tmp_path):
     assert hi[2] in _MOM_DURS[5:]
 
 
+def _keyed_arrow(result, name, key):
+    # A keyed vfold with a list<struct> output (hist) crosses as a native
+    # _DataFrame; read it via Arrow like the columnar hist result.
+    tbl = result[name].to_arrow()
+    return {r[key]: r["value"] for r in tbl.to_pylist()}
+
+
+@_needs_cxx
+def test_vfold_keyed_hist(tmp_path):
+    @jit.vfold
+    class Hist:
+        h = jit.map(key=jit.i64, value=jit.hist())
+
+        @jit.each_batch
+        def step(self, df):
+            self.h[df["pid"]] += df["dur"]
+
+    _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
+    host = PluginHost()
+    host.load(Hist)
+    host.resolve()
+    rows = _keyed_arrow(host.run(str(tmp_path)), "h", "pid")
+    assert set(rows) == {1, 2}
+    for pid, bins in rows.items():
+        assert len(bins) > 0
+        assert set(bins[0].keys()) == {"lo", "hi", "count"}
+        # Each group's bin counts sum to its row count.
+        assert sum(b["count"] for b in bins) == (5 if pid == 1 else 3)
+        # Every observed value falls inside some bin.
+        vals = _MOM_DURS[:5] if pid == 1 else _MOM_DURS[5:]
+        for v in vals:
+            assert any(b["lo"] <= v <= b["hi"] for b in bins)
+
+
+@_needs_cxx
+def test_vfold_keyed_argmax(tmp_path):
+    # argmax reads a (value, by) pair: the value at the row maximizing by, per
+    # key. Here: the dur of the latest (max ts) event per pid.
+    @jit.vfold
+    class Peak:
+        latest = jit.map(key=jit.i64, value=jit.argmax())
+
+        @jit.each_batch
+        def step(self, df):
+            self.latest[df["pid"]] += df["dur"], df["ts"]
+
+    _write_trace(str(tmp_path / "t.pfw.gz"), [10, 20, 30, 40], [1, 2, 1, 2])
+    host = PluginHost()
+    host.load(Peak)
+    host.resolve()
+    # ts = 1000 + i; pid1 rows are i=0 (dur10) and i=2 (dur30); pid2 i=1 (dur20)
+    # and i=3 (dur40). The max-ts row's dur is the argmax repr.
+    got = _keyed(host.run(str(tmp_path)), "latest", "pid")
+    assert got == {1: "30", 2: "40"}
+
+
+@_needs_cxx
+def test_vfold_keyed_occupancy(tmp_path):
+    # busy = interval-union length where depth > 0; active = peak overlap depth.
+    # Both read the (ts, dur) pair.
+    @jit.vfold
+    class Occ:
+        busy = jit.map(key=jit.i64, value=jit.busy())
+        active = jit.map(key=jit.i64, value=jit.active())
+
+        @jit.each_batch
+        def step(self, df):
+            self.busy[df["pid"]] += df["ts"], df["dur"]
+            self.active[df["pid"]] += df["ts"], df["dur"]
+
+    # pid1: [0,100) and [50,150) -> union [0,150)=150, peak depth 2.
+    # pid2: [0,50) and [100,150) -> disjoint union 100, peak depth 1.
+    events = [(1, 0, 100), (1, 50, 100), (2, 0, 50), (2, 100, 50)]
+    with gzip.open(str(tmp_path / "t.pfw.gz"), "wt", encoding="utf-8") as f:
+        for pid, ts, dur in events:
+            f.write(
+                f'{{"name":"read","cat":"POSIX","pid":{pid},"tid":1,'
+                f'"ts":{ts},"dur":{dur},"ph":"X","args":{{}}}}\n'
+            )
+    host = PluginHost()
+    host.load(Occ)
+    host.resolve()
+    result = host.run(str(tmp_path))
+    busy = _keyed(result, "busy", "pid")
+    active = _keyed(result, "active", "pid")
+    assert busy[1] == 150.0
+    assert busy[2] == 100.0
+    assert active[1] == 2.0
+    assert active[2] == 1.0
+
+
 class TestAuthoring:
     def test_reducer_must_match_accumulator(self):
         with pytest.raises(jit.JitError):
@@ -342,6 +433,39 @@ class TestAuthoring:
                 @jit.each_batch
                 def step(self, df):
                     self.s[df["pid"]] += 1  # a reduction needs a value column
+
+    def test_argmax_requires_value_by_pair(self):
+        with pytest.raises(jit.JitError):
+
+            @jit.vfold
+            class BadAm:
+                m = jit.map(key=jit.i64, value=jit.argmax())
+
+                @jit.each_batch
+                def step(self, df):
+                    self.m[df["pid"]] += df["dur"]  # argmax needs a (value, by) pair
+
+    def test_occupancy_requires_value_by_pair(self):
+        with pytest.raises(jit.JitError):
+
+            @jit.vfold
+            class BadOcc:
+                b = jit.map(key=jit.i64, value=jit.busy())
+
+                @jit.each_batch
+                def step(self, df):
+                    self.b[df["pid"]] += df["dur"]  # occupancy needs (ts, dur)
+
+    def test_scalar_reduction_rejects_a_pair(self):
+        with pytest.raises(jit.JitError):
+
+            @jit.vfold
+            class BadPair:
+                s = jit.map(key=jit.i64, value=jit.sum())
+
+                @jit.each_batch
+                def step(self, df):
+                    self.s[df["pid"]] += df["ts"], df["dur"]  # sum takes one column
 
     def test_plugin_rejects_vfold_reduction(self):
         with pytest.raises(jit.JitError):

@@ -100,6 +100,11 @@ __all__ = [
     "skew",
     "kurt",
     "sumsq",
+    "hist",
+    "busy",
+    "concurrency",
+    "utilization",
+    "active",
     "first",
     "last",
     "count_valid",
@@ -362,9 +367,16 @@ class Stddev(_Monoid):
 class AggReduce(_Monoid):
     """A @jit.vfold-only keyed reduction with no DFTU_EXT_MAP monoid; it folds
     through the engine's DFTU_EXT_AGG accumulator. ``dft`` carries the DFTU_AGG_*
-    op code. Not valid as a @jit.plugin map value."""
+    op code. ``param`` feeds dftu_agg_col.param (occupancy cell tolerance); a
+    reduction with ``needs_by`` reads a second (by) column. Not valid as a
+    @jit.plugin map value."""
 
-    __slots__ = ()
+    __slots__ = ("param", "needs_by")
+
+    def __init__(self, dft: str, param: float = 0.0, needs_by: bool = False) -> None:
+        super().__init__(dft)
+        self.param = param
+        self.needs_by = needs_by
 
 
 class Quantiles(_Monoid):
@@ -773,6 +785,39 @@ def last() -> AggReduce:
 def count_valid() -> AggReduce:
     """@jit.vfold-only keyed reduction: count of non-null values in the column."""
     return AggReduce("DFTU_AGG_COUNT_VALID")
+
+
+def hist() -> AggReduce:
+    """@jit.vfold-only keyed reduction: the DDSketch histogram of the value
+    column, a list<struct{lo, hi, count}> column (mergeable, relative-error
+    buckets)."""
+    return AggReduce("DFTU_AGG_HIST")
+
+
+def busy(cell: float = 0.0) -> AggReduce:
+    """@jit.vfold-only keyed occupancy reduction: interval-union length (us)
+    where overlap depth > 0, over the (ts, dur) column pair. ``cell`` is the
+    optional endpoint-snap tolerance in us (0 = exact union). Contribute the
+    pair with ``self.m[df["k"]] += df["ts"], df["dur"]``."""
+    return AggReduce("DFTU_AGG_BUSY", param=float(cell), needs_by=True)
+
+
+def concurrency(cell: float = 0.0) -> AggReduce:
+    """@jit.vfold-only keyed occupancy reduction: sum(dur) / busy over the
+    (ts, dur) pair. ``cell`` is the endpoint-snap tolerance in us."""
+    return AggReduce("DFTU_AGG_CONCURRENCY", param=float(cell), needs_by=True)
+
+
+def utilization(cell: float = 0.0) -> AggReduce:
+    """@jit.vfold-only keyed occupancy reduction: busy / (max_end - min_ts) over
+    the (ts, dur) pair. ``cell`` is the endpoint-snap tolerance in us."""
+    return AggReduce("DFTU_AGG_UTILIZATION", param=float(cell), needs_by=True)
+
+
+def active(cell: float = 0.0) -> AggReduce:
+    """@jit.vfold-only keyed occupancy reduction: peak overlap depth over the
+    (ts, dur) pair. ``cell`` is the endpoint-snap tolerance in us."""
+    return AggReduce("DFTU_AGG_ACTIVE", param=float(cell), needs_by=True)
 
 
 def _argby_dft(op: str, of: "_Type[object]") -> str:
@@ -3627,7 +3672,19 @@ _VFOLD_AGG_OPS = {
     "STDDEV": "DFTU_AGG_STD",
     "SKETCH": "DFTU_AGG_PCT",
     "SET": "DFTU_AGG_SET_UNION",
+    "ARGMAX": "DFTU_AGG_ARGMAX",
 }
+
+
+def _vfold_needs_by(mon: _Monoid) -> bool:
+    """True for a keyed reduction that reads a second (by) column: the reused
+    jit.argmax monoid and the occupancy AggReduce ops (busy/concurrency/
+    utilization/active)."""
+    if isinstance(mon, ArgMax):
+        return True
+    if isinstance(mon, AggReduce):
+        return mon.needs_by
+    return False
 
 
 def _vfold_agg_code(opd: Dict[str, object]) -> str | None:
@@ -3709,11 +3766,34 @@ def _compile_vfold(
                     f"@jit.vfold: key field '{keyfield}' must be numeric "
                     "(pid/tid/ts/dur) or a string (name/cat)"
                 )
+            mon = maps[attr].values[0]
+            needs_by = _vfold_needs_by(mon)
             rhs = stmt.value
             vfield: str | None = None
+            byfield: str | None = None
             const: int | None = None
-            if isinstance(rhs, ast.Constant) and isinstance(rhs.value, int):
+            if needs_by:
+                # argmax/occupancy read a (value, by) column pair: value into
+                # dftu_agg_col.value, by into dftu_agg_col.by.
+                if not (isinstance(rhs, ast.Tuple) and len(rhs.elts) == 2):
+                    raise JitError(
+                        f"@jit.vfold: '{attr}' needs a (value, by) column pair, "
+                        'e.g. self.m[df["pid"]] += df["ts"], df["dur"]'
+                    )
+                vfield = _vfold_df_field(rhs.elts[0])
+                byfield = _vfold_df_field(rhs.elts[1])
+                for f in (vfield, byfield):
+                    if f not in _VFOLD_NUMERIC:
+                        raise JitError(
+                            f"@jit.vfold: '{attr}' (value, by) columns must be "
+                            "numeric (pid/tid/ts/dur)"
+                        )
+                fields.add(vfield)
+                fields.add(byfield)
+            elif isinstance(rhs, ast.Constant) and isinstance(rhs.value, int):
                 const = int(rhs.value)
+            elif isinstance(rhs, ast.Tuple):
+                raise JitError(f"@jit.vfold: '{attr}' takes a single value column, not a pair")
             else:
                 vfield = _vfold_df_field(rhs)
                 if vfield not in _VFOLD_NUMERIC:
@@ -3721,7 +3801,6 @@ def _compile_vfold(
                         f"@jit.vfold: value field '{vfield}' must be numeric (pid/tid/ts/dur)"
                     )
                 fields.add(vfield)
-            mon = maps[attr].values[0]
             fam = mon.dft.split("_")[2] if len(mon.dft.split("_")) > 2 else ""
             # A counter ignores its added value, so `+= df[col]` would count
             # rows, not sum the column - almost never what's meant.
@@ -3754,6 +3833,7 @@ def _compile_vfold(
                     "keycat": keycat,
                     "keyfield": keyfield,
                     "vfield": vfield,
+                    "byfield": byfield,
                     "const": const,
                 }
             )
@@ -3870,12 +3950,20 @@ def _emit_vfold(
             # accumulators across slices and finalizes to a native frame.
             keyfield = cast(str, opd["keyfield"])
             vfield = opd["vfield"]
+            byfield = opd.get("byfield")
+            mon = cast(_Monoid, opd["mon"])
             value = _c_str_literal(cast(str, vfield)) if vfield is not None else "NULL"
-            param = repr(cast(Quantiles, opd["mon"]).qs[0]) if code == "DFTU_AGG_PCT" else "0.0"
+            by = _c_str_literal(cast(str, byfield)) if byfield is not None else "NULL"
+            if code == "DFTU_AGG_PCT":
+                param = repr(cast(Quantiles, mon).qs[0])
+            elif isinstance(mon, AggReduce):
+                param = repr(mon.param)  # occupancy cell tolerance (0 otherwise)
+            else:
+                param = "0.0"
             out += [
                 "    {",
                 f"        const dftu_agg_col specs[1] = {{{{{code}, {value}, "
-                f"{_c_str_literal('value')}, {param}, NULL}}}};",
+                f"{_c_str_literal('value')}, {param}, {by}}}}};",
                 f"        const char* keys[1] = {{{_c_str_literal(keyfield)}}};",
                 f"        dftu_agg* a = agg->agg_new(host->h, {_c_str_literal(attr)}, "
                 "keys, 1, specs, 1);",
@@ -4045,8 +4133,12 @@ def vfold(cls: type) -> type:
     key/value columns, or ``+= 1`` for a counter). A keyed reduction folds
     through the engine's DFTU_EXT_AGG accumulator and crosses back as a native
     DataFrame; its value may be jit.sum/min/max/count/mean/variance/stddev,
-    jit.quantiles((q,)) (one quantile), jit.set(of=jit.i64), or the vfold-only
-    jit.skew/kurt/sumsq/first/last/count_valid. It compiles to a native plugin
+    jit.quantiles((q,)) (one quantile), jit.set(of=jit.i64), jit.hist, or the
+    vfold-only jit.skew/kurt/sumsq/first/last/count_valid. A jit.argmax value
+    and the occupancy reductions (jit.busy/concurrency/utilization/active) read a
+    (value, by) column pair written ``self.<map>[df["k"]] += df["v"], df["by"]``
+    (argmax reports v at the row maximizing by; occupancy takes (ts, dur)). It
+    compiles to a native plugin
     using the columnar on_batch seam, so each batch is folded in-scan; run it
     through :class:`dftracer.utils.plugins.PluginHost` like any other jit
     plugin."""
