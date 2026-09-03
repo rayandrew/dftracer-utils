@@ -269,6 +269,16 @@ PyObject* Series_arrow_c_array(PyObject* self, PyObject* /*args*/) {
 // ---- statistics + elementwise transforms (dataframe kernels)
 // -------------------
 
+// A no-argument column op that forwards to a dftu_series_* C ABI function and
+// wraps the resulting column. Fn is the native op, bound as a template argument
+// so each method is one PyMethodDef line.
+template <dftu_series* (*Fn)(const dftu_series*)>
+PyObject* series_unary(PyObject* self, PyObject*) {
+    Series* a = as_series(self);
+    if (!a) return nullptr;
+    return make_series(Series{Fn(a->handle())});
+}
+
 PyObject* Series_quantile(PyObject* self, PyObject* arg) {
     Series* a = as_series(self);
     if (!a) return nullptr;
@@ -310,11 +320,6 @@ PyObject* Series_nunique(PyObject* self, PyObject*) {
     if (!a) return nullptr;
     return PyLong_FromLongLong(dftu_series_nunique(a->handle()));
 }
-PyObject* Series_unique(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_unique(a->handle())});
-}
 PyObject* Series_value_counts(PyObject* self, PyObject*) {
     Series* a = as_series(self);
     if (!a) return nullptr;
@@ -326,116 +331,6 @@ PyObject* Series_value_counts(PyObject* self, PyObject*) {
         return nullptr;
     }
 }
-PyObject* Series_abs(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_abs(a->handle())});
-}
-PyObject* Series_round(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_round(a->handle())});
-}
-PyObject* Series_cumsum(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_cumsum(a->handle())});
-}
-PyObject* Series_cummax(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_cummax(a->handle())});
-}
-PyObject* Series_cummin(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_cummin(a->handle())});
-}
-PyObject* Series_cum_prod(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_cum_prod(a->handle())});
-}
-PyObject* Series_cum_count(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_cum_count(a->handle())});
-}
-PyObject* Series_ceil(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_ceil(a->handle())});
-}
-PyObject* Series_floor(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_floor(a->handle())});
-}
-PyObject* Series_trunc(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_trunc(a->handle())});
-}
-PyObject* Series_sign(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_sign(a->handle())});
-}
-PyObject* Series_negate(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_negate(a->handle())});
-}
-PyObject* Series_diff(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_diff(a->handle())});
-}
-PyObject* Series_pct_change(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_pct_change(a->handle())});
-}
-PyObject* Series_sqrt(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_sqrt(a->handle())});
-}
-PyObject* Series_exp(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_exp(a->handle())});
-}
-PyObject* Series_log(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_log(a->handle())});
-}
-PyObject* Series_is_nan(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_is_nan(a->handle())});
-}
-PyObject* Series_is_finite(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_is_finite(a->handle())});
-}
-PyObject* Series_is_infinite(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_is_infinite(a->handle())});
-}
-PyObject* Series_is_unique(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_is_unique(a->handle())});
-}
-PyObject* Series_is_duplicated(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_is_duplicated(a->handle())});
-}
 PyObject* Series_is_sorted(PyObject* self, PyObject* args, PyObject* kwds) {
     Series* a = as_series(self);
     if (!a) return nullptr;
@@ -445,11 +340,6 @@ PyObject* Series_is_sorted(PyObject* self, PyObject* args, PyObject* kwds) {
                                      const_cast<char**>(kwlist), &descending))
         return nullptr;
     return PyBool_FromLong(dftu_series_is_sorted(a->handle(), descending));
-}
-PyObject* Series_drop_nulls(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_drop_nulls(a->handle())});
 }
 PyObject* Series_is_in(PyObject* self, PyObject* other) {
     Series* a = as_series(self);
@@ -484,11 +374,6 @@ PyObject* Series_tail(PyObject* self, PyObject* arg) {
     if (n == -1 && PyErr_Occurred()) return nullptr;
     return make_series(
         Series{dftu_series_tail(a->handle(), static_cast<std::int64_t>(n))});
-}
-PyObject* Series_reverse(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_reverse(a->handle())});
 }
 PyObject* Series_shift(PyObject* self, PyObject* arg) {
     Series* a = as_series(self);
@@ -653,11 +538,6 @@ PyObject* Series_search_sorted(PyObject* self, PyObject* other) {
     return make_series(
         Series{dftu_series_search_sorted(a->handle(), values->handle())});
 }
-PyObject* Series_interpolate(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return make_series(Series{dftu_series_interpolate(a->handle())});
-}
 PyObject* Series_is_between(PyObject* self, PyObject* args) {
     Series* a = as_series(self);
     if (!a) return nullptr;
@@ -708,41 +588,28 @@ PyObject* scalar_to_py(dftu_scalar v) {
     return nullptr;
 }
 
-PyObject* Series_sum(PyObject* self, PyObject*) {
+// No-argument reducers that call a Series member and wrap the result. Method is
+// the member (returning dftu_scalar / double / int64), bound as a template
+// argument so each stays one PyMethodDef line.
+template <auto Method>
+PyObject* series_reduce_scalar(PyObject* self, PyObject*) {
     Series* a = as_series(self);
     if (!a) return nullptr;
-    return scalar_to_py(a->sum());
+    return scalar_to_py((a->*Method)());
 }
-PyObject* Series_min(PyObject* self, PyObject*) {
+template <auto Method>
+PyObject* series_reduce_f64(PyObject* self, PyObject*) {
     Series* a = as_series(self);
     if (!a) return nullptr;
-    return scalar_to_py(a->min());
+    return PyFloat_FromDouble((a->*Method)());
 }
-PyObject* Series_max(PyObject* self, PyObject*) {
+template <auto Method>
+PyObject* series_reduce_i64(PyObject* self, PyObject*) {
     Series* a = as_series(self);
     if (!a) return nullptr;
-    return scalar_to_py(a->max());
+    return PyLong_FromLongLong((a->*Method)());
 }
-PyObject* Series_mean(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return PyFloat_FromDouble(a->mean());
-}
-PyObject* Series_count(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return PyLong_FromLongLong(a->count());
-}
-PyObject* Series_product(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return scalar_to_py(a->product());
-}
-PyObject* Series_mode(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return scalar_to_py(a->mode());
-}
+
 PyObject* Series_all(PyObject* self, PyObject*) {
     Series* a = as_series(self);
     if (!a) return nullptr;
@@ -752,16 +619,6 @@ PyObject* Series_any(PyObject* self, PyObject*) {
     Series* a = as_series(self);
     if (!a) return nullptr;
     return PyBool_FromLong(a->any());
-}
-PyObject* Series_arg_min(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return PyLong_FromLongLong(a->arg_min());
-}
-PyObject* Series_arg_max(PyObject* self, PyObject*) {
-    Series* a = as_series(self);
-    if (!a) return nullptr;
-    return PyLong_FromLongLong(a->arg_max());
 }
 PyObject* Series_dot(PyObject* self, PyObject* other) {
     Series* a = as_series(self);
@@ -1188,54 +1045,70 @@ PyMethodDef Series_methods[] = {
     {"skewness", Series_skewness, METH_NOARGS, "Population skewness."},
     {"kurtosis", Series_kurtosis, METH_NOARGS, "Excess kurtosis."},
     {"nunique", Series_nunique, METH_NOARGS, "Number of distinct values."},
-    {"unique", Series_unique, METH_NOARGS,
+    {"unique", series_unary<dftu_series_unique>, METH_NOARGS,
      "Distinct values (ascending) -> Series."},
     {"value_counts", Series_value_counts, METH_NOARGS,
      "value_counts() -> DataFrame of distinct values and counts, "
      "most-frequent first."},
-    {"abs", Series_abs, METH_NOARGS, "Elementwise absolute value (SIMD)."},
+    {"abs", series_unary<dftu_series_abs>, METH_NOARGS,
+     "Elementwise absolute value (SIMD)."},
     {"clip", Series_clip, METH_VARARGS,
      "clip(lo, hi) -> Series clamped to [lo, hi] (SIMD)."},
-    {"round", Series_round, METH_NOARGS, "Round floats to nearest (SIMD)."},
+    {"round", series_unary<dftu_series_round>, METH_NOARGS,
+     "Round floats to nearest (SIMD)."},
     {"fillna", Series_fillna, METH_O,
      "fillna(value) -> Series with nulls replaced."},
-    {"cumsum", Series_cumsum, METH_NOARGS, "Cumulative sum -> Series."},
-    {"cummax", Series_cummax, METH_NOARGS, "Running maximum -> Series."},
-    {"cummin", Series_cummin, METH_NOARGS, "Running minimum -> Series."},
-    {"cum_prod", Series_cum_prod, METH_NOARGS, "Running product -> Series."},
-    {"cum_count", Series_cum_count, METH_NOARGS,
+    {"cumsum", series_unary<dftu_series_cumsum>, METH_NOARGS,
+     "Cumulative sum -> Series."},
+    {"cummax", series_unary<dftu_series_cummax>, METH_NOARGS,
+     "Running maximum -> Series."},
+    {"cummin", series_unary<dftu_series_cummin>, METH_NOARGS,
+     "Running minimum -> Series."},
+    {"cum_prod", series_unary<dftu_series_cum_prod>, METH_NOARGS,
+     "Running product -> Series."},
+    {"cum_count", series_unary<dftu_series_cum_count>, METH_NOARGS,
      "Running count of non-null rows -> Int64 Series."},
-    {"ceil", Series_ceil, METH_NOARGS, "Round floats toward +inf (SIMD)."},
-    {"floor", Series_floor, METH_NOARGS, "Round floats toward -inf (SIMD)."},
-    {"trunc", Series_trunc, METH_NOARGS, "Round floats toward zero (SIMD)."},
-    {"sign", Series_sign, METH_NOARGS, "Sign as -1/0/1 (SIMD)."},
-    {"negate", Series_negate, METH_NOARGS, "Unary minus (SIMD)."},
-    {"diff", Series_diff, METH_NOARGS,
+    {"ceil", series_unary<dftu_series_ceil>, METH_NOARGS,
+     "Round floats toward +inf (SIMD)."},
+    {"floor", series_unary<dftu_series_floor>, METH_NOARGS,
+     "Round floats toward -inf (SIMD)."},
+    {"trunc", series_unary<dftu_series_trunc>, METH_NOARGS,
+     "Round floats toward zero (SIMD)."},
+    {"sign", series_unary<dftu_series_sign>, METH_NOARGS,
+     "Sign as -1/0/1 (SIMD)."},
+    {"negate", series_unary<dftu_series_negate>, METH_NOARGS,
+     "Unary minus (SIMD)."},
+    {"diff", series_unary<dftu_series_diff>, METH_NOARGS,
      "First difference x[i]-x[i-1]; row 0 null."},
-    {"pct_change", Series_pct_change, METH_NOARGS,
+    {"pct_change", series_unary<dftu_series_pct_change>, METH_NOARGS,
      "Percent change -> Float64 Series; row 0 null."},
-    {"sqrt", Series_sqrt, METH_NOARGS, "Square root -> Float64 Series (SIMD)."},
-    {"exp", Series_exp, METH_NOARGS, "Exponential -> Float64 Series."},
-    {"log", Series_log, METH_NOARGS, "Natural log -> Float64 Series."},
-    {"is_nan", Series_is_nan, METH_NOARGS, "Bool mask: value is NaN (SIMD)."},
-    {"is_finite", Series_is_finite, METH_NOARGS,
+    {"sqrt", series_unary<dftu_series_sqrt>, METH_NOARGS,
+     "Square root -> Float64 Series (SIMD)."},
+    {"exp", series_unary<dftu_series_exp>, METH_NOARGS,
+     "Exponential -> Float64 Series."},
+    {"log", series_unary<dftu_series_log>, METH_NOARGS,
+     "Natural log -> Float64 Series."},
+    {"is_nan", series_unary<dftu_series_is_nan>, METH_NOARGS,
+     "Bool mask: value is NaN (SIMD)."},
+    {"is_finite", series_unary<dftu_series_is_finite>, METH_NOARGS,
      "Bool mask: value is finite (SIMD)."},
-    {"is_infinite", Series_is_infinite, METH_NOARGS,
+    {"is_infinite", series_unary<dftu_series_is_infinite>, METH_NOARGS,
      "Bool mask: value is +/-Inf (SIMD)."},
-    {"is_unique", Series_is_unique, METH_NOARGS,
+    {"is_unique", series_unary<dftu_series_is_unique>, METH_NOARGS,
      "Bool mask: value occurs exactly once."},
-    {"is_duplicated", Series_is_duplicated, METH_NOARGS,
+    {"is_duplicated", series_unary<dftu_series_is_duplicated>, METH_NOARGS,
      "Bool mask: value is repeated."},
     {"is_sorted", DFTU_PYCFUNCTION(Series_is_sorted),
      METH_VARARGS | METH_KEYWORDS, "is_sorted(descending=False) -> bool."},
-    {"drop_nulls", Series_drop_nulls, METH_NOARGS, "Drop null rows -> Series."},
+    {"drop_nulls", series_unary<dftu_series_drop_nulls>, METH_NOARGS,
+     "Drop null rows -> Series."},
     {"is_in", Series_is_in, METH_O,
      "is_in(values) -> Bool mask where the value is in the values Series."},
     {"sort", DFTU_PYCFUNCTION(Series_sort), METH_VARARGS | METH_KEYWORDS,
      "sort(descending=False) -> sorted Series."},
     {"head", Series_head, METH_O, "head(n) -> first n rows Series."},
     {"tail", Series_tail, METH_O, "tail(n) -> last n rows Series."},
-    {"reverse", Series_reverse, METH_NOARGS,
+    {"reverse", series_unary<dftu_series_reverse>, METH_NOARGS,
      "Rows in reverse order -> Series."},
     {"shift", Series_shift, METH_O,
      "shift(n) -> Series shifted by n (vacated rows null)."},
@@ -1267,28 +1140,33 @@ PyMethodDef Series_methods[] = {
      "qcut(q) -> Int32 Series binning by the column's q-quantile edges."},
     {"search_sorted", Series_search_sorted, METH_O,
      "search_sorted(values) -> Int64 Series of lower-bound insertion indices."},
-    {"interpolate", Series_interpolate, METH_NOARGS,
+    {"interpolate", series_unary<dftu_series_interpolate>, METH_NOARGS,
      "interpolate() -> Float64 Series with null interiors linearly filled."},
     {"is_between", Series_is_between, METH_VARARGS,
      "is_between(lo, hi) -> Bool mask where lo <= value <= hi (SIMD)."},
     {"dot", Series_dot, METH_O,
      "dot(other) -> scalar sum of x[i]*y[i] over non-null pairs (SIMD)."},
-    {"sum", Series_sum, METH_NOARGS, "Sum of non-null values -> scalar."},
-    {"min", Series_min, METH_NOARGS, "Minimum non-null value -> scalar."},
-    {"max", Series_max, METH_NOARGS, "Maximum non-null value -> scalar."},
-    {"mean", Series_mean, METH_NOARGS, "Mean of non-null values -> float."},
-    {"count", Series_count, METH_NOARGS, "Non-null row count -> int."},
-    {"product", Series_product, METH_NOARGS,
+    {"sum", series_reduce_scalar<&Series::sum>, METH_NOARGS,
+     "Sum of non-null values -> scalar."},
+    {"min", series_reduce_scalar<&Series::min>, METH_NOARGS,
+     "Minimum non-null value -> scalar."},
+    {"max", series_reduce_scalar<&Series::max>, METH_NOARGS,
+     "Maximum non-null value -> scalar."},
+    {"mean", series_reduce_f64<&Series::mean>, METH_NOARGS,
+     "Mean of non-null values -> float."},
+    {"count", series_reduce_i64<&Series::count>, METH_NOARGS,
+     "Non-null row count -> int."},
+    {"product", series_reduce_scalar<&Series::product>, METH_NOARGS,
      "Product of non-null values -> scalar."},
-    {"mode", Series_mode, METH_NOARGS,
+    {"mode", series_reduce_scalar<&Series::mode>, METH_NOARGS,
      "Most frequent non-null value -> scalar."},
     {"all", Series_all, METH_NOARGS,
      "Whether every non-null Bool value is true."},
     {"any", Series_any, METH_NOARGS,
      "Whether any non-null Bool value is true."},
-    {"arg_min", Series_arg_min, METH_NOARGS,
+    {"arg_min", series_reduce_i64<&Series::arg_min>, METH_NOARGS,
      "Index of the minimum non-null value (-1 if none)."},
-    {"arg_max", Series_arg_max, METH_NOARGS,
+    {"arg_max", series_reduce_i64<&Series::arg_max>, METH_NOARGS,
      "Index of the maximum non-null value (-1 if none)."},
     {"take", Series_take, METH_O,
      "take(indices) -> Series gathered at the given row indices."},

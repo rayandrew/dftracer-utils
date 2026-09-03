@@ -60,6 +60,12 @@ const char* to_string(Agg agg) noexcept;
 /// Throws std::out_of_range on an unknown name.
 Agg agg_from_string(std::string_view name);
 
+/// Map the public Agg selector to the engine AggOp code. Same op; the two enums
+/// carry the same op under different stable values.
+AggOp to_agg_op(Agg agg);
+/// Inverse of to_agg_op.
+Agg from_agg_op(AggOp op);
+
 /// One aggregate in a group_by: `op` selects the function (First/Last are pivot
 /// only); `column` is the value column (ignored for Count, which is the group
 /// size); `out` is the result column name.

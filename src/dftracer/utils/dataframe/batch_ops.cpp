@@ -36,27 +36,10 @@ std::int64_t index_of(const DataFrame& b, const std::string& name) {
 }
 
 AggOp agg_op_of(const std::string& op) {
-    if (op == "sum") return AggOp::Sum;
-    if (op == "min") return AggOp::Min;
-    if (op == "max") return AggOp::Max;
-    if (op == "mean") return AggOp::Mean;
-    if (op == "count") return AggOp::Count;
-    if (op == "var") return AggOp::Var;
-    if (op == "std") return AggOp::Std;
-    if (op == "skew") return AggOp::Skew;
-    if (op == "kurt") return AggOp::Kurt;
-    if (op == "first") return AggOp::First;
-    if (op == "last") return AggOp::Last;
-    if (op == "pct") return AggOp::Pct;
-    if (op == "hist") return AggOp::Hist;
-    if (op == "argmax") return AggOp::ArgMax;
-    if (op == "sumsq") return AggOp::SumSq;
-    if (op == "set_union") return AggOp::SetUnion;
-    if (op == "busy") return AggOp::Busy;
-    if (op == "concurrency") return AggOp::Concurrency;
-    if (op == "utilization") return AggOp::Utilization;
-    if (op == "active") return AggOp::Active;
-    if (op == "count_valid") return AggOp::CountValid;
+#define DFTU_AGG_OP(id, code, str) \
+    if (op == str) return AggOp::id;
+#include <dftracer/utils/dataframe/agg_ops.def>
+#undef DFTU_AGG_OP
     throw std::out_of_range("group_by: unknown aggregate op " + op);
 }
 
@@ -64,74 +47,20 @@ AggOp agg_op_of(const std::string& op) {
 
 const char* to_string(Agg agg) noexcept {
     switch (agg) {
-        case Agg::Sum:
-            return "sum";
-        case Agg::Min:
-            return "min";
-        case Agg::Max:
-            return "max";
-        case Agg::Count:
-            return "count";
-        case Agg::Mean:
-            return "mean";
-        case Agg::Var:
-            return "var";
-        case Agg::Std:
-            return "std";
-        case Agg::Skew:
-            return "skew";
-        case Agg::Kurt:
-            return "kurt";
-        case Agg::First:
-            return "first";
-        case Agg::Last:
-            return "last";
-        case Agg::Pct:
-            return "pct";
-        case Agg::Hist:
-            return "hist";
-        case Agg::ArgMax:
-            return "argmax";
-        case Agg::SumSq:
-            return "sumsq";
-        case Agg::SetUnion:
-            return "set_union";
-        case Agg::Busy:
-            return "busy";
-        case Agg::Concurrency:
-            return "concurrency";
-        case Agg::Utilization:
-            return "utilization";
-        case Agg::Active:
-            return "active";
-        case Agg::CountValid:
-            return "count_valid";
+#define DFTU_AGG_OP(id, code, str) \
+    case Agg::id:                  \
+        return str;
+#include <dftracer/utils/dataframe/agg_ops.def>
+#undef DFTU_AGG_OP
     }
     return "count";
 }
 
 Agg agg_from_string(std::string_view name) {
-    if (name == "sum") return Agg::Sum;
-    if (name == "min") return Agg::Min;
-    if (name == "max") return Agg::Max;
-    if (name == "count") return Agg::Count;
-    if (name == "mean") return Agg::Mean;
-    if (name == "var") return Agg::Var;
-    if (name == "std") return Agg::Std;
-    if (name == "skew") return Agg::Skew;
-    if (name == "kurt") return Agg::Kurt;
-    if (name == "first") return Agg::First;
-    if (name == "last") return Agg::Last;
-    if (name == "pct") return Agg::Pct;
-    if (name == "hist") return Agg::Hist;
-    if (name == "argmax") return Agg::ArgMax;
-    if (name == "sumsq") return Agg::SumSq;
-    if (name == "set_union") return Agg::SetUnion;
-    if (name == "busy") return Agg::Busy;
-    if (name == "concurrency") return Agg::Concurrency;
-    if (name == "utilization") return Agg::Utilization;
-    if (name == "active") return Agg::Active;
-    if (name == "count_valid") return Agg::CountValid;
+#define DFTU_AGG_OP(id, code, str) \
+    if (name == str) return Agg::id;
+#include <dftracer/utils/dataframe/agg_ops.def>
+#undef DFTU_AGG_OP
     throw std::out_of_range("agg_from_string: unknown aggregate op " +
                             std::string(name));
 }
@@ -332,7 +261,7 @@ DataFrame group_by(const DataFrame& b, const std::vector<std::string>& keys,
     specs.reserve(aggs.size());
     for (const GroupAgg& a : aggs) {
         AggSpec sp;
-        sp.op = agg_op_of(to_string(a.op));
+        sp.op = to_agg_op(a.op);
         sp.out = a.out;
         sp.param = a.param;
         sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);
@@ -1339,7 +1268,7 @@ DataFrame group_by_dynamic(const DataFrame& b, const std::string& time_col,
     specs.reserve(aggs.size());
     for (const GroupAgg& a : aggs) {
         AggSpec sp;
-        sp.op = agg_op_of(to_string(a.op));
+        sp.op = to_agg_op(a.op);
         sp.out = a.out;
         sp.param = a.param;
         sp.value_col = sp.op == AggOp::Count ? -1 : resolve(a.column);

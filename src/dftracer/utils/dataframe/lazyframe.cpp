@@ -630,102 +630,6 @@ class TopkCursor : public Cursor {
     bool done_ = false;
 };
 
-AggOp to_agg_op(Agg a) {
-    switch (a) {
-        case Agg::Sum:
-            return AggOp::Sum;
-        case Agg::Min:
-            return AggOp::Min;
-        case Agg::Max:
-            return AggOp::Max;
-        case Agg::Count:
-            return AggOp::Count;
-        case Agg::Mean:
-            return AggOp::Mean;
-        case Agg::Var:
-            return AggOp::Var;
-        case Agg::Std:
-            return AggOp::Std;
-        case Agg::Skew:
-            return AggOp::Skew;
-        case Agg::Kurt:
-            return AggOp::Kurt;
-        case Agg::First:
-            return AggOp::First;
-        case Agg::Last:
-            return AggOp::Last;
-        case Agg::Pct:
-            return AggOp::Pct;
-        case Agg::Hist:
-            return AggOp::Hist;
-        case Agg::ArgMax:
-            return AggOp::ArgMax;
-        case Agg::SumSq:
-            return AggOp::SumSq;
-        case Agg::SetUnion:
-            return AggOp::SetUnion;
-        case Agg::Busy:
-            return AggOp::Busy;
-        case Agg::Concurrency:
-            return AggOp::Concurrency;
-        case Agg::Utilization:
-            return AggOp::Utilization;
-        case Agg::Active:
-            return AggOp::Active;
-        case Agg::CountValid:
-            return AggOp::CountValid;
-    }
-    return AggOp::Count;
-}
-
-Agg from_agg_op(AggOp a) {
-    switch (a) {
-        case AggOp::Sum:
-            return Agg::Sum;
-        case AggOp::Min:
-            return Agg::Min;
-        case AggOp::Max:
-            return Agg::Max;
-        case AggOp::Count:
-            return Agg::Count;
-        case AggOp::Mean:
-            return Agg::Mean;
-        case AggOp::Var:
-            return Agg::Var;
-        case AggOp::Std:
-            return Agg::Std;
-        case AggOp::Skew:
-            return Agg::Skew;
-        case AggOp::Kurt:
-            return Agg::Kurt;
-        case AggOp::First:
-            return Agg::First;
-        case AggOp::Last:
-            return Agg::Last;
-        case AggOp::Pct:
-            return Agg::Pct;
-        case AggOp::Hist:
-            return Agg::Hist;
-        case AggOp::ArgMax:
-            return Agg::ArgMax;
-        case AggOp::SumSq:
-            return Agg::SumSq;
-        case AggOp::SetUnion:
-            return Agg::SetUnion;
-        case AggOp::Busy:
-            return Agg::Busy;
-        case AggOp::Concurrency:
-            return Agg::Concurrency;
-        case AggOp::Utilization:
-            return Agg::Utilization;
-        case AggOp::Active:
-            return Agg::Active;
-        case AggOp::CountValid:
-            return Agg::CountValid;
-    }
-    return Agg::Count;
-}
-
 // One run: single-group AggState blobs (agg_extract_group + agg_serialize),
 // length-prefixed, in ascending composite-key order (agg_sort_groups). The
 // on-disk unit a bounded k-way merge reads back one group at a time.
@@ -2222,6 +2126,28 @@ template <class... Ts>
 overloaded(Ts...) -> overloaded<Ts...>;
 
 }  // namespace
+
+AggOp to_agg_op(Agg a) {
+    switch (a) {
+#define DFTU_AGG_OP(id, code, name) \
+    case Agg::id:                   \
+        return AggOp::id;
+#include <dftracer/utils/dataframe/agg_ops.def>
+#undef DFTU_AGG_OP
+    }
+    return AggOp::Count;
+}
+
+Agg from_agg_op(AggOp a) {
+    switch (a) {
+#define DFTU_AGG_OP(id, code, name) \
+    case AggOp::id:                 \
+        return Agg::id;
+#include <dftracer/utils/dataframe/agg_ops.def>
+#undef DFTU_AGG_OP
+    }
+    return Agg::Count;
+}
 
 // A plan node: exactly the data its op needs (no fat struct). Held by value in
 // the LazyFrame plan.
