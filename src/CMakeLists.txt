@@ -751,14 +751,15 @@ foreach(variant shared static)
                           VISIBILITY_INLINES_HIDDEN ON)
     string(TOUPPER ${variant} VARIANT_UPPER)
     link_simdjson(dftracer_utils_dataframe_${variant} ${VARIANT_UPPER})
-    # Highway powers the SIMD kernels; hwy_contrib carries VQSort (argsort).
-    if(TARGET hwy)
-      target_link_libraries(dftracer_utils_dataframe_${variant}
-                            PRIVATE $<BUILD_INTERFACE:hwy>)
-    endif()
+    # Highway powers the SIMD kernels; hwy_contrib carries VQSort (argsort) and
+    # publicly depends on hwy, so linking it pulls hwy in too. Fall back to hwy
+    # alone when contrib is absent; linking both puts libhwy.a on the line twice.
     if(TARGET hwy_contrib)
       target_link_libraries(dftracer_utils_dataframe_${variant}
                             PRIVATE $<BUILD_INTERFACE:hwy_contrib>)
+    elseif(TARGET hwy)
+      target_link_libraries(dftracer_utils_dataframe_${variant}
+                            PRIVATE $<BUILD_INTERFACE:hwy>)
     endif()
     add_stdfs_if_needed(dftracer_utils_dataframe_${variant})
     if(DFTRACER_UTILS_ENABLE_PCH)

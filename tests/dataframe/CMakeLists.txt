@@ -16,12 +16,16 @@ foreach(test_file ${DATAFRAME_TEST_SOURCES})
   # Some tests include internal SIMD kernel headers (e.g. kernels/sort.h ->
   # hwy/contrib/sort/vqsort.h). The dataframe library links Highway PRIVATE, so
   # its include dir is not propagated to consumers; bring it in for the tests
-  # that include those headers directly.
+  # that include those headers directly. Add only the include path: the Highway
+  # libraries are already provided through the dataframe library's link, so
+  # relinking them here put libhwy.a on the command twice.
   if(TARGET hwy)
-    target_link_libraries(${target_name} PRIVATE $<BUILD_INTERFACE:hwy>)
+    target_include_directories(${target_name} SYSTEM PRIVATE
+                               $<TARGET_PROPERTY:hwy,INTERFACE_INCLUDE_DIRECTORIES>)
   endif()
   if(TARGET hwy_contrib)
-    target_link_libraries(${target_name} PRIVATE $<BUILD_INTERFACE:hwy_contrib>)
+    target_include_directories(${target_name} SYSTEM PRIVATE
+                               $<TARGET_PROPERTY:hwy_contrib,INTERFACE_INCLUDE_DIRECTORIES>)
   endif()
   target_set_warnings(${target_name})
   target_enable_coroutine(${target_name})
