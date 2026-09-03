@@ -726,6 +726,90 @@ DFTU_EXPORT dftu_dataframe* dftu_dataframe_group_by_dynamic(
     const dftu_dataframe* df, const char* time_col, int64_t every,
     int64_t period, const dftu_group_agg* aggs, int32_t n_aggs);
 
+/*
+ * dftu_lazyframe: an opaque handle to a deferred query over a dftu_dataframe
+ * (the lazy counterpart to the eager frame ops above). Builder ops record a
+ * step and return a NEW dftu_lazyframe sharing the source frame's buffers (no
+ * data copy); nothing runs until dftu_lazyframe_collect. Every returned handle
+ * is owned by the caller and freed with dftu_lazyframe_free. Ops reuse the
+ * existing dftu_expr / dftu_group_agg types.
+ */
+typedef struct dftu_lazyframe dftu_lazyframe;
+
+/* The expression handle (defined in dataframe/expr.h, which includes this
+ * header); forward-declared here for the lazyframe filter/with_column ops. */
+typedef struct dftu_expr dftu_expr;
+
+/** Wrap a materialized frame as a deferred query over a self-contained
+ * in-memory source. The frame's columns are shared (no data copy) into a source
+ * that owns them, so the result outlives `df` and never references external
+ * scan/executor state; this is the supported way to produce a lazy result that
+ * crosses the plugin ABI. `df` is borrowed, not consumed. NULL if `df` is
+ * NULL. */
+DFTU_EXPORT dftu_lazyframe* dftu_dataframe_lazy(const dftu_dataframe* df);
+
+/** Run the deferred pipeline and materialize the surviving rows into a new
+ * owned frame (free with dftu_dataframe_free). Does NOT consume `lf`: it stays
+ * valid and re-runnable. `morsel_rows` is the scan chunk size; <= 0 means auto.
+ * NULL on error. */
+DFTU_EXPORT dftu_dataframe* dftu_lazyframe_collect(dftu_lazyframe* lf,
+                                                   int64_t morsel_rows);
+
+/** Free a lazyframe handle. */
+DFTU_EXPORT void dftu_lazyframe_free(dftu_lazyframe* lf);
+
+/** Output column names without running the query, joined by '\n' into a new
+ * malloc'd C string (empty for a plan ending in a data-dependent op). The
+ * caller frees it with dftu_query_string_free. NULL on error. */
+DFTU_EXPORT char* dftu_lazyframe_schema(const dftu_lazyframe* lf);
+
+/** The optimized plan as text (one op per line), for introspection. A new
+ * malloc'd C string the caller frees with dftu_query_string_free. NULL on
+ * error. */
+DFTU_EXPORT char* dftu_lazyframe_explain(const dftu_lazyframe* lf);
+
+/** Keep rows where `pred` (a dftu_expr over the frame's columns by position) is
+ * true. `pred` is borrowed. NULL on error. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_filter(const dftu_lazyframe* lf,
+                                                  const dftu_expr* pred);
+
+/** Project to the `n` columns named by `names`, in that order. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_select(const dftu_lazyframe* lf,
+                                                  const char* const* names,
+                                                  int32_t n);
+
+/** Add or replace column `name` with the value of `expr` (a dftu_expr over the
+ * frame's columns by position). `expr` is borrowed. NULL on error. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_with_column(const dftu_lazyframe* lf,
+                                                       const char* name,
+                                                       const dftu_expr* expr);
+
+/** Group by the `n_keys` key columns named by `keys` (a composite key) and
+ * compute each aggregate in `aggs` (op|column|out, as
+ * dftu_dataframe_group_by_dynamic). NULL on an unknown column/op. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_group_by(const dftu_lazyframe* lf,
+                                                    const char* const* keys,
+                                                    int32_t n_keys,
+                                                    const dftu_group_agg* aggs,
+                                                    int32_t n_aggs);
+
+/** Sort by the column `name`, ascending unless `descending`. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_sort_by(const dftu_lazyframe* lf,
+                                                   const char* name,
+                                                   int32_t descending);
+
+/** First / last `n` rows (head is the row-limit form). */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_head(const dftu_lazyframe* lf,
+                                                int64_t n);
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_tail(const dftu_lazyframe* lf,
+                                                int64_t n);
+
+/** Drop every row that is null in ANY column. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_drop_nulls(const dftu_lazyframe* lf);
+
+/** Distinct rows (keep first), in original order. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_unique(const dftu_lazyframe* lf);
+
 /* ---- Op registry -------------------------------------------------------- */
 /* One name-keyed registry over the engine's ops so a built-in op and a user op
  * are looked up and run the same way (the plugin-ABI foundation). Built-in ops

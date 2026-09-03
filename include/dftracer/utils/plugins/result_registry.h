@@ -53,8 +53,37 @@ struct OwnedDataFrame {
     }
 };
 
-using NamedResult = std::variant<std::vector<std::byte>, OwnedArrow,
-                                 OwnedArrowBatches, OwnedDataFrame>;
+/// A deferred columnar result carried across the ABI as a dftu_lazyframe
+/// handle, freed via the dataframe C ABI. Lets a plugin return a lazy plan the
+/// host collects at the Python edge. The plan MUST be self-contained (its
+/// source an in-memory frame or a re-openable source, e.g. dftu_dataframe_lazy
+/// of a materialized frame); referencing the plugin's per-scan/executor
+/// context, which dies at finalize, is a plugin bug.
+struct OwnedLazyFrame {
+    dftu_lazyframe* handle = nullptr;
+    OwnedLazyFrame() = default;
+    explicit OwnedLazyFrame(dftu_lazyframe* h) noexcept : handle(h) {}
+    OwnedLazyFrame(OwnedLazyFrame&& o) noexcept : handle(o.handle) {
+        o.handle = nullptr;
+    }
+    OwnedLazyFrame& operator=(OwnedLazyFrame&& o) noexcept {
+        if (this != &o) {
+            if (handle) dftu_lazyframe_free(handle);
+            handle = o.handle;
+            o.handle = nullptr;
+        }
+        return *this;
+    }
+    OwnedLazyFrame(const OwnedLazyFrame&) = delete;
+    OwnedLazyFrame& operator=(const OwnedLazyFrame&) = delete;
+    ~OwnedLazyFrame() {
+        if (handle) dftu_lazyframe_free(handle);
+    }
+};
+
+using NamedResult =
+    std::variant<std::vector<std::byte>, OwnedArrow, OwnedArrowBatches,
+                 OwnedDataFrame, OwnedLazyFrame>;
 
 class NamedResultRegistry {
    public:
@@ -86,6 +115,15 @@ class NamedResultRegistry {
         if (!name || !handle) return;
         std::lock_guard<std::mutex> lock(mutex_);
         results_[name] = OwnedDataFrame{handle};
+    }
+
+    /// Take ownership of a native dftu_lazyframe (deferred) result; the host
+    /// collects it at the Python edge. The plan must be self-contained (see
+    /// OwnedLazyFrame). A null handle is a no-op.
+    void emit_lazyframe(const char* name, dftu_lazyframe* handle) {
+        if (!name || !handle) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        results_[name] = OwnedLazyFrame{handle};
     }
 
     /// Take ownership of a multi-batch streamed result. Empty batches are a

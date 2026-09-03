@@ -126,6 +126,10 @@ typedef struct dftu_op dftu_op; /**< composable async op node; scan-lifetime */
    that uses it includes that header for the dftu_dataframe and dftu_series
    column ops. */
 typedef struct dftu_dataframe dftu_dataframe;
+/** A deferred columnar plan handle (the lazy counterpart to dftu_dataframe).
+   The concrete type is the dataframe engine's (dftracer/utils/dataframe/abi.h).
+ */
+typedef struct dftu_lazyframe dftu_lazyframe;
 
 typedef struct {
     uint64_t count;
@@ -777,6 +781,15 @@ typedef struct dftu_ext_result {
        ok, -1 on error. Same finalize/collision semantics. Appended after
        emit_arrow; a host predating it leaves the slot NULL. */
     int (*emit_frame)(void* h, const char* name, dftu_dataframe* df);
+    /** Emit a named deferred dataframe result; the host TAKES OWNERSHIP of the
+       dftu_lazyframe handle (do not free it after) and collects it at the
+       Python edge. The plan MUST be self-contained - its source an in-memory
+       frame or a re-openable source (dftu_dataframe_lazy of a materialized
+       frame is the supported construction); a plan referencing the plugin's
+       per-scan/executor state, which dies at finalize, is a plugin bug. 0 ok,
+       -1 on error. Same finalize/collision semantics. Appended after
+       emit_frame; a host predating it leaves the slot NULL. */
+    int (*emit_lazyframe)(void* h, const char* name, dftu_lazyframe* lf);
 } dftu_ext_result;
 
 /** Join kind for map_declare_join; the host maps this to its internal enum. */

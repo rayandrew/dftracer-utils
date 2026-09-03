@@ -1536,8 +1536,14 @@ int host_result_emit_frame(void* h, const char* name, ::dftu_dataframe* df) {
     return static_cast<PluginFold*>(h)->result_emit_frame(name, df);
 }
 
+int host_result_emit_lazyframe(void* h, const char* name,
+                               ::dftu_lazyframe* lf) {
+    return static_cast<PluginFold*>(h)->result_emit_lazyframe(name, lf);
+}
+
 const dftu_ext_result g_result = {host_result_emit, host_result_emit_arrow,
-                                  host_result_emit_frame};
+                                  host_result_emit_frame,
+                                  host_result_emit_lazyframe};
 
 ::dftu_map* host_map_new(void* h, const char* name, const dftu_type* key_types,
                          std::uint32_t key_n, dftu_monoid_kind value) {
@@ -2496,6 +2502,12 @@ int PluginFold::result_emit_arrow(const char* name, ::ArrowArray* a,
 int PluginFold::result_emit_frame(const char* name, ::dftu_dataframe* df) {
     if (!named_results_) return -1;
     named_results_->emit_frame(name, df);
+    return 0;
+}
+
+int PluginFold::result_emit_lazyframe(const char* name, ::dftu_lazyframe* lf) {
+    if (!named_results_) return -1;
+    named_results_->emit_lazyframe(name, lf);
     return 0;
 }
 

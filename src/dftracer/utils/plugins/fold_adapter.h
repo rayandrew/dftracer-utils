@@ -261,6 +261,9 @@ class PluginFold : public trace::views::detail::Fold {
     // Emit a native dataframe result; takes ownership of the handle. -1 when no
     // named-result registry is bound.
     int result_emit_frame(const char* name, dftu_dataframe* df);
+    // Emit a deferred (lazyframe) result; takes ownership of the handle. -1
+    // when no named-result registry is bound.
+    int result_emit_lazyframe(const char* name, dftu_lazyframe* lf);
 
     // Get-or-create this slice's named map; null if a key type is not I64/STR
     // or any value monoid has no scalar result. The address is stable for the

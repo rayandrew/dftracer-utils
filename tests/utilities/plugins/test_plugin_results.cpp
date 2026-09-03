@@ -5,6 +5,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/abi.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/monoid.h>
@@ -28,6 +29,7 @@ using dftracer::utils::StringIntern;
 using dftracer::utils::plugins::NamedResult;
 using dftracer::utils::plugins::NamedResultRegistry;
 using dftracer::utils::plugins::OwnedArrow;
+using dftracer::utils::plugins::OwnedLazyFrame;
 using dftracer::utils::plugins::PluginFold;
 using dftracer::utils::plugins::SharedResultRegistry;
 using views::detail::CoverageSet;
@@ -155,5 +157,35 @@ TEST_SUITE("PluginResults") {
         CHECK(named.emit_arrow(nullptr, &a, &s) == -1);
         CHECK(named.emit_arrow("x", nullptr, &s) == -1);
         CHECK(named.emit_arrow("x", &a, nullptr) == -1);
+    }
+
+    TEST_CASE("an emitted lazyframe is owned and collects to the frame") {
+        NamedResultRegistry named;
+
+        const std::int64_t v[4] = {5, 15, 20, 8};
+        dftu_series* col = dftu_series_new_flat(DFTU_TYPE_INT64, v, 4, nullptr);
+        const char* names[1] = {"v"};
+        dftu_dataframe* df = dftu_dataframe_new(names, &col, 1);
+        REQUIRE(df != nullptr);
+        // A self-contained plan over a materialized frame: the supported way to
+        // hand a LazyFrame across the ABI.
+        dftu_lazyframe* lf = dftu_dataframe_lazy(df);
+        REQUIRE(lf != nullptr);
+        dftu_dataframe_free(df);
+
+        named.emit_lazyframe("plan", lf);
+
+        auto it = named.results().find("plan");
+        REQUIRE(it != named.results().end());
+        REQUIRE(std::holds_alternative<OwnedLazyFrame>(it->second));
+
+        dftu_lazyframe* got = std::get<OwnedLazyFrame>(it->second).handle;
+        REQUIRE(got != nullptr);
+        dftu_dataframe* out = dftu_lazyframe_collect(got, 0);
+        REQUIRE(out != nullptr);
+        CHECK(dftu_dataframe_num_rows(out) == 4);
+        dftu_dataframe_free(out);
+
+        named.clear();  // frees the owned lazyframe handle (asan-clean).
     }
 }

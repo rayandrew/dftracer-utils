@@ -809,6 +809,14 @@ class Host {
         const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
         return e && e->emit_arrow ? e->emit_arrow(h_->h, name, a, s) : -1;
     }
+    /// Hands a deferred plan to the host, which takes ownership and collects it
+    /// at the Python edge; -1 if the host lacks the result channel or the
+    /// emit_lazyframe slot. The plan must be self-contained (see the
+    /// emit_lazyframe contract in abi.h).
+    int emit_result_lazyframe(const char* name, dftu_lazyframe* lf) const {
+        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
+        return e && e->emit_lazyframe ? e->emit_lazyframe(h_->h, name, lf) : -1;
+    }
 
     /// Mergeable map: get-or-create a named tuple-keyed map whose value is a
     /// scalar monoid; null if a key type or the value monoid is unsupported.

@@ -21,7 +21,10 @@
 // Unconditional: the native-frame result path (OwnedDataFrame) needs the
 // DataFrame wrapper regardless of the Arrow build option.
 #include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/internal/lazyframe_handle.h>
+#include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/python/dataframe.h>
+#include <dftracer/utils/python/lazyframe.h>
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 #include <dftracer/utils/python/arrow_helpers.h>
@@ -52,6 +55,7 @@ using dftracer::utils::plugins::ConfigTree;
 using dftracer::utils::plugins::NamedResult;
 using dftracer::utils::plugins::OwnedArrow;
 using dftracer::utils::plugins::OwnedDataFrame;
+using dftracer::utils::plugins::OwnedLazyFrame;
 using dftracer::utils::plugins::PluginHost;
 namespace indexing = dftracer::utils::trace::indexing;
 namespace internal = dftracer::utils::trace::internal;
@@ -838,6 +842,15 @@ PyObject* result_to_py(NamedResult& result) {
                 df_ns::Series{dftu_dataframe_column(h, nm)});
         }
         return dftracer::utils::python::wrap_dataframe(std::move(df));
+    }
+    if (auto* lazy = std::get_if<OwnedLazyFrame>(&result)) {
+        // Move the plan out into the native Python LazyFrame wrapper; the
+        // OwnedLazyFrame frees the emptied handle. The plan must be
+        // self-contained (see the emit_lazyframe contract).
+        namespace df_ns = dftracer::utils::dataframe;
+        df_ns::LazyFrame lf =
+            std::move(df_ns::lazyframe_handle_unwrap(lazy->handle));
+        return dftracer::utils::python::wrap_lazyframe(std::move(lf));
     }
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
     namespace arr = dftracer::utils::utilities::common::arrow;
