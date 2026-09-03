@@ -378,18 +378,6 @@ static coro::CoroTask<void> verify_output(
     }
 }
 
-static std::vector<std::string> split_csv(const std::string& spec) {
-    std::vector<std::string> out;
-    std::size_t pos = 0;
-    while (pos < spec.size()) {
-        auto comma = spec.find(',', pos);
-        std::string tok = spec.substr(pos, comma - pos);
-        pos = (comma == std::string::npos) ? spec.size() : comma + 1;
-        if (!tok.empty()) out.push_back(std::move(tok));
-    }
-    return out;
-}
-
 static bool parse_group_by(const std::string& spec,
                            std::vector<GroupKey>& out) {
     std::size_t pos = 0;
@@ -685,7 +673,8 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
     const bool counters = cli->counters;
     const bool ct_mode = cli->call_tree;
     const bool fg_mode = cli->flamegraph;
-    const std::vector<std::string> ct_partition = split_csv(cli->ct_partition);
+    const std::vector<std::string> ct_partition =
+        cli::split_csv(cli->ct_partition);
     const bool aggregate = !group_keys.empty() || !agg_specs.empty() ||
                            counters || time_bucket > 0 || cli->agg_numeric_args;
     const bool typed_mode = cli->collect_typed;
@@ -892,7 +881,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         if (!group_keys.empty()) v = v.group_by(group_keys);
         if (!agg_specs.empty()) v = v.agg(agg_specs);
         if (cli->agg_numeric_args) v = v.agg_numeric_args();
-        if (!cli->select.empty()) v = v.select(split_csv(cli->select));
+        if (!cli->select.empty()) v = v.select(cli::split_csv(cli->select));
         if (cli->no_spill)
             v = v.memory_budget(NO_SPILL_BUDGET);
         else if (cli->memory_budget > 0)

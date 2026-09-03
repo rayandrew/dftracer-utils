@@ -7,7 +7,6 @@
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/dataframe/agg.h>
-#include <dftracer/utils/trace/views/aggfold.h>
 #include <dftracer/utils/trace/views/bloom_fold.h>
 #include <dftracer/utils/trace/views/containment_fold.h>
 #include <dftracer/utils/trace/views/coverage.h>
@@ -1037,11 +1036,11 @@ coro::CoroTask<ExportStats> run_session(
     // Serve each match-all aggregation branch from a rollup or the aggregation
     // tier with no scan; collect the rest. A match-all agg branch that must
     // scan carries its full plan (base + group_by/agg) so it can drive an
-    // AggFold.
+    // EngineAggFold.
     struct ScanBranch {
         const BranchHooks* br;
         std::shared_ptr<ViewPlan> agg_plan;  // set only for a match-all agg
-        bool apply_query = false;            // branch AggFold filters per event
+        bool apply_query = false;  // branch EngineAggFold filters per event
     };
     std::vector<ScanBranch> scan_branches;
     scan_branches.reserve(state->branches.size());
@@ -1097,8 +1096,8 @@ coro::CoroTask<ExportStats> run_session(
         co_return ExportStats{};
     }
 
-    // One fused scan drives every branch: an AggFold per aggregation and one
-    // BranchDriverFold parsing raw lines for the fold/export branches.
+    // One fused scan drives every branch: an EngineAggFold per aggregation and
+    // one BranchDriverFold parsing raw lines for the fold/export branches.
     ViewPlan scan_plan = plan;
     if (auto mv = find_subsuming_view(plan)) scan_plan.files = std::move(*mv);
     ViewDefinition avdef = make_vdef(scan_plan, /*for_aggregation=*/true);

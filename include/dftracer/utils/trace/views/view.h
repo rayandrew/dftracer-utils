@@ -331,7 +331,7 @@ class ViewSession {
         std::vector<AggSpec> agg);
 
     /// Aggregate ALL of the base view's events (no per-branch predicate) into a
-    /// /// Batch. For a branch that wants every scanned event, so several
+    /// DataFrame. For a branch that wants every scanned event, so several
     /// distinct group_by/agg aggregations share the one scan.
     Deferred<dftracer::utils::dataframe::DataFrame> collect(
         std::vector<GroupKey> group_by, std::vector<AggSpec> agg);
@@ -816,7 +816,7 @@ class View {
         dftracer::utils::StringIntern& intern) const;
 
     /// The built plan. Exposes the internal representation so a caller can
-    /// drive the GroupMap and dataframe-engine collection paths directly
+    /// drive the dataframe-engine collection paths directly
     /// (see view_executor.h / view_agg_engine.h); not otherwise needed.
     const detail::ViewPlan& plan() const { return *plan_; }
 

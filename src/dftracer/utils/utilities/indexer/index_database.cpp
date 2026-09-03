@@ -1108,37 +1108,6 @@ IndexDatabase::query_file_category_counts_batch(
     return results;
 }
 
-void IndexDatabase::merge_file_category_counts_batch_into(
-    const std::vector<int>& file_ids,
-    std::unordered_map<int, ChunkStatistics*>& targets) const {
-    for (const auto file_id : file_ids) {
-        auto target_it = targets.find(file_id);
-        if (target_it == targets.end() || target_it->second == nullptr) {
-            continue;
-        }
-
-        std::string value;
-        auto status = impl_->db_->get(file_category_counts_key(file_id), &value,
-                                      cf::FILE_CAT_COUNTS);
-        if (status.IsNotFound()) {
-            continue;
-        }
-        if (!status.ok()) {
-            throw_db_error("Failed to read file category counts", status);
-        }
-
-        auto* stats = target_it->second;
-        DecodeContextGuard ctx("file_cat_counts merge file_id=%d size=%zu",
-                               file_id, value.size());
-        for_each_count_map_entry(
-            value, [stats](std::string_view key, std::uint64_t count) {
-                auto entry =
-                    stats->category_counts.try_emplace(std::string(key), 0);
-                entry.first->second += count;
-            });
-    }
-}
-
 std::unordered_map<int, StringViewMap<std::uint64_t>>
 IndexDatabase::query_file_pid_tid_counts_batch(
     const std::vector<int>& file_ids) const {
@@ -1197,66 +1166,6 @@ IndexDatabase::query_file_name_summaries_batch(
         }
     }
     return results;
-}
-
-void IndexDatabase::merge_file_pid_tid_counts_batch_into(
-    const std::vector<int>& file_ids,
-    std::unordered_map<int, ChunkStatistics*>& targets) const {
-    for (const auto file_id : file_ids) {
-        auto target_it = targets.find(file_id);
-        if (target_it == targets.end() || target_it->second == nullptr) {
-            continue;
-        }
-
-        std::string value;
-        auto status = impl_->db_->get(file_pid_tid_counts_key(file_id), &value,
-                                      cf::FILE_PID_TID_COUNTS);
-        if (status.IsNotFound()) {
-            continue;
-        }
-        if (!status.ok()) {
-            throw_db_error("Failed to read file pid_tid counts", status);
-        }
-
-        auto* stats = target_it->second;
-        DecodeContextGuard ctx("file_pid_tid_counts merge file_id=%d size=%zu",
-                               file_id, value.size());
-        for_each_count_map_entry(value, [stats](std::string_view key,
-                                                std::uint64_t count) {
-            auto entry = stats->pid_tid_counts.try_emplace(std::string(key), 0);
-            entry.first->second += count;
-        });
-    }
-}
-
-void IndexDatabase::merge_file_name_counts_batch_into(
-    const std::vector<int>& file_ids,
-    std::unordered_map<int, ChunkStatistics*>& targets) const {
-    for (const auto file_id : file_ids) {
-        auto target_it = targets.find(file_id);
-        if (target_it == targets.end() || target_it->second == nullptr) {
-            continue;
-        }
-
-        std::string value;
-        auto status = impl_->db_->get(file_name_counts_key(file_id), &value,
-                                      cf::FILE_NAME_COUNTS);
-        if (status.IsNotFound()) {
-            continue;
-        }
-        if (!status.ok()) {
-            throw_db_error("Failed to read file name counts", status);
-        }
-
-        auto* stats = target_it->second;
-        DecodeContextGuard ctx("file_name_counts merge file_id=%d size=%zu",
-                               file_id, value.size());
-        for_each_name_summary_entry(value, [stats](std::string_view key,
-                                                   std::uint64_t count) {
-            auto entry = stats->name_counts.try_emplace(std::string(key), 0);
-            entry.first->second += count;
-        });
-    }
 }
 
 std::optional<RootStatisticsResult> IndexDatabase::query_root_scalar_stats()

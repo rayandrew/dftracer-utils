@@ -25,8 +25,8 @@ namespace dftracer::utils::trace::views::detail {
 // The dataframe-engine aggregation as a Fold on the fused scan: one mergeable
 // AggState per slice, accumulated per batch through build_agg_input_frame (the
 // same derivation the streaming collect uses), merged with agg_merge. The
-// per-event phase/metadata/query filter mirrors AggFold so the same events
-// reach the aggregation.
+// per-event phase/metadata/query filter mirrors the collect path so the same
+// events reach the aggregation.
 class EngineAggFold : public Fold {
    public:
     EngineAggFold(const ViewPlan& plan,
@@ -49,7 +49,7 @@ class EngineAggFold : public Fold {
 
     bool accepts(const ScanShape&) const override { return true; }
 
-    // Matches AggFold::needs_args (marking too few silently drops fields).
+    // Marking too few args silently drops fields, so stay conservative.
     bool needs_args() const override {
         if (plan_->auto_numeric_metrics) return true;
         for (const auto& gk : plan_->group_by)

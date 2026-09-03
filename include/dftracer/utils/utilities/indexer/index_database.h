@@ -204,15 +204,6 @@ class IndexDatabase {
     StringViewMap<std::uint64_t> query_root_category_counts() const;
     StringViewMap<std::uint64_t> query_root_pid_tid_counts() const;
     StringViewMap<std::uint64_t> query_root_name_counts() const;
-    void merge_file_category_counts_batch_into(
-        const std::vector<int>& file_ids,
-        std::unordered_map<int, ChunkStatistics*>& targets) const;
-    void merge_file_pid_tid_counts_batch_into(
-        const std::vector<int>& file_ids,
-        std::unordered_map<int, ChunkStatistics*>& targets) const;
-    void merge_file_name_counts_batch_into(
-        const std::vector<int>& file_ids,
-        std::unordered_map<int, ChunkStatistics*>& targets) const;
     void merge_root_category_counts_into(ChunkStatistics& target) const;
     void merge_root_pid_tid_counts_into(ChunkStatistics& target) const;
     void merge_root_name_counts_into(ChunkStatistics& target) const;

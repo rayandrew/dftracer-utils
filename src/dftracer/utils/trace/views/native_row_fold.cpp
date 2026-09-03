@@ -38,7 +38,7 @@ bool is_hash_field(std::string_view f) { return f == "fhash" || f == "hhash"; }
 bool is_iocat_field(std::string_view f) { return f == "io_cat"; }
 
 // acc_pat is a computed dimension whose key is the constant "0" for every event
-// (the GroupMap fold in agg_fold.h pushes '0'), not a stored field.
+// (the engine agg path uses '0'), not a stored field.
 bool is_accpat_field(std::string_view f) { return f == "acc_pat"; }
 
 // An agg-engine group-key-string request (see native_row_fold.h). Sets `field`
@@ -250,7 +250,7 @@ df::Series hash_column(const std::vector<FoldEvent>& evs, std::string_view f,
 }
 
 // The dfanalyzer I/O category enum value per event, from the event name. Kept
-// an Int64 (the enum's integer, matching the GroupMap fold's to_chars_i64) so
+// an Int64 (the enum's integer, matching the engine agg path's i64 form) so
 // the group-by collapses and renders it identically to a numeric key.
 df::Series iocat_column(const std::vector<FoldEvent>& evs,
                         const dftracer::utils::StringIntern& intern) {
@@ -269,12 +269,12 @@ df::Series iocat_column(const std::vector<FoldEvent>& evs,
 }
 
 // The acc_pat group key: the constant "0" String for every event, matching the
-// GroupMap fold (agg_fold.h pushes '0'). A single-group, byte-identical key.
+// engine agg path (a constant '0'). A single-group, byte-identical key.
 df::Series accpat_column(const std::vector<FoldEvent>& evs) {
     return df::Series::strings(std::vector<std::string>(evs.size(), "0"));
 }
 
-// A group-key string column rendered exactly as the GroupMap fold builds its
+// A group-key string column rendered exactly as the engine agg path builds its
 // key (PodSource append_arg for an Arg key, append_value for a Field key), so
 // the engine group-by is byte-identical: a missing value is the empty string,
 // numbers are stringified.
@@ -298,8 +298,8 @@ df::Series group_key_str_column(const std::vector<FoldEvent>& evs,
 
 // One auto-discovered numeric arg as a Float64 value column for the agg
 // engine's dyn path: the arg's numeric value where the event carries it as a
-// number (int64 or double), null otherwise. Matches the GroupMap fold's per-arg
-// FieldStat, which is fed only by PodSource::for_each_numeric_arg (string args
+// number (int64 or double), null otherwise. Matches the engine agg path's
+// per-arg FieldStat, fed only by PodSource::for_each_numeric_arg (string args
 // contribute nothing). The "size" pseudo-field resolves to the io-cat-derived
 // byte size (derived_size_t), falling back to a literal numeric "size" arg, so
 // the discovered "size" metric matches fold_numeric_args_t.
@@ -343,7 +343,7 @@ df::Series num_arg_column(const std::vector<FoldEvent>& evs,
 
 // One fold-derived field as a Uint64 value column for the agg engine's value
 // path, keeping the U64 domain agg_field_typed_t assigns so a Sum/Min/Max
-// matches the GroupMap fold: "size" is the io-cat-derived byte size
+// matches the engine agg path: "size" is the io-cat-derived byte size
 // (derived_size_t), "te" is ts+dur (null when the event has no dur, matching
 // number_typed("dur")). ts/dur are read RAW; a non-identity time_scale is
 // reapplied on the engine side (SCALED_TE_COL), never baked in here.

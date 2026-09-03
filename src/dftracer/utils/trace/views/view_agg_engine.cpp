@@ -149,9 +149,9 @@ dataframe::GroupAgg to_group_agg(const AggSpec& spec) {
     return g;
 }
 
-// to_batch's group key column is always a String (the fold's key is text);
+// The final group-key column must be a String (group keys are text), but
 // agg_finalize keeps a non-string key's native type (Int64/Uint64/Float64).
-// Render it back to the decimal text the GroupMap path would have produced.
+// Render it back to the decimal text form.
 dataframe::Series key_column_to_string(const dataframe::Series& col) {
     using dataframe::TypeId;
     const std::int64_t n = col.length();
@@ -198,7 +198,7 @@ bool key_is_resolved(GroupKey::Kind kind) {
 // name key (the fold groups on the hash, a bijection, and relabels to the
 // resolved name only after aggregation), pid for Rank (the rank map keys on
 // pid, matching agg_fold.h's append_group_dim), a group-key-string sentinel for
-// an Arg/Field key (rendered like the GroupMap fold, then relabeled to
+// an Arg/Field key (rendered like the engine agg path, then relabeled to
 // group_col_name after aggregation), else the key's own column.
 std::string key_group_field(const GroupKey& gk) {
     switch (gk.kind) {
@@ -232,7 +232,7 @@ dataframe::Series resolve_key_column(const dataframe::Series& hashes,
     return dataframe::Series::strings(vals);
 }
 
-// One raw group-key column cell rendered exactly as the GroupMap fold builds
+// One raw group-key column cell rendered exactly as the engine agg path builds
 // its key: a String cell verbatim, an integer cell as decimal, a null cell as
 // the empty string (append_arg emits nothing for a missing value).
 std::string cell_to_key_string(const dataframe::Series& col, std::int64_t r) {
@@ -253,7 +253,7 @@ std::string cell_to_key_string(const dataframe::Series& col, std::int64_t r) {
 }
 
 // The pre-transform value of group key `gk` for one raw cell, matching the
-// GroupMap path (resolve_group_keys: resolve_group_value after the fold's key
+// engine agg path (resolve_group_keys: resolve_group_value after the fold's key
 // rendering). A resolved-name key resolves its hash (or keeps the raw hash when
 // no resolver is loaded); cat is lowercased like agg_fold.h's append_group_dim;
 // the rest keep their rendered value.
@@ -268,8 +268,8 @@ std::string transform_key_base(const GroupKey& gk, std::string raw,
 }
 
 // Harvests only the pid -> rank map from PR metadata records, with no group
-// aggregation. The map is byte-identical to the one an AggFold would surface
-// (harvest_pr_rank over the same records).
+// aggregation. The map is byte-identical to the one the engine agg path would
+// surface (harvest_pr_rank over the same records).
 class RankHarvestFold : public Fold {
    public:
     explicit RankHarvestFold(const dftracer::utils::StringIntern& intern)
@@ -338,8 +338,8 @@ dataframe::AggOp to_dyn_op(AggOp op) {
                                  "agg engine: op has no per-arg dyn reduction");
 }
 
-// The dyn reductions for an auto_numeric_metrics plan, matching to_batch's dyn
-// columns: an empty numeric_arg_aggs is the legacy bare-named per-arg mean;
+// The dyn reductions for an auto_numeric_metrics plan, matching the canonical
+// dyn columns: an empty numeric_arg_aggs is the legacy bare-named per-arg mean;
 // each explicit reduction becomes one AggDynSpec whose out_prefix (dyn_col_name
 // with an empty key) gives the finalized column name out_prefix + arg.
 std::vector<dataframe::AggDynSpec> build_dyn_specs(const ViewPlan& plan) {
@@ -384,7 +384,8 @@ coro::CoroTask<void> harvest_ranks(const ViewPlan& plan) {
 }
 
 // The shared engine-aggregation tail (dyn reorder/fixes, key rendering,
-// busy_cell_us, resolver relabel), matching to_batch byte-for-byte. `r` arrives
+// busy_cell_us, resolver relabel), matching the canonical layout byte-for-byte.
+// `r` arrives
 // from agg_finalize as [keys, value specs, text specs, dyn]; `dyn_specs` are
 // the AggState's dyn side-table reductions.
 dataframe::DataFrame finalize_engine_frame(
@@ -412,8 +413,9 @@ dataframe::DataFrame finalize_engine_frame(
     }
     if (plan.agg.empty()) n_plan_value = 1;
 
-    // agg_finalize appends dyn last; to_batch slots it between the value and
-    // text columns. Rotate the [value..end) tail so [text, dyn] becomes [dyn,
+    // agg_finalize appends dyn last; the canonical layout slots it between the
+    // value and text columns. Rotate the [value..end) tail so [text, dyn]
+    // becomes [dyn,
     // text], then build the post-finalize dyn fixes from the reductions.
     const std::size_t dyn_count =
         r.columns.size() - (off + ng) - (n_plan_value + n_plan_text);

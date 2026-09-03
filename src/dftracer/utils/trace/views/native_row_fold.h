@@ -17,9 +17,9 @@ namespace dftracer::utils::trace::views::detail {
 class GroupResolver;
 
 /// Sentinel select tokens the agg engine uses to ask build_row_frame for a
-/// group-key STRING column rendered exactly as the GroupMap fold builds its key
-/// (PodSource append_arg for an Arg key, append_value for a Field key): "" for
-/// a missing value, numbers stringified. Internal to the agg-engine <->
+/// group-key STRING column rendered exactly as the engine agg path builds its
+/// key (PodSource append_arg for an Arg key, append_value for a Field key): ""
+/// for a missing value, numbers stringified. Internal to the agg-engine <->
 /// row-fold seam; never a user-facing select.
 inline constexpr std::string_view AGG_KEY_ARG_PREFIX = "__aggkey_arg:";
 inline constexpr std::string_view AGG_KEY_FIELD_PREFIX = "__aggkey_field:";
@@ -28,7 +28,7 @@ inline constexpr std::string_view AGG_KEY_FIELD_PREFIX = "__aggkey_field:";
 /// numeric-only Float64 VALUE column for one auto-discovered numeric arg (the
 /// auto_numeric_metrics / numeric_arg_aggs dyn path). The column carries the
 /// arg's numeric value where the event holds it as a number and null otherwise,
-/// matching the GroupMap fold's per-arg FieldStat (fold_numeric_args_t, which
+/// matching the engine agg path's per-arg FieldStat (fold_numeric_args_t, which
 /// feeds only PodSource::for_each_numeric_arg values). The special name "size"
 /// resolves to the io-cat-derived byte size (derived_size_t), falling back to a
 /// literal numeric "size" arg. Internal to the agg-engine <-> row-fold seam.
@@ -37,8 +37,8 @@ inline constexpr std::string_view AGG_NUM_ARG_PREFIX = "__aggnum_arg:";
 /// Sentinel select token the agg engine uses to ask build_row_frame for a
 /// fold-DERIVED typed VALUE column: "size" is the io-cat-derived byte size,
 /// "te" is ts+dur. Built with the U64 domain agg_field_typed_t assigns, so a
-/// Sum/Min/Max over it matches the GroupMap fold column-for-column. Internal to
-/// the agg-engine <-> row-fold seam; never a user-facing select.
+/// Sum/Min/Max over it matches the engine agg path column-for-column. Internal
+/// to the agg-engine <-> row-fold seam; never a user-facing select.
 inline constexpr std::string_view AGG_DERIVED_PREFIX = "__aggderiv:";
 
 /// Build one native DataFrame from `events`: top-level columns plus every arg
