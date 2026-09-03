@@ -31,6 +31,14 @@ static_assert(DFTU_AGG_ARGMAX == static_cast<int>(dataframe::AggOp::ArgMax));
 static_assert(DFTU_AGG_SUMSQ == static_cast<int>(dataframe::AggOp::SumSq));
 static_assert(DFTU_AGG_SET_UNION ==
               static_cast<int>(dataframe::AggOp::SetUnion));
+static_assert(DFTU_AGG_BUSY == static_cast<int>(dataframe::AggOp::Busy));
+static_assert(DFTU_AGG_CONCURRENCY ==
+              static_cast<int>(dataframe::AggOp::Concurrency));
+static_assert(DFTU_AGG_UTILIZATION ==
+              static_cast<int>(dataframe::AggOp::Utilization));
+static_assert(DFTU_AGG_ACTIVE == static_cast<int>(dataframe::AggOp::Active));
+static_assert(DFTU_AGG_COUNT_VALID ==
+              static_cast<int>(dataframe::AggOp::CountValid));
 
 namespace dftracer::utils::dataframe {
 

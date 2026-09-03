@@ -97,6 +97,12 @@ __all__ = [
     "stddev",
     "std",
     "quantiles",
+    "skew",
+    "kurt",
+    "sumsq",
+    "first",
+    "last",
+    "count_valid",
     "argmin",
     "argmax",
     "topk",
@@ -351,6 +357,14 @@ class Stddev(_Monoid):
     __slots__ = ()
 
     def observe(self, v: float) -> None: ...
+
+
+class AggReduce(_Monoid):
+    """A @jit.vfold-only keyed reduction with no DFTU_EXT_MAP monoid; it folds
+    through the engine's DFTU_EXT_AGG accumulator. ``dft`` carries the DFTU_AGG_*
+    op code. Not valid as a @jit.plugin map value."""
+
+    __slots__ = ()
 
 
 class Quantiles(_Monoid):
@@ -729,6 +743,36 @@ def quantiles(qs: "Tuple[float, ...]" = (0.5, 0.9, 0.95, 0.99)) -> Quantiles:
         if not 0.0 <= q <= 1.0:
             raise JitError(f"jit.quantiles value {q} is outside [0, 1]")
     return Quantiles("DFTU_MONOID_SKETCH", qs)
+
+
+def skew() -> AggReduce:
+    """@jit.vfold-only keyed reduction: population skewness of the value column."""
+    return AggReduce("DFTU_AGG_SKEW")
+
+
+def kurt() -> AggReduce:
+    """@jit.vfold-only keyed reduction: excess (population) kurtosis."""
+    return AggReduce("DFTU_AGG_KURT")
+
+
+def sumsq() -> AggReduce:
+    """@jit.vfold-only keyed reduction: sum of squares (Float64)."""
+    return AggReduce("DFTU_AGG_SUMSQ")
+
+
+def first() -> AggReduce:
+    """@jit.vfold-only keyed reduction: first non-null value in row order."""
+    return AggReduce("DFTU_AGG_FIRST")
+
+
+def last() -> AggReduce:
+    """@jit.vfold-only keyed reduction: last non-null value in row order."""
+    return AggReduce("DFTU_AGG_LAST")
+
+
+def count_valid() -> AggReduce:
+    """@jit.vfold-only keyed reduction: count of non-null values in the column."""
+    return AggReduce("DFTU_AGG_COUNT_VALID")
 
 
 def _argby_dft(op: str, of: "_Type[object]") -> str:
@@ -3461,6 +3505,13 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
             "@jit.plugin needs at least one jit.map, jit.publish/jit.consume, or "
             "jit.shared attribute"
         )
+    for attr, decl in maps.items():
+        if any(isinstance(v, AggReduce) for v in decl.values):
+            raise JitError(
+                f"@jit.plugin map '{attr}' cannot use a @jit.vfold-only reduction "
+                "(jit.skew/kurt/sumsq/first/last/count_valid); these fold through "
+                "DFTU_EXT_AGG, available only in @jit.vfold"
+            )
     joins = _resolve_joins(join_decls, maps)
     if len(each) != 1:
         raise JitError("@jit.plugin needs exactly one @jit.each_event method")
@@ -3559,6 +3610,45 @@ _VFOLD_NUMERIC = frozenset({"pid", "tid", "ts", "dur"})
 # distinct value for a DFTU_T_STR map key.
 _VFOLD_STRING_FIELDS = frozenset({"name", "cat"})
 
+# Keyed monoid family -> engine aggregate op. A recognized family folds through
+# the DFTU_EXT_AGG accumulator (the engine's mergeable AggState, merged across
+# worker slices and finalized to a native frame); an uncovered family or a
+# constant-valued fold stays on the DFTU_EXT_MAP row-fold path.
+# Engine-monoid family (mon.dft.split("_")[2]) -> aggregate op, for the value
+# monoids that already exist on the map side. Reductions with no map monoid
+# (skew/kurt/sumsq/first/last/count_valid) come through jit.AggReduce instead.
+_VFOLD_AGG_OPS = {
+    "SUM": "DFTU_AGG_SUM",
+    "MIN": "DFTU_AGG_MIN",
+    "MAX": "DFTU_AGG_MAX",
+    "COUNTER": "DFTU_AGG_COUNT",
+    "MEAN": "DFTU_AGG_MEAN",
+    "VARIANCE": "DFTU_AGG_VAR",
+    "STDDEV": "DFTU_AGG_STD",
+    "SKETCH": "DFTU_AGG_PCT",
+    "SET": "DFTU_AGG_SET_UNION",
+}
+
+
+def _vfold_agg_code(opd: Dict[str, object]) -> str | None:
+    """The DFTU_AGG_* op a keyed vfold reduction maps to, or None to keep it on
+    the map row-fold path. COUNT counts rows and needs no value column; the other
+    aggregates need one, so a constant-valued fold has no engine equivalent."""
+    if opd["kind"] != "keyed":
+        return None
+    mon = cast(_Monoid, opd["mon"])
+    if isinstance(mon, AggReduce):
+        code: str | None = mon.dft
+    else:
+        parts = mon.dft.split("_")
+        fam = parts[2] if len(parts) > 2 else ""
+        code = _VFOLD_AGG_OPS.get(fam)
+    if code is None:
+        return None
+    if code == "DFTU_AGG_COUNT":
+        return code
+    return code if opd["vfield"] is not None else None
+
 
 def _vfold_df_field(node: ast.expr) -> str:
     if not (
@@ -3645,6 +3735,15 @@ def _compile_vfold(
                     f"@jit.vfold: a string key ('{keyfield}') supports only "
                     "sum/min/max over a value column for now"
                 )
+            # A keyed quantile folds through DFTU_AGG_PCT, one output column, so
+            # it takes a single quantile over a value column.
+            if fam == "SKETCH" and (const is not None or len(cast(Quantiles, mon).qs) != 1):
+                raise JitError(
+                    f"@jit.vfold: a jit.quantiles map ('{attr}') supports exactly "
+                    "one quantile over a value column"
+                )
+            if isinstance(mon, AggReduce) and const is not None:
+                raise JitError(f"@jit.vfold: '{attr}' reduces a value column, not a constant")
             fields.add(keyfield)
             ops.append(
                 {
@@ -3705,11 +3804,20 @@ def _emit_vfold(
     needs_expr: str,
     plan_query: str | None,
 ) -> str:
-    used = {"map_new"}
-    for opd in ops:
-        mon = cast(_Monoid, opd["mon"])
-        used.add("map_add_f64" if mon.dft in _F64_MONOIDS else "map_add_u64")
-    guard = " || ".join(["!map"] + [f"!map->{fn}" for fn in sorted(used)])
+    agg_codes = [_vfold_agg_code(opd) for opd in ops]
+    map_ops = [opd for opd, code in zip(ops, agg_codes) if code is None]
+    need_map = bool(map_ops)
+    need_agg = any(code is not None for code in agg_codes)
+    guard_parts: List[str] = []
+    if need_map:
+        used = {"map_new"}
+        for opd in map_ops:
+            mon = cast(_Monoid, opd["mon"])
+            used.add("map_add_f64" if mon.dft in _F64_MONOIDS else "map_add_u64")
+        guard_parts += ["!map"] + [f"!map->{fn}" for fn in sorted(used)]
+    if need_agg:
+        guard_parts += ["!agg", "!agg->agg_new", "!agg->agg_accumulate"]
+    guard = " || ".join(guard_parts)
     plan_query_field = "plan_query" if plan_query is not None else "NULL"
     out: List[str] = [
         "#include <dftracer/utils/plugins/abi.h>",
@@ -3741,16 +3849,43 @@ def _emit_vfold(
         "static dftu_task* on_batch_columns(void* slice,",
         "                                   const dftu_dataframe* df,",
         "                                   const dftu_host* host) {",
-        "    const dftu_ext_map* map =",
-        "        (const dftu_ext_map*)host->get_extension(host->h, DFTU_EXT_MAP);",
         "    (void)slice;",
-        f"    if ({guard}) return NULL;",
     ]
-    for opd in ops:
+    if need_map:
+        out += [
+            "    const dftu_ext_map* map =",
+            "        (const dftu_ext_map*)host->get_extension(host->h, DFTU_EXT_MAP);",
+        ]
+    if need_agg:
+        out += [
+            "    const dftu_ext_agg* agg =",
+            "        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);",
+        ]
+    out.append(f"    if ({guard}) return NULL;")
+    for opd, code in zip(ops, agg_codes):
+        attr = cast(str, opd["attr"])
+        if code is not None:
+            # Keyed aggregate: fold the batch's key + value columns into the
+            # engine's DFTU_EXT_AGG accumulator; the host merges same-named
+            # accumulators across slices and finalizes to a native frame.
+            keyfield = cast(str, opd["keyfield"])
+            vfield = opd["vfield"]
+            value = _c_str_literal(cast(str, vfield)) if vfield is not None else "NULL"
+            param = repr(cast(Quantiles, opd["mon"]).qs[0]) if code == "DFTU_AGG_PCT" else "0.0"
+            out += [
+                "    {",
+                f"        const dftu_agg_col specs[1] = {{{{{code}, {value}, "
+                f"{_c_str_literal('value')}, {param}, NULL}}}};",
+                f"        const char* keys[1] = {{{_c_str_literal(keyfield)}}};",
+                f"        dftu_agg* a = agg->agg_new(host->h, {_c_str_literal(attr)}, "
+                "keys, 1, specs, 1);",
+                "        if (a) agg->agg_accumulate(host->h, a, df);",
+                "    }",
+            ]
+            continue
         mon = cast(_Monoid, opd["mon"])
         f64 = mon.dft in _F64_MONOIDS
         add_fn = "map_add_f64" if f64 else "map_add_u64"
-        attr = cast(str, opd["attr"])
         if opd["kind"] == "scalar":
             field = cast(str, opd["field"])
             rop = cast(str, opd["rop"])
@@ -3786,77 +3921,9 @@ def _emit_vfold(
         keytype = cast(str, opd["keytype"])
         vfield = opd["vfield"]
         read_val = vfield is not None
-        parts = mon.dft.split("_")
-        fam = parts[2] if len(parts) > 2 else ""
-        group_flag = {
-            "SUM": "DFTU_REDUCE_SUM",
-            "MIN": "DFTU_REDUCE_MIN",
-            "MAX": "DFTU_REDUCE_MAX",
-        }.get(fam)
-        # SUM/MIN/MAX of a column compose as one per-key aggregate, so group the
-        # batch with a single SIMD pass and fold each distinct key. COUNTER/MEAN
-        # (and a constant value) do not compose that way - fold row by row and
-        # let the monoid accumulate per sample.
-        keycat = cast(str, opd["keycat"])
-        if read_val and group_flag is not None:
-            perkey = "(double)gv[i]" if f64 else "(uint64_t)gv[i]"
-            head = [
-                "    {",
-                f"        dftu_series* kc = dftu_dataframe_column(df, {_c_str_literal(keyfield)});",
-                f"        dftu_series* vc = dftu_dataframe_column(df, {_c_str_literal(cast(str, vfield))});",
-                "        if (kc && vc) {",
-                "            dftu_series* ok = 0;",
-                "            dftu_series* ov[1] = {0};",
-                f"            int32_t nout = dftu_dataframe_group_by(kc, vc, {group_flag}, &ok, ov, 1);",
-                "            if (nout >= 1 && ok && ov[0]) {",
-                "                int64_t g = dftu_series_length(ok);",
-                "                const uint64_t* gv = (const uint64_t*)dftu_series_data(ov[0]);",
-                f"                const dftu_type kt[1] = {{{keytype}}};",
-                f"                dftu_map* m = map->map_new(host->h, {_c_str_literal(attr)}, kt, 1, {mon.dft});",
-            ]
-            if keycat == "str":
-                # Re-intern each distinct group key for the DFTU_T_STR map key; the
-                # host resolves the ids back to strings at finalize.
-                body = [
-                    "                dftu_series* okf = dftu_series_materialize(ok);",
-                    "                const int32_t* off = okf ? dftu_series_offsets(okf) : 0;",
-                    "                const char* kb = okf ? (const char*)dftu_series_data(okf) : 0;",
-                    "                if (off && kb && gv) {",
-                    "                    for (int64_t i = 0; i < g; i++) {",
-                    "                        int64_t key[1];",
-                    "                        key[0] = (int64_t)host->intern(host->h, kb + off[i],",
-                    "                                                       (uint32_t)(off[i + 1] - off[i]));",
-                    f"                        map->{add_fn}(host->h, m, key, {perkey});",
-                    "                    }",
-                    "                }",
-                    "                if (okf) dftu_series_free(okf);",
-                ]
-            else:
-                body = [
-                    "                const uint64_t* gk = (const uint64_t*)dftu_series_data(ok);",
-                    "                if (gk && gv) {",
-                    "                    for (int64_t i = 0; i < g; i++) {",
-                    "                        int64_t key[1];",
-                    "                        key[0] = (int64_t)gk[i];",
-                    f"                        map->{add_fn}(host->h, m, key, {perkey});",
-                    "                    }",
-                    "                }",
-                ]
-            out += (
-                head
-                + body
-                + [
-                    "            }",
-                    "            if (ok) dftu_series_free(ok);",
-                    "            if (ov[0]) dftu_series_free(ov[0]);",
-                    "            dftu_series_free(kc);",
-                    "            dftu_series_free(vc);",
-                    "        }",
-                    "    }",
-                ]
-            )
-            continue
-        # Row-fold path: per-key counter/mean, or a constant value.
+        # Row-fold path: per-key over a constant value, or a monoid the engine's
+        # aggregator does not cover; fold row by row so the monoid accumulates
+        # per sample.
         perrow = (
             ("(double)vd[i]" if f64 else "(uint64_t)vd[i]")
             if read_val
@@ -3972,12 +4039,17 @@ def vfold(cls: type) -> type:
     ops on the batch and folds them into scalar accumulators or keyed maps.
 
     Declare scalar accumulators as jit.sum()/min()/max() and/or keyed maps as
-    jit.map(key=<type>, value=<monoid>), plus one :func:`each_batch` method whose
-    body is a sequence of ``self.<acc> += df["f"].<reducer>()`` (reducer matching
-    the accumulator) and ``self.<map>[df["k"]] += df["v"]`` (numeric key/value
-    columns, or ``+= 1`` for a counter). It compiles to a native plugin using the
-    columnar on_batch seam, so each batch is folded in-scan; run it through
-    :class:`dftracer.utils.plugins.PluginHost` like any other jit plugin."""
+    jit.map(key=<type>, value=<reduction>), plus one :func:`each_batch` method
+    whose body is a sequence of ``self.<acc> += df["f"].<reducer>()`` (reducer
+    matching the accumulator) and ``self.<map>[df["k"]] += df["v"]`` (numeric
+    key/value columns, or ``+= 1`` for a counter). A keyed reduction folds
+    through the engine's DFTU_EXT_AGG accumulator and crosses back as a native
+    DataFrame; its value may be jit.sum/min/max/count/mean/variance/stddev,
+    jit.quantiles((q,)) (one quantile), jit.set(of=jit.i64), or the vfold-only
+    jit.skew/kurt/sumsq/first/last/count_valid. It compiles to a native plugin
+    using the columnar on_batch seam, so each batch is folded in-scan; run it
+    through :class:`dftracer.utils.plugins.PluginHost` like any other jit
+    plugin."""
     return _build_vfold(cls)
 
 

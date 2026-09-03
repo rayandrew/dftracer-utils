@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from .dataframe import DataFrame
 from .dftracer_utils_ext import PluginHost as _NativePluginHost
+from .dftracer_utils_ext import _DataFrame
 
 if TYPE_CHECKING:
     import pyarrow as pa  # ty: ignore[unresolved-import]
@@ -144,9 +145,13 @@ class PluginHost:
     def _shape(self, name: str, obj: object) -> "_RunResult":
         """Wrap an in-memory tabular result as a DataFrame, renaming jit v0..
         columns to the declared field names. Readers and bytes pass through."""
+        if isinstance(obj, bytes):
+            return obj
+        if isinstance(obj, _DataFrame):
+            return DataFrame(obj)
         import pyarrow as pa
 
-        if isinstance(obj, bytes) or isinstance(obj, pa.RecordBatchReader):
+        if isinstance(obj, pa.RecordBatchReader):
             return obj
         table = pa.table(obj)
         fields = self._renames.get(name)

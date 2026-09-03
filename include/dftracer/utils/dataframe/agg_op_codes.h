@@ -28,7 +28,12 @@ typedef enum {
     DFTU_AGG_HIST = 12,
     DFTU_AGG_ARGMAX = 13,
     DFTU_AGG_SUMSQ = 14,
-    DFTU_AGG_SET_UNION = 15
+    DFTU_AGG_SET_UNION = 15,
+    DFTU_AGG_BUSY = 16,
+    DFTU_AGG_CONCURRENCY = 17,
+    DFTU_AGG_UTILIZATION = 18,
+    DFTU_AGG_ACTIVE = 19,
+    DFTU_AGG_COUNT_VALID = 20
 } dftu_agg_op;
 
 #ifdef __cplusplus

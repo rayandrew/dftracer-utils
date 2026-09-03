@@ -2526,7 +2526,8 @@ MapAccum* PluginFold::map_get(const char* name, const dftu_type* key_types,
     std::vector<dataframe::AggSpec> aspecs;
     aspecs.reserve(spec_n);
     for (std::uint32_t i = 0; i < spec_n; ++i) {
-        if (specs[i].op < DFTU_AGG_COUNT || specs[i].op > DFTU_AGG_SET_UNION) {
+        if (specs[i].op < DFTU_AGG_COUNT ||
+            specs[i].op > DFTU_AGG_COUNT_VALID) {
             DFTRACER_UTILS_LOG_ERROR(
                 "Plugin agg '%s' aggregate %u has an out-of-range op code %d",
                 name, i, specs[i].op);

@@ -29,6 +29,13 @@ def _value(result, name):
     return pa.table(result[name]).column("value").to_numpy(zero_copy_only=False)
 
 
+def _keyed(result, name, key):
+    # A keyed vfold now crosses as a native _DataFrame (DFTU_EXT_AGG finalizes to
+    # a native frame); read it at the edge as pandas.
+    pdf = result[name].to_pandas()
+    return dict(zip(pdf[key].tolist(), pdf["value"].tolist()))
+
+
 @_needs_cxx
 def test_vfold_scalar_sum(tmp_path):
     @jit.vfold
@@ -86,8 +93,7 @@ def test_vfold_keyed_sum_per_pid(tmp_path):
     host = PluginHost()
     host.load(PerPid)
     host.resolve()
-    tbl = pa.table(host.run(str(tmp_path))["busy"])
-    got = dict(zip(tbl.column(0).to_pylist(), tbl.column("value").to_pylist()))
+    got = _keyed(host.run(str(tmp_path)), "busy", "pid")
     assert got == {1: 40.0, 2: 60.0}  # pid1: 10+30, pid2: 20+40
 
 
@@ -112,8 +118,7 @@ def test_vfold_keyed_sum_per_name(tmp_path):
     host = PluginHost()
     host.load(ByName)
     host.resolve()
-    tbl = pa.table(host.run(str(tmp_path))["dur"])
-    got = dict(zip(tbl.column(0).to_pylist(), tbl.column("value").to_pylist()))
+    got = _keyed(host.run(str(tmp_path)), "dur", "name")
     assert got == {"read": 60.0, "write": 300.0}
 
 
@@ -131,9 +136,8 @@ def test_vfold_keyed_max_per_pid(tmp_path):
     host = PluginHost()
     host.load(Peak)
     host.resolve()
-    tbl = pa.table(host.run(str(tmp_path))["hi"])
-    got = dict(zip(tbl.column(0).to_pylist(), tbl.column("value").to_pylist()))
-    assert got == {1: 30, 2: 90}  # per-pid max via SIMD group-by
+    got = _keyed(host.run(str(tmp_path)), "hi", "pid")
+    assert got == {1: 30, 2: 90}  # per-pid max
 
 
 @_needs_cxx
@@ -150,9 +154,130 @@ def test_vfold_keyed_count_per_pid(tmp_path):
     host = PluginHost()
     host.load(Hits)
     host.resolve()
-    tbl = pa.table(host.run(str(tmp_path))["n"])
-    got = dict(zip(tbl.column(0).to_pylist(), tbl.column("value").to_pylist()))
+    got = _keyed(host.run(str(tmp_path)), "n", "pid")
     assert got == {1: 2, 2: 3}
+
+
+@_needs_cxx
+def test_vfold_keyed_pct_per_pid(tmp_path):
+    # A per-key percentile the legacy DFTU_EXT_MAP group_by path could not
+    # express; it reaches vfold through DFTU_EXT_AGG's DDSketch quantile.
+    @jit.vfold
+    class Median:
+        p50 = jit.map(key=jit.i64, value=jit.quantiles((0.5,)))
+
+        @jit.each_batch
+        def step(self, df):
+            self.p50[df["pid"]] += df["dur"]
+
+    durs = [10, 20, 30, 40, 50, 100, 200, 300]
+    pids = [1, 1, 1, 1, 1, 2, 2, 2]
+    _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
+    host = PluginHost()
+    host.load(Median)
+    host.resolve()
+    got = _keyed(host.run(str(tmp_path)), "p50", "pid")
+    assert got[1] == pytest.approx(30.0, rel=0.05)  # median of pid1
+    assert got[2] == pytest.approx(200.0, rel=0.05)  # median of pid2
+
+
+# pid1 = [10,20,30,40,50] (symmetric, mean 30); pid2 = [100,200,300] (mean 200).
+_MOM_DURS = [10, 20, 30, 40, 50, 100, 200, 300]
+_MOM_PIDS = [1, 1, 1, 1, 1, 2, 2, 2]
+
+
+@_needs_cxx
+def test_vfold_keyed_moments(tmp_path):
+    # var/std/skew/sumsq/count_valid reach vfold through DFTU_EXT_AGG; none was
+    # expressible on the legacy group_by/row-fold map path.
+    @jit.vfold
+    class Moments:
+        variance = jit.map(key=jit.i64, value=jit.variance())
+        std = jit.map(key=jit.i64, value=jit.stddev())
+        skew = jit.map(key=jit.i64, value=jit.skew())
+        sumsq = jit.map(key=jit.i64, value=jit.sumsq())
+        nvalid = jit.map(key=jit.i64, value=jit.count_valid())
+
+        @jit.each_batch
+        def step(self, df):
+            self.variance[df["pid"]] += df["dur"]
+            self.std[df["pid"]] += df["dur"]
+            self.skew[df["pid"]] += df["dur"]
+            self.sumsq[df["pid"]] += df["dur"]
+            self.nvalid[df["pid"]] += df["dur"]
+
+    _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
+    host = PluginHost()
+    host.load(Moments)
+    host.resolve()
+    result = host.run(str(tmp_path))
+    var = _keyed(result, "variance", "pid")
+    std = _keyed(result, "std", "pid")
+    skew = _keyed(result, "skew", "pid")
+    sumsq = _keyed(result, "sumsq", "pid")
+    nvalid = _keyed(result, "nvalid", "pid")
+    assert var[1] == pytest.approx(250.0)  # sample variance, n-1
+    assert var[2] == pytest.approx(10000.0)
+    assert std[1] == pytest.approx(250.0**0.5)
+    assert std[2] == pytest.approx(100.0)
+    assert skew[1] == pytest.approx(0.0, abs=1e-9)  # symmetric
+    assert skew[2] == pytest.approx(0.0, abs=1e-9)
+    assert sumsq[1] == pytest.approx(5500.0)  # 10^2+..+50^2
+    assert sumsq[2] == pytest.approx(140000.0)
+    assert nvalid[1] == 5
+    assert nvalid[2] == 3
+
+
+@_needs_cxx
+def test_vfold_keyed_set_union(tmp_path):
+    @jit.vfold
+    class Distinct:
+        vals = jit.map(key=jit.i64, value=jit.set(of=jit.i64))
+
+        @jit.each_batch
+        def step(self, df):
+            self.vals[df["pid"]] += df["dur"]
+
+    durs = [10, 20, 10, 30, 20, 200, 200, 100]
+    pids = [1, 1, 1, 1, 1, 2, 2, 2]
+    _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
+    host = PluginHost()
+    host.load(Distinct)
+    host.resolve()
+    got = _keyed(host.run(str(tmp_path)), "vals", "pid")
+
+    # SET_UNION crosses as one text cell of distinct values, separated by 0x1e.
+    def _members(cell):
+        return {int(x) for x in cell.split("\x1e") if x}
+
+    assert _members(got[1]) == {10, 20, 30}
+    assert _members(got[2]) == {100, 200}
+
+
+@_needs_cxx
+def test_vfold_keyed_first_last(tmp_path):
+    @jit.vfold
+    class Ends:
+        lo = jit.map(key=jit.i64, value=jit.first())
+        hi = jit.map(key=jit.i64, value=jit.last())
+
+        @jit.each_batch
+        def step(self, df):
+            self.lo[df["pid"]] += df["dur"]
+            self.hi[df["pid"]] += df["dur"]
+
+    _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
+    host = PluginHost()
+    host.load(Ends)
+    host.resolve()
+    result = host.run(str(tmp_path))
+    lo = _keyed(result, "lo", "pid")
+    hi = _keyed(result, "hi", "pid")
+    # first/last land on a real value in each group (row order is scan-dependent).
+    assert lo[1] in _MOM_DURS[:5]
+    assert hi[1] in _MOM_DURS[:5]
+    assert lo[2] in _MOM_DURS[5:]
+    assert hi[2] in _MOM_DURS[5:]
 
 
 class TestAuthoring:
@@ -206,3 +331,25 @@ class TestAuthoring:
                 @jit.each_batch
                 def step(self, df):
                     self.hits[df["pid"]] += df["dur"]  # a counter needs += 1
+
+    def test_reduction_rejects_a_constant(self):
+        with pytest.raises(jit.JitError):
+
+            @jit.vfold
+            class Bad3:
+                s = jit.map(key=jit.i64, value=jit.skew())
+
+                @jit.each_batch
+                def step(self, df):
+                    self.s[df["pid"]] += 1  # a reduction needs a value column
+
+    def test_plugin_rejects_vfold_reduction(self):
+        with pytest.raises(jit.JitError):
+
+            @jit.plugin
+            class Bad4:
+                m = jit.map(key=jit.i64, value=jit.sumsq())
+
+                @jit.each_event
+                def step(self, e):
+                    self.m[e.pid] += e.dur  # vfold-only reduction in a plugin
