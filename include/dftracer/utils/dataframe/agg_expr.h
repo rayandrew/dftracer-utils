@@ -2,6 +2,7 @@
 #define DFTRACER_UTILS_DATAFRAME_AGG_EXPR_H
 
 #include <dftracer/utils/dataframe/agg.h>
+#include <dftracer/utils/dataframe/agg_op_codes.h>
 #include <dftracer/utils/dataframe/expr.h>
 
 #include <string>
@@ -80,25 +81,6 @@ DataFrame group_agg_expr(const Expr& key, const std::vector<AggExprSpec>& specs,
 // dftu_dataframe_group_agg_expr, so every consumer gets the same engine. Value
 // expressions are borrowed (not freed).
 extern "C" {
-
-enum {
-    DFTU_AGG_COUNT = 0,
-    DFTU_AGG_SUM = 1,
-    DFTU_AGG_MIN = 2,
-    DFTU_AGG_MAX = 3,
-    DFTU_AGG_MEAN = 4,
-    DFTU_AGG_VAR = 5,
-    DFTU_AGG_STD = 6,
-    DFTU_AGG_SKEW = 7,
-    DFTU_AGG_KURT = 8,
-    DFTU_AGG_FIRST = 9,
-    DFTU_AGG_LAST = 10,
-    DFTU_AGG_PCT = 11,
-    DFTU_AGG_HIST = 12,
-    DFTU_AGG_ARGMAX = 13,
-    DFTU_AGG_SUMSQ = 14,
-    DFTU_AGG_SET_UNION = 15
-};
 
 /** One aggregate: `op` is a DFTU_AGG_* code, `value` the value expression
  * (borrowed; NULL for COUNT), `out` the result column name (borrowed), `param`

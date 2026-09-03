@@ -1,0 +1,38 @@
+#ifndef DFTRACER_UTILS_DATAFRAME_AGG_OP_CODES_H
+#define DFTRACER_UTILS_DATAFRAME_AGG_OP_CODES_H
+
+/* Stable aggregate op codes shared by the dataframe C ABI (dftu_agg_spec) and
+   the plugin ABI (dftu_agg_col), so a plugin author selects an aggregate by a
+   named enum, not a bare int. The values mirror dataframe::AggOp; a
+   static_assert in agg.cpp keeps the two definitions in lockstep. The C seams
+   still carry the code as a fixed-width int for ABI stability and range-check
+   it at the boundary. */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    DFTU_AGG_COUNT = 0,
+    DFTU_AGG_SUM = 1,
+    DFTU_AGG_MIN = 2,
+    DFTU_AGG_MAX = 3,
+    DFTU_AGG_MEAN = 4,
+    DFTU_AGG_VAR = 5,
+    DFTU_AGG_STD = 6,
+    DFTU_AGG_SKEW = 7,
+    DFTU_AGG_KURT = 8,
+    DFTU_AGG_FIRST = 9,
+    DFTU_AGG_LAST = 10,
+    DFTU_AGG_PCT = 11,
+    DFTU_AGG_HIST = 12,
+    DFTU_AGG_ARGMAX = 13,
+    DFTU_AGG_SUMSQ = 14,
+    DFTU_AGG_SET_UNION = 15
+} dftu_agg_op;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif  // DFTRACER_UTILS_DATAFRAME_AGG_OP_CODES_H

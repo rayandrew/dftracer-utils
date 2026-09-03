@@ -188,6 +188,10 @@ struct ComposeOp {
     }
 };
 
+// dft.ext.agg accumulator; defined in the .cpp to keep agg.h (and its Arrow
+// tangle) out of this header.
+struct AggAccum;
+
 class PluginFold : public trace::views::detail::Fold {
     using Fold = trace::views::detail::Fold;
     using FoldBatch = trace::views::detail::FoldBatch;
@@ -254,6 +258,9 @@ class PluginFold : public trace::views::detail::Fold {
     // Emit a named result into the host registry; no-ops when none is bound.
     void result_emit(const char* name, const void* data, std::uint64_t len);
     int result_emit_arrow(const char* name, ::ArrowArray* a, ::ArrowSchema* s);
+    // Emit a native dataframe result; takes ownership of the handle. -1 when no
+    // named-result registry is bound.
+    int result_emit_frame(const char* name, dftu_dataframe* df);
 
     // Get-or-create this slice's named map; null if a key type is not I64/STR
     // or any value monoid has no scalar result. The address is stable for the
@@ -333,6 +340,15 @@ class PluginFold : public trace::views::detail::Fold {
     void declare_join(const char* out_name, const char* left_name,
                       const char* right_name, dftu_join_type type);
 
+    // Get-or-create this slice's named dft.ext.agg accumulator; null on a bad
+    // op code, a missing output name, or an allocation failure. A name seen
+    // before keeps its creation-time specs. agg_accumulate skips a batch
+    // missing any referenced column.
+    dftu_agg* agg_new(const char* name, const char* const* key_names,
+                      std::uint32_t key_n, const dftu_agg_col* specs,
+                      std::uint32_t spec_n);
+    void agg_accumulate(dftu_agg* a, const dftu_dataframe* df);
+
     // Seed part_bits (K = 1u << bits) on maps created after this call.
     // Internal, not on the ABI. Default 0 => K=1.
     void set_map_part_bits(std::uint32_t bits) { map_part_bits_ = bits; }
@@ -399,6 +415,9 @@ class PluginFold : public trace::views::detail::Fold {
     // Build each merged map's Arrow table and emit it under its name; reloads
     // spilled runs first, so a spilled map materializes identically.
     void materialize_maps();
+    // Finalize each merged aggregation accumulator to an Arrow table and emit
+    // it under its name.
+    void materialize_aggs();
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
     // max_rows_per_batch == 0 builds exactly one batch; > 0 flushes every
     // that-many rows so an ordered/nested global sort streams in chunks.
@@ -447,6 +466,11 @@ class PluginFold : public trace::views::detail::Fold {
     std::deque<MapAccum> maps_;
     std::unordered_map<std::uint64_t, std::size_t> map_index_;
     std::uint32_t map_part_bits_ = 0;
+
+    // dft.ext.agg accumulators; unique_ptr keeps each handed-out dftu_agg*
+    // stable and lets the header forward-declare AggAccum.
+    std::deque<std::unique_ptr<AggAccum>> aggs_;
+    std::unordered_map<std::uint64_t, std::size_t> agg_index_;
 
     struct DeclaredJoin {
         std::string out_name, left_name, right_name;

@@ -11,6 +11,27 @@
 
 namespace dataframe = dftracer::utils::dataframe;
 
+// The shared C ABI op codes (dftu_agg_op, used by both the dataframe agg C ABI
+// and the plugin DFTU_EXT_AGG seam) must stay bit-identical to
+// dataframe::AggOp, since both seams reinterpret the int as an AggOp.
+static_assert(DFTU_AGG_COUNT == static_cast<int>(dataframe::AggOp::Count));
+static_assert(DFTU_AGG_SUM == static_cast<int>(dataframe::AggOp::Sum));
+static_assert(DFTU_AGG_MIN == static_cast<int>(dataframe::AggOp::Min));
+static_assert(DFTU_AGG_MAX == static_cast<int>(dataframe::AggOp::Max));
+static_assert(DFTU_AGG_MEAN == static_cast<int>(dataframe::AggOp::Mean));
+static_assert(DFTU_AGG_VAR == static_cast<int>(dataframe::AggOp::Var));
+static_assert(DFTU_AGG_STD == static_cast<int>(dataframe::AggOp::Std));
+static_assert(DFTU_AGG_SKEW == static_cast<int>(dataframe::AggOp::Skew));
+static_assert(DFTU_AGG_KURT == static_cast<int>(dataframe::AggOp::Kurt));
+static_assert(DFTU_AGG_FIRST == static_cast<int>(dataframe::AggOp::First));
+static_assert(DFTU_AGG_LAST == static_cast<int>(dataframe::AggOp::Last));
+static_assert(DFTU_AGG_PCT == static_cast<int>(dataframe::AggOp::Pct));
+static_assert(DFTU_AGG_HIST == static_cast<int>(dataframe::AggOp::Hist));
+static_assert(DFTU_AGG_ARGMAX == static_cast<int>(dataframe::AggOp::ArgMax));
+static_assert(DFTU_AGG_SUMSQ == static_cast<int>(dataframe::AggOp::SumSq));
+static_assert(DFTU_AGG_SET_UNION ==
+              static_cast<int>(dataframe::AggOp::SetUnion));
+
 namespace dftracer::utils::dataframe {
 
 AggExprSpec agg_count(std::string out) {

@@ -2,6 +2,7 @@
 #define DFTRACER_UTILS_PLUGINS_RESULT_REGISTRY_H
 
 #include <dftracer/utils/core/common/config.h>
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/owned_arrow.h>
 
 #include <cstddef>
@@ -26,8 +27,34 @@ struct OwnedArrowBatches {
     std::vector<OwnedArrow> batches;
 };
 
-using NamedResult =
-    std::variant<std::vector<std::byte>, OwnedArrow, OwnedArrowBatches>;
+/// A native columnar result carried across the ABI as a dftu_dataframe handle
+/// (the dataframe engine's own boundary type), freed via the dataframe C ABI.
+/// Lets an engine-backed result (the aggregation accumulator) cross as our own
+/// DataFrame with no Arrow round-trip.
+struct OwnedDataFrame {
+    dftu_dataframe* handle = nullptr;
+    OwnedDataFrame() = default;
+    explicit OwnedDataFrame(dftu_dataframe* h) noexcept : handle(h) {}
+    OwnedDataFrame(OwnedDataFrame&& o) noexcept : handle(o.handle) {
+        o.handle = nullptr;
+    }
+    OwnedDataFrame& operator=(OwnedDataFrame&& o) noexcept {
+        if (this != &o) {
+            if (handle) dftu_dataframe_free(handle);
+            handle = o.handle;
+            o.handle = nullptr;
+        }
+        return *this;
+    }
+    OwnedDataFrame(const OwnedDataFrame&) = delete;
+    OwnedDataFrame& operator=(const OwnedDataFrame&) = delete;
+    ~OwnedDataFrame() {
+        if (handle) dftu_dataframe_free(handle);
+    }
+};
+
+using NamedResult = std::variant<std::vector<std::byte>, OwnedArrow,
+                                 OwnedArrowBatches, OwnedDataFrame>;
 
 class NamedResultRegistry {
    public:
@@ -51,6 +78,14 @@ class NamedResultRegistry {
         std::lock_guard<std::mutex> lock(mutex_);
         results_[name] = std::move(owned);
         return 0;
+    }
+
+    /// Take ownership of a native dftu_dataframe result. A null handle is a
+    /// no-op.
+    void emit_frame(const char* name, dftu_dataframe* handle) {
+        if (!name || !handle) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        results_[name] = OwnedDataFrame{handle};
     }
 
     /// Take ownership of a multi-batch streamed result. Empty batches are a

@@ -18,11 +18,13 @@
 #include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
+// Unconditional: the native-frame result path (OwnedDataFrame) needs the
+// DataFrame wrapper regardless of the Arrow build option.
+#include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/python/dataframe.h>
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
-#include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/python/arrow_helpers.h>
-#include <dftracer/utils/python/dataframe.h>
 #include <dftracer/utils/utilities/common/arrow/explode.h>
 #include <dftracer/utils/utilities/common/arrow/gapfill.h>
 #include <dftracer/utils/utilities/common/arrow/join.h>
@@ -49,6 +51,7 @@ using dftracer::utils::coro::CoroTask;
 using dftracer::utils::plugins::ConfigTree;
 using dftracer::utils::plugins::NamedResult;
 using dftracer::utils::plugins::OwnedArrow;
+using dftracer::utils::plugins::OwnedDataFrame;
 using dftracer::utils::plugins::PluginHost;
 namespace indexing = dftracer::utils::trace::indexing;
 namespace internal = dftracer::utils::trace::internal;
@@ -818,6 +821,24 @@ PyObject* result_to_py(NamedResult& result) {
         return PyBytes_FromStringAndSize(
             reinterpret_cast<const char*>(blob->data()),
             static_cast<Py_ssize_t>(blob->size()));
+    if (auto* frame = std::get_if<OwnedDataFrame>(&result)) {
+        // Adopt the handle's columns into a native DataFrame (shared buffers,
+        // zero-copy) and hand it back as a _DataFrame; the OwnedDataFrame frees
+        // the emptied handle.
+        namespace df_ns = dftracer::utils::dataframe;
+        dftu_dataframe* h = frame->handle;
+        df_ns::DataFrame df;
+        std::int32_t n = dftu_dataframe_num_columns(h);
+        df.names.reserve(static_cast<std::size_t>(n));
+        df.columns.reserve(static_cast<std::size_t>(n));
+        for (std::int32_t i = 0; i < n; ++i) {
+            const char* nm = dftu_dataframe_column_name(h, i);
+            df.names.emplace_back(nm ? nm : "");
+            df.columns.emplace_back(
+                df_ns::Series{dftu_dataframe_column(h, nm)});
+        }
+        return dftracer::utils::python::wrap_dataframe(std::move(df));
+    }
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
     namespace arr = dftracer::utils::utilities::common::arrow;
     if (auto* batches = std::get_if<OwnedArrowBatches>(&result))

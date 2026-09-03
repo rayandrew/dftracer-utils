@@ -13,6 +13,7 @@
 #include <dftracer/utils/core/io/ops.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/agg_expr.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/map_grouping_arrow.h>
@@ -59,6 +60,16 @@
 #include <vector>
 
 namespace dftracer::utils::plugins {
+
+// Per-slice engine-backed aggregation accumulator (dft.ext.agg). value_names
+// are the distinct value/by columns the specs reference, ordered so each spec's
+// value_col/by_col indexes into it.
+struct AggAccum {
+    std::string name;
+    std::vector<std::string> key_names;
+    std::vector<std::string> value_names;
+    dataframe::AggStatePtr state;
+};
 
 namespace {
 
@@ -1521,7 +1532,12 @@ int host_result_emit_arrow(void* h, const char* name, ::ArrowArray* a,
     return static_cast<PluginFold*>(h)->result_emit_arrow(name, a, s);
 }
 
-const dftu_ext_result g_result = {host_result_emit, host_result_emit_arrow};
+int host_result_emit_frame(void* h, const char* name, ::dftu_dataframe* df) {
+    return static_cast<PluginFold*>(h)->result_emit_frame(name, df);
+}
+
+const dftu_ext_result g_result = {host_result_emit, host_result_emit_arrow,
+                                  host_result_emit_frame};
 
 ::dftu_map* host_map_new(void* h, const char* name, const dftu_type* key_types,
                          std::uint32_t key_n, dftu_monoid_kind value) {
@@ -1684,6 +1700,19 @@ void host_map_add_row(void* h, ::dftu_map* m, const std::int64_t* key,
                                              key, vals, n);
 }
 
+::dftu_agg* host_agg_new(void* h, const char* name,
+                         const char* const* key_names, std::uint32_t key_n,
+                         const ::dftu_agg_col* specs, std::uint32_t spec_n) {
+    return static_cast<PluginFold*>(h)->agg_new(name, key_names, key_n, specs,
+                                                spec_n);
+}
+
+void host_agg_accumulate(void* h, ::dftu_agg* a, const ::dftu_dataframe* df) {
+    static_cast<PluginFold*>(h)->agg_accumulate(a, df);
+}
+
+const dftu_ext_agg g_agg = {host_agg_new, host_agg_accumulate};
+
 const dftu_ext_map g_map = {host_map_new,
                             host_map_add_u64,
                             host_map_add_f64,
@@ -1738,6 +1767,7 @@ const void* host_get_extension(void*, const char* ext_id) {
     if (std::strcmp(ext_id, DFTU_EXT_HANDLES) == 0) return &g_handles;
     if (std::strcmp(ext_id, DFTU_EXT_RESULT) == 0) return &g_result;
     if (std::strcmp(ext_id, DFTU_EXT_MAP) == 0) return &g_map;
+    if (std::strcmp(ext_id, DFTU_EXT_AGG) == 0) return &g_agg;
     return nullptr;
 }
 
@@ -2463,9 +2493,114 @@ int PluginFold::result_emit_arrow(const char* name, ::ArrowArray* a,
     return named_results_ ? named_results_->emit_arrow(name, a, s) : -1;
 }
 
+int PluginFold::result_emit_frame(const char* name, ::dftu_dataframe* df) {
+    if (!named_results_) return -1;
+    named_results_->emit_frame(name, df);
+    return 0;
+}
+
 MapAccum* PluginFold::map_get(const char* name, const dftu_type* key_types,
                               std::uint32_t key_n, dftu_monoid_kind value) {
     return map_get_product(name, key_types, key_n, &value, 1);
+}
+
+::dftu_agg* PluginFold::agg_new(const char* name, const char* const* key_names,
+                                std::uint32_t key_n,
+                                const ::dftu_agg_col* specs,
+                                std::uint32_t spec_n) {
+    if (!name || (key_n && !key_names) || spec_n == 0 || !specs) return nullptr;
+    std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
+    auto it = agg_index_.find(key);
+    if (it != agg_index_.end())
+        return reinterpret_cast<::dftu_agg*>(aggs_[it->second].get());
+
+    std::vector<std::string> value_names;
+    auto column_index = [&](const char* col) -> std::int32_t {
+        if (!col) return -1;
+        for (std::size_t i = 0; i < value_names.size(); ++i)
+            if (value_names[i] == col) return static_cast<std::int32_t>(i);
+        value_names.emplace_back(col);
+        return static_cast<std::int32_t>(value_names.size() - 1);
+    };
+
+    std::vector<dataframe::AggSpec> aspecs;
+    aspecs.reserve(spec_n);
+    for (std::uint32_t i = 0; i < spec_n; ++i) {
+        if (specs[i].op < DFTU_AGG_COUNT || specs[i].op > DFTU_AGG_SET_UNION) {
+            DFTRACER_UTILS_LOG_ERROR(
+                "Plugin agg '%s' aggregate %u has an out-of-range op code %d",
+                name, i, specs[i].op);
+            return nullptr;
+        }
+        if (!specs[i].out || !specs[i].out[0]) {
+            DFTRACER_UTILS_LOG_ERROR(
+                "Plugin agg '%s' aggregate %u is missing an output name", name,
+                i);
+            return nullptr;
+        }
+        dataframe::AggSpec s;
+        s.op = static_cast<dataframe::AggOp>(specs[i].op);
+        s.value_col = column_index(specs[i].value);
+        s.out = specs[i].out;
+        s.param = specs[i].param;
+        s.by_col = column_index(specs[i].by);
+        aspecs.push_back(std::move(s));
+    }
+
+    try {
+        auto acc = std::make_unique<AggAccum>();
+        acc->name = name;
+        acc->key_names.reserve(key_n);
+        for (std::uint32_t i = 0; i < key_n; ++i)
+            acc->key_names.emplace_back(key_names[i] ? key_names[i] : "");
+        acc->value_names = std::move(value_names);
+        acc->state = dataframe::agg_new(std::move(aspecs));
+        AggAccum* raw = acc.get();
+        aggs_.push_back(std::move(acc));
+        agg_index_.emplace(key, aggs_.size() - 1);
+        return reinterpret_cast<::dftu_agg*>(raw);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void PluginFold::agg_accumulate(::dftu_agg* a, const ::dftu_dataframe* df) {
+    if (!a || !df) return;
+    AggAccum& acc = *reinterpret_cast<AggAccum*>(a);
+    if (!acc.state) return;
+
+    // Series wraps and frees each shared handle; a missing column yields a null
+    // handle, so skip the whole batch rather than accumulate a partial key.
+    std::vector<dataframe::Series> owned;
+    owned.reserve(acc.key_names.size() + acc.value_names.size());
+    auto column = [&](const std::string& n) -> const dataframe::Series* {
+        dftu_series* h = dftu_dataframe_column(df, n.c_str());
+        if (!h) return nullptr;
+        owned.emplace_back(h);
+        return &owned.back();
+    };
+
+    std::vector<const dataframe::Series*> keys;
+    keys.reserve(acc.key_names.size());
+    for (const std::string& n : acc.key_names) {
+        const dataframe::Series* c = column(n);
+        if (!c) return;
+        keys.push_back(c);
+    }
+    std::vector<const dataframe::Series*> values;
+    values.reserve(acc.value_names.size());
+    for (const std::string& n : acc.value_names) {
+        const dataframe::Series* c = column(n);
+        if (!c) return;
+        values.push_back(c);
+    }
+
+    try {
+        dataframe::agg_accumulate(*acc.state, keys, values);
+    } catch (...) {
+        DFTRACER_UTILS_LOG_ERROR("Plugin agg '%s' accumulate failed",
+                                 acc.name.c_str());
+    }
 }
 
 MapAccum* PluginFold::map_get_product(const char* name,
@@ -3018,6 +3153,21 @@ void PluginFold::merge(Fold& other) {
     o.map_spill_dirs_.clear();
     o.map_spill_cur_dir_.clear();
     if (o.map_spill_failed_) map_spill_failed_ = true;
+
+    // Fold each worker's aggregation accumulators into this master by name via
+    // the engine's single merge path (agg_merge). An accumulator new to the
+    // master is moved in whole; a shared name merges the two AggStates.
+    for (auto& [key, idx] : o.agg_index_) {
+        std::unique_ptr<AggAccum>& src = o.aggs_[idx];
+        if (!src || !src->state) continue;
+        auto it = agg_index_.find(key);
+        if (it == agg_index_.end()) {
+            aggs_.push_back(std::move(src));
+            agg_index_.emplace(key, aggs_.size() - 1);
+        } else if (aggs_[it->second]->state) {
+            dataframe::agg_merge(*aggs_[it->second]->state, *src->state);
+        }
+    }
 }
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
@@ -3570,6 +3720,32 @@ void PluginFold::materialize_maps() {
 #endif
 }
 
+void PluginFold::materialize_aggs() {
+    if (!named_results_) return;
+    for (std::unique_ptr<AggAccum>& acc : aggs_) {
+        if (!acc || !acc->state) continue;
+        try {
+            dataframe::DataFrame out =
+                dataframe::agg_finalize(*acc->state, acc->key_names);
+            // Move the columns into a dftu_dataframe handle (the engine's own
+            // ABI boundary type) so the result crosses as our DataFrame, no
+            // Arrow round-trip.
+            std::vector<dftu_series*> handles;
+            handles.reserve(out.columns.size());
+            std::vector<const char*> names;
+            names.reserve(out.names.size());
+            for (dataframe::Series& c : out.columns)
+                handles.push_back(c.release());
+            for (const std::string& n : out.names) names.push_back(n.c_str());
+            dftu_dataframe* h =
+                dftu_dataframe_new(names.data(), handles.data(),
+                                   static_cast<std::int32_t>(handles.size()));
+            if (h) named_results_->emit_frame(acc->name.c_str(), h);
+        } catch (...) {
+        }
+    }
+}
+
 coro::CoroTask<bool> PluginFold::finalize(const CoverageSet&) {
     // Publish this fold's merged handles before on_finalize so a consumer
     // finalizing later in fold order can read them via result().
@@ -3577,6 +3753,7 @@ coro::CoroTask<bool> PluginFold::finalize(const CoverageSet&) {
         for (const auto& [key, idx] : handle_index_)
             results_->values[key] = handles_[idx].to_value();
     materialize_maps();
+    materialize_aggs();
     // Runs reloaded and emitted; drop the temp dirs (the destructor repeats
     // this on an exceptional unwind).
     remove_spill_dirs();

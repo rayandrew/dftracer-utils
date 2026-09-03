@@ -6,6 +6,7 @@
  */
 
 #include <dftracer/utils/core/common/export.h>
+#include <dftracer/utils/dataframe/agg_op_codes.h> /* DFTU_AGG_* for dftu_agg_col */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -236,6 +237,7 @@ typedef struct dftu_io {
 #define DFTU_EXT_HANDLES "dftu.ext.handles@1"
 #define DFTU_EXT_RESULT "dftu.ext.result@1"
 #define DFTU_EXT_MAP "dftu.ext.map@1"
+#define DFTU_EXT_AGG "dftu.ext.agg@1"
 
 typedef struct dftu_ext_coro {
     dftu_task* (*spawn)(void* h, dftu_work_fn fn, void* arg);
@@ -768,6 +770,13 @@ typedef struct dftu_ext_result {
        finalize/collision semantics. */
     int (*emit_arrow)(void* h, const char* name, struct ArrowArray* a,
                       struct ArrowSchema* s);
+    /** Emit a named native dataframe result; the host TAKES OWNERSHIP of the
+       dftu_dataframe handle (do not free it after). The plugin ABI is internal,
+       so a columnar result crosses it as our own dataframe with no Arrow
+       round-trip; the Arrow edge is the external (Python) reader's concern. 0
+       ok, -1 on error. Same finalize/collision semantics. Appended after
+       emit_arrow; a host predating it leaves the slot NULL. */
+    int (*emit_frame)(void* h, const char* name, dftu_dataframe* df);
 } dftu_ext_result;
 
 /** Join kind for map_declare_join; the host maps this to its internal enum. */
@@ -926,6 +935,49 @@ typedef struct dftu_ext_map {
     void (*map_add_row)(void* h, dftu_map* m, const int64_t* key,
                         const dftu_row_val* vals, uint32_t n);
 } dftu_ext_map;
+
+/** Host-owned per-plugin cross-batch aggregation accumulator, fetched via
+   dftu_host::get_extension(DFTU_EXT_AGG). Unlike dftu_ext_map (a monoid map the
+   plugin folds into by hand), this wraps the dataframe engine's mergeable
+   AggState directly, so a fold gets the engine's full op vocab (Pct, Hist,
+   SetUnion, ArgMax, ...), out-of-core spill, and the single merge path the
+   Views use. The host merges same-named accumulators across worker slices and
+   finalizes each at scan end to a native dataframe (the key columns, then one
+   column per aggregate), returned to run() under `name`. */
+typedef struct dftu_agg dftu_agg;
+
+/** One aggregate for a dftu_ext_agg accumulator. `op` is a DFTU_AGG_* code (the
+   dftu_agg_op enum, kept a fixed-width int at the seam for ABI stability); a
+   code outside the DFTU_AGG_* range makes agg_new return NULL. `value` names
+   the value column in each accumulated batch dataframe (NULL for
+   DFTU_AGG_COUNT, the group row count); `out` names the result column; `param`
+   is the quantile in [0,1] for DFTU_AGG_PCT (0 otherwise); `by` names the
+   column maximized for DFTU_AGG_ARGMAX (NULL otherwise). All names are borrowed
+   for the agg_new call only. */
+typedef struct dftu_agg_col {
+    int32_t op;
+    const char* value;
+    const char* out;
+    double param;
+    const char* by;
+} dftu_agg_col;
+
+typedef struct dftu_ext_agg {
+    /** Get-or-create a named accumulator grouping by the `key_n` columns named
+       in `key_names` and computing each of `spec_n` aggregates. Returns a
+       stable handle owned by the host (freed at fold teardown, never by the
+       plugin); NULL on a bad op code, a missing output name, or allocation
+       failure. A name seen before returns the existing handle and ignores the
+       new spec. Safe from any slice thread on that slice's host. */
+    dftu_agg* (*agg_new)(void* h, const char* name,
+                         const char* const* key_names, uint32_t key_n,
+                         const dftu_agg_col* specs, uint32_t spec_n);
+    /** Fold one batch into `a`: each key and value column is looked up by name
+       in `df` (host-owned, borrowed for the call) and accumulated. A batch
+       missing any referenced column is skipped. Serial per accumulator; one
+       slice's accumulator is touched by one thread. */
+    void (*agg_accumulate)(void* h, dftu_agg* a, const dftu_dataframe* df);
+} dftu_ext_agg;
 
 /** Severity for dftu_host::log; higher is more severe. Mirrors the host's own
    logger levels, so a plugin's line is gated by the same threshold. */
