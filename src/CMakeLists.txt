@@ -1537,6 +1537,14 @@ if(DFTRACER_UTILS_BUILD_PYTHON)
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/sst_distribution.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series_detail.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series/arith.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series/math.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series/window.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series/stats.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series/reduce.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series/string.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/series/arrow.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/dataframe.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/dataframe.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/lazyframe.cpp
