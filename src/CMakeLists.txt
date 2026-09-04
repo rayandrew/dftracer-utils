@@ -462,6 +462,7 @@ endforeach()
 
 set(DFTRACER_UTILS_VEC_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/abi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/abi_enum_lockstep.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/op_registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/agg.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/agg/state.cpp
