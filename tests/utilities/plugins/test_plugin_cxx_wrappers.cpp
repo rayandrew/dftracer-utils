@@ -432,7 +432,7 @@ TEST_SUITE("PluginCxxConfigArrays") {
 
         // Absent / wrong-kind keys yield empty vectors and a null array().
         CHECK(cfg.get_int_array("missing").empty());
-        CHECK(cfg.array("missing") == nullptr);
+        CHECK(cfg.array("missing").is_null());
     }
 }
 

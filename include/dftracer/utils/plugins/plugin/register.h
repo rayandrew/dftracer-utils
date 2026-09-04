@@ -18,6 +18,69 @@
 
 namespace dftracer::utils::plugins {
 
+/// Typed, non-owning view over one dftu_value node; a Slice may keep it since
+/// the host-owned config tree outlives it. Default-constructed (or an
+/// out-of-range/wrong-kind lookup) yields a null ConfigValue: kind() is
+/// ValueKind::Null and every predicate but is_null() is false.
+class ConfigValue {
+   public:
+    ConfigValue() = default;
+    explicit ConfigValue(const dftu_value* v) noexcept : v_(v) {}
+
+    ValueKind kind() const noexcept {
+        return v_ ? static_cast<ValueKind>(v_->kind) : ValueKind::Null;
+    }
+    bool is_null() const noexcept { return !v_ || v_->kind == DFTU_VAL_NULL; }
+    bool is_bool() const noexcept { return v_ && v_->kind == DFTU_VAL_BOOL; }
+    bool is_i64() const noexcept { return v_ && v_->kind == DFTU_VAL_I64; }
+    bool is_f64() const noexcept { return v_ && v_->kind == DFTU_VAL_F64; }
+    bool is_str() const noexcept { return v_ && v_->kind == DFTU_VAL_STR; }
+    bool is_array() const noexcept { return v_ && v_->kind == DFTU_VAL_ARRAY; }
+    bool is_object() const noexcept {
+        return v_ && v_->kind == DFTU_VAL_OBJECT;
+    }
+
+    bool as_bool(bool dflt = false) const noexcept {
+        return dftu_as_bool(v_, dflt ? 1 : 0) != 0;
+    }
+    std::int64_t as_i64(std::int64_t dflt = 0) const noexcept {
+        return dftu_as_i64(v_, dflt);
+    }
+    double as_f64(double dflt = 0.0) const noexcept {
+        return dftu_as_f64(v_, dflt);
+    }
+    std::string_view as_str(std::string_view dflt = {}) const noexcept {
+        std::uint32_t n = 0;
+        const char* s = dftu_as_str(v_, &n);
+        return s ? std::string_view{s, n} : dflt;
+    }
+
+    /// ARRAY child count or OBJECT member count; 0 for any other kind.
+    std::uint32_t size() const noexcept {
+        return (is_array() || is_object()) ? v_->count : 0;
+    }
+    /// Element `i` of an ARRAY; out of range or not an array yields null.
+    ConfigValue operator[](std::uint32_t i) const noexcept {
+        return (is_array() && i < v_->count) ? ConfigValue{&v_->as.items[i]}
+                                             : ConfigValue{};
+    }
+    /// Member `key` of an OBJECT; absent or not an object yields null.
+    ConfigValue operator[](std::string_view key) const noexcept {
+        if (!is_object()) return ConfigValue{};
+        for (std::uint32_t i = 0; i < v_->count; ++i) {
+            const dftu_member& m = v_->as.members[i];
+            if (std::string_view{m.key, m.key_len} == key)
+                return ConfigValue{m.value};
+        }
+        return ConfigValue{};
+    }
+
+    const dftu_value* raw() const noexcept { return v_; }
+
+   private:
+    const dftu_value* v_ = nullptr;
+};
+
 /** View over the config tree; a Slice may keep returned string_views since the
    host-owned tree outlives it. */
 class Config {
@@ -55,17 +118,21 @@ class Config {
         return Config{(v && v->kind == DFTU_VAL_OBJECT) ? v : nullptr};
     }
 
-    /// The raw ARRAY value at `key`, or null if absent or not an array. Iterate
-    /// its elements as `arr->as.items[i]` over `arr->count`.
-    const dftu_value* array(std::string_view key) const {
-        const dftu_value* v = find(key);
-        return (v && v->kind == DFTU_VAL_ARRAY) ? v : nullptr;
+    /// Typed view of the value at `key`, of any kind (including ARRAY/OBJECT);
+    /// null if absent. Prefer this over raw() for walking nested config.
+    ConfigValue value(std::string_view key) const {
+        return ConfigValue{find(key)};
+    }
+    /// Typed view of the ARRAY at `key`; null if absent or not an array.
+    /// Iterate elements with ConfigValue::size()/operator[].
+    ConfigValue array(std::string_view key) const {
+        return ConfigValue{raw_array(key)};
     }
     /// The ARRAY at `key` coerced to int64 per element (dftu_as_i64 rules);
     /// empty if the key is absent or not an array.
     std::vector<std::int64_t> get_int_array(std::string_view key) const {
         std::vector<std::int64_t> out;
-        if (const dftu_value* a = array(key)) {
+        if (const dftu_value* a = raw_array(key)) {
             out.reserve(a->count);
             for (std::uint32_t i = 0; i < a->count; ++i)
                 out.push_back(dftu_as_i64(&a->as.items[i], 0));
@@ -76,7 +143,7 @@ class Config {
     /// empty if the key is absent or not an array.
     std::vector<double> get_double_array(std::string_view key) const {
         std::vector<double> out;
-        if (const dftu_value* a = array(key)) {
+        if (const dftu_value* a = raw_array(key)) {
             out.reserve(a->count);
             for (std::uint32_t i = 0; i < a->count; ++i)
                 out.push_back(dftu_as_f64(&a->as.items[i], 0.0));
@@ -88,7 +155,7 @@ class Config {
     /// absent or not an array.
     std::vector<std::string_view> get_string_array(std::string_view key) const {
         std::vector<std::string_view> out;
-        if (const dftu_value* a = array(key)) {
+        if (const dftu_value* a = raw_array(key)) {
             out.reserve(a->count);
             for (std::uint32_t i = 0; i < a->count; ++i) {
                 const dftu_value& e = a->as.items[i];
@@ -104,6 +171,11 @@ class Config {
     const dftu_value* raw() const { return root_; }
 
    private:
+    const dftu_value* raw_array(std::string_view key) const {
+        const dftu_value* v = find(key);
+        return (v && v->kind == DFTU_VAL_ARRAY) ? v : nullptr;
+    }
+
     const dftu_value* root_ = nullptr;
 };
 

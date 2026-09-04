@@ -123,6 +123,67 @@ enum class JoinType : std::int32_t {
     Full = DFTU_JOIN_FULL
 };
 
+/// Scoped mirror of dftu_phase for Event::phase; each enumerator is its ABI
+/// constant, so static_cast<dftu_phase> recovers the raw value.
+enum class Phase : std::int32_t {
+    Unknown = DFTU_PH_UNKNOWN,
+    Complete = DFTU_PH_COMPLETE,
+    Counter = DFTU_PH_COUNTER,
+    Aggregated = DFTU_PH_AGGREGATED,
+    Metadata = DFTU_PH_METADATA
+};
+static_assert(static_cast<dftu_phase>(Phase::Unknown) == DFTU_PH_UNKNOWN);
+static_assert(static_cast<dftu_phase>(Phase::Complete) == DFTU_PH_COMPLETE);
+static_assert(static_cast<dftu_phase>(Phase::Counter) == DFTU_PH_COUNTER);
+static_assert(static_cast<dftu_phase>(Phase::Aggregated) == DFTU_PH_AGGREGATED);
+static_assert(static_cast<dftu_phase>(Phase::Metadata) == DFTU_PH_METADATA);
+
+/// Scoped mirror of dftu_log_level for Host::log; each enumerator is its ABI
+/// constant, so static_cast<dftu_log_level> recovers the raw value.
+enum class LogLevel : std::int32_t {
+    Trace = DFTU_LOG_TRACE,
+    Debug = DFTU_LOG_DEBUG,
+    Info = DFTU_LOG_INFO,
+    Warn = DFTU_LOG_WARN,
+    Error = DFTU_LOG_ERROR
+};
+static_assert(static_cast<dftu_log_level>(LogLevel::Trace) == DFTU_LOG_TRACE);
+static_assert(static_cast<dftu_log_level>(LogLevel::Debug) == DFTU_LOG_DEBUG);
+static_assert(static_cast<dftu_log_level>(LogLevel::Info) == DFTU_LOG_INFO);
+static_assert(static_cast<dftu_log_level>(LogLevel::Warn) == DFTU_LOG_WARN);
+static_assert(static_cast<dftu_log_level>(LogLevel::Error) == DFTU_LOG_ERROR);
+
+/// Scoped mirror of dftu_arg_kind for Arg::kind; each enumerator is its ABI
+/// constant, so static_cast<dftu_arg_kind> recovers the raw value.
+enum class ArgKind : std::int32_t {
+    F64 = DFTU_ARG_F64,
+    I64 = DFTU_ARG_I64,
+    Str = DFTU_ARG_STR
+};
+static_assert(static_cast<dftu_arg_kind>(ArgKind::F64) == DFTU_ARG_F64);
+static_assert(static_cast<dftu_arg_kind>(ArgKind::I64) == DFTU_ARG_I64);
+static_assert(static_cast<dftu_arg_kind>(ArgKind::Str) == DFTU_ARG_STR);
+
+/// Scoped mirror of dftu_value_kind for ConfigValue::kind; each enumerator is
+/// its ABI constant, so static_cast<dftu_value_kind> recovers the raw value.
+enum class ValueKind : std::int32_t {
+    Null = DFTU_VAL_NULL,
+    Bool = DFTU_VAL_BOOL,
+    I64 = DFTU_VAL_I64,
+    F64 = DFTU_VAL_F64,
+    Str = DFTU_VAL_STR,
+    Array = DFTU_VAL_ARRAY,
+    Object = DFTU_VAL_OBJECT
+};
+static_assert(static_cast<dftu_value_kind>(ValueKind::Null) == DFTU_VAL_NULL);
+static_assert(static_cast<dftu_value_kind>(ValueKind::Bool) == DFTU_VAL_BOOL);
+static_assert(static_cast<dftu_value_kind>(ValueKind::I64) == DFTU_VAL_I64);
+static_assert(static_cast<dftu_value_kind>(ValueKind::F64) == DFTU_VAL_F64);
+static_assert(static_cast<dftu_value_kind>(ValueKind::Str) == DFTU_VAL_STR);
+static_assert(static_cast<dftu_value_kind>(ValueKind::Array) == DFTU_VAL_ARRAY);
+static_assert(static_cast<dftu_value_kind>(ValueKind::Object) ==
+              DFTU_VAL_OBJECT);
+
 /// Scoped mirror of dftu_ver_op for Version::satisfies; each enumerator is its
 /// ABI constant, so static_cast<dftu_ver_op> recovers the raw value.
 enum class VerOp : std::int32_t {
@@ -183,6 +244,38 @@ class Version {
 
    private:
     dftu_version v_{};
+};
+
+/// Read view over a dftu_capability (built with capability()): a namespaced id
+/// plus semantic version, as returned to an author from a provider listing.
+class Capability {
+   public:
+    Capability() = default;
+    constexpr explicit Capability(dftu_capability c) noexcept : c_(c) {}
+
+    std::string_view id() const noexcept { return c_.id ? c_.id : ""; }
+    Version version() const noexcept { return Version{c_.ver}; }
+    dftu_capability raw() const noexcept { return c_; }
+
+   private:
+    dftu_capability c_{};
+};
+
+/// Read view over a dftu_requirement (built with requirement()): an id, a
+/// version constraint, and whether it is load-blocking.
+class Requirement {
+   public:
+    Requirement() = default;
+    constexpr explicit Requirement(dftu_requirement r) noexcept : r_(r) {}
+
+    std::string_view id() const noexcept { return r_.id ? r_.id : ""; }
+    VerOp op() const noexcept { return static_cast<VerOp>(r_.op); }
+    Version version() const noexcept { return Version{r_.ver}; }
+    bool required() const noexcept { return r_.required != 0; }
+    dftu_requirement raw() const noexcept { return r_; }
+
+   private:
+    dftu_requirement r_{};
 };
 
 /// Scoped mirror of dftu_agg_op for AggCol/Host::agg; each enumerator is its

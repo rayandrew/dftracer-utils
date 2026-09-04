@@ -223,7 +223,7 @@ TEST_CASE("plugin cxx: Batch view iterates typed Events") {
         CHECK(e.ts() == 1000 + i);
         CHECK(e.dur() == 10 * (i + 1));
         CHECK(e.has_dur());
-        CHECK(e.phase() == DFTU_PH_COMPLETE);
+        CHECK(e.phase() == dftracer::utils::plugins::Phase::Complete);
         CHECK(e.cat_id().raw() == cat);
         CHECK(e.cat(h) == "POSIX");
         CHECK(e.name(h) == "read");

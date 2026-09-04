@@ -57,6 +57,9 @@ class Host {
         h_->log(h_->h, static_cast<std::uint8_t>(level), msg.data(),
                 static_cast<std::uint32_t>(msg.size()));
     }
+    void log(LogLevel level, std::string_view msg) const {
+        log(static_cast<dftu_log_level>(level), msg);
+    }
 
     Io io() const { return Io{h_}; }
     AsyncOp await(dftu_task* t) const { return AsyncOp{t}; }
@@ -166,6 +169,10 @@ class Host {
         dftu_version v{};
         return provider_best(req, &v) ? std::optional<Version>{Version{v}}
                                       : std::nullopt;
+    }
+    /// Version-wrapped provider_best for a wrapped Requirement.
+    std::optional<Version> provider_best_v(const Requirement& req) const {
+        return provider_best_v(req.raw());
     }
 
     /// Caller owns the handle and must sketch_free it.
@@ -1022,7 +1029,7 @@ class Arg {
     StrId key_id() const noexcept { return StrId{a_->key}; }
     std::string_view key(const Host& h) const { return h.str(key_id()); }
 
-    dftu_arg_kind kind() const noexcept { return a_->kind; }
+    ArgKind kind() const noexcept { return static_cast<ArgKind>(a_->kind); }
     bool is_i64() const noexcept { return a_->kind == DFTU_ARG_I64; }
     bool is_f64() const noexcept { return a_->kind == DFTU_ARG_F64; }
     bool is_str() const noexcept { return a_->kind == DFTU_ARG_STR; }
@@ -1108,8 +1115,8 @@ class Event {
     std::uint64_t dur() const noexcept { return e_->dur; }
     /// Whether the event carried an explicit duration (a complete-phase event).
     bool has_dur() const noexcept { return e_->has_dur != 0; }
-    dftu_phase phase() const noexcept {
-        return static_cast<dftu_phase>(e_->phase);
+    Phase phase() const noexcept {
+        return static_cast<Phase>(static_cast<dftu_phase>(e_->phase));
     }
 
     /// Interned id of a string field; absent() (DFTU_STR_NONE) when not
