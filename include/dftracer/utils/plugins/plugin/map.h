@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -126,6 +127,11 @@ class Host {
         return q && qe && qe->query_matches &&
                qe->query_matches(h_->h, q, &e) != 0;
     }
+    /// Compile and wrap as a non-owning Query bound to this host; see
+    /// query_compile for lifetime.
+    class Query compile(std::string_view src) const;
+    /// compile() for a predicate built with `F`/`Field`.
+    class Query compile(const Expr& e) const;
 
     /// Capability-registry queries, meaningful during a comms resolve() (or any
     /// time after): how many plugins provide `cap_id` at any version.
@@ -146,6 +152,13 @@ class Host {
         const dftu_requirement& req) const {
         dftu_version v{};
         return provider_best(req, &v) ? std::optional<dftu_version>{v}
+                                      : std::nullopt;
+    }
+    /// Version-wrapped form of provider_best; nullopt if no provider satisfies
+    /// `req`.
+    std::optional<Version> provider_best_v(const dftu_requirement& req) const {
+        dftu_version v{};
+        return provider_best(req, &v) ? std::optional<Version>{Version{v}}
                                       : std::nullopt;
     }
 
@@ -236,6 +249,15 @@ class Host {
         return e && e->trace_read ? e->trace_read(h_->h, path, on_event, ud)
                                   : -1;
     }
+    /// Scan `path` (auto-indexed), invoking `fn` once per event as either
+    /// `fn(const Event&)` or `fn(const dftu_event&)`. `fn` is borrowed for the
+    /// call. 0 on success.
+    template <class Fn>
+    int trace_read(const char* path, Fn&& fn) const;
+
+    /// RAII trace writer for `path` (a gzip .pfw.gz); empty (`!writer`) if the
+    /// host lacks the trace group.
+    class TraceWriter trace_writer(const char* path) const;
 
     /// Get a host-owned parallel Writer for `path` with `num_workers` lanes
     /// (`gzip` != 0 compresses). The Writer is host-owned and scan-lifetime;
@@ -1122,6 +1144,108 @@ class Batch {
    private:
     const dftu_batch* b_;
 };
+
+template <class Fn>
+inline int Host::trace_read(const char* path, Fn&& fn) const {
+    auto thunk = [](const void* item, void* ud) {
+        const dftu_event& ev = *static_cast<const dftu_event*>(item);
+        auto& f = *static_cast<std::decay_t<Fn>*>(ud);
+        if constexpr (std::is_invocable_v<std::decay_t<Fn>&, const Event&>)
+            f(Event{ev});
+        else
+            f(ev);
+    };
+    return trace_read(
+        path, thunk,
+        const_cast<void*>(static_cast<const void*>(std::addressof(fn))));
+}
+
+/// Non-owning view over a compiled dftu_query (see Host::compile). Host-owned
+/// and valid for the scan; the plugin never frees it.
+class Query {
+   public:
+    Query() = default;
+
+    explicit operator bool() const noexcept { return q_ != nullptr; }
+
+    bool matches(const dftu_event& e) const {
+        return host_.query_matches(q_, e);
+    }
+    bool matches(const Event& e) const { return matches(e.raw()); }
+
+    /// Borrowed handle; the host retains ownership. Null if unsupported.
+    dftu_query* raw() const noexcept { return q_; }
+
+   private:
+    friend class Host;
+    Query(Host host, dftu_query* q) noexcept : host_(host), q_(q) {}
+
+    Host host_{nullptr};
+    dftu_query* q_ = nullptr;
+};
+
+inline Query Host::compile(std::string_view src) const {
+    return Query{*this, query_compile(src)};
+}
+inline Query Host::compile(const Expr& e) const {
+    return Query{*this, query_compile(e)};
+}
+
+/// Move-only RAII owner of a host trace writer (see Host::trace_writer):
+/// opens a gzip .pfw.gz for writing, appends events, then closes exactly once,
+/// in close() or the destructor, whichever runs first.
+class TraceWriter {
+   public:
+    TraceWriter() = default;
+    TraceWriter(TraceWriter&& o) noexcept : host_(o.host_), w_(o.w_) {
+        o.w_ = nullptr;
+    }
+    TraceWriter& operator=(TraceWriter&& o) noexcept {
+        if (this != &o) {
+            close();
+            host_ = o.host_;
+            w_ = o.w_;
+            o.w_ = nullptr;
+        }
+        return *this;
+    }
+    TraceWriter(const TraceWriter&) = delete;
+    TraceWriter& operator=(const TraceWriter&) = delete;
+    ~TraceWriter() { close(); }
+
+    explicit operator bool() const noexcept { return w_ != nullptr; }
+
+    int write(std::span<const dftu_event> evs) const {
+        return w_ ? host_.trace_write(w_, evs.data(),
+                                      static_cast<std::uint32_t>(evs.size()))
+                  : -1;
+    }
+    int write(const Batch& b) const {
+        return write(
+            std::span<const dftu_event>{b.raw().events, b.raw().count});
+    }
+    /// Idempotent: a no-op returning 0 once already closed.
+    int close() {
+        int rc = w_ ? host_.trace_close(w_) : 0;
+        w_ = nullptr;
+        return rc;
+    }
+
+    /// Borrowed handle; the TraceWriter retains ownership. Null if unsupported.
+    dftu_trace_writer* raw() const noexcept { return w_; }
+
+   private:
+    friend class Host;
+    TraceWriter(Host host, dftu_trace_writer* w) noexcept
+        : host_(host), w_(w) {}
+
+    Host host_{nullptr};
+    dftu_trace_writer* w_ = nullptr;
+};
+
+inline TraceWriter Host::trace_writer(const char* path) const {
+    return TraceWriter{*this, trace_open_write(path)};
+}
 
 /// dftu_row_val factory for a u64 (integer-monoid) contribution to component
 /// `comp`.

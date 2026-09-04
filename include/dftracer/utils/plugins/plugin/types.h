@@ -123,6 +123,68 @@ enum class JoinType : std::int32_t {
     Full = DFTU_JOIN_FULL
 };
 
+/// Scoped mirror of dftu_ver_op for Version::satisfies; each enumerator is its
+/// ABI constant, so static_cast<dftu_ver_op> recovers the raw value.
+enum class VerOp : std::int32_t {
+    Ge = DFTU_VER_GE,
+    Gt = DFTU_VER_GT,
+    Le = DFTU_VER_LE,
+    Lt = DFTU_VER_LT,
+    Eq = DFTU_VER_EQ,
+    Caret = DFTU_VER_CARET,
+    Tilde = DFTU_VER_TILDE
+};
+static_assert(static_cast<dftu_ver_op>(VerOp::Ge) == DFTU_VER_GE);
+static_assert(static_cast<dftu_ver_op>(VerOp::Gt) == DFTU_VER_GT);
+static_assert(static_cast<dftu_ver_op>(VerOp::Le) == DFTU_VER_LE);
+static_assert(static_cast<dftu_ver_op>(VerOp::Lt) == DFTU_VER_LT);
+static_assert(static_cast<dftu_ver_op>(VerOp::Eq) == DFTU_VER_EQ);
+static_assert(static_cast<dftu_ver_op>(VerOp::Caret) == DFTU_VER_CARET);
+static_assert(static_cast<dftu_ver_op>(VerOp::Tilde) == DFTU_VER_TILDE);
+
+/// Wraps a dftu_version (major.minor.patch). Comparisons and satisfies() defer
+/// to the ABI's dftu_version_cmp / dftu_version_satisfies.
+class Version {
+   public:
+    constexpr Version() noexcept = default;
+    constexpr explicit Version(dftu_version v) noexcept : v_(v) {}
+    constexpr Version(std::uint16_t major, std::uint16_t minor,
+                      std::uint16_t patch) noexcept
+        : v_{major, minor, patch} {}
+
+    constexpr std::uint16_t major() const noexcept { return v_.major; }
+    constexpr std::uint16_t minor() const noexcept { return v_.minor; }
+    constexpr std::uint16_t patch() const noexcept { return v_.patch; }
+    constexpr dftu_version raw() const noexcept { return v_; }
+
+    friend bool operator==(Version a, Version b) noexcept {
+        return dftu_version_cmp(a.v_, b.v_) == 0;
+    }
+    friend bool operator!=(Version a, Version b) noexcept { return !(a == b); }
+    friend bool operator<(Version a, Version b) noexcept {
+        return dftu_version_cmp(a.v_, b.v_) < 0;
+    }
+    friend bool operator<=(Version a, Version b) noexcept {
+        return dftu_version_cmp(a.v_, b.v_) <= 0;
+    }
+    friend bool operator>(Version a, Version b) noexcept {
+        return dftu_version_cmp(a.v_, b.v_) > 0;
+    }
+    friend bool operator>=(Version a, Version b) noexcept {
+        return dftu_version_cmp(a.v_, b.v_) >= 0;
+    }
+
+    bool satisfies(dftu_ver_op op, Version want) const noexcept {
+        return dftu_version_satisfies(v_, op, want.v_) != 0;
+    }
+    bool satisfies(VerOp op, Version want) const noexcept {
+        return satisfies(static_cast<dftu_ver_op>(op), want);
+    }
+
+   private:
+    dftu_version v_{};
+};
+
 /// Opaque strong handle for an interned-string id (the C ABI's dftu_str, which
 /// is an id, not bytes). Compare and hash by identity; resolve to bytes with
 /// Host::str. absent() is the DFTU_STR_NONE sentinel. raw() exposes the
