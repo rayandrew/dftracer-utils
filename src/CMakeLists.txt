@@ -1557,6 +1557,16 @@ if(DFTRACER_UTILS_BUILD_PYTHON)
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/batch_indexer.h
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer_detail.h
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/plan.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/builders.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/collect.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/session.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/join.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/materialize.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/export.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/stream.cpp
+      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/trace_viewer/containment.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/plugin_host.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/op_runner.cpp
       ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/python/ops.cpp
