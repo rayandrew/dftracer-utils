@@ -367,6 +367,117 @@ class AggCol {
     const char* by_ = nullptr;
 };
 
+/// Per-op AggCol factories: each function's signature takes exactly the
+/// fields its DFTU_AGG_* op consumes (see dftu_agg_col in abi.h), so a
+/// mismatched param combination (e.g. a quantile on sum()) fails to compile
+/// instead of silently building an AggCol with an unused or missing field.
+namespace agg {
+
+/// Group row count; no value column.
+inline AggCol count(const char* out) noexcept {
+    return AggCol(AggOp::Count).out(out);
+}
+
+/// Count of non-null values in `value` (Int64), distinct from count()'s row
+/// count.
+inline AggCol count_valid(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::CountValid).value(value).out(out);
+}
+
+inline AggCol sum(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Sum).value(value).out(out);
+}
+inline AggCol min(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Min).value(value).out(out);
+}
+inline AggCol max(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Max).value(value).out(out);
+}
+inline AggCol mean(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Mean).value(value).out(out);
+}
+/// Sample variance.
+inline AggCol var(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Var).value(value).out(out);
+}
+/// Sample standard deviation.
+inline AggCol std_dev(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Std).value(value).out(out);
+}
+/// Population skewness.
+inline AggCol skew(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Skew).value(value).out(out);
+}
+/// Excess (population) kurtosis.
+inline AggCol kurt(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Kurt).value(value).out(out);
+}
+/// First non-null value in row order (order-independent merge).
+inline AggCol first(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::First).value(value).out(out);
+}
+/// Last non-null value in row order.
+inline AggCol last(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Last).value(value).out(out);
+}
+inline AggCol sumsq(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Sumsq).value(value).out(out);
+}
+/// Distinct String values of `value`, sorted and joined.
+inline AggCol set_union(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::SetUnion).value(value).out(out);
+}
+/// The DDSketch histogram over `value`: a list<struct{lo,hi,count}> column of
+/// the sketch's occupied bins (no bin-count parameter).
+inline AggCol hist(const char* value, const char* out) noexcept {
+    return AggCol(AggOp::Hist).value(value).out(out);
+}
+
+/// A DDSketch quantile of `value`; `q` is the level in [0, 1].
+inline AggCol pct(const char* value, const char* out, double q) noexcept {
+    return AggCol(AggOp::Pct).value(value).out(out).param(q);
+}
+
+/// The String repr of `value` at the row maximizing `by`.
+inline AggCol argmax(const char* value, const char* out,
+                     const char* by) noexcept {
+    return AggCol(AggOp::Argmax).value(value).out(out).by(by);
+}
+
+/// Occupancy reductions over a (ts, dur) interval pair per group: `ts` is the
+/// event start column, `dur` its duration column, and `occ_cell_us` an
+/// optional endpoint-snap tolerance (0 = exact). Busy is the exact
+/// interval-union length (us) where depth > 0.
+inline AggCol busy(const char* ts, const char* dur, const char* out,
+                   double occ_cell_us = 0.0) noexcept {
+    return AggCol(AggOp::Busy).value(ts).by(dur).out(out).param(occ_cell_us);
+}
+/// sum(dur) / busy over the same (ts, dur) window; see busy().
+inline AggCol concurrency(const char* ts, const char* dur, const char* out,
+                          double occ_cell_us = 0.0) noexcept {
+    return AggCol(AggOp::Concurrency)
+        .value(ts)
+        .by(dur)
+        .out(out)
+        .param(occ_cell_us);
+}
+/// busy / (max_end - min_ts) over the same (ts, dur) window; see busy().
+inline AggCol utilization(const char* ts, const char* dur, const char* out,
+                          double occ_cell_us = 0.0) noexcept {
+    return AggCol(AggOp::Utilization)
+        .value(ts)
+        .by(dur)
+        .out(out)
+        .param(occ_cell_us);
+}
+/// Peak overlap depth over the same (ts, dur) window; see busy().
+inline AggCol active(const char* ts, const char* dur, const char* out,
+                     double occ_cell_us = 0.0) noexcept {
+    return AggCol(AggOp::Active).value(ts).by(dur).out(out).param(occ_cell_us);
+}
+
+}  // namespace agg
+
 /// Opaque strong handle for an interned-string id (the C ABI's dftu_str, which
 /// is an id, not bytes). Compare and hash by identity; resolve to bytes with
 /// Host::str. absent() is the DFTU_STR_NONE sentinel. raw() exposes the

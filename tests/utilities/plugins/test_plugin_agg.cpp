@@ -12,6 +12,7 @@
 // arrow_abi.
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/agg_op_codes.h>
+#include <dftracer/utils/plugins/plugin.h>
 #include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/fold_event.h>
@@ -26,10 +27,13 @@
 using dftracer::utils::CoroScope;
 using dftracer::utils::Runtime;
 using dftracer::utils::StringIntern;
+using dftracer::utils::plugins::AggCol;
+using dftracer::utils::plugins::Host;
 using dftracer::utils::plugins::NamedResultRegistry;
 using dftracer::utils::plugins::OwnedDataFrame;
 using dftracer::utils::plugins::PluginFold;
 using dftracer::utils::trace::RecordPhase;
+namespace agg = dftracer::utils::plugins::agg;
 namespace coro = dftracer::utils::coro;
 namespace views = dftracer::utils::trace::views;
 using views::detail::FoldBatch;
@@ -69,6 +73,38 @@ FoldEvent evt(StringIntern& intern, const char* cat, const char* name,
     dftu_agg* a = agg->agg_new(host->h, "by_cat", keys, 1, specs, 3);
     if (a) agg->agg_accumulate(host->h, a, df);
     return nullptr;
+}
+
+// Same accumulator, built through the agg:: factories + Host::agg instead of
+// raw dftu_agg_col structs, proving each factory produces the same wire spec.
+::dftu_task* agg_factory_on_batch_columns(void* slice, const dftu_dataframe* df,
+                                          const dftu_host* host) {
+    (void)slice;
+    Host h(host);
+    const auto acc =
+        h.agg("by_cat_factory", {"cat"},
+              {agg::mean("dur", "mean_dur"), agg::pct("dur", "p50_dur", 0.5)});
+    if (acc) acc.accumulate(df);
+    return nullptr;
+}
+
+dftu_plugin make_agg_factory_plugin() {
+    dftu_plugin p{};
+    p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
+    p.needs = [](void*) -> std::uint32_t { return 0; };
+    p.plan_query = [](void*) -> const char* { return nullptr; };
+    p.make_slice = [](void*) -> void* {
+        static int sentinel;
+        return &sentinel;
+    };
+    p.merge = [](void*, void*) {};
+    p.on_finalize = [](void*, const dftu_host*) -> ::dftu_task* {
+        return nullptr;
+    };
+    p.destroy_slice = [](void*) {};
+    p.destroy = [](void*) {};
+    p.on_batch_columns = agg_factory_on_batch_columns;
+    return p;
 }
 
 dftu_plugin make_agg_plugin() {
@@ -236,4 +272,95 @@ TEST_CASE("DFTU_EXT_AGG: cross-batch grouped aggregation, engine-backed") {
     dftu_series_free(valcol);
     dftu_series_free(gk);
     dftu_series_free(gv[0]);
+}
+
+TEST_CASE(
+    "agg:: factories build the same dftu_agg_col wire fields as the raw "
+    "builder") {
+    const AggCol mean_c = agg::mean("dur", "mean_dur");
+    const dftu_agg_col mean_raw = mean_c.raw();
+    CHECK(mean_raw.op == DFTU_AGG_MEAN);
+    CHECK(std::string(mean_raw.value) == "dur");
+    CHECK(std::string(mean_raw.out) == "mean_dur");
+    CHECK(mean_raw.by == nullptr);
+
+    const dftu_agg_col pct_raw = agg::pct("dur", "p50_dur", 0.5).raw();
+    CHECK(pct_raw.op == DFTU_AGG_PCT);
+    CHECK(std::string(pct_raw.value) == "dur");
+    CHECK(pct_raw.param == doctest::Approx(0.5));
+    CHECK(pct_raw.by == nullptr);
+
+    const dftu_agg_col count_raw = agg::count("n").raw();
+    CHECK(count_raw.op == DFTU_AGG_COUNT);
+    CHECK(count_raw.value == nullptr);
+    CHECK(std::string(count_raw.out) == "n");
+
+    const dftu_agg_col argmax_raw =
+        agg::argmax("name", "name_at_max", "dur").raw();
+    CHECK(argmax_raw.op == DFTU_AGG_ARGMAX);
+    CHECK(std::string(argmax_raw.value) == "name");
+    CHECK(std::string(argmax_raw.by) == "dur");
+
+    const dftu_agg_col busy_raw = agg::busy("ts", "dur", "busy_us", 2.0).raw();
+    CHECK(busy_raw.op == DFTU_AGG_BUSY);
+    CHECK(std::string(busy_raw.value) == "ts");
+    CHECK(std::string(busy_raw.by) == "dur");
+    CHECK(busy_raw.param == doctest::Approx(2.0));
+}
+
+TEST_CASE(
+    "agg:: factories through Host::agg accumulate the same as raw dftu_agg_col "
+    "specs") {
+    StringIntern intern;
+    dftu_plugin p = make_agg_factory_plugin();
+    NamedResultRegistry named;
+    PluginFold master(&p, intern, nullptr, &named);
+
+    std::vector<std::vector<FoldEvent>> slices = {
+        {evt(intern, "POSIX", "read", 10), evt(intern, "POSIX", "write", 20),
+         evt(intern, "STDIO", "open", 5)},
+        {evt(intern, "POSIX", "read", 30), evt(intern, "STDIO", "close", 7)},
+    };
+    for (const auto& evs : slices) {
+        auto slice = master.slice();
+        auto* pf = static_cast<PluginFold*>(slice.get());
+        ScanUnit unit{};
+        pf->step(FoldBatch{std::span<const FoldEvent>(evs), unit, {}});
+        master.merge(*pf);
+    }
+    finalize_now(master);
+
+    auto it = named.results().find("by_cat_factory");
+    REQUIRE(it != named.results().end());
+    REQUIRE(std::holds_alternative<OwnedDataFrame>(it->second));
+    dftu_dataframe* out = std::get<OwnedDataFrame>(it->second).handle;
+    REQUIRE(out != nullptr);
+    const std::int64_t n = dftu_dataframe_num_rows(out);
+    REQUIRE(n == 2);
+
+    dftu_series* cat = dftu_dataframe_column(out, "cat");
+    dftu_series* mean_dur = dftu_dataframe_column(out, "mean_dur");
+    dftu_series* p50_dur = dftu_dataframe_column(out, "p50_dur");
+    REQUIRE(cat);
+    REQUIRE(mean_dur);
+    REQUIRE(p50_dur);
+
+    std::map<std::string, double> got_mean;
+    std::map<std::string, double> got_p50;
+    for (std::int64_t r = 0; r < n; ++r) {
+        std::string k = str_at(cat, r);
+        got_mean[k] = num_at(mean_dur, r);
+        got_p50[k] = num_at(p50_dur, r);
+    }
+
+    // POSIX: durs {10, 20, 30}; STDIO: durs {5, 7}.
+    CHECK(got_mean["POSIX"] == doctest::Approx(20.0));
+    CHECK(got_mean["STDIO"] == doctest::Approx(6.0));
+    CHECK(got_p50["POSIX"] == doctest::Approx(20.0).epsilon(0.05));
+    CHECK(got_p50["STDIO"] >= 5.0);
+    CHECK(got_p50["STDIO"] <= 7.0);
+
+    dftu_series_free(cat);
+    dftu_series_free(mean_dur);
+    dftu_series_free(p50_dur);
 }
