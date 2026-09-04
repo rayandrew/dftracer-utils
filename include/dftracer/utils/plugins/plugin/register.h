@@ -1,0 +1,372 @@
+#ifndef DFTRACER_UTILS_PLUGINS_PLUGIN_REGISTER_H
+#define DFTRACER_UTILS_PLUGINS_PLUGIN_REGISTER_H
+
+#include <dftracer/utils/plugins/abi.h>
+#include <dftracer/utils/plugins/plugin/async.h>
+#include <dftracer/utils/plugins/plugin/map.h>
+#include <dftracer/utils/plugins/plugin/types.h>
+
+#include <concepts>
+#include <coroutine>
+#include <cstdint>
+#include <cstring>
+#include <exception>
+#include <iterator>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace dftracer::utils::plugins {
+
+/** View over the config tree; a Slice may keep returned string_views since the
+   host-owned tree outlives it. */
+class Config {
+   public:
+    Config() = default;
+    explicit Config(const dftu_value* root) : root_(root) {}
+
+    const dftu_value* find(std::string_view key) const {
+        if (!root_ || root_->kind != DFTU_VAL_OBJECT) return nullptr;
+        for (std::uint32_t i = 0; i < root_->count; ++i) {
+            const dftu_member& m = root_->as.members[i];
+            if (std::string_view{m.key, m.key_len} == key) return m.value;
+        }
+        return nullptr;
+    }
+
+    std::string_view get(std::string_view key,
+                         std::string_view dflt = {}) const {
+        const dftu_value* v = find(key);
+        return (v && v->kind == DFTU_VAL_STR)
+                   ? std::string_view{v->as.str, v->count}
+                   : dflt;
+    }
+    std::int64_t get_int(std::string_view key, std::int64_t dflt = 0) const {
+        return dftu_as_i64(find(key), dflt);
+    }
+    double get_double(std::string_view key, double dflt = 0.0) const {
+        return dftu_as_f64(find(key), dflt);
+    }
+    bool get_bool(std::string_view key, bool dflt = false) const {
+        return dftu_as_bool(find(key), dflt ? 1 : 0) != 0;
+    }
+    Config child(std::string_view key) const {
+        const dftu_value* v = find(key);
+        return Config{(v && v->kind == DFTU_VAL_OBJECT) ? v : nullptr};
+    }
+
+    /// The raw ARRAY value at `key`, or null if absent or not an array. Iterate
+    /// its elements as `arr->as.items[i]` over `arr->count`.
+    const dftu_value* array(std::string_view key) const {
+        const dftu_value* v = find(key);
+        return (v && v->kind == DFTU_VAL_ARRAY) ? v : nullptr;
+    }
+    /// The ARRAY at `key` coerced to int64 per element (dftu_as_i64 rules);
+    /// empty if the key is absent or not an array.
+    std::vector<std::int64_t> get_int_array(std::string_view key) const {
+        std::vector<std::int64_t> out;
+        if (const dftu_value* a = array(key)) {
+            out.reserve(a->count);
+            for (std::uint32_t i = 0; i < a->count; ++i)
+                out.push_back(dftu_as_i64(&a->as.items[i], 0));
+        }
+        return out;
+    }
+    /// The ARRAY at `key` coerced to double per element (dftu_as_f64 rules);
+    /// empty if the key is absent or not an array.
+    std::vector<double> get_double_array(std::string_view key) const {
+        std::vector<double> out;
+        if (const dftu_value* a = array(key)) {
+            out.reserve(a->count);
+            for (std::uint32_t i = 0; i < a->count; ++i)
+                out.push_back(dftu_as_f64(&a->as.items[i], 0.0));
+        }
+        return out;
+    }
+    /// The ARRAY at `key` as string_views (non-STR elements yield an empty
+    /// view); the views borrow the host-owned config tree. Empty if the key is
+    /// absent or not an array.
+    std::vector<std::string_view> get_string_array(std::string_view key) const {
+        std::vector<std::string_view> out;
+        if (const dftu_value* a = array(key)) {
+            out.reserve(a->count);
+            for (std::uint32_t i = 0; i < a->count; ++i) {
+                const dftu_value& e = a->as.items[i];
+                out.push_back(e.kind == DFTU_VAL_STR
+                                  ? std::string_view{e.as.str, e.count}
+                                  : std::string_view{});
+            }
+        }
+        return out;
+    }
+
+    explicit operator bool() const { return root_ != nullptr; }
+    const dftu_value* raw() const { return root_; }
+
+   private:
+    const dftu_value* root_ = nullptr;
+};
+
+namespace detail {
+
+template <class Slice>
+constexpr std::uint32_t slice_needs() {
+    if constexpr (requires { Slice::needs; })
+        return Slice::needs;
+    else
+        return 0;
+}
+
+template <class Slice>
+struct Holder {
+    dftu_plugin vt{};
+    Config config;
+    std::string plan; /**< backs plan_query's const char* */
+};
+
+template <class Slice>
+Holder<Slice>* holder_of(void* self) {
+    return static_cast<Holder<Slice>*>(self);
+}
+
+/// A Slice whose async on_batch takes the ergonomic Batch view.
+template <class Slice>
+concept AsyncBatchView = requires(Slice& s, const Batch& b, Host h) {
+    { s.on_batch(b, h) } -> std::same_as<Task>;
+};
+
+/// A Slice whose async on_batch takes the raw C dftu_batch (legacy signature).
+template <class Slice>
+concept AsyncBatch = requires(Slice& s, const dftu_batch& b, Host h) {
+    { s.on_batch(b, h) } -> std::same_as<Task>;
+};
+
+/// A Slice whose synchronous step takes the ergonomic Batch view.
+template <class Slice>
+concept BatchViewStep =
+    requires(Slice& s, const Batch& b, Host h) { s.step(b, h); };
+
+template <class Slice>
+concept AsyncFinalize = requires(Slice& s, Host h) {
+    { s.on_finalize(h) } -> std::same_as<Task>;
+};
+
+/// Resume the driven coroutine one step; NULL once it has run to completion.
+inline dftu_task* step_thunk(void* coro) {
+    auto h = std::coroutine_handle<Task::promise_type>::from_address(coro);
+    h.resume();
+    if (!h.done()) return h.promise().pending;
+    if (h.promise().exc) {
+        if (const dftu_host* host = h.promise().host) {
+            try {
+                std::rethrow_exception(h.promise().exc);
+            } catch (const std::exception& e) {
+                Host{host}.log(DFTU_LOG_ERROR, e.what());
+            } catch (...) {
+                Host{host}.log(DFTU_LOG_ERROR, "plugin coroutine threw");
+            }
+        }
+    }
+    h.destroy();
+    return nullptr;
+}
+
+template <class Slice, class Coro>
+dftu_task* drive_coro(const dftu_host* host, Coro&& coro) {
+    Task t = std::forward<Coro>(coro);
+    auto h = t.release();
+    h.promise().host = host;
+    const dftu_ext_coro* c =
+        host->get_extension ? static_cast<const dftu_ext_coro*>(
+                                  host->get_extension(host->h, DFTU_EXT_CORO))
+                            : nullptr;
+    return c && c->drive ? c->drive(host->h, &step_thunk, h.address())
+                         : nullptr;
+}
+
+/// A Slice that publishes capabilities via a static `provides()` returning a
+/// range of dftu_capability (build them with capability()).
+template <class Slice>
+concept DeclaresProvides = requires {
+    { std::begin(Slice::provides()) };
+    { std::end(Slice::provides()) };
+};
+
+/// A Slice that consumes capabilities via a static `requires_caps()` returning
+/// a range of dftu_requirement (build them with requirement()). Named
+/// requires_caps because `requires` is a C++20 keyword.
+template <class Slice>
+concept DeclaresRequires = requires {
+    { std::begin(Slice::requires_caps()) };
+    { std::end(Slice::requires_caps()) };
+};
+
+/// A Slice that reacts to the post-declare capability resolution via a static
+/// `on_resolve(Host)`; use Host::provider_count / Host::provider_best inside.
+template <class Slice>
+concept DeclaresResolve = requires(Host h) { Slice::on_resolve(h); };
+
+/// A Slice that declares any comms hook, so make_plugin wires get_extension.
+template <class Slice>
+concept HasComms = DeclaresProvides<Slice> || DeclaresRequires<Slice> ||
+                   DeclaresResolve<Slice>;
+
+template <class Slice>
+std::uint32_t comms_provides(void*, dftu_capability* out, std::uint32_t max) {
+    std::uint32_t n = 0;
+    for (const dftu_capability& c : Slice::provides()) {
+        if (out && n < max) out[n] = c;
+        ++n;
+    }
+    return n;
+}
+
+template <class Slice>
+std::uint32_t comms_requires(void*, dftu_requirement* out, std::uint32_t max) {
+    std::uint32_t n = 0;
+    for (const dftu_requirement& r : Slice::requires_caps()) {
+        if (out && n < max) out[n] = r;
+        ++n;
+    }
+    return n;
+}
+
+template <class Slice>
+void comms_resolve(void*, const dftu_host* host) {
+    try {
+        Slice::on_resolve(Host{host});
+    } catch (const std::exception& e) {
+        Host{host}.log(DFTU_LOG_ERROR, e.what());
+    } catch (...) {
+        Host{host}.log(DFTU_LOG_ERROR, "plugin resolve threw");
+    }
+}
+
+template <class Slice>
+constexpr auto provides_thunk() {
+    if constexpr (DeclaresProvides<Slice>)
+        return &comms_provides<Slice>;
+    else
+        return static_cast<decltype(dftu_plugin_comms::provides)>(nullptr);
+}
+template <class Slice>
+constexpr auto requires_thunk() {
+    if constexpr (DeclaresRequires<Slice>)
+        return &comms_requires<Slice>;
+    else
+        return static_cast<decltype(dftu_plugin_comms::require_caps)>(nullptr);
+}
+template <class Slice>
+constexpr auto resolve_thunk() {
+    if constexpr (DeclaresResolve<Slice>)
+        return &comms_resolve<Slice>;
+    else
+        return static_cast<decltype(dftu_plugin_comms::resolve)>(nullptr);
+}
+
+/// Per-Slice comms table with static storage; only ODR-used when HasComms.
+template <class Slice>
+inline const dftu_plugin_comms comms_table = {
+    provides_thunk<Slice>(), requires_thunk<Slice>(), resolve_thunk<Slice>()};
+
+}  // namespace detail
+
+/** Build a dftu_plugin from a Slice providing Slice(const Config&), merge, and
+   either sync step/finalize or a Task-returning on_batch/on_finalize coroutine,
+   plus optionally `static constexpr uint32_t needs`. For inter-plugin comms a
+   Slice may also declare any of: `static ... provides()` (a range of
+   dftu_capability, built with capability()), `static ... requires_caps()` (a
+   range of dftu_requirement, built with requirement()), and `static void
+   on_resolve(Host)`; when present, make_plugin wires dftu_plugin::get_extension
+   to a per-Slice dftu_plugin_comms so the host discovers and resolves them.
+   Exceptions must not escape the ABI boundary, so every callback catches. */
+template <class Slice>
+dftu_plugin* make_plugin(const dftu_value* config) {
+    auto* hd = new detail::Holder<Slice>();
+    hd->config = Config(config);
+    hd->plan = std::string(hd->config.get("query"));
+
+    dftu_plugin& vt = hd->vt;
+    vt.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
+    vt.self = hd;
+
+    vt.needs = [](void*) -> std::uint32_t {
+        return detail::slice_needs<Slice>();
+    };
+
+    vt.plan_query = [](void* self) -> const char* {
+        auto* h = detail::holder_of<Slice>(self);
+        return h->plan.empty() ? nullptr : h->plan.c_str();
+    };
+
+    vt.make_slice = [](void* self) -> void* {
+        try {
+            return new Slice(detail::holder_of<Slice>(self)->config);
+        } catch (...) {
+            return nullptr;
+        }
+    };
+
+    vt.on_batch = [](void* slice, const dftu_batch* b,
+                     const dftu_host* host) -> dftu_task* {
+        try {
+            Slice* sl = static_cast<Slice*>(slice);
+            Host h{host};
+            if constexpr (detail::AsyncBatchView<Slice>) {
+                return detail::drive_coro<Slice>(host,
+                                                 sl->on_batch(Batch{*b}, h));
+            } else if constexpr (detail::AsyncBatch<Slice>) {
+                return detail::drive_coro<Slice>(host, sl->on_batch(*b, h));
+            } else if constexpr (detail::BatchViewStep<Slice>) {
+                sl->step(Batch{*b}, h);
+            } else {
+                sl->step(*b, h);
+            }
+        } catch (const std::exception& e) {
+            Host{host}.log(DFTU_LOG_ERROR, e.what());
+        } catch (...) {
+            Host{host}.log(DFTU_LOG_ERROR, "plugin step threw");
+        }
+        return nullptr;
+    };
+
+    vt.merge = [](void* into, void* other) {
+        try {
+            static_cast<Slice*>(into)->merge(*static_cast<Slice*>(other));
+        } catch (...) {
+        }
+    };
+
+    vt.on_finalize = [](void* slice, const dftu_host* host) -> dftu_task* {
+        try {
+            if constexpr (detail::AsyncFinalize<Slice>) {
+                return detail::drive_coro<Slice>(
+                    host, static_cast<Slice*>(slice)->on_finalize(Host{host}));
+            } else {
+                static_cast<Slice*>(slice)->finalize(Host{host});
+            }
+        } catch (const std::exception& e) {
+            Host{host}.log(DFTU_LOG_ERROR, e.what());
+        } catch (...) {
+            Host{host}.log(DFTU_LOG_ERROR, "plugin finalize threw");
+        }
+        return nullptr;
+    };
+
+    vt.destroy_slice = [](void* slice) { delete static_cast<Slice*>(slice); };
+    vt.destroy = [](void* self) { delete detail::holder_of<Slice>(self); };
+
+    if constexpr (detail::HasComms<Slice>) {
+        vt.get_extension = [](void*, const char* ext_id) -> const void* {
+            if (ext_id && std::strcmp(ext_id, DFTU_EXT_COMMS) == 0)
+                return &detail::comms_table<Slice>;
+            return nullptr;
+        };
+    }
+
+    return &vt;
+}
+
+}  // namespace dftracer::utils::plugins
+
+#endif /* DFTRACER_UTILS_PLUGINS_PLUGIN_REGISTER_H */
