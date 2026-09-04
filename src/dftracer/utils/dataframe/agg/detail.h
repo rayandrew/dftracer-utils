@@ -1,0 +1,462 @@
+#ifndef DFTRACER_UTILS_DATAFRAME_AGG_DETAIL_H
+#define DFTRACER_UTILS_DATAFRAME_AGG_DETAIL_H
+
+#include <ankerl/unordered_dense.h>
+#include <dftracer/utils/core/common/hash/hash_combine.h>
+#include <dftracer/utils/dataframe/agg.h>
+#include <dftracer/utils/dataframe/field_stat.h>
+#include <dftracer/utils/dataframe/series.h>
+#include <dftracer/utils/dataframe/sketch.h>
+
+#include <cstdint>
+#include <limits>
+#include <map>
+#include <set>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
+
+// Private definition of the AggState partial group state, shared across the
+// agg_*.cpp translation units (the class is opaque in agg.h). col_domain and
+// read_bits are referenced by AggState::group_of and are defined in
+// agg_state.cpp.
+namespace dftracer::utils::dataframe {
+
+FieldStatDomain col_domain(TypeId t);
+std::uint64_t read_bits(const Series& c, std::int64_t i, FieldStatDomain d);
+
+// Groups fold by distinct value column, not by spec: sum(dur), mean(dur) and
+// var(dur) share one FieldStat per group (accumulated once). Count is
+// field-independent (group rows).
+class AggState {
+   public:
+    std::vector<AggSpec> specs;
+    std::vector<int> spec_field;         // spec -> field index, or -1 (Count)
+    std::vector<std::int32_t> field_vc;  // field -> value_col
+    std::vector<FieldStatDomain> field_domain;  // field -> accumulation domain
+    std::size_t nf = 0;
+    bool inited = false;
+
+    // Composite key over N columns: each column keeps its own type (Int64
+    // stays Int64, String stays String) - `key_is_str[k]` selects which of
+    // `ikey_cols[k]` / `skey_cols[k]` holds column k's per-group values. Groups
+    // are located by a combined hash of the N cells (hash_combine, no string
+    // concatenation) with a column-by-column equality check on collision.
+    std::size_t nkeys = 0;
+    std::vector<char> key_is_str;  // nkeys
+    // Domain the raw bits in ikey_cols reinterpret to on finalize/render, so a
+    // Uint64 hash key > 2^63 or a Float64 key keeps its real type.
+    std::vector<FieldStatDomain> key_domain;           // nkeys
+    std::vector<std::vector<std::int64_t>> ikey_cols;  // nkeys * ngroups
+    std::vector<std::vector<std::string>> skey_cols;   // nkeys * ngroups
+    std::unordered_map<std::uint64_t, std::vector<std::int64_t>> key_buckets;
+    std::vector<std::uint64_t> counts;                 // per group: rows seen
+    std::vector<FieldStat> fstats;                     // groups * nf
+
+    // First/Last state, allocated (groups * nf) only when `has_fl`. First/Last
+    // are order-independent: each keeps the value at the smallest / largest
+    // global row index seen for the group, so parallel-chunk merge order does
+    // not matter. `fl_*_idx == -1` means no non-null value yet.
+    bool has_fl = false;
+    std::vector<char> field_is_str;       // field -> value column is String
+    std::vector<std::uint64_t> fl_first;  // fixed-width raw bits
+    std::vector<std::uint64_t> fl_last;
+    std::vector<std::string> fl_first_s;  // string values
+    std::vector<std::string> fl_last_s;
+    std::vector<std::int64_t> fl_first_idx;
+    std::vector<std::int64_t> fl_last_idx;
+
+    // Per-group DDSketch state for Pct, allocated (groups * n_sketch) only when
+    // `has_sketch`. All Pct specs on one field share a single sketch slot (the
+    // quantiles read the same sketch); `field_sketch[field] == -1` marks a
+    // field with no sketch.
+    bool has_sketch = false;
+    std::size_t n_sketch = 0;
+    std::vector<int> field_sketch;
+    std::vector<DDSketch> sketches;
+
+    // ArgMax: one slot per ArgMax spec (no field-level dedup, mirroring the
+    // View's AggSchema - a slot tracks the max `by_col` seen and the repr of
+    // `value_col` at that row). `argmax_by_col`/`argmax_val_col` are raw
+    // indices into the `values` array passed to accumulate.
+    bool has_argmax = false;
+    std::size_t n_argmax = 0;
+    std::vector<int> spec_argmax;   // spec -> argmax slot, or -1
+    std::vector<std::int32_t> argmax_by_col;
+    std::vector<std::int32_t> argmax_val_col;
+    std::vector<double> argmax_by;  // groups * n_argmax
+    std::vector<char> argmax_has;   // groups * n_argmax
+    std::vector<std::string> argmax_repr;
+
+    // SetUnion: one slot per SetUnion spec (no field-level dedup, mirroring the
+    // View's AggSchema). `set_val_col` is a raw index into `values`.
+    bool has_set = false;
+    std::size_t n_set = 0;
+    std::vector<int> spec_set;                // spec -> set slot, or -1
+    std::vector<std::int32_t> set_val_col;
+    std::vector<std::set<std::string>> sets;  // groups * n_set
+
+    // Occupancy: one slot per distinct (ts col, dur col, occ_cell) triple (all
+    // occupancy ops on the same inputs share one delta-map, mirroring the
+    // View's single per-group state). A slot holds a sparse +1/-1 endpoint
+    // delta-map plus sum(dur)/min(ts)/max(end), all associative so
+    // parallel/spilled partials merge exactly.
+    using OccDeltas = ankerl::unordered_dense::map<std::uint64_t, std::int64_t>;
+    bool has_occ = false;
+    std::size_t n_occ = 0;
+    std::vector<int> spec_occ;              // spec -> occ slot, or -1
+    std::vector<std::int32_t> occ_val_col;  // slot -> ts value_col
+    std::vector<std::int32_t> occ_by_col;   // slot -> dur by_col
+    std::vector<std::uint64_t> occ_cell;    // slot -> endpoint-snap tolerance
+    std::vector<OccDeltas> occ_deltas;      // groups * n_occ
+    std::vector<std::uint64_t> occ_total;   // groups * n_occ
+    std::vector<std::uint64_t> occ_ts;      // groups * n_occ (min; init max)
+    std::vector<std::uint64_t> occ_te;      // groups * n_occ (max; init 0)
+
+    // Name-keyed dyn side-table: per group, one FieldStat (and, when a Pct
+    // reduction is configured, one DDSketch) per auto-discovered argument name.
+    // The name set is data-dependent (grows during accumulate) and merges by
+    // name-union, so a single streaming pass builds per-argument aggregates
+    // without a name pre-scan. `dyn_domain` fixes each name's finalized column
+    // type once (the domain of the first input column seen for it), so a group
+    // missing a name still lands in that name's stable column type.
+    bool has_dyn = false;
+    bool dyn_has_sketch = false;
+    std::vector<AggDynSpec> dyn_specs;
+    std::vector<std::map<std::string, FieldStat>> dyn_fs;     // ngroups
+    std::vector<std::map<std::string, DDSketch>> dyn_sketch;  // ngroups
+    std::map<std::string, FieldStatDomain> dyn_domain;
+
+    std::size_t nspecs() const { return specs.size(); }
+    std::int64_t ngroups() const {
+        return static_cast<std::int64_t>(counts.size());
+    }
+
+    // The distinct-field layout is a pure function of the specs.
+    void init_layout() {
+        spec_field.assign(specs.size(), -1);
+        field_vc.clear();
+        std::unordered_map<std::int32_t, int> seen;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            const AggSpec& sp = specs[s];
+            if (sp.op == AggOp::Count || sp.op == AggOp::SetUnion ||
+                agg_uses_by_col(sp.op) || sp.value_col < 0)
+                continue;
+            auto it = seen.find(sp.value_col);
+            if (it == seen.end()) {
+                int fi = static_cast<int>(field_vc.size());
+                seen.emplace(sp.value_col, fi);
+                field_vc.push_back(sp.value_col);
+                spec_field[s] = fi;
+            } else {
+                spec_field[s] = it->second;
+            }
+        }
+        nf = field_vc.size();
+        // Size the per-field layout up front (domain refined on first
+        // accumulate) so a state finalized with no accumulate/seed still has
+        // valid slots.
+        field_domain.assign(nf, FieldStatDomain::F64);
+        field_is_str.assign(nf, 0);
+        has_fl = false;
+        for (const AggSpec& sp : specs)
+            if (sp.op == AggOp::First || sp.op == AggOp::Last) has_fl = true;
+
+        // One shared sketch slot per field that any Pct or Hist spec
+        // references (all quantiles and the histogram read the same sketch).
+        field_sketch.assign(nf, -1);
+        n_sketch = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].op != AggOp::Pct && specs[s].op != AggOp::Hist)
+                continue;
+            const int fi = spec_field[s];
+            if (fi >= 0 && field_sketch[static_cast<std::size_t>(fi)] < 0)
+                field_sketch[static_cast<std::size_t>(fi)] =
+                    static_cast<int>(n_sketch++);
+        }
+        has_sketch = n_sketch > 0;
+
+        spec_argmax.assign(specs.size(), -1);
+        argmax_by_col.clear();
+        argmax_val_col.clear();
+        n_argmax = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].op != AggOp::ArgMax) continue;
+            spec_argmax[s] = static_cast<int>(n_argmax++);
+            argmax_by_col.push_back(specs[s].by_col);
+            argmax_val_col.push_back(specs[s].value_col);
+        }
+        has_argmax = n_argmax > 0;
+
+        spec_set.assign(specs.size(), -1);
+        set_val_col.clear();
+        n_set = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].op != AggOp::SetUnion) continue;
+            spec_set[s] = static_cast<int>(n_set++);
+            set_val_col.push_back(specs[s].value_col);
+        }
+        has_set = n_set > 0;
+
+        spec_occ.assign(specs.size(), -1);
+        occ_val_col.clear();
+        occ_by_col.clear();
+        occ_cell.clear();
+        n_occ = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            const AggSpec& sp = specs[s];
+            if (sp.op != AggOp::Busy && sp.op != AggOp::Concurrency &&
+                sp.op != AggOp::Utilization && sp.op != AggOp::Active)
+                continue;
+            const std::uint64_t cell = static_cast<std::uint64_t>(sp.param);
+            int slot = -1;
+            for (std::size_t k = 0; k < n_occ; ++k)
+                if (occ_val_col[k] == sp.value_col &&
+                    occ_by_col[k] == sp.by_col && occ_cell[k] == cell) {
+                    slot = static_cast<int>(k);
+                    break;
+                }
+            if (slot < 0) {
+                slot = static_cast<int>(n_occ++);
+                occ_val_col.push_back(sp.value_col);
+                occ_by_col.push_back(sp.by_col);
+                occ_cell.push_back(cell);
+            }
+            spec_occ[s] = slot;
+        }
+        has_occ = n_occ > 0;
+
+        has_dyn = !dyn_specs.empty();
+        dyn_has_sketch = false;
+        for (const AggDynSpec& d : dyn_specs)
+            if (d.op == AggOp::Pct) dyn_has_sketch = true;
+    }
+
+    void grow_group() {
+        counts.push_back(0);
+        fstats.resize(fstats.size() + nf);
+        if (has_fl) {
+            fl_first.resize(fl_first.size() + nf, 0);
+            fl_last.resize(fl_last.size() + nf, 0);
+            fl_first_s.resize(fl_first_s.size() + nf);
+            fl_last_s.resize(fl_last_s.size() + nf);
+            fl_first_idx.resize(fl_first_idx.size() + nf, -1);
+            fl_last_idx.resize(fl_last_idx.size() + nf, -1);
+        }
+        if (has_sketch) sketches.resize(sketches.size() + n_sketch);
+        if (has_argmax) {
+            argmax_by.resize(argmax_by.size() + n_argmax, 0.0);
+            argmax_has.resize(argmax_has.size() + n_argmax, 0);
+            argmax_repr.resize(argmax_repr.size() + n_argmax);
+        }
+        if (has_set) sets.resize(sets.size() + n_set);
+        if (has_occ) {
+            occ_deltas.resize(occ_deltas.size() + n_occ);
+            occ_total.resize(occ_total.size() + n_occ, 0);
+            occ_ts.resize(occ_ts.size() + n_occ,
+                          (std::numeric_limits<std::uint64_t>::max)());
+            occ_te.resize(occ_te.size() + n_occ, 0);
+        }
+        if (has_dyn) {
+            dyn_fs.emplace_back();
+            if (dyn_has_sketch) dyn_sketch.emplace_back();
+        }
+    }
+    // Shared lookup for both live rows (get_int/get_str read a Series cell) and
+    // merge (they read another AggState's already-materialized key columns):
+    // hash the N cells, probe the bucket for an exact column-by-column match,
+    // else append a new group.
+    template <class GetInt, class GetStr>
+    std::int64_t find_or_add_group(GetInt&& get_int, GetStr&& get_str) {
+        std::size_t h = 0;
+        for (std::size_t k = 0; k < nkeys; ++k) {
+            const std::size_t cv =
+                key_is_str[k] ? std::hash<std::string_view>{}(get_str(k))
+                              : static_cast<std::size_t>(get_int(k));
+            dftracer::utils::hash_combine(h, cv);
+        }
+        auto it = key_buckets.find(static_cast<std::uint64_t>(h));
+        if (it != key_buckets.end()) {
+            for (std::int64_t g : it->second) {
+                bool match = true;
+                for (std::size_t k = 0; k < nkeys && match; ++k)
+                    match = key_is_str[k]
+                                ? (skey_cols[k][static_cast<std::size_t>(g)] ==
+                                   get_str(k))
+                                : (ikey_cols[k][static_cast<std::size_t>(g)] ==
+                                   get_int(k));
+                if (match) return g;
+            }
+        }
+        const std::int64_t g = ngroups();
+        for (std::size_t k = 0; k < nkeys; ++k) {
+            if (key_is_str[k])
+                skey_cols[k].emplace_back(get_str(k));
+            else
+                ikey_cols[k].push_back(get_int(k));
+        }
+        key_buckets[static_cast<std::uint64_t>(h)].push_back(g);
+        grow_group();
+        return g;
+    }
+    std::int64_t group_of(const std::vector<const Series*>& keys,
+                          std::int64_t i) {
+        // A non-string key column widens to int64 by its own domain, not
+        // plain read_i64: a Uint64/Float64 key (e.g. a hash or a fractional
+        // arg) would otherwise read as 0 for every row and collapse into one
+        // group.
+        return find_or_add_group(
+            [&](std::size_t k) {
+                return static_cast<std::int64_t>(
+                    read_bits(*keys[k], i, col_domain(keys[k]->type())));
+            },
+            [&](std::size_t k) -> std::string_view {
+                return keys[k]->string_at(i);
+            });
+    }
+    std::int64_t group_of_other(const AggState& other, std::int64_t j) {
+        return find_or_add_group(
+            [&](std::size_t k) {
+                return other.ikey_cols[k][static_cast<std::size_t>(j)];
+            },
+            [&](std::size_t k) -> std::string_view {
+                return other.skey_cols[k][static_cast<std::size_t>(j)];
+            });
+    }
+
+    // Recompute key_buckets from already-populated ikey_cols/skey_cols (after
+    // deserialize), without re-appending group storage.
+    void rebuild_key_buckets(std::int64_t ng) {
+        key_buckets.clear();
+        for (std::int64_t g = 0; g < ng; ++g) {
+            std::size_t h = 0;
+            for (std::size_t k = 0; k < nkeys; ++k) {
+                const std::size_t cv =
+                    key_is_str[k]
+                        ? std::hash<std::string_view>{}(
+                              skey_cols[k][static_cast<std::size_t>(g)])
+                        : static_cast<std::size_t>(
+                              ikey_cols[k][static_cast<std::size_t>(g)]);
+                dftracer::utils::hash_combine(h, cv);
+            }
+            key_buckets[static_cast<std::uint64_t>(h)].push_back(g);
+        }
+    }
+
+    // Merge group `j` of `other` into this state's group `g` (already located).
+    // Shared by agg_merge (1:1 keys) and agg_regroup (projected keys); assumes
+    // this state adopted `other`'s spec/field layout.
+    void merge_group(std::int64_t g, const AggState& other, std::int64_t j) {
+        counts[static_cast<std::size_t>(g)] +=
+            other.counts[static_cast<std::size_t>(j)];
+        const std::size_t db = static_cast<std::size_t>(g) * nf;
+        const std::size_t sb = static_cast<std::size_t>(j) * nf;
+        for (std::size_t fj = 0; fj < nf; ++fj)
+            fstats[db + fj].merge(other.fstats[sb + fj]);
+        if (has_fl) {
+            for (std::size_t fj = 0; fj < nf; ++fj) {
+                const std::size_t d = db + fj, s = sb + fj;
+                const std::int64_t ofi = other.fl_first_idx[s];
+                if (ofi >= 0 &&
+                    (fl_first_idx[d] < 0 || ofi < fl_first_idx[d])) {
+                    fl_first_idx[d] = ofi;
+                    fl_first[d] = other.fl_first[s];
+                    fl_first_s[d] = other.fl_first_s[s];
+                }
+                const std::int64_t oli = other.fl_last_idx[s];
+                if (oli > fl_last_idx[d]) {
+                    fl_last_idx[d] = oli;
+                    fl_last[d] = other.fl_last[s];
+                    fl_last_s[d] = other.fl_last_s[s];
+                }
+            }
+        }
+        if (has_sketch) {
+            const std::size_t ds = static_cast<std::size_t>(g) * n_sketch;
+            const std::size_t ss = static_cast<std::size_t>(j) * n_sketch;
+            for (std::size_t sk = 0; sk < n_sketch; ++sk)
+                sketches[ds + sk].merge(other.sketches[ss + sk]);
+        }
+        if (has_argmax) {
+            const std::size_t da = static_cast<std::size_t>(g) * n_argmax;
+            const std::size_t sa = static_cast<std::size_t>(j) * n_argmax;
+            for (std::size_t slot = 0; slot < n_argmax; ++slot) {
+                if (!other.argmax_has[sa + slot]) continue;
+                if (!argmax_has[da + slot] ||
+                    other.argmax_by[sa + slot] > argmax_by[da + slot]) {
+                    argmax_by[da + slot] = other.argmax_by[sa + slot];
+                    argmax_has[da + slot] = 1;
+                    argmax_repr[da + slot] = other.argmax_repr[sa + slot];
+                }
+            }
+        }
+        if (has_set) {
+            const std::size_t ds = static_cast<std::size_t>(g) * n_set;
+            const std::size_t ss = static_cast<std::size_t>(j) * n_set;
+            for (std::size_t slot = 0; slot < n_set; ++slot)
+                sets[ds + slot].insert(other.sets[ss + slot].begin(),
+                                       other.sets[ss + slot].end());
+        }
+        if (has_occ) {
+            const std::size_t ds = static_cast<std::size_t>(g) * n_occ;
+            const std::size_t ss = static_cast<std::size_t>(j) * n_occ;
+            for (std::size_t slot = 0; slot < n_occ; ++slot) {
+                occ_total[ds + slot] += other.occ_total[ss + slot];
+                if (other.occ_ts[ss + slot] < occ_ts[ds + slot])
+                    occ_ts[ds + slot] = other.occ_ts[ss + slot];
+                if (other.occ_te[ss + slot] > occ_te[ds + slot])
+                    occ_te[ds + slot] = other.occ_te[ss + slot];
+                for (const auto& [t, dlt] : other.occ_deltas[ss + slot])
+                    occ_deltas[ds + slot][t] += dlt;
+            }
+        }
+        if (has_dyn) {
+            for (const auto& [name, sm] :
+                 other.dyn_fs[static_cast<std::size_t>(j)])
+                dyn_fs[static_cast<std::size_t>(g)][name].merge(sm);
+            if (dyn_has_sketch)
+                for (const auto& [name, sk] :
+                     other.dyn_sketch[static_cast<std::size_t>(j)])
+                    dyn_sketch[static_cast<std::size_t>(g)][name].merge(sk);
+        }
+    }
+
+    // Adopt `other`'s spec/field/layout metadata into an empty (uninited) state
+    // without copying any group data. Shared by agg_merge and agg_regroup.
+    void adopt_layout(const AggState& other) {
+        specs = other.specs;
+        spec_field = other.spec_field;
+        field_vc = other.field_vc;
+        field_domain = other.field_domain;
+        field_is_str = other.field_is_str;
+        nf = other.nf;
+        has_fl = other.has_fl;
+        has_sketch = other.has_sketch;
+        n_sketch = other.n_sketch;
+        field_sketch = other.field_sketch;
+        has_argmax = other.has_argmax;
+        n_argmax = other.n_argmax;
+        spec_argmax = other.spec_argmax;
+        argmax_by_col = other.argmax_by_col;
+        argmax_val_col = other.argmax_val_col;
+        has_set = other.has_set;
+        n_set = other.n_set;
+        spec_set = other.spec_set;
+        set_val_col = other.set_val_col;
+        has_occ = other.has_occ;
+        n_occ = other.n_occ;
+        spec_occ = other.spec_occ;
+        occ_val_col = other.occ_val_col;
+        occ_by_col = other.occ_by_col;
+        occ_cell = other.occ_cell;
+        has_dyn = other.has_dyn;
+        dyn_has_sketch = other.dyn_has_sketch;
+        dyn_specs = other.dyn_specs;
+        dyn_domain = other.dyn_domain;
+    }
+};
+
+}  // namespace dftracer::utils::dataframe
+
+#endif  // DFTRACER_UTILS_DATAFRAME_AGG_DETAIL_H
