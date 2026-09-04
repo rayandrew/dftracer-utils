@@ -2765,7 +2765,7 @@ LazyFrame LazyFrame::drop_nulls() const {
     return with_ops(std::move(ops));
 }
 
-LazyFrame LazyFrame::fill_null(dftu_scalar value) const {
+LazyFrame LazyFrame::fill_null(Scalar value) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(LazyOp{FillNullOp{value}}));
     return with_ops(std::move(ops));

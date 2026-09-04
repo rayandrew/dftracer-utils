@@ -1253,7 +1253,7 @@ TEST_SUITE("vec") {
         // comparison -> bool
         Series mask = ex::eval(
             ex::expr_cmp(
-                DFTU_CMP_GT, ex::expr_col(1),
+                ex::CmpOp::Gt, ex::expr_col(1),
                 dftracer::utils::dataframe::to_scalar<std::int64_t>(25)),
             in);
         CHECK(mask.type() == TypeId::Bool);

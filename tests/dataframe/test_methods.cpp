@@ -595,10 +595,7 @@ TEST_CASE("Expr unary math / clip / cast evaluate") {
     std::vector<double> xv{-3.2, 4.7, -1.5, 9.9};
     Series x = df::Series::flat_f64(xv.data(), 4);
 
-    Series fl =
-        df::eval(df::expr_unary(static_cast<std::int32_t>(df::UnaryOp::Floor),
-                                df::col(0)),
-                 {&x});
+    Series fl = df::eval(df::expr_unary(df::UnaryOp::Floor, df::col(0)), {&x});
     CHECK(fl.data<double>()[0] == doctest::Approx(-4.0));
     CHECK(fl.data<double>()[3] == doctest::Approx(9.0));
 
@@ -615,8 +612,7 @@ TEST_CASE("Expr unary math / clip / cast evaluate") {
     CHECK(cf.data<double>()[2] == doctest::Approx(3.0));
 
     auto unary = [&](df::UnaryOp op, Series& in) {
-        return df::eval(
-            df::expr_unary(static_cast<std::int32_t>(op), df::col(0)), {&in});
+        return df::eval(df::expr_unary(op, df::col(0)), {&in});
     };
 
     std::vector<double> pv{1.0, 4.0, 9.0, 16.0};
@@ -687,17 +683,14 @@ TEST_CASE("Expr engine is null-aware: fillna and null-preserving ops") {
     CHECK(filled.null_count() == 0);
 
     // A math op over a nullable column preserves the null positions.
-    Series abs_nul = df::eval(
-        df::expr_unary(static_cast<std::int32_t>(df::UnaryOp::Abs), df::col(0)),
-        {&nul});
+    Series abs_nul =
+        df::eval(df::expr_unary(df::UnaryOp::Abs, df::col(0)), {&nul});
     CHECK(abs_nul.null_count() == 2);
 
     // fillna after abs closes the nulls.
     Series both =
-        df::eval(df::expr_fillna(
-                     df::expr_unary(static_cast<std::int32_t>(df::UnaryOp::Abs),
-                                    df::col(0)),
-                     df::detail::expr_scalar_i(0)),
+        df::eval(df::expr_fillna(df::expr_unary(df::UnaryOp::Abs, df::col(0)),
+                                 df::detail::expr_scalar_i(0)),
                  {&nul});
     CHECK(both.null_count() == 0);
     CHECK(both.data<std::int64_t>()[1] == 0);

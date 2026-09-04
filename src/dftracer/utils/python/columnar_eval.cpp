@@ -87,7 +87,7 @@ bool build_expr(PyObject* ast, dataframe::Expr* out) {
             case AST_PRIM: {
                 dataframe::Expr a = pop();
                 stack.push_back(dataframe::expr_prim(
-                    static_cast<std::int32_t>(PyLong_AsLong(arg(1))), a));
+                    static_cast<dataframe::PrimOp>(PyLong_AsLong(arg(1))), a));
                 break;
             }
             case AST_CMP: {
@@ -95,13 +95,15 @@ bool build_expr(PyObject* ast, dataframe::Expr* out) {
                 if (!py_to_scalar(arg(2), &rhs)) return false;
                 dataframe::Expr a = pop();
                 stack.push_back(dataframe::expr_cmp(
-                    static_cast<std::int32_t>(PyLong_AsLong(arg(1))), a, rhs));
+                    static_cast<dataframe::CmpOp>(PyLong_AsLong(arg(1))), a,
+                    rhs));
                 break;
             }
             case AST_LOGICAL: {
                 dataframe::Expr b = pop(), a = pop();
                 stack.push_back(dataframe::expr_logical(
-                    static_cast<std::int32_t>(PyLong_AsLong(arg(1))), a, b));
+                    static_cast<dataframe::LogicalOp>(PyLong_AsLong(arg(1))), a,
+                    b));
                 break;
             }
             case AST_NOT: {
@@ -118,7 +120,7 @@ bool build_expr(PyObject* ast, dataframe::Expr* out) {
             case AST_UNARY: {
                 dataframe::Expr a = pop();
                 stack.push_back(dataframe::expr_unary(
-                    static_cast<std::int32_t>(PyLong_AsLong(arg(1))), a));
+                    static_cast<dataframe::UnaryOp>(PyLong_AsLong(arg(1))), a));
                 break;
             }
             case AST_CLIP: {

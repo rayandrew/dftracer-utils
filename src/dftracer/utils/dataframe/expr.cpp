@@ -141,13 +141,15 @@ Expr expr_binary(BinaryOp op, const Expr& a, const Expr& b) {
     return make(ExprKind::Binary, static_cast<std::int32_t>(op), {}, a.node(),
                 b.node());
 }
-Expr expr_prim(std::int32_t prim, const Expr& a) {
-    return make(ExprKind::Prim, prim, {}, a.node(), nullptr);
+Expr expr_prim(PrimOp prim, const Expr& a) {
+    return make(ExprKind::Prim, static_cast<std::int32_t>(prim), {}, a.node(),
+                nullptr);
 }
-Expr expr_unary(std::int32_t op, const Expr& a) {
-    return make(ExprKind::Unary, op, {}, a.node(), nullptr);
+Expr expr_unary(UnaryOp op, const Expr& a) {
+    return make(ExprKind::Unary, static_cast<std::int32_t>(op), {}, a.node(),
+                nullptr);
 }
-Expr expr_clip(const Expr& a, dftu_scalar lo, dftu_scalar hi) {
+Expr expr_clip(const Expr& a, Scalar lo, Scalar hi) {
     auto n = std::make_shared<ExprNode>();
     n->kind = ExprKind::Clip;
     n->scalar = lo;
@@ -155,14 +157,16 @@ Expr expr_clip(const Expr& a, dftu_scalar lo, dftu_scalar hi) {
     n->a = a.node();
     return Expr{std::move(n)};
 }
-Expr expr_fillna(const Expr& a, dftu_scalar fill) {
+Expr expr_fillna(const Expr& a, Scalar fill) {
     return make(ExprKind::Fillna, 0, fill, a.node(), nullptr);
 }
-Expr expr_cmp(std::int32_t cmp, const Expr& a, dftu_scalar rhs) {
-    return make(ExprKind::Cmp, cmp, rhs, a.node(), nullptr);
+Expr expr_cmp(CmpOp cmp, const Expr& a, Scalar rhs) {
+    return make(ExprKind::Cmp, static_cast<std::int32_t>(cmp), rhs, a.node(),
+                nullptr);
 }
-Expr expr_logical(std::int32_t op, const Expr& a, const Expr& b) {
-    return make(ExprKind::Logical, op, {}, a.node(), b.node());
+Expr expr_logical(LogicalOp op, const Expr& a, const Expr& b) {
+    return make(ExprKind::Logical, static_cast<std::int32_t>(op), {}, a.node(),
+                b.node());
 }
 Expr expr_not(const Expr& a) {
     return make(ExprKind::Not, 0, {}, a.node(), nullptr);
@@ -693,20 +697,24 @@ dftu_expr* dftu_expr_binary(int32_t op, const dftu_expr* a,
                                        unwrap(a), unwrap(b)));
 }
 dftu_expr* dftu_expr_prim(int32_t prim, const dftu_expr* a) {
-    return wrap(dataframe::expr_prim(prim, unwrap(a)));
+    return wrap(
+        dataframe::expr_prim(static_cast<dataframe::PrimOp>(prim), unwrap(a)));
 }
 dftu_expr* dftu_expr_unary(int32_t op, const dftu_expr* a) {
-    return wrap(dataframe::expr_unary(op, unwrap(a)));
+    return wrap(
+        dataframe::expr_unary(static_cast<dataframe::UnaryOp>(op), unwrap(a)));
 }
 dftu_expr* dftu_expr_clip(const dftu_expr* a, dftu_scalar lo, dftu_scalar hi) {
     return wrap(dataframe::expr_clip(unwrap(a), lo, hi));
 }
 dftu_expr* dftu_expr_cmp(int32_t cmp, const dftu_expr* a, dftu_scalar rhs) {
-    return wrap(dataframe::expr_cmp(cmp, unwrap(a), rhs));
+    return wrap(dataframe::expr_cmp(static_cast<dataframe::CmpOp>(cmp),
+                                    unwrap(a), rhs));
 }
 dftu_expr* dftu_expr_logical(int32_t op, const dftu_expr* a,
                              const dftu_expr* b) {
-    return wrap(dataframe::expr_logical(op, unwrap(a), unwrap(b)));
+    return wrap(dataframe::expr_logical(static_cast<dataframe::LogicalOp>(op),
+                                        unwrap(a), unwrap(b)));
 }
 dftu_expr* dftu_expr_not(const dftu_expr* a) {
     return wrap(dataframe::expr_not(unwrap(a)));

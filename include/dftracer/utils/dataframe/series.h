@@ -232,6 +232,15 @@ class Series {
         return static_cast<const T*>(dftu_series_data(handle_));
     }
 
+    /// FLAT value buffer as a span of `length()` elements; empty unless FLAT.
+    template <class T>
+    std::span<const T> values() const noexcept {
+        const T* p = data<T>();
+        return p != nullptr
+                   ? std::span<const T>(p, static_cast<std::size_t>(length()))
+                   : std::span<const T>();
+    }
+
     /// Value of a FLAT String/Binary column at `i`. Undefined for other types.
     std::string_view string_at(std::int64_t i) const noexcept {
         const std::int32_t* off = dftu_series_offsets(handle_);
@@ -244,6 +253,15 @@ class Series {
     /// column, or null for fixed-width types.
     const std::int32_t* offsets() const noexcept {
         return dftu_series_offsets(handle_);
+    }
+
+    /// int32 offset buffer as a span of `length()+1` entries; empty for
+    /// fixed-width types.
+    std::span<const std::int32_t> offsets_span() const noexcept {
+        const std::int32_t* off = offsets();
+        return off != nullptr ? std::span<const std::int32_t>(
+                                    off, static_cast<std::size_t>(length()) + 1)
+                              : std::span<const std::int32_t>();
     }
 
     /// Child count: 1 for a List, the field count for a Struct, else 0.
@@ -337,7 +355,7 @@ class Series {
     /// unless the input is a 64-bit integer column.
     Series prim(PrimOp op) const;
     Series abs() const;
-    Series clip(dftu_scalar lo, dftu_scalar hi) const;
+    Series clip(Scalar lo, Scalar hi) const;
     /// Clamp to [lo, hi] with natural C++ values (clip(0, 100)); the bounds
     /// convert to this column's element type.
     template <class Lo, class Hi,
@@ -347,7 +365,7 @@ class Series {
         return clip(to_scalar_(lo), to_scalar_(hi));
     }
     Series round() const;
-    Series fillna(dftu_scalar fill) const;
+    Series fillna(Scalar fill) const;
     /// Replace nulls with a natural C++ value (fillna(0), fillna(1.5)); the
     /// fill converts to this column's element type.
     template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
@@ -413,6 +431,7 @@ class Series {
 
     Series argsort(bool descending = false) const;
     Series take(const std::vector<std::int64_t>& indices) const;
+    Series take(std::span<const std::int64_t> indices) const;
     Series materialize() const;
     /// Keep the rows where the bit-packed Bool `mask` (same length) is true.
     Series filter(const Series& mask) const;

@@ -894,7 +894,7 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
             ts_d * dataframe::expr_lit(spec.bucket_scale) -
             dataframe::expr_lit(static_cast<double>(spec.bucket_origin));
         dataframe::Expr floored = dataframe::expr_unary(
-            static_cast<std::int32_t>(dataframe::UnaryOp::Floor),
+            dataframe::UnaryOp::Floor,
             rel / dataframe::expr_lit(spec.bucket_interval));
         dataframe::Expr bucket =
             dataframe::expr_cast(dataframe::TypeId::Int64, floored) *

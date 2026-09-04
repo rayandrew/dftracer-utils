@@ -126,7 +126,7 @@ struct DataFrame {
     DataFrame drop_nulls() const;
     /// Fill nulls in every column with `value` (columns whose type rejects it
     /// are left unchanged).
-    DataFrame fill_null(dftu_scalar value) const;
+    DataFrame fill_null(Scalar value) const;
     /// Fill nulls with a natural C++ value (fill_null(0)); the value converts
     /// to each column's element type.
     template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>

@@ -116,11 +116,11 @@ Series Series::prim(PrimOp op) const {
     return Series{dftu_series_prim(handle_, static_cast<dftu_prim_op>(op))};
 }
 Series Series::abs() const { return Series{dftu_series_abs(handle_)}; }
-Series Series::clip(dftu_scalar lo, dftu_scalar hi) const {
+Series Series::clip(Scalar lo, Scalar hi) const {
     return Series{dftu_series_clip(handle_, lo, hi)};
 }
 Series Series::round() const { return Series{dftu_series_round(handle_)}; }
-Series Series::fillna(dftu_scalar fill) const {
+Series Series::fillna(Scalar fill) const {
     return Series{dftu_series_fillna(handle_, fill)};
 }
 Series Series::cumsum() const { return Series{dftu_series_cumsum(handle_)}; }
@@ -196,6 +196,9 @@ Series Series::argsort(bool descending) const {
     return Series{dftu_series_argsort(handle_, descending ? 1 : 0)};
 }
 Series Series::take(const std::vector<std::int64_t>& indices) const {
+    return take(std::span<const std::int64_t>(indices));
+}
+Series Series::take(std::span<const std::int64_t> indices) const {
     return Series{dftu_series_take(handle_, indices.data(),
                                    static_cast<std::int64_t>(indices.size()))};
 }

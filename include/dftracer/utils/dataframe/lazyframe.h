@@ -145,7 +145,7 @@ class LazyFrame {
     LazyFrame head(std::int64_t n) const;
     LazyFrame tail(std::int64_t n) const;
     LazyFrame drop_nulls() const;
-    LazyFrame fill_null(dftu_scalar value) const;
+    LazyFrame fill_null(Scalar value) const;
     /// Fill nulls with a natural C++ value; converts to each column's type.
     template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
     LazyFrame fill_null(T value) const {

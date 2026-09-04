@@ -69,19 +69,19 @@ Expr expr_remap_cols(const Expr& e,
 Expr expr_lit(std::int64_t value);
 Expr expr_lit(double value);
 Expr expr_binary(BinaryOp op, const Expr& a, const Expr& b);
-Expr expr_prim(std::int32_t prim, const Expr& a);
+Expr expr_prim(PrimOp prim, const Expr& a);
 /// Unary numeric op (UnaryOp: abs/round/floor/ceil/log/sqrt/exp/sign/negate/
 /// trunc/is_nan/is_finite/is_infinite).
-Expr expr_unary(std::int32_t op, const Expr& a);
+Expr expr_unary(UnaryOp op, const Expr& a);
 /// Clamp each value to [lo, hi].
-Expr expr_clip(const Expr& a, dftu_scalar lo, dftu_scalar hi);
+Expr expr_clip(const Expr& a, Scalar lo, Scalar hi);
 /// Replace nulls (validity bitmap) with a fill value.
-Expr expr_fillna(const Expr& a, dftu_scalar fill);
+Expr expr_fillna(const Expr& a, Scalar fill);
 /// ASCII-lowercase a String column (Series::to_lowercase). Throws at compile
 /// time if the operand is not a String column.
 Expr expr_lower(const Expr& a);
-Expr expr_cmp(std::int32_t cmp, const Expr& a, dftu_scalar rhs);
-Expr expr_logical(std::int32_t op, const Expr& a, const Expr& b);
+Expr expr_cmp(CmpOp cmp, const Expr& a, Scalar rhs);
+Expr expr_logical(LogicalOp op, const Expr& a, const Expr& b);
 Expr expr_not(const Expr& a);
 Expr expr_cast(TypeId type, const Expr& a);
 
@@ -104,10 +104,10 @@ inline Expr operator/(const Expr& a, const Expr& b) {
     return expr_binary(BinaryOp::Div, a, b);
 }
 inline Expr operator&(const Expr& a, const Expr& b) {
-    return expr_logical(DFTU_LOGICAL_AND, a, b);
+    return expr_logical(LogicalOp::And, a, b);
 }
 inline Expr operator|(const Expr& a, const Expr& b) {
-    return expr_logical(DFTU_LOGICAL_OR, a, b);
+    return expr_logical(LogicalOp::Or, a, b);
 }
 inline Expr operator~(const Expr& a) { return expr_not(a); }
 
@@ -127,28 +127,28 @@ inline dftu_scalar expr_scalar_d(double v) {
 }  // namespace detail
 
 inline Expr operator>(const Expr& a, std::int64_t v) {
-    return expr_cmp(DFTU_CMP_GT, a, detail::expr_scalar_i(v));
+    return expr_cmp(CmpOp::Gt, a, detail::expr_scalar_i(v));
 }
 inline Expr operator>=(const Expr& a, std::int64_t v) {
-    return expr_cmp(DFTU_CMP_GE, a, detail::expr_scalar_i(v));
+    return expr_cmp(CmpOp::Ge, a, detail::expr_scalar_i(v));
 }
 inline Expr operator<(const Expr& a, std::int64_t v) {
-    return expr_cmp(DFTU_CMP_LT, a, detail::expr_scalar_i(v));
+    return expr_cmp(CmpOp::Lt, a, detail::expr_scalar_i(v));
 }
 inline Expr operator<=(const Expr& a, std::int64_t v) {
-    return expr_cmp(DFTU_CMP_LE, a, detail::expr_scalar_i(v));
+    return expr_cmp(CmpOp::Le, a, detail::expr_scalar_i(v));
 }
 inline Expr operator>(const Expr& a, double v) {
-    return expr_cmp(DFTU_CMP_GT, a, detail::expr_scalar_d(v));
+    return expr_cmp(CmpOp::Gt, a, detail::expr_scalar_d(v));
 }
 inline Expr operator>=(const Expr& a, double v) {
-    return expr_cmp(DFTU_CMP_GE, a, detail::expr_scalar_d(v));
+    return expr_cmp(CmpOp::Ge, a, detail::expr_scalar_d(v));
 }
 inline Expr operator<(const Expr& a, double v) {
-    return expr_cmp(DFTU_CMP_LT, a, detail::expr_scalar_d(v));
+    return expr_cmp(CmpOp::Lt, a, detail::expr_scalar_d(v));
 }
 inline Expr operator<=(const Expr& a, double v) {
-    return expr_cmp(DFTU_CMP_LE, a, detail::expr_scalar_d(v));
+    return expr_cmp(CmpOp::Le, a, detail::expr_scalar_d(v));
 }
 
 /// Compile `root` (type inference + CSE + lowering) and evaluate it over
