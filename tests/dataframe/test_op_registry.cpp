@@ -1,10 +1,14 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/op.h>
 #include <doctest/doctest.h>
 
 #include <cstdint>
-#include <cstring>
 #include <string>
+
+using dftracer::utils::dataframe::find_op;
+using dftracer::utils::dataframe::OpArgs;
+using dftracer::utils::dataframe::OpKind;
 
 namespace {
 
@@ -32,18 +36,17 @@ dftu_scalar i64_scalar(std::int64_t v) {
 
 TEST_SUITE("op_registry") {
     TEST_CASE("a built-in binary op is found and its signature decodes") {
-        const dftu_op_desc* add = dftu_op_find("add");
-        REQUIRE(add != nullptr);
-        CHECK(dftu_op_kind_of(add->sig) == DFTU_OP_KIND_SERIES);
-        CHECK(dftu_op_arity(add->sig) == 2);
-        CHECK(std::string(dftu_op_signature(add->sig)) ==
-              "(series, series) -> series");
+        auto add = find_op("add");
+        REQUIRE(add.has_value());
+        CHECK(add->sig().kind() == OpKind::Series);
+        CHECK(add->sig().arity() == 2);
+        CHECK(add->sig().to_string() == "(series, series) -> series");
 
         std::int64_t a[3] = {1, 2, 3}, b[3] = {10, 20, 30};
         dftu_series* ca = i64_col(a, 3);
         dftu_series* cb = i64_col(b, 3);
         const dftu_series* in[2] = {ca, cb};
-        dftu_series* out = dftu_op_run(add, in, 2, nullptr);
+        dftu_series* out = dftu_op_run(dftu_op_find("add"), in, 2, nullptr);
         REQUIRE(out != nullptr);
         const std::int64_t* d = i64_of(out);
         CHECK(d[0] == 11);
@@ -60,18 +63,17 @@ TEST_SUITE("op_registry") {
         const dftu_series* in[1] = {c};
 
         // add_scalar: SCALAR at operand slot 1.
-        dftu_op_arg a1{};
-        a1.args[1].scalar = i64_scalar(100);
-        dftu_series* o1 = dftu_op_run(dftu_op_find("add_scalar"), in, 1, &a1);
+        OpArgs a1;
+        a1.scalar(1, i64_scalar(100));
+        dftu_series* o1 = dftu_op_run(dftu_op_find("add_scalar"), in, 1, a1);
         REQUIRE(o1 != nullptr);
         CHECK(i64_of(o1)[0] == 101);
         dftu_series_free(o1);
 
         // compare: enum at slot 1, scalar at slot 2 -> v > 3.
-        dftu_op_arg a2{};
-        a2.args[1].i32 = DFTU_CMP_GT;
-        a2.args[2].scalar = i64_scalar(3);
-        dftu_series* o2 = dftu_op_run(dftu_op_find("compare"), in, 1, &a2);
+        OpArgs a2;
+        a2.i32(1, DFTU_CMP_GT).scalar(2, i64_scalar(3));
+        dftu_series* o2 = dftu_op_run(dftu_op_find("compare"), in, 1, a2);
         REQUIRE(o2 != nullptr);
         CHECK(bit_of(o2, 1) == true);
         CHECK(bit_of(o2, 0) == false);
@@ -83,11 +85,9 @@ TEST_SUITE("op_registry") {
         dftu_series* sc = dftu_series_new_string(DFTU_TYPE_STRING, offs,
                                                  "foobarhello", 2, nullptr);
         const dftu_series* sin[1] = {sc};
-        dftu_op_arg a3{};
-        a3.args[1].str.ptr = "oo";
-        a3.args[1].str.len = 2;
-        dftu_series* o3 =
-            dftu_op_run(dftu_op_find("str_contains"), sin, 1, &a3);
+        OpArgs a3;
+        a3.str(1, "oo");
+        dftu_series* o3 = dftu_op_run(dftu_op_find("str_contains"), sin, 1, a3);
         REQUIRE(o3 != nullptr);
         CHECK(bit_of(o3, 0) == true);
         CHECK(bit_of(o3, 1) == false);
@@ -109,16 +109,17 @@ TEST_SUITE("op_registry") {
         dftu_series* cp = i64_col(p, 3);
         CHECK(dftu_op_run_aggregate(dftu_op_find("product"), cp, nullptr, &ok)
                   .value.i == 24);
-        dftu_op_arg arg{};
-        arg.args[1].i32 = DFTU_REDUCE_SUM;
-        CHECK(dftu_op_run_aggregate(dftu_op_find("reduce"), cp, &arg, &ok)
+        OpArgs arg;
+        arg.i32(1, DFTU_REDUCE_SUM);
+        CHECK(dftu_op_run_aggregate(dftu_op_find("reduce"), cp, arg, &ok)
                   .value.i == 9);
 
         // dot: second series rides args[1].series -> 2*2 + 3*3 + 4*4 = 29.
-        dftu_op_arg darg{};
-        darg.args[1].series = cp;
-        CHECK(dftu_op_run_aggregate(dftu_op_find("dot"), cp, &darg, &ok)
-                  .value.d == doctest::Approx(29.0));
+        OpArgs darg;
+        darg.series(1, cp);
+        CHECK(
+            dftu_op_run_aggregate(dftu_op_find("dot"), cp, darg, &ok).value.d ==
+            doctest::Approx(29.0));
         CHECK(ok == 1);
         dftu_series_free(c);
         dftu_series_free(cp);
@@ -131,18 +132,21 @@ TEST_SUITE("op_registry") {
             CHECK(dftu_op_find(name) != nullptr);
         CHECK(dftu_op_find("no_such_op") == nullptr);
 
-        uint32_t n = dftu_op_count();
+        using dftracer::utils::dataframe::op_at;
+        using dftracer::utils::dataframe::op_count;
+
+        uint32_t n = op_count();
         REQUIRE(n >= 120);  // ~100 column ops + ~23 frame ops
         bool saw_add = false, saw_frame = false;
         for (uint32_t i = 0; i < n; ++i) {
-            const dftu_op_desc* op = dftu_op_at(i);
-            REQUIRE(op != nullptr);
-            if (std::strcmp(op->name, "add") == 0) saw_add = true;
-            if (std::strcmp(op->name, "frame.head") == 0) saw_frame = true;
+            auto op = op_at(i);
+            REQUIRE(static_cast<bool>(op));
+            if (op.name() == "add") saw_add = true;
+            if (op.name() == "frame.head") saw_frame = true;
         }
         CHECK(saw_add);
         CHECK(saw_frame);
-        CHECK(dftu_op_at(n) == nullptr);
+        CHECK(!static_cast<bool>(op_at(n)));
     }
 
     TEST_CASE("newly-added column ops and sig shapes run") {
@@ -157,24 +161,23 @@ TEST_SUITE("op_registry") {
         const dftu_series* in1[1] = {c};
         int ok = 0;
 
-        dftu_op_arg varg{};
-        varg.args[1].i32 = 1;  // sample
+        OpArgs varg;
+        varg.i32(1, 1);  // sample
         dftu_scalar var =
-            dftu_op_run_aggregate(dftu_op_find("variance"), c, &varg, &ok);
+            dftu_op_run_aggregate(dftu_op_find("variance"), c, varg, &ok);
         CHECK(ok == 1);
         CHECK(var.kind == DFTU_SCALAR_TAG_F64);
         CHECK(var.value.d == doctest::Approx(5.0 / 3.0));
 
-        dftu_op_arg qarg{};
-        qarg.args[1].f64 = 0.5;
+        OpArgs qarg;
+        qarg.f64(1, 0.5);
         dftu_scalar q =
-            dftu_op_run_aggregate(dftu_op_find("quantile"), c, &qarg, &ok);
+            dftu_op_run_aggregate(dftu_op_find("quantile"), c, qarg, &ok);
         CHECK(q.kind == DFTU_SCALAR_TAG_F64);
 
-        dftu_op_arg carg{};
-        carg.args[1].scalar = i64_scalar(2);
-        carg.args[2].scalar = i64_scalar(3);
-        dftu_series* clipped = dftu_op_run(dftu_op_find("clip"), in1, 1, &carg);
+        OpArgs carg;
+        carg.scalar(1, i64_scalar(2)).scalar(2, i64_scalar(3));
+        dftu_series* clipped = dftu_op_run(dftu_op_find("clip"), in1, 1, carg);
         REQUIRE(clipped != nullptr);
         CHECK(i64_of(clipped)[0] == 2);
         CHECK(i64_of(clipped)[3] == 3);
@@ -195,22 +198,22 @@ TEST_SUITE("op_registry") {
         REQUIRE(df != nullptr);
         const dftu_dataframe* fin[1] = {df};
 
-        const dftu_op_desc* head = dftu_op_find("frame.head");
-        REQUIRE(head != nullptr);
-        CHECK(dftu_op_kind_of(head->sig) == DFTU_OP_KIND_FRAME);
-        dftu_op_arg harg{};
-        harg.args[1].i64 = 2;
-        dftu_dataframe* h = dftu_op_run_frame(head, fin, 1, &harg);
+        auto head = find_op("frame.head");
+        REQUIRE(head.has_value());
+        CHECK(head->sig().kind() == OpKind::Frame);
+        OpArgs harg;
+        harg.i64(1, 2);
+        dftu_dataframe* h =
+            dftu_op_run_frame(dftu_op_find("frame.head"), fin, 1, harg);
         REQUIRE(h != nullptr);
         CHECK(dftu_dataframe_num_rows(h) == 2);
         dftu_dataframe_free(h);
 
         const char* sel[1] = {"a"};
-        dftu_op_arg sarg{};
-        sarg.args[1].list.items = sel;
-        sarg.args[1].list.n = 1;
+        OpArgs sarg;
+        sarg.strlist(1, sel, 1);
         dftu_dataframe* s =
-            dftu_op_run_frame(dftu_op_find("frame.select"), fin, 1, &sarg);
+            dftu_op_run_frame(dftu_op_find("frame.select"), fin, 1, sarg);
         REQUIRE(s != nullptr);
         CHECK(dftu_dataframe_num_columns(s) == 1);
         dftu_dataframe_free(s);
@@ -220,10 +223,10 @@ TEST_SUITE("op_registry") {
         // value_counts: series -> frame (no frame operand; series in args[0]).
         std::int64_t vc[4] = {1, 1, 2, 3};
         dftu_series* cvc = i64_col(vc, 4);
-        dftu_op_arg vcarg{};
-        vcarg.args[0].series = cvc;
+        OpArgs vcarg;
+        vcarg.series(0, cvc);
         dftu_dataframe* vcf = dftu_op_run_frame(
-            dftu_op_find("frame.value_counts"), nullptr, 0, &vcarg);
+            dftu_op_find("frame.value_counts"), nullptr, 0, vcarg);
         REQUIRE(vcf != nullptr);
         CHECK(dftu_dataframe_num_rows(vcf) == 3);  // 3 distinct values
         dftu_dataframe_free(vcf);
