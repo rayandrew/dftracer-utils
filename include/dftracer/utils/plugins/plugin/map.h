@@ -36,15 +36,15 @@ class Host {
    public:
     explicit Host(const dftu_host* h) : h_(h) {}
 
-    std::string_view str(dftu_str id) const {
-        if (id == DFTU_STR_NONE) return {};
+    std::string_view str(StrId id) const {
+        if (id.absent()) return {};
         std::uint32_t n = 0;
-        const char* p = h_->resolve(h_->h, id, &n);
+        const char* p = h_->resolve(h_->h, id.raw(), &n);
         return p ? std::string_view{p, n} : std::string_view{};
     }
-    dftu_str intern(std::string_view s) const {
-        return h_->intern(h_->h, s.data(),
-                          static_cast<std::uint32_t>(s.size()));
+    StrId intern(std::string_view s) const {
+        return StrId{
+            h_->intern(h_->h, s.data(), static_cast<std::uint32_t>(s.size()))};
     }
     void log(dftu_log_level level, std::string_view msg) const {
         h_->log(h_->h, static_cast<std::uint8_t>(level), msg.data(),
@@ -914,8 +914,8 @@ class Arg {
     Arg() = default;
     explicit Arg(const dftu_arg& a) noexcept : a_(&a) {}
 
-    dftu_str key_id() const noexcept { return a_->key; }
-    std::string_view key(const Host& h) const { return h.str(a_->key); }
+    StrId key_id() const noexcept { return StrId{a_->key}; }
+    std::string_view key(const Host& h) const { return h.str(key_id()); }
 
     dftu_arg_kind kind() const noexcept { return a_->kind; }
     bool is_i64() const noexcept { return a_->kind == DFTU_ARG_I64; }
@@ -925,8 +925,8 @@ class Arg {
     /// Read the accessor matching kind(); another slot holds a stale value.
     std::int64_t i64() const noexcept { return a_->v.i64; }
     double f64() const noexcept { return a_->v.f64; }
-    dftu_str str_id() const noexcept { return a_->v.str; }
-    std::string_view str(const Host& h) const { return h.str(a_->v.str); }
+    StrId str_id() const noexcept { return StrId{a_->v.str}; }
+    std::string_view str(const Host& h) const { return h.str(str_id()); }
 
     const dftu_arg& raw() const noexcept { return *a_; }
 
@@ -1007,11 +1007,12 @@ class Event {
         return static_cast<dftu_phase>(e_->phase);
     }
 
-    /// Interned id of a string field; DFTU_STR_NONE when absent.
-    dftu_str cat_id() const noexcept { return e_->cat; }
-    dftu_str name_id() const noexcept { return e_->name; }
-    dftu_str fhash_id() const noexcept { return e_->fhash; }
-    dftu_str hhash_id() const noexcept { return e_->hhash; }
+    /// Interned id of a string field; absent() (DFTU_STR_NONE) when not
+    /// present.
+    StrId cat_id() const noexcept { return StrId{e_->cat}; }
+    StrId name_id() const noexcept { return StrId{e_->name}; }
+    StrId fhash_id() const noexcept { return StrId{e_->fhash}; }
+    StrId hhash_id() const noexcept { return StrId{e_->hhash}; }
 
     /// Whether a string field was present on the event, so a plugin never
     /// compares an id against the raw DFTU_STR_NONE sentinel.
@@ -1022,10 +1023,10 @@ class Event {
 
     /// Resolve a string field to its bytes via `h`; empty when absent. The
     /// returned view is stable for the whole scan.
-    std::string_view cat(const Host& h) const { return h.str(e_->cat); }
-    std::string_view name(const Host& h) const { return h.str(e_->name); }
-    std::string_view fhash(const Host& h) const { return h.str(e_->fhash); }
-    std::string_view hhash(const Host& h) const { return h.str(e_->hhash); }
+    std::string_view cat(const Host& h) const { return h.str(cat_id()); }
+    std::string_view name(const Host& h) const { return h.str(name_id()); }
+    std::string_view fhash(const Host& h) const { return h.str(fhash_id()); }
+    std::string_view hhash(const Host& h) const { return h.str(hhash_id()); }
 
     /// Args are present only when the plugin declared DFTU_NEED_ARGS; otherwise
     /// arg_count() is 0. The views are borrowed for the current on_batch call.
@@ -1035,9 +1036,9 @@ class Event {
 
     /// First arg whose interned key matches `key`, or nullopt if none (and when
     /// args were not requested). Keys are flattened to dotted paths.
-    std::optional<Arg> find_arg(dftu_str key) const noexcept {
+    std::optional<Arg> find_arg(StrId key) const noexcept {
         for (std::uint32_t i = 0; i < e_->arg_count; ++i)
-            if (e_->args[i].key == key) return Arg{e_->args[i]};
+            if (e_->args[i].key == key.raw()) return Arg{e_->args[i]};
         return std::nullopt;
     }
 
@@ -1162,7 +1163,7 @@ inline std::int64_t key_of(T v) noexcept {
 /// Encode a STR/BYTES key slot: interns `s` on `h` and carries the id in the
 /// int64 slot.
 inline std::int64_t key_of(const Host& h, std::string_view s) {
-    return static_cast<std::int64_t>(h.intern(s));
+    return static_cast<std::int64_t>(h.intern(s).raw());
 }
 
 /// Encode one typed key/payload slot into the int64 the map ABI expects,
@@ -1284,7 +1285,7 @@ class Map {
     void add_argby_at(KeyTs... keys, std::uint32_t comp, double by,
                       std::string_view payload) const {
         add_argby_at(keys..., comp, by,
-                     static_cast<std::int64_t>(host_.intern(payload)));
+                     static_cast<std::int64_t>(host_.intern(payload).raw()));
     }
 
     /// Contribute (by, payload) to a bounded TOPK/BOTTOMK component; k is
@@ -1307,7 +1308,7 @@ class Map {
     void add_topk_at(KeyTs... keys, std::uint32_t comp, std::uint32_t k,
                      double by, std::string_view payload) const {
         add_topk_at(keys..., comp, k, by,
-                    static_cast<std::int64_t>(host_.intern(payload)));
+                    static_cast<std::int64_t>(host_.intern(payload).raw()));
     }
 
     /// Append (order_key, element id) to an ordered-list (LIST_*) component.

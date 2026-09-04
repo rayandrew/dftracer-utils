@@ -169,7 +169,8 @@ TEST_CASE("plugin cxx: typed row and key helpers encode without hand casts") {
     dftracer::utils::plugins::Host h{&fx.host()};
     std::int64_t id = key_of(h, std::string_view("POSIX"));
     CHECK(id != DFTU_STR_NONE);
-    CHECK(h.str(static_cast<dftu_str>(id)) == "POSIX");
+    CHECK(h.str(dftracer::utils::plugins::StrId{static_cast<dftu_str>(id)}) ==
+          "POSIX");
     CHECK(key_of(h, std::string_view("POSIX")) == id);  // interning is stable
 }
 
@@ -223,7 +224,7 @@ TEST_CASE("plugin cxx: Batch view iterates typed Events") {
         CHECK(e.dur() == 10 * (i + 1));
         CHECK(e.has_dur());
         CHECK(e.phase() == DFTU_PH_COMPLETE);
-        CHECK(e.cat_id() == cat);
+        CHECK(e.cat_id().raw() == cat);
         CHECK(e.cat(h) == "POSIX");
         CHECK(e.name(h) == "read");
         CHECK(e.arg_count() == 0);

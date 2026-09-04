@@ -123,15 +123,33 @@ enum class JoinType : std::int32_t {
     Full = DFTU_JOIN_FULL
 };
 
-/// A pre-interned STR/BYTES key slot: carries an already-interned dftu_str id
-/// (e.g. Event::name_id(), Event::fhash_id()) as a STR key component without
+/// Opaque strong handle for an interned-string id (the C ABI's dftu_str, which
+/// is an id, not bytes). Compare and hash by identity; resolve to bytes with
+/// Host::str. absent() is the DFTU_STR_NONE sentinel. raw() exposes the
+/// underlying id only to cross the C ABI seam - it is never an integer to a
+/// plugin author.
+class StrId {
+   public:
+    StrId() = default;
+    constexpr explicit StrId(dftu_str id) noexcept : id_(id) {}
+    constexpr dftu_str raw() const noexcept { return id_; }
+    constexpr bool absent() const noexcept { return id_ == DFTU_STR_NONE; }
+    constexpr bool operator==(StrId o) const noexcept { return id_ == o.id_; }
+    constexpr bool operator!=(StrId o) const noexcept { return id_ != o.id_; }
+
+   private:
+    dftu_str id_ = DFTU_STR_NONE;
+};
+
+/// A pre-interned STR/BYTES key slot: carries an already-interned id (e.g.
+/// Event::name_id(), Event::fhash_id()) as a STR key component without
 /// re-interning its bytes. Declare the slot's key type as Interned (in a Key
 /// tag) and feed it an interned() value.
 struct Interned {
     dftu_str id;
 };
 /// Wrap an already-interned id for use as a STR key slot; see Interned.
-inline Interned interned(dftu_str id) noexcept { return Interned{id}; }
+inline Interned interned(StrId id) noexcept { return Interned{id.raw()}; }
 
 /// Compile-time key schema tag naming each key component's C++ type in order,
 /// e.g. `Key<std::int64_t, std::string_view>{}` for a (pid, name) key.

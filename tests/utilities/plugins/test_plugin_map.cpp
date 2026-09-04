@@ -58,9 +58,9 @@ struct EdgeSlice {
             "edges",
             dftracer::utils::plugins::Key<std::int64_t, std::int64_t>{});
         for (const dftracer::utils::plugins::Event& e : b) {
-            if (e.fhash_id() == DFTU_STR_NONE) continue;
+            if (e.fhash_id().absent()) continue;
             m[std::tuple{static_cast<std::int64_t>(e.pid()),
-                         static_cast<std::int64_t>(e.fhash_id())}] += 1;
+                         static_cast<std::int64_t>(e.fhash_id().raw())}] += 1;
         }
     }
     void merge(EdgeSlice&) {}
@@ -77,10 +77,10 @@ struct WideEdgeSlice {
             h.map_new_product("wide_edges", {DFTU_T_I64, DFTU_T_I64},
                               {DFTU_MONOID_COUNTER, DFTU_MONOID_SUM_F64});
         for (const dftracer::utils::plugins::Event& e : b) {
-            if (e.fhash_id() == DFTU_STR_NONE) continue;
+            if (e.fhash_id().absent()) continue;
             std::initializer_list<std::int64_t> key = {
                 static_cast<std::int64_t>(e.pid()),
-                static_cast<std::int64_t>(e.fhash_id())};
+                static_cast<std::int64_t>(e.fhash_id().raw())};
             h.map_add_u64_at(m, key, 0, 1);
             h.map_add_f64_at(m, key, 1, static_cast<double>(e.dur()));
         }
@@ -98,10 +98,10 @@ struct NamedEdgeSlice {
         dftu_map* m = h.map_new("named_edges", {DFTU_T_I64, DFTU_T_STR},
                                 DFTU_MONOID_COUNTER);
         for (const dftracer::utils::plugins::Event& e : b) {
-            if (e.name_id() == DFTU_STR_NONE) continue;
+            if (e.name_id().absent()) continue;
             h.map_add_u64(m,
                           {static_cast<std::int64_t>(e.pid()),
-                           static_cast<std::int64_t>(e.name_id())},
+                           static_cast<std::int64_t>(e.name_id().raw())},
                           1);
         }
     }
@@ -118,9 +118,9 @@ struct FileSetSlice {
         auto m = h.map("file_set", dftracer::utils::plugins::Monoid::Set_Str,
                        dftracer::utils::plugins::Key<std::int64_t>{});
         for (const dftracer::utils::plugins::Event& e : b) {
-            if (e.fhash_id() == DFTU_STR_NONE) continue;
+            if (e.fhash_id().absent()) continue;
             m[static_cast<std::int64_t>(e.pid())] +=
-                static_cast<std::uint64_t>(e.fhash_id());
+                static_cast<std::uint64_t>(e.fhash_id().raw());
         }
     }
     void merge(FileSetSlice&) {}
@@ -136,10 +136,10 @@ struct EventSeqSlice {
         auto m = h.map("event_seq", dftracer::utils::plugins::Monoid::List_Str,
                        dftracer::utils::plugins::Key<std::int64_t>{});
         for (const dftracer::utils::plugins::Event& e : b) {
-            if (e.name_id() == DFTU_STR_NONE) continue;
+            if (e.name_id().absent()) continue;
             m.add_ordered(static_cast<std::int64_t>(e.pid()),
                           static_cast<std::int64_t>(e.ts()),
-                          static_cast<std::uint64_t>(e.name_id()));
+                          static_cast<std::uint64_t>(e.name_id().raw()));
         }
     }
     void merge(EventSeqSlice&) {}

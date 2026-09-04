@@ -160,7 +160,7 @@ struct NestedSlice {
         for (const dftracer::utils::plugins::Event& e : b) {
             const auto outer = std::tuple{static_cast<std::int64_t>(e.pid())};
             const auto inner =
-                std::tuple{static_cast<std::int64_t>(e.fhash_id())};
+                std::tuple{static_cast<std::int64_t>(e.fhash_id().raw())};
             m.add(outer, inner, 0, static_cast<std::uint64_t>(1));
             m.add(outer, inner, 1, static_cast<double>(e.dur()));
         }
@@ -177,7 +177,7 @@ struct InternedKeySlice {
               dftracer::utils::plugins::Host h) {
         auto m = h.counter_map("iname", Key<std::int64_t, Interned>{});
         for (const dftracer::utils::plugins::Event& e : b) {
-            if (e.name_id() == DFTU_STR_NONE) continue;
+            if (e.name_id().absent()) continue;
             m[std::tuple{static_cast<std::int64_t>(e.pid()),
                          interned(e.name_id())}] += 1;
         }
