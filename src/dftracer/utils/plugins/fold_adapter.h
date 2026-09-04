@@ -395,6 +395,14 @@ class PluginFold : public trace::views::detail::Fold {
     void declare_join(const char* out_name, const char* left_name,
                       const char* right_name, dftu_join_type type);
 
+    // Finalize-only reads over a merged map (dftu_ext_map read slots). Each
+    // reloads any spilled runs first, so a map drained by streaming
+    // materialize reads back empty rather than stale partial state.
+    std::uint64_t map_size(MapAccum* m);
+    int map_lookup(MapAccum* m, const std::int64_t* key, std::uint32_t key_n,
+                   std::uint32_t comp, ::dftu_monoid_value* out);
+    void* map_iter_new(MapAccum* m);
+
     // Get-or-create this slice's named dft.ext.agg accumulator; null on a bad
     // op code, a missing output name, or an allocation failure. A name seen
     // before keeps its creation-time specs. agg_accumulate skips a batch

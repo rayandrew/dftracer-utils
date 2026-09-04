@@ -24,6 +24,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -66,6 +67,50 @@ struct EdgeSlice {
     void merge(EdgeSlice&) {}
     void finalize(dftracer::utils::plugins::Host) {}
 };
+
+// Builds a {pid} -> COUNTER map, then reads it back at finalize through
+// FinalizedMap: size(), get(), monoid(), and a full iteration. Results are
+// captured into a static struct rather than CHECKed in place, since finalize()
+// runs on a Runtime worker thread; the TEST_CASE asserts on the main thread
+// after finalize_now() returns.
+struct ReadCounterSlice {
+    struct Result {
+        bool ran = false;
+        std::uint64_t size = 0;
+        std::optional<std::uint64_t> v1;
+        std::optional<std::uint64_t> v2;
+        bool missing_key_absent = false;
+        bool monoid_matches_get = false;
+        std::map<std::int64_t, std::uint64_t> iterated;
+    };
+    static Result result;
+
+    explicit ReadCounterSlice(const dftracer::utils::plugins::Config&) {}
+    void step(const dftracer::utils::plugins::Batch& b,
+              dftracer::utils::plugins::Host h) {
+        auto m = h.counter_map("read_counts",
+                               dftracer::utils::plugins::Key<std::int64_t>{});
+        for (const dftracer::utils::plugins::Event& e : b)
+            m[static_cast<std::int64_t>(e.pid())] += 1;
+    }
+    void merge(ReadCounterSlice&) {}
+    void finalize(dftracer::utils::plugins::Host h) {
+        auto m = h.counter_map("read_counts",
+                               dftracer::utils::plugins::Key<std::int64_t>{});
+        auto fm = m.finalized();
+        result.size = fm.size();
+        result.v1 = fm.get(1);
+        result.v2 = fm.get(2);
+        result.missing_key_absent = !fm.get(999).has_value();
+        auto mv = fm.monoid(1);
+        result.monoid_matches_get = mv.has_value() && result.v1.has_value() &&
+                                    mv->as_u64() == *result.v1;
+        for (const auto& [key, val] : fm)
+            result.iterated[std::get<0>(key)] = val.as_u64();
+        result.ran = true;
+    }
+};
+ReadCounterSlice::Result ReadCounterSlice::result;
 
 // Each event contributes (+1, +dur) to a product map at key {pid, fhash}: the
 // edge carries both a count and a total duration.
@@ -4555,5 +4600,41 @@ TEST_SUITE("PluginMap") {
             CHECK(keys == std::set<std::int64_t>{1, 2});
         }
 #endif
+    }
+
+    TEST_CASE("FinalizedMap reads a merged counter map at finalize") {
+        StringIntern intern;
+        SharedResultRegistry reg;
+        NamedResultRegistry named;
+        FoldHolder master(
+            dftracer::utils::plugins::make_plugin<ReadCounterSlice>(nullptr),
+            intern, &reg, &named);
+
+        // Merged: pid 1 -> 3, pid 2 -> 2.
+        const std::vector<std::vector<FoldEvent>> slices = {
+            {edge(1, 10), edge(1, 10), edge(2, 20)},
+            {edge(1, 10), edge(2, 20)}};
+        for (const auto& evs : slices) {
+            auto slice = master.fold->slice();
+            auto* pf = static_cast<PluginFold*>(slice.get());
+            ScanUnit unit;
+            FoldBatch fb{std::span<const FoldEvent>(evs), unit};
+            pf->step(fb);
+            master.fold->merge(*pf);
+        }
+        finalize_now(*master.fold);
+
+        const ReadCounterSlice::Result& r = ReadCounterSlice::result;
+        REQUIRE(r.ran);
+        CHECK(r.size == 2);
+        REQUIRE(r.v1.has_value());
+        CHECK(*r.v1 == 3);
+        REQUIRE(r.v2.has_value());
+        CHECK(*r.v2 == 2);
+        CHECK(r.missing_key_absent);
+        CHECK(r.monoid_matches_get);
+        REQUIRE(r.iterated.size() == 2);
+        CHECK(r.iterated.at(1) == 3);
+        CHECK(r.iterated.at(2) == 2);
     }
 }

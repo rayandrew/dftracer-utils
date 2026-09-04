@@ -810,6 +810,9 @@ typedef enum {
    `name`. */
 typedef struct dftu_map dftu_map;
 
+/** Opaque iterator over a finalized map's merged entries; see map_iter_new. */
+typedef struct dftu_map_cursor dftu_map_cursor;
+
 /** One component contribution for map_add_row: apply `value` to component
    `comp`, as an f64 add when `is_f64` is nonzero, else a u64 add. */
 typedef struct {
@@ -947,6 +950,30 @@ typedef struct dftu_ext_map {
        Intended for a map_new_fused map but valid on any product map. */
     void (*map_add_row)(void* h, dftu_map* m, const int64_t* key,
                         const dftu_row_val* vals, uint32_t n);
+    /** Finalize-only reads over a merged map. Sound only once the map is fully
+       merged, i.e. inside on_finalize; the default in-memory materialize
+       leaves entries intact, but the opt-in streaming/spill materialize path
+       drains the map as it emits, so a streamed map reads back empty here -
+       do not try to re-read emitted frames. Appended after map_add_row; a
+       host that predates it leaves these slots NULL. */
+    /** Number of merged entries (0 if empty or drained by streaming). */
+    uint64_t (*map_size)(void* h, dftu_map* m);
+    /** Look up one value component at `key` (key_n int64s); 1 and fills *out
+       if found, 0 if not. `comp` is 0-based, as in map_add_*_at. */
+    int (*map_get)(void* h, dftu_map* m, const int64_t* key, uint32_t key_n,
+                   uint32_t comp, dftu_monoid_value* out);
+    /** Create an iterator over the map's merged entries; free with
+       map_iter_free. */
+    dftu_map_cursor* (*map_iter_new)(void* h, dftu_map* m);
+    /** Advance and fill the next entry: up to key_cap key ints (key_n_out set
+       to the true key arity) and up to val_cap value components (val_n_out
+       set to the true component count). 1 if an entry was written, 0 at end.
+     */
+    int (*map_iter_next)(dftu_map_cursor* cur, int64_t* key_out,
+                         uint32_t key_cap, uint32_t* key_n_out,
+                         dftu_monoid_value* vals_out, uint32_t val_cap,
+                         uint32_t* val_n_out);
+    void (*map_iter_free)(dftu_map_cursor* cur);
 } dftu_ext_map;
 
 /** Host-owned per-plugin cross-batch aggregation accumulator, fetched via

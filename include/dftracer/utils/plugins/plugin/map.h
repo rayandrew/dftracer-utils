@@ -13,18 +13,22 @@
 #include <cstring>
 #include <initializer_list>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace dftracer::utils::plugins {
 
 template <class... KeyTs>
 class Map;
+template <class... KeyTs>
+class FinalizedMap;
 template <class Outer, class Inner>
 class NestedMap;
 class Handle;
@@ -1384,6 +1388,29 @@ inline std::int64_t encode_slot(const Host& h, const T& v) {
         return key_of(h, std::string_view{v});
 }
 
+/// Decode one int64 key slot back to its typed value, the reverse of
+/// encode_slot: an Interned slot carries the raw id, a floating T bit-casts
+/// back, an integral T static_casts back. A STR/BYTES-typed slot (T not
+/// Interned/arithmetic) has no decode in v1 - use Interned to read it as a raw
+/// id instead.
+template <class T>
+inline T decode_slot(std::int64_t slot) {
+    if constexpr (std::is_same_v<std::remove_cv_t<T>, Interned>) {
+        return Interned{static_cast<dftu_str>(slot)};
+    } else if constexpr (std::is_floating_point_v<T>) {
+        T v{};
+        std::memcpy(&v, &slot, sizeof(v));
+        return v;
+    } else if constexpr (std::is_integral_v<T>) {
+        return static_cast<T>(slot);
+    } else {
+        static_assert(std::is_integral_v<T>,
+                      "FinalizedMap iteration decodes arithmetic or Interned "
+                      "key columns only; a STR key column has no decode in "
+                      "v1 - declare it Interned to read the raw id");
+    }
+}
+
 /// Typed, non-owning view over a host-owned mergeable map (see Host::map). Keys
 /// are passed as natural C++ values (integers pass through, floats bit-cast,
 /// strings interned on the host), so authors never hand-encode the int64 key
@@ -1555,6 +1582,12 @@ class Map {
         e_->map_set_ordered(h(), m_, ordered ? 1 : 0);
     }
 
+    /// A finalize-only read view over this same map; see FinalizedMap. Call
+    /// only from on_finalize, once every worker slice has merged.
+    FinalizedMap<KeyTs...> finalized() const {
+        return FinalizedMap<KeyTs...>{host_, e_, m_};
+    }
+
    private:
     friend class Host;
     Map(Host host, const dftu_ext_map* e, dftu_map* m)
@@ -1593,6 +1626,149 @@ class Map {
             }
         }
     }
+
+    Host host_{nullptr};
+    const dftu_ext_map* e_ = nullptr;
+    dftu_map* m_ = nullptr;
+};
+
+/// Finalize-only read view over a host-owned mergeable map (see
+/// Map::finalized()). Valid only inside on_finalize, once every worker slice
+/// has merged into one map. Reads the map that materialize_map would read:
+/// the default in-memory materialize leaves entries intact, but the opt-in
+/// streaming/spill materialize path drains the map as it emits, so a streamed
+/// map reads back empty here - do not try to re-read emitted frames.
+template <class... KeyTs>
+class FinalizedMap {
+    static_assert(sizeof...(KeyTs) >= 1, "a Map needs at least one key column");
+    static constexpr std::size_t N = sizeof...(KeyTs);
+    // Cap on value components read per iterator step; every value monoid
+    // vocabulary in abi.h fits comfortably under this.
+    static constexpr std::uint32_t MAX_VALUE_COMPONENTS = 16;
+
+   public:
+    FinalizedMap() = default;
+
+    /// Borrowed handle; the host retains ownership. Null if unsupported.
+    dftu_map* raw() const noexcept { return m_; }
+    explicit operator bool() const noexcept { return m_ != nullptr; }
+
+    /// Number of merged entries (0 if empty, unsupported, or the map was
+    /// drained by streaming materialize).
+    std::uint64_t size() const {
+        return m_ && e_ && e_->map_size ? e_->map_size(h(), m_) : 0;
+    }
+
+    /// The value at component `comp` (default 0) for `keys`; nullopt if
+    /// absent or the host lacks the read slots.
+    std::optional<MonoidValue> monoid(KeyTs... keys,
+                                      std::uint32_t comp = 0) const {
+        if (!m_ || !e_ || !e_->map_get) return std::nullopt;
+        const std::int64_t k[N] = {encode_slot(host_, keys)...};
+        MonoidValue v;
+        return e_->map_get(h(), m_, k, static_cast<std::uint32_t>(N), comp,
+                           &v.raw) != 0
+                   ? std::optional<MonoidValue>{v}
+                   : std::nullopt;
+    }
+
+    /// Typed extraction of monoid(): as_f64() for a floating V, else as_u64().
+    template <class V = std::uint64_t>
+    std::optional<V> get(KeyTs... keys, std::uint32_t comp = 0) const {
+        std::optional<MonoidValue> v = monoid(keys..., comp);
+        if (!v) return std::nullopt;
+        if constexpr (std::is_floating_point_v<V>)
+            return static_cast<V>(v->as_f64());
+        else
+            return static_cast<V>(v->as_u64());
+    }
+
+    /// Single-pass forward iterator over the map's merged (key, value)
+    /// entries; value is component 0. Frees its cursor once exhausted or
+    /// destroyed.
+    class iterator {
+       public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = std::pair<std::tuple<KeyTs...>, MonoidValue>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const value_type*;
+        using reference = const value_type&;
+
+        iterator() = default;
+
+        const value_type& operator*() const noexcept { return cur_; }
+        const value_type* operator->() const noexcept { return &cur_; }
+        iterator& operator++() {
+            fetch();
+            return *this;
+        }
+        void operator++(int) { fetch(); }
+        bool operator==(const iterator& o) const noexcept {
+            return done_ == o.done_;
+        }
+        bool operator!=(const iterator& o) const noexcept {
+            return !(*this == o);
+        }
+
+       private:
+        friend class FinalizedMap;
+        iterator(Host host, const dftu_ext_map* e, dftu_map_cursor* c)
+            : host_(host), e_(e) {
+            if (c)
+                cursor_ = std::shared_ptr<dftu_map_cursor>(
+                    c, [e](dftu_map_cursor* p) {
+                        if (e->map_iter_free) e->map_iter_free(p);
+                    });
+            fetch();
+        }
+
+        template <std::size_t... Is>
+        static std::tuple<KeyTs...> decode(const std::int64_t* k,
+                                           std::index_sequence<Is...>) {
+            return std::tuple<KeyTs...>{decode_slot<KeyTs>(k[Is])...};
+        }
+
+        void fetch() {
+            if (!e_ || !e_->map_iter_next || !cursor_) {
+                done_ = true;
+                cursor_.reset();
+                return;
+            }
+            std::int64_t keys[N];
+            std::uint32_t key_n = 0;
+            dftu_monoid_value vals[MAX_VALUE_COMPONENTS];
+            std::uint32_t val_n = 0;
+            if (!e_->map_iter_next(cursor_.get(), keys,
+                                   static_cast<std::uint32_t>(N), &key_n, vals,
+                                   MAX_VALUE_COMPONENTS, &val_n)) {
+                done_ = true;
+                cursor_.reset();
+                return;
+            }
+            cur_.first = decode(keys, std::index_sequence_for<KeyTs...>{});
+            cur_.second.raw = val_n > 0 ? vals[0] : dftu_monoid_value{};
+            done_ = false;
+        }
+
+        Host host_{nullptr};
+        const dftu_ext_map* e_ = nullptr;
+        std::shared_ptr<dftu_map_cursor> cursor_;
+        value_type cur_{};
+        bool done_ = true;
+    };
+
+    iterator begin() const {
+        if (!m_ || !e_ || !e_->map_iter_new) return iterator{};
+        return iterator{host_, e_, e_->map_iter_new(h(), m_)};
+    }
+    iterator end() const { return iterator{}; }
+
+   private:
+    friend class Map<KeyTs...>;
+    FinalizedMap(Host host, const dftu_ext_map* e, dftu_map* m)
+        : host_(host), e_(e), m_(m) {}
+
+    void* h() const noexcept { return host_.raw()->h; }
 
     Host host_{nullptr};
     const dftu_ext_map* e_ = nullptr;

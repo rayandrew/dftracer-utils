@@ -778,6 +778,66 @@ void host_map_add_row(void* h, ::dftu_map* m, const std::int64_t* key,
                                              key, vals, n);
 }
 
+// Iterator state for map_iter_*; a flat walk across MapAccum's radix
+// partitions, since entries live in one EntriesMap per partition.
+struct MapCursor {
+    MapAccum* m;
+    std::uint32_t part = 0;
+    MapAccum::EntriesMap::const_iterator it{};
+
+    explicit MapCursor(MapAccum* map) : m(map) {
+        if (!m->parts.empty()) it = m->parts[0].begin();
+    }
+};
+
+std::uint64_t host_map_size(void* h, ::dftu_map* m) {
+    return static_cast<PluginFold*>(h)->map_size(
+        reinterpret_cast<MapAccum*>(m));
+}
+
+int host_map_get(void* h, ::dftu_map* m, const std::int64_t* key,
+                 std::uint32_t key_n, std::uint32_t comp,
+                 dftu_monoid_value* out) {
+    return static_cast<PluginFold*>(h)->map_lookup(
+        reinterpret_cast<MapAccum*>(m), key, key_n, comp, out);
+}
+
+::dftu_map_cursor* host_map_iter_new(void* h, ::dftu_map* m) {
+    return reinterpret_cast<::dftu_map_cursor*>(
+        static_cast<PluginFold*>(h)->map_iter_new(
+            reinterpret_cast<MapAccum*>(m)));
+}
+
+int host_map_iter_next(::dftu_map_cursor* cur_, std::int64_t* key_out,
+                       std::uint32_t key_cap, std::uint32_t* key_n_out,
+                       dftu_monoid_value* vals_out, std::uint32_t val_cap,
+                       std::uint32_t* val_n_out) {
+    auto* cur = reinterpret_cast<MapCursor*>(cur_);
+    MapAccum* m = cur->m;
+    while (cur->part < m->parts.size() &&
+           cur->it == m->parts[cur->part].end()) {
+        ++cur->part;
+        if (cur->part < m->parts.size()) cur->it = m->parts[cur->part].begin();
+    }
+    if (cur->part >= m->parts.size()) return 0;
+    const auto& kv = *cur->it;
+    const std::uint32_t kn = static_cast<std::uint32_t>(kv.first.size());
+    if (key_n_out) *key_n_out = kn;
+    const std::uint32_t kcopy = std::min(kn, key_cap);
+    for (std::uint32_t i = 0; i < kcopy; ++i) key_out[i] = kv.first[i];
+    const std::uint32_t vn = static_cast<std::uint32_t>(kv.second.size());
+    if (val_n_out) *val_n_out = vn;
+    const std::uint32_t vcopy = std::min(vn, val_cap);
+    for (std::uint32_t i = 0; i < vcopy; ++i)
+        vals_out[i] = kv.second[i].to_value();
+    ++cur->it;
+    return 1;
+}
+
+void host_map_iter_free(::dftu_map_cursor* cur_) {
+    delete reinterpret_cast<MapCursor*>(cur_);
+}
+
 const dftu_ext_map g_map = {host_map_new,
                             host_map_add_u64,
                             host_map_add_f64,
@@ -799,7 +859,12 @@ const dftu_ext_map g_map = {host_map_new,
                             host_map_add_xy_at,
                             host_map_new_sketch,
                             host_map_new_fused,
-                            host_map_add_row};
+                            host_map_add_row,
+                            host_map_size,
+                            host_map_get,
+                            host_map_iter_new,
+                            host_map_iter_next,
+                            host_map_iter_free};
 
 }  // namespace
 
@@ -1336,6 +1401,32 @@ void PluginFold::declare_join(const char* out_name, const char* left_name,
     for (const DeclaredJoin& j : joins_)
         if (j.out_name == out_name) return;
     joins_.push_back({out_name, left_name, right_name, type});
+}
+
+std::uint64_t PluginFold::map_size(MapAccum* m) {
+    if (!m) return 0;
+    reload_runs(*m);
+    return static_cast<std::uint64_t>(m->total_entries());
+}
+
+int PluginFold::map_lookup(MapAccum* m, const std::int64_t* key,
+                           std::uint32_t key_n, std::uint32_t comp,
+                           ::dftu_monoid_value* out) {
+    if (!m || !key || !out) return 0;
+    reload_runs(*m);
+    if (m->parts.empty()) return 0;
+    std::vector<std::int64_t> k(key, key + key_n);
+    const MapAccum::EntriesMap& part = m->parts[m->partition_of(k)];
+    auto it = part.find(k);
+    if (it == part.end() || comp >= it->second.size()) return 0;
+    *out = it->second[comp].to_value();
+    return 1;
+}
+
+void* PluginFold::map_iter_new(MapAccum* m) {
+    if (!m) return nullptr;
+    reload_runs(*m);
+    return new MapCursor(m);
 }
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
