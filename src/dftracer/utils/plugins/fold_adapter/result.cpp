@@ -1,7 +1,7 @@
 #include <dftracer/utils/core/common/hash/fnv1a.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
-#include <dftracer/utils/plugins/fold_adapter_ext.h>
+#include <dftracer/utils/plugins/fold_adapter/ext.h>
 
 #include <cstdint>
 

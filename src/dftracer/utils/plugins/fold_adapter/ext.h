@@ -11,7 +11,7 @@
 #include <vector>
 
 // Private seam shared by the fold_adapter extension translation units
-// (fold_adapter.cpp core plus fold_adapter_ext_{map,agg,result}.cpp). Each ext
+// (fold_adapter.cpp core plus fold_adapter/{map,agg,result}.cpp). Each ext
 // TU defines its own file-static g_* vtable and exposes it through the
 // detail:: accessor below; host_get_extension in the core TU calls the
 // accessors. The remaining declarations are the free helpers referenced across

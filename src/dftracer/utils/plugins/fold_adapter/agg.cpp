@@ -4,7 +4,7 @@
 #include <dftracer/utils/dataframe/agg_expr.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
-#include <dftracer/utils/plugins/fold_adapter_ext.h>
+#include <dftracer/utils/plugins/fold_adapter/ext.h>
 
 #include <cstdint>
 #include <memory>

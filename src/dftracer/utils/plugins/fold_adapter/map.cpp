@@ -42,7 +42,7 @@
 #include <dftracer/utils/utilities/common/arrow/ipc_writer.h>
 #endif
 
-#include <dftracer/utils/plugins/fold_adapter_ext.h>
+#include <dftracer/utils/plugins/fold_adapter/ext.h>
 
 #include <algorithm>
 #include <atomic>
