@@ -6,6 +6,7 @@
 #include <dftracer/utils/plugins/owned_arrow.h>
 #include <dftracer/utils/plugins/plugin/async.h>
 #include <dftracer/utils/plugins/plugin/types.h>
+#include <dftracer/utils/plugins/result_registry.h>
 
 #include <array>
 #include <cstdint>
@@ -28,6 +29,7 @@ template <class Outer, class Inner>
 class NestedMap;
 class Handle;
 class Writer;
+class Agg;
 template <class T>
 class OutPort;
 template <class T>
@@ -399,6 +401,26 @@ class Host {
                    : std::nullopt;
     }
 
+    dftu_agg* agg_new(const char* name, const char* const* key_names,
+                      std::uint32_t key_n, const dftu_agg_col* specs,
+                      std::uint32_t spec_n) const {
+        const dftu_ext_agg* e = ext(DFTU_EXT_AGG, agg_ext_);
+        return e && e->agg_new
+                   ? e->agg_new(h_->h, name, key_names, key_n, specs, spec_n)
+                   : nullptr;
+    }
+    void agg_accumulate(dftu_agg* a, const dftu_dataframe* df) const {
+        const dftu_ext_agg* e = ext(DFTU_EXT_AGG, agg_ext_);
+        if (e && e->agg_accumulate) e->agg_accumulate(h_->h, a, df);
+    }
+    /// Get-or-create a named cross-batch aggregation accumulator grouping by
+    /// `key_names` and computing each of `cols`; empty (`!agg`) if the host
+    /// lacks the agg group or agg_new rejects the spec (a bad op code or
+    /// missing output name). See dftu_ext_agg::agg_new; a name seen before
+    /// returns the existing accumulator and ignores `cols`.
+    Agg agg(const char* name, std::initializer_list<const char*> key_names,
+            std::initializer_list<AggCol> cols) const;
+
     /// Named result channel: emit an opaque blob (the host copies `len` bytes)
     /// or a user-schema Arrow array (the host moves it); both surface from
     /// PluginHost::run keyed by name. Best called at on_finalize.
@@ -423,6 +445,22 @@ class Host {
     int emit_result_lazyframe(const char* name, dftu_lazyframe* lf) const {
         const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
         return e && e->emit_lazyframe ? e->emit_lazyframe(h_->h, name, lf) : -1;
+    }
+    /// Hands a native dataframe result to the host, which takes ownership; -1
+    /// if the host lacks the result channel or the emit_frame slot (`df` is
+    /// left intact so it frees normally). Same finalize/collision semantics as
+    /// emit_result.
+    int emit_result_frame(const char* name, OwnedDataFrame&& df) const {
+        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
+        if (!e || !e->emit_frame) return -1;
+        return e->emit_frame(h_->h, name, df.release());
+    }
+    /// OwnedLazyFrame overload of emit_result_lazyframe; -1 leaves `lf` intact
+    /// so it frees normally.
+    int emit_result_lazyframe(const char* name, OwnedLazyFrame&& lf) const {
+        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
+        if (!e || !e->emit_lazyframe) return -1;
+        return e->emit_lazyframe(h_->h, name, lf.release());
     }
 
     /// Mergeable map: get-or-create a named tuple-keyed map whose value is a
@@ -723,6 +761,7 @@ class Host {
     mutable const dftu_ext_handles* handles_ext_ = nullptr;
     mutable const dftu_ext_result* result_ext_ = nullptr;
     mutable const dftu_ext_map* map_ext_ = nullptr;
+    mutable const dftu_ext_agg* agg_ext_ = nullptr;
 };
 
 /// Move-only RAII owner of a host sketch handle; frees it in the destructor.
@@ -764,6 +803,46 @@ class Sketch {
 };
 
 inline Sketch Host::make_sketch() const { return Sketch{*this}; }
+
+/// Non-owning view over a host-owned cross-batch aggregation accumulator (see
+/// Host::agg). The host owns the handle (freed at fold teardown), so there is
+/// nothing for the plugin to free.
+class Agg {
+   public:
+    Agg() = default;
+
+    /// Fold one batch's key/value columns (looked up by name in `df`) into
+    /// this accumulator. Serial per accumulator; one slice's accumulator is
+    /// touched by one thread.
+    void accumulate(const dftu_dataframe* df) const {
+        host_.agg_accumulate(a_, df);
+    }
+    void accumulate(const OwnedDataFrame& df) const { accumulate(df.handle); }
+
+    /// Borrowed handle; the host retains ownership. Null if unsupported.
+    dftu_agg* raw() const noexcept { return a_; }
+    explicit operator bool() const noexcept { return a_ != nullptr; }
+
+   private:
+    friend class Host;
+    Agg(Host host, dftu_agg* a) noexcept : host_(host), a_(a) {}
+
+    Host host_{nullptr};
+    dftu_agg* a_ = nullptr;
+};
+
+inline Agg Host::agg(const char* name,
+                     std::initializer_list<const char*> key_names,
+                     std::initializer_list<AggCol> cols) const {
+    std::vector<const char*> keys(key_names.begin(), key_names.end());
+    std::vector<dftu_agg_col> specs;
+    specs.reserve(cols.size());
+    for (const AggCol& c : cols) specs.push_back(c.raw());
+    dftu_agg* a =
+        agg_new(name, keys.data(), static_cast<std::uint32_t>(keys.size()),
+                specs.data(), static_cast<std::uint32_t>(specs.size()));
+    return Agg{*this, a};
+}
 
 /// Typed, non-owning view over a named cross-worker mergeable handle (see
 /// Host::handle). The handle is a write-only accumulator: contribute during

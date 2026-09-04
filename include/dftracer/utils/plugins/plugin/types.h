@@ -185,6 +185,95 @@ class Version {
     dftu_version v_{};
 };
 
+/// Scoped mirror of dftu_agg_op for AggCol/Host::agg; each enumerator is its
+/// DFTU_AGG_* constant, so static_cast<dftu_agg_op> recovers the raw value.
+/// See abi.h/dftu_agg_col for each op's semantics and which of
+/// value/out/param/by it consumes.
+enum class AggOp : std::int32_t {
+    Count = DFTU_AGG_COUNT,
+    Sum = DFTU_AGG_SUM,
+    Min = DFTU_AGG_MIN,
+    Max = DFTU_AGG_MAX,
+    Mean = DFTU_AGG_MEAN,
+    Var = DFTU_AGG_VAR,
+    Std = DFTU_AGG_STD,
+    Skew = DFTU_AGG_SKEW,
+    Kurt = DFTU_AGG_KURT,
+    First = DFTU_AGG_FIRST,
+    Last = DFTU_AGG_LAST,
+    Pct = DFTU_AGG_PCT,
+    Hist = DFTU_AGG_HIST,
+    Argmax = DFTU_AGG_ARGMAX,
+    Sumsq = DFTU_AGG_SUMSQ,
+    SetUnion = DFTU_AGG_SET_UNION,
+    Busy = DFTU_AGG_BUSY,
+    Concurrency = DFTU_AGG_CONCURRENCY,
+    Utilization = DFTU_AGG_UTILIZATION,
+    Active = DFTU_AGG_ACTIVE,
+    CountValid = DFTU_AGG_COUNT_VALID
+};
+static_assert(static_cast<dftu_agg_op>(AggOp::Count) == DFTU_AGG_COUNT);
+static_assert(static_cast<dftu_agg_op>(AggOp::Sum) == DFTU_AGG_SUM);
+static_assert(static_cast<dftu_agg_op>(AggOp::Min) == DFTU_AGG_MIN);
+static_assert(static_cast<dftu_agg_op>(AggOp::Max) == DFTU_AGG_MAX);
+static_assert(static_cast<dftu_agg_op>(AggOp::Mean) == DFTU_AGG_MEAN);
+static_assert(static_cast<dftu_agg_op>(AggOp::Var) == DFTU_AGG_VAR);
+static_assert(static_cast<dftu_agg_op>(AggOp::Std) == DFTU_AGG_STD);
+static_assert(static_cast<dftu_agg_op>(AggOp::Skew) == DFTU_AGG_SKEW);
+static_assert(static_cast<dftu_agg_op>(AggOp::Kurt) == DFTU_AGG_KURT);
+static_assert(static_cast<dftu_agg_op>(AggOp::First) == DFTU_AGG_FIRST);
+static_assert(static_cast<dftu_agg_op>(AggOp::Last) == DFTU_AGG_LAST);
+static_assert(static_cast<dftu_agg_op>(AggOp::Pct) == DFTU_AGG_PCT);
+static_assert(static_cast<dftu_agg_op>(AggOp::Hist) == DFTU_AGG_HIST);
+static_assert(static_cast<dftu_agg_op>(AggOp::Argmax) == DFTU_AGG_ARGMAX);
+static_assert(static_cast<dftu_agg_op>(AggOp::Sumsq) == DFTU_AGG_SUMSQ);
+static_assert(static_cast<dftu_agg_op>(AggOp::SetUnion) == DFTU_AGG_SET_UNION);
+static_assert(static_cast<dftu_agg_op>(AggOp::Busy) == DFTU_AGG_BUSY);
+static_assert(static_cast<dftu_agg_op>(AggOp::Concurrency) ==
+              DFTU_AGG_CONCURRENCY);
+static_assert(static_cast<dftu_agg_op>(AggOp::Utilization) ==
+              DFTU_AGG_UTILIZATION);
+static_assert(static_cast<dftu_agg_op>(AggOp::Active) == DFTU_AGG_ACTIVE);
+static_assert(static_cast<dftu_agg_op>(AggOp::CountValid) ==
+              DFTU_AGG_COUNT_VALID);
+
+/// Fluent builder for one dftu_agg_col spec passed to Host::agg. All names
+/// (value/out/by) are borrowed const char* held only for the agg_new call, per
+/// the SDK's borrowed-name convention; they must outlive that call.
+class AggCol {
+   public:
+    explicit AggCol(AggOp op) noexcept : op_(op) {}
+
+    AggCol& value(const char* v) noexcept {
+        value_ = v;
+        return *this;
+    }
+    AggCol& out(const char* o) noexcept {
+        out_ = o;
+        return *this;
+    }
+    AggCol& param(double p) noexcept {
+        param_ = p;
+        return *this;
+    }
+    AggCol& by(const char* b) noexcept {
+        by_ = b;
+        return *this;
+    }
+
+    dftu_agg_col raw() const noexcept {
+        return dftu_agg_col{static_cast<std::int32_t>(op_), value_, out_,
+                            param_, by_};
+    }
+
+   private:
+    AggOp op_;
+    const char* value_ = nullptr;
+    const char* out_ = nullptr;
+    double param_ = 0.0;
+    const char* by_ = nullptr;
+};
+
 /// Opaque strong handle for an interned-string id (the C ABI's dftu_str, which
 /// is an id, not bytes). Compare and hash by identity; resolve to bytes with
 /// Host::str. absent() is the DFTU_STR_NONE sentinel. raw() exposes the

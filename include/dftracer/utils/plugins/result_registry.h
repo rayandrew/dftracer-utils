@@ -1,7 +1,6 @@
 #ifndef DFTRACER_UTILS_PLUGINS_RESULT_REGISTRY_H
 #define DFTRACER_UTILS_PLUGINS_RESULT_REGISTRY_H
 
-#include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/owned_arrow.h>
 
@@ -51,6 +50,14 @@ struct OwnedDataFrame {
     ~OwnedDataFrame() {
         if (handle) dftu_dataframe_free(handle);
     }
+
+    /// Releases ownership to the caller, who must free it (or hand it to
+    /// something that will); the destructor no longer will.
+    dftu_dataframe* release() noexcept {
+        dftu_dataframe* h = handle;
+        handle = nullptr;
+        return h;
+    }
 };
 
 /// A deferred columnar result carried across the ABI as a dftu_lazyframe
@@ -78,6 +85,14 @@ struct OwnedLazyFrame {
     OwnedLazyFrame& operator=(const OwnedLazyFrame&) = delete;
     ~OwnedLazyFrame() {
         if (handle) dftu_lazyframe_free(handle);
+    }
+
+    /// Releases ownership to the caller, who must free it (or hand it to
+    /// something that will); the destructor no longer will.
+    dftu_lazyframe* release() noexcept {
+        dftu_lazyframe* h = handle;
+        handle = nullptr;
+        return h;
     }
 };
 
