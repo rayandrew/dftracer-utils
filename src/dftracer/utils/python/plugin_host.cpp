@@ -11,6 +11,7 @@
 #include <dftracer/utils/python/py_errors.h>
 #include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
+#include <dftracer/utils/python/py_seq_helpers.h>
 #include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
@@ -57,6 +58,8 @@ using dftracer::utils::plugins::OwnedArrow;
 using dftracer::utils::plugins::OwnedDataFrame;
 using dftracer::utils::plugins::OwnedLazyFrame;
 using dftracer::utils::plugins::PluginHost;
+using dftracer::utils::python::parse_seq;
+using dftracer::utils::python::parse_string_seq;
 namespace indexing = dftracer::utils::trace::indexing;
 namespace internal = dftracer::utils::trace::internal;
 namespace views = dftracer::utils::trace::views;
@@ -116,20 +119,7 @@ bool collect_inputs(PyObject* traces, std::vector<std::string>& out) {
         out.emplace_back(s);
         return true;
     }
-    PyObject* seq =
-        PySequence_Fast(traces, "traces must be a str or list[str]");
-    if (!seq) return false;
-    const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        const char* s = as_utf8(PySequence_Fast_GET_ITEM(seq, i));
-        if (!s) {
-            Py_DECREF(seq);
-            return false;
-        }
-        out.emplace_back(s);
-    }
-    Py_DECREF(seq);
-    return true;
+    return parse_string_seq(traces, "traces must be a str or list[str]", out);
 }
 
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
@@ -447,21 +437,15 @@ bool resolve_col(const ArrowSchema* s, const char* name, std::uint32_t* out) {
 
 bool resolve_cols(const ArrowSchema* s, PyObject* names,
                   std::vector<std::uint32_t>& out) {
-    PyObject* fast = PySequence_Fast(names, "expected a sequence of names");
-    if (!fast) return false;
-    const Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
-    out.reserve(static_cast<std::size_t>(n));
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        const char* nm = as_utf8(PySequence_Fast_GET_ITEM(fast, i));
-        std::uint32_t idx = 0;
-        if (!nm || !resolve_col(s, nm, &idx)) {
-            Py_DECREF(fast);
-            return false;
-        }
-        out.push_back(idx);
-    }
-    Py_DECREF(fast);
-    return true;
+    return parse_seq<std::uint32_t>(
+        names, "expected a sequence of names", out,
+        [&](PyObject* item, std::vector<std::uint32_t>& o) {
+            const char* nm = as_utf8(item);
+            std::uint32_t idx = 0;
+            if (!nm || !resolve_col(s, nm, &idx)) return false;
+            o.push_back(idx);
+            return true;
+        });
 }
 
 bool window_func_from_str(const char* name, arr::WindowFunc* out) {

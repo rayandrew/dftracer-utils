@@ -3,6 +3,7 @@
 
 #include <Python.h>
 #include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/python/py_seq_helpers.h>
 
 #include <stdexcept>
 #include <string>
@@ -31,25 +32,20 @@ inline dftracer::utils::dataframe::GroupAgg group_agg_from_spec(
 // GroupAgg records, mirroring the group_by string-spec form.
 inline bool aggs_from_seq(
     PyObject* obj, std::vector<dftracer::utils::dataframe::GroupAgg>& out) {
-    PyObject* seq = PySequence_Fast(obj, "aggs must be a sequence of str");
-    if (!seq) return false;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-        if (!s) {
-            Py_DECREF(seq);
-            return false;
-        }
-        try {
-            out.push_back(group_agg_from_spec(s));
-        } catch (const std::exception& e) {
-            PyErr_SetString(PyExc_ValueError, e.what());
-            Py_DECREF(seq);
-            return false;
-        }
-    }
-    Py_DECREF(seq);
-    return true;
+    return parse_seq<dftracer::utils::dataframe::GroupAgg>(
+        obj, "aggs must be a sequence of str", out,
+        [](PyObject* item,
+           std::vector<dftracer::utils::dataframe::GroupAgg>& o) {
+            const char* s = PyUnicode_AsUTF8(item);
+            if (!s) return false;
+            try {
+                o.push_back(group_agg_from_spec(s));
+            } catch (const std::exception& e) {
+                PyErr_SetString(PyExc_ValueError, e.what());
+                return false;
+            }
+            return true;
+        });
 }
 
 // Parse a group_by key argument that is either one column name or a sequence
@@ -62,20 +58,7 @@ inline bool strings_from_str_or_seq(PyObject* obj,
         out.emplace_back(s);
         return true;
     }
-    PyObject* seq =
-        PySequence_Fast(obj, "key must be a str or a sequence of str");
-    if (!seq) return false;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-        if (!s) {
-            Py_DECREF(seq);
-            return false;
-        }
-        out.emplace_back(s);
-    }
-    Py_DECREF(seq);
-    return true;
+    return parse_string_seq(obj, "key must be a str or a sequence of str", out);
 }
 
 }  // namespace dftracer::utils::python

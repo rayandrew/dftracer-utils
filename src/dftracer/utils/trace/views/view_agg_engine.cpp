@@ -710,6 +710,24 @@ static double cell_as_double(const dataframe::Series& c, std::int64_t r) {
     }
 }
 
+void append_transform_columns(
+    dataframe::DataFrame& frame,
+    const std::vector<AggInputSpec::Transform>& transforms,
+    const GroupResolver* resolver) {
+    const std::int64_t n = frame.num_rows();
+    for (const AggInputSpec::Transform& t : transforms) {
+        const dataframe::Series& src = frame.columns[static_cast<std::size_t>(
+            frame.column_index(t.src_col))];
+        std::vector<std::string> vals(static_cast<std::size_t>(n));
+        for (std::int64_t r = 0; r < n; ++r)
+            vals[static_cast<std::size_t>(r)] = apply_group_transform(
+                t.gk,
+                transform_key_base(t.gk, cell_to_key_string(src, r), resolver));
+        frame.names.push_back(t.out_col);
+        frame.columns.push_back(dataframe::Series::strings(vals));
+    }
+}
+
 dataframe::DataFrame build_agg_input_frame(
     const std::vector<FoldEvent>& events,
     const dftracer::utils::StringIntern& intern, const AggInputSpec& spec,
@@ -724,17 +742,7 @@ dataframe::DataFrame build_agg_input_frame(
             f.columns.push_back(std::move(col));
         }
 
-    for (const AggInputSpec::Transform& t : spec.transforms) {
-        const dataframe::Series& src =
-            f.columns[static_cast<std::size_t>(f.column_index(t.src_col))];
-        std::vector<std::string> vals(static_cast<std::size_t>(n));
-        for (std::int64_t r = 0; r < n; ++r)
-            vals[static_cast<std::size_t>(r)] = apply_group_transform(
-                t.gk,
-                transform_key_base(t.gk, cell_to_key_string(src, r), resolver));
-        f.names.push_back(t.out_col);
-        f.columns.push_back(dataframe::Series::strings(vals));
-    }
+    append_transform_columns(f, spec.transforms, resolver);
 
     // cat/bucket/scale sources are select tokens; map each to its built frame
     // column (te's derived token resolves to "te").
@@ -860,19 +868,7 @@ coro::CoroTask<EnginePrep> prepare_engine_group(const ViewPlan& plan) {
         dataframe::DataFrame frame = co_await lf.collect();
         const GroupResolver* resolver =
             spec.transform_wants_resolver ? ensure_resolver(plan) : nullptr;
-        const std::int64_t n = frame.num_rows();
-        for (const AggInputSpec::Transform& t : spec.transforms) {
-            const dataframe::Series& src =
-                frame.columns[static_cast<std::size_t>(
-                    frame.column_index(t.src_col))];
-            std::vector<std::string> vals(static_cast<std::size_t>(n));
-            for (std::int64_t r = 0; r < n; ++r)
-                vals[static_cast<std::size_t>(r)] = apply_group_transform(
-                    t.gk, transform_key_base(t.gk, cell_to_key_string(src, r),
-                                             resolver));
-            frame.names.push_back(t.out_col);
-            frame.columns.push_back(dataframe::Series::strings(vals));
-        }
+        append_transform_columns(frame, spec.transforms, resolver);
         lf =
             dataframe::lazy(std::move(frame)).memory_budget(plan.memory_budget);
     }

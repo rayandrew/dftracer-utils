@@ -49,6 +49,9 @@ using dataframe::DataFrame;
 using dataframe::Series;
 using dftracer::utils::python::aggs_from_seq;
 using dftracer::utils::python::group_agg_from_spec;
+using dftracer::utils::python::parse_int_seq;
+using dftracer::utils::python::parse_seq;
+using dftracer::utils::python::parse_string_seq;
 using dftracer::utils::python::strings_from_str_or_seq;
 
 // A DataFrame owns its columns as one STRUCT column: child(i) hands out a
@@ -206,36 +209,21 @@ PyObject* DataFrame_query(PyObject* self, PyObject* args, PyObject* kwds) {
         }
         if (group_by && *group_by) plan.group_by = group_by;
         if (aggs_obj && aggs_obj != Py_None) {
-            PyObject* seq =
-                PySequence_Fast(aggs_obj, "aggs must be a sequence of strings");
-            if (!seq) return nullptr;
-            Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-            for (Py_ssize_t i = 0; i < n; ++i) {
-                const char* s =
-                    PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-                if (!s) {
-                    Py_DECREF(seq);
-                    return nullptr;
-                }
-                plan.aggs.push_back(group_agg_from_spec(s));
-            }
-            Py_DECREF(seq);
+            if (!parse_seq<dataframe::GroupAgg>(
+                    aggs_obj, "aggs must be a sequence of strings", plan.aggs,
+                    [](PyObject* item, std::vector<dataframe::GroupAgg>& o) {
+                        const char* s = PyUnicode_AsUTF8(item);
+                        if (!s) return false;
+                        o.push_back(group_agg_from_spec(s));
+                        return true;
+                    }))
+                return nullptr;
         }
         if (select_obj && select_obj != Py_None) {
-            PyObject* seq = PySequence_Fast(
-                select_obj, "select must be a sequence of column names");
-            if (!seq) return nullptr;
-            Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-            for (Py_ssize_t i = 0; i < n; ++i) {
-                const char* s =
-                    PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-                if (!s) {
-                    Py_DECREF(seq);
-                    return nullptr;
-                }
-                plan.select.emplace_back(s);
-            }
-            Py_DECREF(seq);
+            if (!parse_string_seq(select_obj,
+                                  "select must be a sequence of column names",
+                                  plan.select))
+                return nullptr;
         }
         if (order_by && *order_by) plan.order_by = order_by;
         plan.descending = descending != 0;
@@ -312,20 +300,9 @@ PyObject* DataFrame_with_column(PyObject* self, PyObject* args) {
 PyObject* DataFrame_take(PyObject* self, PyObject* seq) {
     DataFrameObject* b = as_dataframe(self);
     if (!b) return nullptr;
-    PyObject* fast = PySequence_Fast(seq, "take() expects a sequence of ints");
-    if (!fast) return nullptr;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(fast);
     std::vector<std::int64_t> idx;
-    idx.reserve(static_cast<std::size_t>(n));
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        long long v = PyLong_AsLongLong(PySequence_Fast_GET_ITEM(fast, i));
-        if (v == -1 && PyErr_Occurred()) {
-            Py_DECREF(fast);
-            return nullptr;
-        }
-        idx.push_back(static_cast<std::int64_t>(v));
-    }
-    Py_DECREF(fast);
+    if (!parse_int_seq(seq, "take() expects a sequence of ints", idx))
+        return nullptr;
     return run_batch_op([&] { return to_dataframe(b).take(idx); });
 }
 
@@ -375,19 +352,9 @@ PyObject* DataFrame_sort_by_multi(PyObject* self, PyObject* args,
                                      const_cast<char**>(kwlist), &names_obj,
                                      &descending_obj))
         return nullptr;
-    PyObject* seq = PySequence_Fast(names_obj, "names must be a sequence");
-    if (!seq) return nullptr;
     std::vector<std::string> names;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-        if (!s) {
-            Py_DECREF(seq);
-            return nullptr;
-        }
-        names.emplace_back(s);
-    }
-    Py_DECREF(seq);
+    if (!parse_string_seq(names_obj, "names must be a sequence", names))
+        return nullptr;
 
     // `descending` is either a single bool (broadcasts) or a sequence of bool,
     // one per name; a bare Python list is never truthy-coerced (that was the
@@ -551,19 +518,9 @@ PyObject* DataFrame_hash_partition(PyObject* self, PyObject* args) {
     std::vector<std::string> keys;
     if (PyUnicode_Check(keys_obj)) {
         keys.emplace_back(PyUnicode_AsUTF8(keys_obj));
-    } else {
-        PyObject* seq = PySequence_Fast(keys_obj, "keys must be a str or list");
-        if (!seq) return nullptr;
-        Py_ssize_t m = PySequence_Fast_GET_SIZE(seq);
-        for (Py_ssize_t i = 0; i < m; ++i) {
-            const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-            if (!s) {
-                Py_DECREF(seq);
-                return nullptr;
-            }
-            keys.emplace_back(s);
-        }
-        Py_DECREF(seq);
+    } else if (!parse_string_seq(keys_obj, "keys must be a str or list",
+                                 keys)) {
+        return nullptr;
     }
 
     std::vector<DataFrame> parts;
@@ -834,19 +791,7 @@ bool names_from_obj(PyObject* obj, std::vector<std::string>& out) {
         out.emplace_back(PyUnicode_AsUTF8(obj));
         return true;
     }
-    PyObject* seq = PySequence_Fast(obj, "expected a str or sequence of str");
-    if (!seq) return false;
-    Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-        if (!s) {
-            Py_DECREF(seq);
-            return false;
-        }
-        out.emplace_back(s);
-    }
-    Py_DECREF(seq);
-    return true;
+    return parse_string_seq(obj, "expected a str or sequence of str", out);
 }
 
 // unpivot(id_vars, value_vars) / melt: reshape wide -> long.

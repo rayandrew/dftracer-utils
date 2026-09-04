@@ -15,6 +15,7 @@
 #include <dftracer/utils/python/py_list_helpers.h>
 #include <dftracer/utils/python/py_method.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
+#include <dftracer/utils/python/py_seq_helpers.h>
 #include <dftracer/utils/python/py_str_helpers.h>
 #include <dftracer/utils/python/py_type_helpers.h>
 #include <dftracer/utils/python/runtime.h>
@@ -59,6 +60,8 @@ namespace {
 
 using dftracer::utils::Runtime;
 using dftracer::utils::dataframe::DataFrame;
+using dftracer::utils::python::parse_bytes_seq;
+using dftracer::utils::python::parse_string_seq;
 using dftracer::utils::query::Query;
 using dftracer::utils::trace::views::AggOp;
 using dftracer::utils::trace::views::AggregatedView;
@@ -820,19 +823,7 @@ PyObject* tv_collect(TraceViewerObject* self, PyObject*) {
 }
 
 static bool parse_partition(PyObject* seq_obj, std::vector<std::string>& out) {
-    PyObject* seq = PySequence_Fast(seq_obj, "partition must be a sequence");
-    if (!seq) return false;
-    const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(seq, i));
-        if (!s) {
-            Py_DECREF(seq);
-            return false;
-        }
-        out.emplace_back(s);
-    }
-    Py_DECREF(seq);
-    return true;
+    return parse_string_seq(seq_obj, "partition must be a sequence", out);
 }
 
 // Decode a session containment branch's sink "partition_csv\x1f ts\x1f dur\x1f
@@ -1649,22 +1640,9 @@ PyObject* tv_merge_partials(TraceViewerObject* self, PyObject* arg) {
                     "merge_partials() requires the arrow-enabled build");
     return nullptr;
 #else
-    PyObject* seq = PySequence_Fast(arg, "merge_partials expects a sequence");
-    if (!seq) return nullptr;
-    const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
     std::vector<std::string> owned;
-    owned.reserve(static_cast<std::size_t>(n));
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        char* buf = nullptr;
-        Py_ssize_t len = 0;
-        if (PyBytes_AsStringAndSize(PySequence_Fast_GET_ITEM(seq, i), &buf,
-                                    &len) < 0) {
-            Py_DECREF(seq);
-            return nullptr;
-        }
-        owned.emplace_back(buf, static_cast<std::size_t>(len));
-    }
-    Py_DECREF(seq);
+    if (!parse_bytes_seq(arg, "merge_partials expects a sequence", owned))
+        return nullptr;
 
     auto files = extract_files(self);
     auto index_dir = extract_index_dir(self);
@@ -1717,23 +1695,10 @@ PyObject* tv_merge_flamegraph_partials(TraceViewerObject*, PyObject* arg) {
                     "merge_flamegraph_partials() requires the arrow build");
     return nullptr;
 #else
-    PyObject* seq =
-        PySequence_Fast(arg, "merge_flamegraph_partials expects a sequence");
-    if (!seq) return nullptr;
-    const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
     std::vector<std::string> owned;
-    owned.reserve(static_cast<std::size_t>(n));
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        char* buf = nullptr;
-        Py_ssize_t len = 0;
-        if (PyBytes_AsStringAndSize(PySequence_Fast_GET_ITEM(seq, i), &buf,
-                                    &len) < 0) {
-            Py_DECREF(seq);
-            return nullptr;
-        }
-        owned.emplace_back(buf, static_cast<std::size_t>(len));
-    }
-    Py_DECREF(seq);
+    if (!parse_bytes_seq(arg, "merge_flamegraph_partials expects a sequence",
+                         owned))
+        return nullptr;
     std::vector<std::string_view> parts(owned.begin(), owned.end());
     DataFrame table = View::merge_flamegraph_partials(parts);
     return dftracer::utils::python::wrap_dataframe(std::move(table));
@@ -1742,23 +1707,9 @@ PyObject* tv_merge_flamegraph_partials(TraceViewerObject*, PyObject* arg) {
 
 // Distributed materialize: reduce rank-local partials and write the rollup.
 PyObject* tv_materialize_partials(TraceViewerObject* self, PyObject* arg) {
-    PyObject* seq =
-        PySequence_Fast(arg, "materialize_partials expects a sequence");
-    if (!seq) return nullptr;
-    const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
     std::vector<std::string> owned;
-    owned.reserve(static_cast<std::size_t>(n));
-    for (Py_ssize_t i = 0; i < n; ++i) {
-        char* buf = nullptr;
-        Py_ssize_t len = 0;
-        if (PyBytes_AsStringAndSize(PySequence_Fast_GET_ITEM(seq, i), &buf,
-                                    &len) < 0) {
-            Py_DECREF(seq);
-            return nullptr;
-        }
-        owned.emplace_back(buf, static_cast<std::size_t>(len));
-    }
-    Py_DECREF(seq);
+    if (!parse_bytes_seq(arg, "materialize_partials expects a sequence", owned))
+        return nullptr;
 
     Runtime* rt = resolve_runtime(self);
     auto files = extract_files(self);

@@ -14,6 +14,8 @@
 #include <dftracer/utils/utilities/common/arrow/arrow_export.h>
 #endif
 
+#include <ankerl/unordered_dense.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -191,6 +193,56 @@ struct ComposeOp {
 // dft.ext.agg accumulator; defined in the .cpp to keep agg.h (and its Arrow
 // tangle) out of this header.
 struct AggAccum;
+
+// Name-keyed registry of stable-address elements. Deque-backed so an element
+// pointer (a dftu_map*/dftu_handle*/dftu_agg* handed to a plugin) never moves;
+// the name-hash index gives get-or-create without a linear scan. Insertion
+// order is preserved for deterministic materialize.
+template <class T>
+class StableRegistry {
+   public:
+    using IndexMap = ankerl::unordered_dense::map<std::uint64_t, std::size_t>;
+
+    auto begin() { return items_.begin(); }
+    auto end() { return items_.end(); }
+    auto begin() const { return items_.begin(); }
+    auto end() const { return items_.end(); }
+    std::size_t size() const { return items_.size(); }
+    bool empty() const { return items_.empty(); }
+    T& operator[](std::size_t i) { return items_[i]; }
+    const T& operator[](std::size_t i) const { return items_[i]; }
+    const IndexMap& index() const { return index_; }
+
+    /// Pointer to the element for @p key, or nullptr if absent.
+    T* find(std::uint64_t key) {
+        auto it = index_.find(key);
+        return it == index_.end() ? nullptr : &items_[it->second];
+    }
+
+    /// Append @p value under @p key and return its stable address. The caller
+    /// guarantees @p key is not already present.
+    T* push(std::uint64_t key, T value) {
+        items_.push_back(std::move(value));
+        index_.emplace(key, items_.size() - 1);
+        return &items_.back();
+    }
+
+    /// Return the element for @p key, creating it via @p make() (invoked only
+    /// on a miss). Returns nullptr if construction or insertion throws.
+    template <class Factory>
+    T* get_or_create(std::uint64_t key, Factory&& make) {
+        if (T* e = find(key)) return e;
+        try {
+            return push(key, make());
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+   private:
+    std::deque<T> items_;
+    IndexMap index_;
+};
 
 class PluginFold : public trace::views::detail::Fold {
     using Fold = trace::views::detail::Fold;
@@ -458,22 +510,18 @@ class PluginFold : public trace::views::detail::Fold {
     SharedResultRegistry* results_ = nullptr;
     NamedResultRegistry* named_results_ = nullptr;
 
-    // Per-slice named handles; the deque keeps each MonoidAccumulator address
-    // stable so a dftu_handle* handed to a plugin never dangles across a
-    // rehash.
-    std::deque<MonoidAccumulator> handles_;
-    std::unordered_map<std::uint64_t, std::size_t> handle_index_;
+    // Per-slice named handles; StableRegistry keeps each MonoidAccumulator
+    // address stable so a dftu_handle* handed to a plugin never dangles.
+    StableRegistry<MonoidAccumulator> handles_;
 
-    // Per-slice named maps; the deque keeps each MapAccum address stable so a
-    // dftu_map* handed to a plugin never dangles across a rehash.
-    std::deque<MapAccum> maps_;
-    std::unordered_map<std::uint64_t, std::size_t> map_index_;
+    // Per-slice named maps; StableRegistry keeps each MapAccum address stable
+    // so a dftu_map* handed to a plugin never dangles.
+    StableRegistry<MapAccum> maps_;
     std::uint32_t map_part_bits_ = 0;
 
     // dft.ext.agg accumulators; unique_ptr keeps each handed-out dftu_agg*
     // stable and lets the header forward-declare AggAccum.
-    std::deque<std::unique_ptr<AggAccum>> aggs_;
-    std::unordered_map<std::uint64_t, std::size_t> agg_index_;
+    StableRegistry<std::unique_ptr<AggAccum>> aggs_;
 
     struct DeclaredJoin {
         std::string out_name, left_name, right_name;

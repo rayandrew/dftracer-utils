@@ -530,6 +530,20 @@ bool tier_key_is_resolved(GroupKey::Kind kind) {
            kind == GroupKey::Kind::HostName || kind == GroupKey::Kind::Rank;
 }
 
+void build_tier_keys(std::vector<std::string>& keys, const ViewPlan& plan,
+                     const AggKeyView& kv, const GroupResolver* resolver,
+                     char (&fbuf)[::dftracer::utils::hash::HEX64_DIGITS]) {
+    for (const auto& gk : plan.group_by) {
+        std::string v = key_value(kv, gk, fbuf);
+        if (gk.transform != GroupKey::Transform::None) {
+            if (resolver && tier_key_is_resolved(gk.kind))
+                v = resolve_group_value(*resolver, gk.kind, v);
+            v = apply_group_transform(gk, std::move(v));
+        }
+        keys.push_back(std::move(v));
+    }
+}
+
 }  // namespace
 
 // `eval_root` is the cat-lowered clone of plan.query's AST (see
@@ -614,15 +628,7 @@ bool agg_tier_collect(const ViewPlan& plan, dataframe::AggStatePtr& out) {
 
         keys.clear();
         keys.reserve(plan.group_by.size());
-        for (const auto& gk : plan.group_by) {
-            std::string v = key_value(kv, gk, fbuf);
-            if (gk.transform != GroupKey::Transform::None) {
-                if (resolver && tier_key_is_resolved(gk.kind))
-                    v = resolve_group_value(*resolver, gk.kind, v);
-                v = apply_group_transform(gk, std::move(v));
-            }
-            keys.push_back(std::move(v));
-        }
+        build_tier_keys(keys, plan, kv, resolver, fbuf);
         dataframe::agg_seed_group(*state, keys, mv.count,
                                   row_seed_values(vcols, mv, sketch_store));
     }
@@ -744,15 +750,7 @@ bool events_profiles_collect(const ViewPlan& plan,
         // resolved+transformed here since finalize skips the resolver for it.
         if (has_bucket)
             keys.push_back(std::to_string(tier_time_bucket(kv, plan)));
-        for (const auto& gk : plan.group_by) {
-            std::string v = key_value(kv, gk, fbuf);
-            if (gk.transform != GroupKey::Transform::None) {
-                if (resolver && tier_key_is_resolved(gk.kind))
-                    v = resolve_group_value(*resolver, gk.kind, v);
-                v = apply_group_transform(gk, std::move(v));
-            }
-            keys.push_back(std::move(v));
-        }
+        build_tier_keys(keys, plan, kv, resolver, fbuf);
         dataframe::agg_seed_group(is_profile ? *prof_state : *ev_state, keys,
                                   mv.count,
                                   row_seed_values(vcols, mv, sketch_store));

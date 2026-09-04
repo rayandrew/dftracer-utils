@@ -121,47 +121,16 @@ static coro::CoroTask<HttpResponse> handle_viz_events(const HttpRequest& req,
             "Missing required parameters: begin, end, summary");
     }
 
-    double begin = params.get_double("begin", 0);
-    double end = params.get_double("end", 0);
     int summary = params.get_int("summary", 1);
     if (summary < 1) summary = 1;
 
-    // Validate the optional raw DSL query before it is spliced into the view.
-    auto query = params.get("query");
-    if (!query.empty() && !query::try_parse(query).has_value()) {
-        co_return HttpResponse::bad_request("Invalid query: " +
-                                            std::string(query));
-    }
-
-    // Timestamp normalization: default ON, opt-out with ?ts_normalize=0
-    auto ts_norm_param = params.get("ts_normalize");
-    bool normalize = ts_norm_param.empty() || ts_norm_param != "0";
-
-    std::uint64_t global_min = 0;
-    if (normalize) {
-        global_min = index.global_min_timestamp_us();
-        if (global_min == std::numeric_limits<std::uint64_t>::max()) {
-            global_min = 0;  // No valid bounds, skip normalization
-        }
-    }
-
-    // When normalization is active the user sends normalized
-    // begin/end values (relative to global_min).  De-normalize them
-    // so the predicate filters against absolute timestamps.
-    double original_begin = begin;
-    double original_end = end;
-    // Client sends us; the scan matches the native index. Convert first, then
-    // de-normalize against the native base. Identity for US traces.
-    if (index.time_metric() != TraceIndex::TimeMetric::US) {
-        begin = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(begin)));
-        end = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(end)));
-    }
-    if (normalize && global_min > 0) {
-        begin += static_cast<double>(global_min);
-        end += static_cast<double>(global_min);
-    }
+    auto win = parse_viz_window(params, index);
+    if (!win) co_return std::move(win.error());
+    double begin = win->begin;
+    double end = win->end;
+    double original_begin = win->original_begin;
+    double original_end = win->original_end;
+    std::uint64_t global_min = win->global_min;
 
     double min_dur =
         duration_threshold(begin, end, static_cast<unsigned>(summary));
@@ -451,35 +420,12 @@ static coro::CoroTask<HttpResponse> handle_viz_stats(const HttpRequest& req,
             "Missing required parameters: begin, end");
     }
 
-    double begin = params.get_double("begin", 0);
-    double end = params.get_double("end", 0);
-
-    auto query = params.get("query");
-    if (!query.empty() && !query::try_parse(query).has_value()) {
-        co_return HttpResponse::bad_request("Invalid query: " +
-                                            std::string(query));
-    }
-
-    auto ts_norm_param = params.get("ts_normalize");
-    bool normalize = ts_norm_param.empty() || ts_norm_param != "0";
-    std::uint64_t global_min = 0;
-    if (normalize) {
-        global_min = index.global_min_timestamp_us();
-        if (global_min == std::numeric_limits<std::uint64_t>::max())
-            global_min = 0;
-    }
-    double original_begin = begin;
-    double original_end = end;
-    if (index.time_metric() != TraceIndex::TimeMetric::US) {
-        begin = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(begin)));
-        end = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(end)));
-    }
-    if (normalize && global_min > 0) {
-        begin += static_cast<double>(global_min);
-        end += static_cast<double>(global_min);
-    }
+    auto win = parse_viz_window(params, index);
+    if (!win) co_return std::move(win.error());
+    double begin = win->begin;
+    double end = win->end;
+    double original_begin = win->original_begin;
+    double original_end = win->original_end;
 
     GroupBy group = parse_group_by(params.get("group"));
 
@@ -795,32 +741,10 @@ static coro::CoroTask<HttpResponse> handle_viz_calltree(
         co_return HttpResponse::bad_request(
             "Missing required parameters: begin, end");
 
-    double begin = params.get_double("begin", 0);
-    double end = params.get_double("end", 0);
-
-    auto query = params.get("query");
-    if (!query.empty() && !query::try_parse(query).has_value())
-        co_return HttpResponse::bad_request("Invalid query: " +
-                                            std::string(query));
-
-    auto ts_norm_param = params.get("ts_normalize");
-    bool normalize = ts_norm_param.empty() || ts_norm_param != "0";
-    std::uint64_t global_min = 0;
-    if (normalize) {
-        global_min = index.global_min_timestamp_us();
-        if (global_min == std::numeric_limits<std::uint64_t>::max())
-            global_min = 0;
-    }
-    if (index.time_metric() != TraceIndex::TimeMetric::US) {
-        begin = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(begin)));
-        end = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(end)));
-    }
-    if (normalize && global_min > 0) {
-        begin += static_cast<double>(global_min);
-        end += static_cast<double>(global_min);
-    }
+    auto win = parse_viz_window(params, index);
+    if (!win) co_return std::move(win.error());
+    double begin = win->begin;
+    double end = win->end;
 
     ViewDefinition view = build_viz_view(params, begin, end, 0);
     // The flame tree keys on ts/dur containment and ignores ph=M metadata, so
@@ -907,32 +831,10 @@ static coro::CoroTask<HttpResponse> handle_viz_histogram(
         co_return HttpResponse::bad_request(
             "Missing required parameters: begin, end");
 
-    double begin = params.get_double("begin", 0);
-    double end = params.get_double("end", 0);
-
-    auto query = params.get("query");
-    if (!query.empty() && !query::try_parse(query).has_value())
-        co_return HttpResponse::bad_request("Invalid query: " +
-                                            std::string(query));
-
-    auto ts_norm_param = params.get("ts_normalize");
-    bool normalize = ts_norm_param.empty() || ts_norm_param != "0";
-    std::uint64_t global_min = 0;
-    if (normalize) {
-        global_min = index.global_min_timestamp_us();
-        if (global_min == std::numeric_limits<std::uint64_t>::max())
-            global_min = 0;
-    }
-    if (index.time_metric() != TraceIndex::TimeMetric::US) {
-        begin = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(begin)));
-        end = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(end)));
-    }
-    if (normalize && global_min > 0) {
-        begin += static_cast<double>(global_min);
-        end += static_cast<double>(global_min);
-    }
+    auto win = parse_viz_window(params, index);
+    if (!win) co_return std::move(win.error());
+    double begin = win->begin;
+    double end = win->end;
 
     ViewDefinition view = build_viz_view(params, begin, end, 0);
     view.with_include_metadata(false);  // aggregate only; skip ph=M records
@@ -1516,26 +1418,13 @@ static coro::CoroTask<HttpResponse> handle_viz_density(
     for (const auto& rt : resolve_types)
         if (rt) any_resolve = true;
 
-    auto ts_norm_param = params.get("ts_normalize");
-    bool normalize = ts_norm_param.empty() || ts_norm_param != "0";
-    std::uint64_t global_min = 0;
-    if (normalize) {
-        global_min = index.global_min_timestamp_us();
-        if (global_min == std::numeric_limits<std::uint64_t>::max())
-            global_min = 0;
-    }
-    double original_begin = begin;
-    double original_end = end;
-    if (index.time_metric() != TraceIndex::TimeMetric::US) {
-        begin = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(begin)));
-        end = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(end)));
-    }
-    if (normalize && global_min > 0) {
-        begin += static_cast<double>(global_min);
-        end += static_cast<double>(global_min);
-    }
+    auto win = parse_viz_window(params, index);
+    if (!win) co_return std::move(win.error());
+    begin = win->begin;
+    end = win->end;
+    double original_begin = win->original_begin;
+    double original_end = win->original_end;
+    std::uint64_t global_min = win->global_min;
 
     // Bucket width (== the ~1px cutoff), in the client's actual pixels.
     int width = params.get_int("width", DEFAULT_VIEWPORT_WIDTH);
@@ -2052,38 +1941,16 @@ static coro::CoroTask<HttpResponse> handle_viz_counters(
             "Missing required parameters: begin, end");
     }
 
-    double begin = params.get_double("begin", 0);
-    double end = params.get_double("end", 0);
     int buckets = params.get_int("buckets", 800);
     if (buckets < 16) buckets = 16;
     if (buckets > 4000) buckets = 4000;
 
-    auto query = params.get("query");
-    if (!query.empty() && !query::try_parse(query).has_value()) {
-        co_return HttpResponse::bad_request("Invalid query: " +
-                                            std::string(query));
-    }
-
-    auto ts_norm_param = params.get("ts_normalize");
-    bool normalize = ts_norm_param.empty() || ts_norm_param != "0";
-    std::uint64_t global_min = 0;
-    if (normalize) {
-        global_min = index.global_min_timestamp_us();
-        if (global_min == std::numeric_limits<std::uint64_t>::max())
-            global_min = 0;
-    }
-    double original_begin = begin;
-    double original_end = end;
-    if (index.time_metric() != TraceIndex::TimeMetric::US) {
-        begin = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(begin)));
-        end = static_cast<double>(
-            index.us_to_native(static_cast<std::uint64_t>(end)));
-    }
-    if (normalize && global_min > 0) {
-        begin += static_cast<double>(global_min);
-        end += static_cast<double>(global_min);
-    }
+    auto win = parse_viz_window(params, index);
+    if (!win) co_return std::move(win.error());
+    double begin = win->begin;
+    double end = win->end;
+    double original_begin = win->original_begin;
+    double original_end = win->original_end;
 
     double bucket_us = (end - begin) / static_cast<double>(buckets);
     if (bucket_us <= 0) bucket_us = 1;

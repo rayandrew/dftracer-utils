@@ -2469,15 +2469,7 @@ MonoidAccumulator* PluginFold::handle_get(const char* cap_id,
                                           dftu_monoid_kind kind) {
     if (!cap_id) return nullptr;
     std::uint64_t key = dftracer::utils::hash::fnv1a_hash(cap_id);
-    auto it = handle_index_.find(key);
-    if (it != handle_index_.end()) return &handles_[it->second];
-    try {
-        handles_.emplace_back(kind);
-        handle_index_.emplace(key, handles_.size() - 1);
-        return &handles_.back();
-    } catch (...) {
-        return nullptr;
-    }
+    return handles_.get_or_create(key, [&] { return MonoidAccumulator(kind); });
 }
 
 int PluginFold::handle_result(const char* cap_id,
@@ -2522,9 +2514,8 @@ MapAccum* PluginFold::map_get(const char* name, const dftu_type* key_types,
                                 std::uint32_t spec_n) {
     if (!name || (key_n && !key_names) || spec_n == 0 || !specs) return nullptr;
     std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
-    auto it = agg_index_.find(key);
-    if (it != agg_index_.end())
-        return reinterpret_cast<::dftu_agg*>(aggs_[it->second].get());
+    if (std::unique_ptr<AggAccum>* slot = aggs_.find(key))
+        return reinterpret_cast<::dftu_agg*>(slot->get());
 
     std::vector<std::string> value_names;
     auto column_index = [&](const char* col) -> std::int32_t {
@@ -2560,7 +2551,7 @@ MapAccum* PluginFold::map_get(const char* name, const dftu_type* key_types,
         aspecs.push_back(std::move(s));
     }
 
-    try {
+    std::unique_ptr<AggAccum>* slot = aggs_.get_or_create(key, [&] {
         auto acc = std::make_unique<AggAccum>();
         acc->name = name;
         acc->key_names.reserve(key_n);
@@ -2568,13 +2559,9 @@ MapAccum* PluginFold::map_get(const char* name, const dftu_type* key_types,
             acc->key_names.emplace_back(key_names[i] ? key_names[i] : "");
         acc->value_names = std::move(value_names);
         acc->state = dataframe::agg_new(std::move(aspecs));
-        AggAccum* raw = acc.get();
-        aggs_.push_back(std::move(acc));
-        agg_index_.emplace(key, aggs_.size() - 1);
-        return reinterpret_cast<::dftu_agg*>(raw);
-    } catch (...) {
-        return nullptr;
-    }
+        return acc;
+    });
+    return slot ? reinterpret_cast<::dftu_agg*>(slot->get()) : nullptr;
 }
 
 void PluginFold::agg_accumulate(::dftu_agg* a, const ::dftu_dataframe* df) {
@@ -2652,9 +2639,7 @@ MapAccum* PluginFold::map_get_product(const char* name,
         }
     }
     std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
-    auto it = map_index_.find(key);
-    if (it != map_index_.end()) return &maps_[it->second];
-    try {
+    return maps_.get_or_create(key, [&] {
         MapAccum m;
         m.name = name;
         m.key_n = key_n;
@@ -2663,12 +2648,8 @@ MapAccum* PluginFold::map_get_product(const char* name,
         for (std::uint32_t i = 0; i < value_n; ++i)
             m.value_base_bytes += MonoidAccumulator(values[i]).state_bytes();
         m.set_part_bits(map_part_bits_);
-        maps_.push_back(std::move(m));
-        map_index_.emplace(key, maps_.size() - 1);
-        return &maps_.back();
-    } catch (...) {
-        return nullptr;
-    }
+        return m;
+    });
 }
 
 MapAccum* PluginFold::map_get_nested(const char* name,
@@ -2711,9 +2692,7 @@ MapAccum* PluginFold::map_get_nested(const char* name,
             return nullptr;
         }
     std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
-    auto it = map_index_.find(key);
-    if (it != map_index_.end()) return &maps_[it->second];
-    try {
+    return maps_.get_or_create(key, [&] {
         MapAccum m;
         m.name = name;
         m.key_n = outer_key_n + inner_key_n;
@@ -2727,12 +2706,8 @@ MapAccum* PluginFold::map_get_nested(const char* name,
         m.inner_key_types.assign(inner_key_types,
                                  inner_key_types + inner_key_n);
         m.set_part_bits(map_part_bits_);
-        maps_.push_back(std::move(m));
-        map_index_.emplace(key, maps_.size() - 1);
-        return &maps_.back();
-    } catch (...) {
-        return nullptr;
-    }
+        return m;
+    });
 }
 
 void PluginFold::map_add_nested_u64(MapAccum* m, const std::int64_t* outer_key,
@@ -2874,9 +2849,7 @@ MapAccum* PluginFold::map_get_argrow(const char* name,
             return nullptr;
         }
     std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
-    auto it = map_index_.find(key);
-    if (it != map_index_.end()) return &maps_[it->second];
-    try {
+    return maps_.get_or_create(key, [&] {
         const dftu_monoid_kind vk =
             is_max ? DFTU_MONOID_ARGMAX_ROW : DFTU_MONOID_ARGMIN_ROW;
         MapAccum m;
@@ -2887,12 +2860,8 @@ MapAccum* PluginFold::map_get_argrow(const char* name,
         m.payload_types.assign(payload_types, payload_types + payload_n);
         m.value_base_bytes += MonoidAccumulator(vk).state_bytes();
         m.set_part_bits(map_part_bits_);
-        maps_.push_back(std::move(m));
-        map_index_.emplace(key, maps_.size() - 1);
-        return &maps_.back();
-    } catch (...) {
-        return nullptr;
-    }
+        return m;
+    });
 }
 
 MapAccum* PluginFold::map_get_sketch(const char* name,
@@ -2916,9 +2885,7 @@ MapAccum* PluginFold::map_get_sketch(const char* name,
             return nullptr;
         }
     std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
-    auto it = map_index_.find(key);
-    if (it != map_index_.end()) return &maps_[it->second];
-    try {
+    return maps_.get_or_create(key, [&] {
         MapAccum m;
         m.name = name;
         m.key_n = key_n;
@@ -2928,12 +2895,8 @@ MapAccum* PluginFold::map_get_sketch(const char* name,
         m.value_base_bytes +=
             MonoidAccumulator(DFTU_MONOID_SKETCH).state_bytes();
         m.set_part_bits(map_part_bits_);
-        maps_.push_back(std::move(m));
-        map_index_.emplace(key, maps_.size() - 1);
-        return &maps_.back();
-    } catch (...) {
-        return nullptr;
-    }
+        return m;
+    });
 }
 
 MapAccum* PluginFold::map_get_fused(const char* name,
@@ -2962,9 +2925,7 @@ MapAccum* PluginFold::map_get_fused(const char* name,
         }
     }
     std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
-    auto it = map_index_.find(key);
-    if (it != map_index_.end()) return &maps_[it->second];
-    try {
+    return maps_.get_or_create(key, [&] {
         MapAccum m;
         m.name = name;
         m.key_n = key_n;
@@ -2975,12 +2936,8 @@ MapAccum* PluginFold::map_get_fused(const char* name,
             m.fused_out_names.emplace_back(out_names[i]);
         }
         m.set_part_bits(map_part_bits_);
-        maps_.push_back(std::move(m));
-        map_index_.emplace(key, maps_.size() - 1);
-        return &maps_.back();
-    } catch (...) {
-        return nullptr;
-    }
+        return m;
+    });
 }
 
 void PluginFold::map_add_row(MapAccum* m, const std::int64_t* key,
@@ -3087,24 +3044,18 @@ void PluginFold::merge(Fold& other) {
     auto& o = static_cast<PluginFold&>(other);
     if (o.slice_) plugin_->merge(slice_, o.slice_);
     // Merge named handles by key; fuse folds each worker slice into the master.
-    for (const auto& [key, idx] : o.handle_index_) {
+    for (const auto& [key, idx] : o.handles_.index()) {
         const MonoidAccumulator& src = o.handles_[idx];
-        auto it = handle_index_.find(key);
-        if (it == handle_index_.end()) {
-            handles_.emplace_back(src.kind());
-            handle_index_.emplace(key, handles_.size() - 1);
-            handles_.back().merge(src);
-        } else {
-            handles_[it->second].merge(src);
-        }
+        MonoidAccumulator* dst = handles_.find(key);
+        if (!dst) dst = handles_.push(key, MonoidAccumulator(src.kind()));
+        dst->merge(src);
     }
     // Fold each named map's entries into this by key, merging a colliding key's
     // monoid.
-    for (const auto& [key, idx] : o.map_index_) {
+    for (const auto& [key, idx] : o.maps_.index()) {
         MapAccum& src = o.maps_[idx];
-        auto it = map_index_.find(key);
-        MapAccum* dst;
-        if (it == map_index_.end()) {
+        MapAccum* dst = maps_.find(key);
+        if (!dst) {
             MapAccum m;
             m.name = src.name;
             m.key_n = src.key_n;
@@ -3117,11 +3068,7 @@ void PluginFold::merge(Fold& other) {
             m.quantile_qs = src.quantile_qs;
             m.fused_out_names = src.fused_out_names;
             m.set_part_bits(src.part_bits);
-            maps_.push_back(std::move(m));
-            map_index_.emplace(key, maps_.size() - 1);
-            dst = &maps_.back();
-        } else {
-            dst = &maps_[it->second];
+            dst = maps_.push(key, std::move(m));
         }
         dst->ordered = dst->ordered || src.ordered;
         // dst carries src's part_bits, so src partition p folds into dst
@@ -3170,15 +3117,14 @@ void PluginFold::merge(Fold& other) {
     // Fold each worker's aggregation accumulators into this master by name via
     // the engine's single merge path (agg_merge). An accumulator new to the
     // master is moved in whole; a shared name merges the two AggStates.
-    for (auto& [key, idx] : o.agg_index_) {
+    for (const auto& [key, idx] : o.aggs_.index()) {
         std::unique_ptr<AggAccum>& src = o.aggs_[idx];
         if (!src || !src->state) continue;
-        auto it = agg_index_.find(key);
-        if (it == agg_index_.end()) {
-            aggs_.push_back(std::move(src));
-            agg_index_.emplace(key, aggs_.size() - 1);
-        } else if (aggs_[it->second]->state) {
-            dataframe::agg_merge(*aggs_[it->second]->state, *src->state);
+        std::unique_ptr<AggAccum>* dst = aggs_.find(key);
+        if (!dst) {
+            aggs_.push(key, std::move(src));
+        } else if ((*dst)->state) {
+            dataframe::agg_merge(*(*dst)->state, *src->state);
         }
     }
 }
@@ -3700,8 +3646,7 @@ void PluginFold::materialize_maps() {
         }
     }
     auto find_map = [&](const std::string& name) -> MapAccum* {
-        auto it = map_index_.find(dftracer::utils::hash::fnv1a_hash(name));
-        return it == map_index_.end() ? nullptr : &maps_[it->second];
+        return maps_.find(dftracer::utils::hash::fnv1a_hash(name));
     };
     for (const DeclaredJoin& dj : joins_) {
         try {
@@ -3763,7 +3708,7 @@ coro::CoroTask<bool> PluginFold::finalize(const CoverageSet&) {
     // Publish this fold's merged handles before on_finalize so a consumer
     // finalizing later in fold order can read them via result().
     if (results_)
-        for (const auto& [key, idx] : handle_index_)
+        for (const auto& [key, idx] : handles_.index())
             results_->values[key] = handles_[idx].to_value();
     materialize_maps();
     materialize_aggs();

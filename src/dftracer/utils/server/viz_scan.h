@@ -5,14 +5,19 @@
 // threshold, viz-query (ViewDefinition) building from request params, and
 // target-file selection. Internal to the server.
 
+#include <dftracer/utils/core/common/expected.h>
 #include <dftracer/utils/core/common/to_chars.h>
+#include <dftracer/utils/query/query.h>
 #include <dftracer/utils/server/http_request.h>
+#include <dftracer/utils/server/http_response.h>
 #include <dftracer/utils/server/trace_index.h>
 #include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/views/view_definition.h>
 #include <simdjson.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -92,6 +97,55 @@ static double duration_threshold(double begin, double end, unsigned level,
     double range = end - begin;
     return range /
            (static_cast<double>(viewport_width) * static_cast<double>(level));
+}
+
+/// Parsed and normalized time window shared by the /viz handlers.
+struct VizWindow {
+    double begin;              ///< Absolute native time for the scan predicate.
+    double end;                ///< Absolute native time for the scan predicate.
+    double original_begin;     ///< Client-sent value (normalized us).
+    double original_end;       ///< Client-sent value (normalized us).
+    std::uint64_t global_min;  ///< 0 when normalization is off or unavailable.
+    bool normalize;
+};
+
+/// Parse begin/end, validate the optional DSL query, then apply timestamp
+/// normalization and native-unit conversion so begin/end are absolute native
+/// timestamps for the scan. Returns a bad_request response when the query is
+/// malformed. Callers keep their own required-parameter checks and any
+/// per-handler extras (summary/lookback/min_dur/group_by).
+static dftracer::utils::expected<VizWindow, HttpResponse> parse_viz_window(
+    const QueryParams& params, TraceIndex& index) {
+    double begin = params.get_double("begin", 0);
+    double end = params.get_double("end", 0);
+
+    auto query = params.get("query");
+    if (!query.empty() && !query::try_parse(query).has_value())
+        return dftracer::utils::unexpected(
+            HttpResponse::bad_request("Invalid query: " + std::string(query)));
+
+    auto ts_norm_param = params.get("ts_normalize");
+    bool normalize = ts_norm_param.empty() || ts_norm_param != "0";
+    std::uint64_t global_min = 0;
+    if (normalize) {
+        global_min = index.global_min_timestamp_us();
+        if (global_min == std::numeric_limits<std::uint64_t>::max())
+            global_min = 0;
+    }
+    double original_begin = begin;
+    double original_end = end;
+    if (index.time_metric() != TraceIndex::TimeMetric::US) {
+        begin = static_cast<double>(
+            index.us_to_native(static_cast<std::uint64_t>(begin)));
+        end = static_cast<double>(
+            index.us_to_native(static_cast<std::uint64_t>(end)));
+    }
+    if (normalize && global_min > 0) {
+        begin += static_cast<double>(global_min);
+        end += static_cast<double>(global_min);
+    }
+    return VizWindow{begin,        end,        original_begin,
+                     original_end, global_min, normalize};
 }
 
 static std::string extract_json_value(simdjson::dom::element val) {
