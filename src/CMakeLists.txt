@@ -266,8 +266,16 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/tcp_listener.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/trace_index.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/trace_api.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz_api.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz_summary_build.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/api.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/calltree.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/counters.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/density.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/events.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/histogram.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/misc.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/proctree.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/stats.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/summary_build.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/http_parser.cpp
 )
 
@@ -1392,7 +1400,7 @@ if(DFTRACER_UTILS_BUILD_BINARIES)
 
     target_sources(
       dftracer_server
-      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz_ui.cpp
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/server/viz/ui.cpp
               ${DFTRACER_WEB_GENERATED} ${DFTRACER_API_GENERATED})
   endif()
 

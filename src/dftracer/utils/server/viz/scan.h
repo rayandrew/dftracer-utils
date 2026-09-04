@@ -27,7 +27,7 @@ namespace dftracer::utils::server {
 using trace::views::ViewDefinition;
 
 // `value`. No-op when the key is absent. Returns whether it rewrote.
-static bool rewrite_uint_field(std::string& json, std::string_view key,
+inline bool rewrite_uint_field(std::string& json, std::string_view key,
                                std::uint64_t value) {
     auto pos = json.find(key);
     if (pos == std::string::npos) return false;
@@ -47,7 +47,7 @@ static bool rewrite_uint_field(std::string& json, std::string_view key,
 /// from "ts" and scale ts/dur from the trace's native unit `metric` into
 /// microseconds. Falls back to the original string on parse failure. For a US
 /// trace this only subtracts the offset (scaling is identity).
-static std::string normalize_event_ts(const std::string& event_json,
+inline std::string normalize_event_ts(const std::string& event_json,
                                       std::uint64_t offset,
                                       TraceIndex::TimeMetric metric) {
     thread_local simdjson::dom::parser tl_parser;
@@ -91,7 +91,7 @@ static std::string normalize_event_ts(const std::string& event_json,
 
 /// Compute the minimum event duration threshold for a given summary level.
 /// Level 1 = full detail, higher levels filter shorter events.
-static double duration_threshold(double begin, double end, unsigned level,
+inline double duration_threshold(double begin, double end, unsigned level,
                                  unsigned viewport_width = 1920) {
     if (level <= 1) return 0.0;
     double range = end - begin;
@@ -114,7 +114,7 @@ struct VizWindow {
 /// timestamps for the scan. Returns a bad_request response when the query is
 /// malformed. Callers keep their own required-parameter checks and any
 /// per-handler extras (summary/lookback/min_dur/group_by).
-static dftracer::utils::expected<VizWindow, HttpResponse> parse_viz_window(
+inline dftracer::utils::expected<VizWindow, HttpResponse> parse_viz_window(
     const QueryParams& params, TraceIndex& index) {
     double begin = params.get_double("begin", 0);
     double end = params.get_double("end", 0);
@@ -148,7 +148,7 @@ static dftracer::utils::expected<VizWindow, HttpResponse> parse_viz_window(
                      original_end, global_min, normalize};
 }
 
-static std::string extract_json_value(simdjson::dom::element val) {
+inline std::string extract_json_value(simdjson::dom::element val) {
     if (val.is_string()) {
         return std::string(val.get_string().value_unsafe());
     }
@@ -161,7 +161,7 @@ static std::string extract_json_value(simdjson::dom::element val) {
     return {};
 }
 
-static void append_lane_clause(std::string& dsl, const char* field,
+inline void append_lane_clause(std::string& dsl, const char* field,
                                const std::string& val) {
     if (!dsl.empty()) dsl += " and ";
     bool numeric =
@@ -174,7 +174,7 @@ static void append_lane_clause(std::string& dsl, const char* field,
     }
 }
 
-static void apply_lanes(std::string& dsl, std::string_view lanes_str) {
+inline void apply_lanes(std::string& dsl, std::string_view lanes_str) {
     if (lanes_str.empty()) return;
 
     thread_local simdjson::dom::parser tl_parser;
@@ -218,7 +218,7 @@ static void apply_lanes(std::string& dsl, std::string_view lanes_str) {
     }
 }
 
-static void apply_filters(std::string& dsl, std::string_view filters_str) {
+inline void apply_filters(std::string& dsl, std::string_view filters_str) {
     if (filters_str.empty()) return;
 
     thread_local simdjson::dom::parser tl_parser;
@@ -283,7 +283,7 @@ static void apply_filters(std::string& dsl, std::string_view filters_str) {
 // --- GET /api/viz/events ---
 // Build the query view (time range + lane/filter/pid/tid/cat predicates) for a
 // viz request from the parsed parameters.
-static ViewDefinition build_viz_view(const QueryParams& params, double begin,
+inline ViewDefinition build_viz_view(const QueryParams& params, double begin,
                                      double end, double min_dur) {
     ViewDefinition view;
     view.name = "viz_query";
@@ -345,7 +345,7 @@ static ViewDefinition build_viz_view(const QueryParams& params, double begin,
 
 // Select the files to scan: the explicit ?file= or all indexed files, then drop
 // files whose cached time bounds don't overlap [begin, end]. Pure/synchronous.
-static std::vector<const TraceIndex::FileInfo*> select_viz_target_files(
+inline std::vector<const TraceIndex::FileInfo*> select_viz_target_files(
     TraceIndex& index, const QueryParams& params, double begin, double end) {
     auto target_files = collect_candidate_files(index, params);
 

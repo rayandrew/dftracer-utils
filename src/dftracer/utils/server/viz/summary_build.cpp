@@ -13,9 +13,9 @@
 #include <dftracer/utils/server/router.h>
 #include <dftracer/utils/server/signal_handler.h>
 #include <dftracer/utils/server/trace_index.h>
+#include <dftracer/utils/server/viz/internal.h>
+#include <dftracer/utils/server/viz/summary_build.h>
 #include <dftracer/utils/server/viz_api.h>
-#include <dftracer/utils/server/viz_internal.h>
-#include <dftracer/utils/server/viz_summary_build.h>
 #include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <dftracer/utils/trace/views/view_definition.h>

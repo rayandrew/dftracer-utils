@@ -7,7 +7,7 @@
 
 #include <ankerl/unordered_dense.h>
 #include <dftracer/utils/core/common/hash/constants.h>
-#include <dftracer/utils/server/viz_internal.h>
+#include <dftracer/utils/server/viz/internal.h>
 #include <dftracer/utils/trace/aggregators/reserved_args.h>
 #include <simdjson.h>
 
@@ -85,7 +85,7 @@ static constexpr char GROUP_SEP = '\x1f';
 // walk nested objects; bare names fall back into "args" (the canonical home of
 // domain fields). Anything missing or non-scalar yields "" so events are never
 // dropped - the client renders those under "(none)".
-static std::string extract_one_group_value(simdjson::dom::element root,
+inline std::string extract_one_group_value(simdjson::dom::element root,
                                            std::string_view col) {
     auto scalar = [](simdjson::dom::element el) -> std::string {
         if (el.is_string()) return std::string(el.get_string().value_unsafe());
@@ -131,7 +131,7 @@ static std::string extract_one_group_value(simdjson::dom::element root,
 // yields the per-column values joined by GROUP_SEP so lanes split by the tuple;
 // each component keeps its raw value (hashes stay hashes) for client-side
 // resolution.
-static std::string extract_group_value(simdjson::dom::element root,
+inline std::string extract_group_value(simdjson::dom::element root,
                                        std::string_view col) {
     if (col.find(',') == std::string_view::npos)
         return extract_one_group_value(root, col);
@@ -152,7 +152,7 @@ static std::string extract_group_value(simdjson::dom::element root,
     return out;
 }
 
-static std::string extract_group_from_line(std::string_view event,
+inline std::string extract_group_from_line(std::string_view event,
                                            std::string_view col) {
     thread_local simdjson::dom::parser parser;
     thread_local std::string buf;
@@ -167,7 +167,7 @@ static std::string extract_group_from_line(std::string_view event,
 // Aggregate one event (already parsed, with its duration) into the density
 // bucket for its (pid, tid, pixel-column, group). Used both by fold_density for
 // sub-threshold events and to demote a dense window's overflow individuals.
-static void add_to_density(simdjson::dom::element root, double dur,
+inline void add_to_density(simdjson::dom::element root, double dur,
                            double threshold, double begin, DensityMap& dens,
                            std::string_view group_col) {
     double ts = 0;
@@ -203,7 +203,7 @@ static void add_to_density(simdjson::dom::element root, double dur,
 // Fold a sub-threshold event into the density map. Returns false (caller keeps
 // it as an individual event) when it has no duration or is at/above
 // `threshold`.
-static bool fold_density(simdjson::dom::element root, double threshold,
+inline bool fold_density(simdjson::dom::element root, double threshold,
                          double begin, DensityMap& dens,
                          double* out_dur = nullptr,
                          std::string_view group_col = {}) {
@@ -222,7 +222,7 @@ static bool fold_density(simdjson::dom::element root, double threshold,
 // Demote a set of individual events (indices into `big`, already kept whole
 // because dur >= threshold) into density blocks. Lets a dense window cap its
 // individual-event count without dropping any activity from the view.
-static void fold_overflow_events(const std::vector<std::string>& big,
+inline void fold_overflow_events(const std::vector<std::string>& big,
                                  const std::vector<double>& big_dur,
                                  const std::vector<std::uint32_t>& overflow,
                                  double threshold, double begin,
@@ -243,7 +243,7 @@ static void fold_overflow_events(const std::vector<std::string>& big,
 // and in a dense window they outweigh the drawable events several times over.
 static constexpr std::size_t MAX_UNREFERENCED_HASH_RECORDS = 500;
 
-static void drop_unreferenced_hash_records(std::vector<std::string>& big) {
+inline void drop_unreferenced_hash_records(std::vector<std::string>& big) {
     thread_local simdjson::dom::parser parser;
     thread_local std::string buf;
     ankerl::unordered_dense::set<std::string> referenced;
@@ -298,7 +298,7 @@ static void drop_unreferenced_hash_records(std::vector<std::string>& big) {
 
 // Parse just the ts and dur of an event. Returns false for metadata/instant
 // events that lack either field.
-static bool parse_ts_dur(std::string_view event, double& ts, double& dur) {
+inline bool parse_ts_dur(std::string_view event, double& ts, double& dur) {
     EventScalars s;
     if (!parse_event_scalars(event, s) || !s.has_ts || !s.has_dur) return false;
     ts = s.ts;
@@ -308,7 +308,7 @@ static bool parse_ts_dur(std::string_view event, double& ts, double& dur) {
 
 // Parse pid, tid, ts, dur of an event. Returns false for metadata/instant
 // events that lack ts or dur.
-static bool parse_lane_ts_dur(std::string_view event, std::int64_t& pid,
+inline bool parse_lane_ts_dur(std::string_view event, std::int64_t& pid,
                               std::int64_t& tid, double& ts, double& dur) {
     EventScalars s;
     if (!parse_event_scalars(event, s) || !s.has_ts || !s.has_dur) return false;
@@ -324,7 +324,7 @@ static bool parse_lane_ts_dur(std::string_view event, std::int64_t& pid,
 // block is nested only under big events that fully cover its bucket interval
 // [ts, ts+threshold]; a bucket-sized sibling that merely overlaps it is not an
 // ancestor, so folded events stay on their sibling's row.
-static std::vector<std::uint32_t> assign_view_depths(
+inline std::vector<std::uint32_t> assign_view_depths(
     const std::vector<std::string>& big, DensityMap& dens, double begin,
     double threshold) {
     std::vector<std::uint32_t> depth(big.size(), 0);
@@ -416,7 +416,7 @@ static std::vector<std::uint32_t> assign_view_depths(
 // counter series at the same column, and a counter can share a real thread
 // lane. Stable row order by series name so rows do not swap between
 // requests/zooms.
-static void assign_counter_depths(const std::vector<std::string>& big,
+inline void assign_counter_depths(const std::vector<std::string>& big,
                                   const std::vector<std::uint32_t>& big_depth,
                                   DensityMap& dens) {
     auto lane_of = [](std::int64_t pid, std::int64_t tid) {
@@ -469,7 +469,7 @@ struct CounterAcc {
     }
 };
 
-static void fold_counter(std::string_view event, double begin, double bucket_us,
+inline void fold_counter(std::string_view event, double begin, double bucket_us,
                          std::size_t buckets, CounterAcc& acc) {
     thread_local simdjson::dom::parser parser;
     thread_local std::string buf;
@@ -510,7 +510,7 @@ static void fold_counter(std::string_view event, double begin, double bucket_us,
 
 // Add one counter sample of `value` for `series` (a "name.arg" identity) at
 // (pid, tid, col) into the density map.
-static void add_counter_bucket(DensityMap& dens, std::int64_t pid,
+inline void add_counter_bucket(DensityMap& dens, std::int64_t pid,
                                std::int64_t tid, std::int64_t col,
                                std::string_view series, double value_sum,
                                std::uint32_t count) {
@@ -527,7 +527,7 @@ static void add_counter_bucket(DensityMap& dens, std::int64_t pid,
 
 // Fold one ph="C" event into the density map at its column, one block per
 // numeric arg. Takes the parsed element (the partition already parsed it).
-static void fold_counter_density(simdjson::dom::element root, double begin,
+inline void fold_counter_density(simdjson::dom::element root, double begin,
                                  double threshold, std::size_t ncols,
                                  DensityMap& dens) {
     if (!root.is_object() || threshold <= 0 || ncols == 0) return;
@@ -589,7 +589,7 @@ struct AggRec {
     double total;         // dur_sum, native units
 };
 
-static bool collect_aggregated(simdjson::dom::element root,
+inline bool collect_aggregated(simdjson::dom::element root,
                                std::string_view raw, std::vector<AggRec>& out) {
     if (!root.is_object()) return false;
     auto tr = root["ts"];
@@ -635,7 +635,7 @@ static bool collect_aggregated(simdjson::dom::element root,
 // containment like a real event. Positions are estimated (marked "est":true),
 // not real timings. Bounded by `cap` per aggregate: denser aggregates subsample
 // so a 5s window of millions never floods the response.
-static void extrapolate_aggregate(const AggRec& r, double interval,
+inline void extrapolate_aggregate(const AggRec& r, double interval,
                                   double begin, double end, std::size_t cap,
                                   std::vector<std::string>& big,
                                   std::vector<double>& big_dur) {
@@ -685,7 +685,7 @@ static void extrapolate_aggregate(const AggRec& r, double interval,
 // Smallest positive gap between distinct aggregate (ph=3) timestamps. Records
 // are emitted on trace_interval_ms boundaries, so this recovers that window.
 // Returns 0 when fewer than two distinct timestamps are present.
-static double infer_agg_interval(std::vector<double> ts) {
+inline double infer_agg_interval(std::vector<double> ts) {
     if (ts.size() < 2) return 0;
     std::sort(ts.begin(), ts.end());
     double best = 0;
