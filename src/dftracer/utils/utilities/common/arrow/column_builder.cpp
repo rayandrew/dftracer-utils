@@ -428,10 +428,7 @@ void RecordBatchBuilder::append_null(std::size_t col_idx) {
             break;
     }
     ++col.count;
-    if (!schema_declared_ && !touched_[col_idx]) {
-        touched_[col_idx] = true;
-        ++row_touched_count_;
-    }
+    mark_touched(col_idx);
 }
 
 void RecordBatchBuilder::end_row() {

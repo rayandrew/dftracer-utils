@@ -163,6 +163,33 @@ TEST_CASE("RecordBatchBuilder - Null handling") {
     CHECK(child_null_count(result, 0) == 1);
 }
 
+TEST_CASE("RecordBatchBuilder - append_null under a locked schema") {
+    // append_null must gate first-touch marking on schema_locked_ like every
+    // other append_*; a locked schema uses explicit backfill, not first-touch
+    // row detection. This exercises that mixed real/null appends after
+    // lock_schema() still produce a well-formed batch.
+    RecordBatchBuilder b;
+    b.add_or_get_column("a", ColumnType::INT64);
+    b.add_or_get_column("b", ColumnType::INT64);
+    b.lock_schema();
+    CHECK(b.is_schema_locked());
+
+    b.append_int64(0, 1);
+    b.append_null(1);
+    b.end_row();
+
+    b.append_int64(0, 2);
+    b.append_int64(1, 3);
+    b.end_row();
+
+    auto result = b.finish();
+    REQUIRE(result.valid());
+    CHECK(result.num_rows() == 2);
+    CHECK(result.num_columns() == 2);
+    CHECK(child_null_count(result, 0) == 0);
+    CHECK(child_null_count(result, 1) == 1);
+}
+
 TEST_CASE("RecordBatchBuilder - Empty batch") {
     RecordBatchBuilder b;
     b.declare_schema({{"a", ColumnType::INT64}, {"b", ColumnType::STRING}});

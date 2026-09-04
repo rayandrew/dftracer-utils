@@ -500,6 +500,19 @@ coro::CoroTask<bool> try_collect_bootstrap(const ViewPlan& plan,
     co_return true;
 }
 
+// Releases an MV directory lock (see lock_view_dir) on scope exit, so the
+// single-flight lock is dropped on every path including a throw from the build.
+class ViewDirLock {
+   public:
+    explicit ViewDirLock(int fd) noexcept : fd_(fd) {}
+    ~ViewDirLock() { unlock_view_dir(fd_); }
+    ViewDirLock(const ViewDirLock&) = delete;
+    ViewDirLock& operator=(const ViewDirLock&) = delete;
+
+   private:
+    int fd_;
+};
+
 }  // namespace
 
 coro::CoroTask<ExportStats> run_materialize(const ViewPlan& plan,
@@ -519,10 +532,8 @@ coro::CoroTask<ExportStats> run_materialize(const ViewPlan& plan,
         // just finished.
         const int lock = lock_view_dir(dir);
         if (lock < 0) co_return ExportStats{};
-        if (view_is_fresh(plan)) {
-            unlock_view_dir(lock);
-            co_return ExportStats{};
-        }
+        ViewDirLock lock_guard(lock);
+        if (view_is_fresh(plan)) co_return ExportStats{};
         constexpr std::uint64_t DEFAULT_PART_SIZE = 128ull * 1024 * 1024;
         TraceWriteOptions opts;
         opts.output_path = (fs::path(dir) / "part.pfw.gz").string();
@@ -533,15 +544,9 @@ coro::CoroTask<ExportStats> run_materialize(const ViewPlan& plan,
         opts.member_size = plan.mv_checkpoint_size;
         opts.part_size =
             plan.mv_part_size ? plan.mv_part_size : DEFAULT_PART_SIZE;
-        ExportStats stats;
-        try {
-            stats = co_await run_export_trace_indexed(plan, opts, progress);
-            register_view(dir, plan);
-        } catch (...) {
-            unlock_view_dir(lock);
-            throw;
-        }
-        unlock_view_dir(lock);
+        ExportStats stats =
+            co_await run_export_trace_indexed(plan, opts, progress);
+        register_view(dir, plan);
         co_return stats;
     }
 

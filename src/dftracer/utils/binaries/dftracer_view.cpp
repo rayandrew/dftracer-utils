@@ -41,6 +41,35 @@ using namespace dftracer::utils::trace;
 using namespace dftracer::utils::trace::views;
 using namespace dftracer::utils::utilities::filesystem;
 
+namespace {
+// Owns a FILE* opened for output and closes it on scope exit, so a throw from
+// the export ladder cannot leak it. A null handle closes nothing; stdout is
+// written through the raw pointer and never owned here.
+class FileHandle {
+   public:
+    FileHandle() = default;
+    explicit FileHandle(std::FILE* f) noexcept : f_(f) {}
+    ~FileHandle() {
+        if (f_) std::fclose(f_);
+    }
+    FileHandle(FileHandle&& o) noexcept : f_(o.f_) { o.f_ = nullptr; }
+    FileHandle& operator=(FileHandle&& o) noexcept {
+        if (this != &o) {
+            if (f_) std::fclose(f_);
+            f_ = o.f_;
+            o.f_ = nullptr;
+        }
+        return *this;
+    }
+    FileHandle(const FileHandle&) = delete;
+    FileHandle& operator=(const FileHandle&) = delete;
+    std::FILE* get() const noexcept { return f_; }
+
+   private:
+    std::FILE* f_ = nullptr;
+};
+}  // namespace
+
 #ifdef DFTRACER_UTILS_ENABLE_MPI
 // The files owned by `rank` of `size`: a deterministic round-robin split, so
 // every rank derives the same assignment from the same sorted file list.
@@ -848,6 +877,7 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
             co_return 1;
         }
     }
+    FileHandle out_owner(out_file);  // closes out_file on any exit; not stdout
     FILE* out_target = out_file ? out_file : stdout;
     FileSink sink(out_target);
     bool verify_failed = false;
@@ -1129,11 +1159,8 @@ static coro::CoroTask<int> run_view(const ViewArgParse* cli) {
         pipeline.execute();
     } catch (const std::exception& e) {
         DFTRACER_UTILS_LOG_ERROR("Pipeline failed: %s", e.what());
-        if (out_file) std::fclose(out_file);
         co_return 1;
     }
-
-    if (out_file) std::fclose(out_file);
 
     std::fprintf(stderr,
                  "View: %s | Files: %zu | Chunks: scanned=%llu skipped=%llu | "
