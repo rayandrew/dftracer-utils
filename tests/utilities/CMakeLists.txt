@@ -88,6 +88,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_handles.cpp
     plugins/test_plugin_results.cpp
     plugins/test_plugin_agg.cpp
+    plugins/test_plugin_ops.cpp
     plugins/test_plugin_map.cpp
     plugins/test_map_join.cpp
     plugins/test_map_join_arrow.cpp

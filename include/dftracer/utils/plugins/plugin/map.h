@@ -432,6 +432,58 @@ class Host {
     Agg agg(const char* name, std::initializer_list<const char*> key_names,
             std::initializer_list<AggCol> cols) const;
 
+    /// Look up and run a registered dataframe column op by name on `in` (see
+    /// dftu_ext_ops::run); NULL if the host lacks the ops group, `name` is
+    /// unregistered, or the call mismatches the op's kind/arity/shape. The
+    /// result is newly owned by the caller (free with dftu_series_free).
+    dftu_series* run_op(const char* name,
+                        std::initializer_list<const dftu_series*> in,
+                        const dftu_op_arg* args = nullptr) const {
+        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        if (!e || !e->run) return nullptr;
+        std::vector<const dftu_series*> vin(in);
+        return e->run(h_->h, name, vin.data(),
+                      static_cast<std::uint32_t>(vin.size()), args);
+    }
+    /// run_op for a signature whose return token is FRAME; the result is
+    /// newly owned by the caller (free with dftu_dataframe_free).
+    dftu_dataframe* run_op_frame(
+        const char* name, std::initializer_list<const dftu_dataframe*> in,
+        const dftu_op_arg* args = nullptr) const {
+        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        if (!e || !e->run_frame) return nullptr;
+        std::vector<const dftu_dataframe*> vin(in);
+        return e->run_frame(h_->h, name, vin.data(),
+                            static_cast<std::uint32_t>(vin.size()), args);
+    }
+    /// run_op for a signature whose return token is SCALAR/I64/BOOL, reducing
+    /// one column; `ok` (if given) is set false on a NULL/kind/shape mismatch
+    /// or unregistered name.
+    dftu_scalar run_op_aggregate(const char* name, const dftu_series* in,
+                                 const dftu_op_arg* args = nullptr,
+                                 bool* ok = nullptr) const {
+        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        dftu_scalar out{};
+        int run_ok = 0;
+        if (e && e->run_aggregate)
+            e->run_aggregate(h_->h, name, &in, 1, args, &out, &run_ok);
+        if (ok) *ok = run_ok != 0;
+        return out;
+    }
+    /// The registered op named `name` (built-in or user), or NULL if none or
+    /// the host lacks the ops group. See dftu_op_find.
+    const dftu_op_desc* find_op(const char* name) const {
+        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        return e && e->find ? e->find(h_->h, name) : nullptr;
+    }
+    /// Register a user op in the host's shared registry; see dftu_op_register.
+    /// Returns non-zero on a NULL desc/name, an already-registered name, or if
+    /// the host lacks the ops group.
+    int register_op(const dftu_op_desc* desc) const {
+        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        return e && e->register_op ? e->register_op(h_->h, desc) : -1;
+    }
+
     /// Named result channel: emit an opaque blob (the host copies `len` bytes)
     /// or a user-schema Arrow array (the host moves it); both surface from
     /// PluginHost::run keyed by name. Best called at on_finalize.
@@ -773,6 +825,7 @@ class Host {
     mutable const dftu_ext_result* result_ext_ = nullptr;
     mutable const dftu_ext_map* map_ext_ = nullptr;
     mutable const dftu_ext_agg* agg_ext_ = nullptr;
+    mutable const dftu_ext_ops* ops_ext_ = nullptr;
 };
 
 /// Move-only RAII owner of a host sketch handle; frees it in the destructor.

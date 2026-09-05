@@ -63,6 +63,7 @@ const void* map_ext_vtable();
 const void* agg_ext_vtable();
 const void* result_ext_vtable();
 const void* handles_ext_vtable();
+const void* ops_ext_vtable();
 
 }  // namespace detail
 

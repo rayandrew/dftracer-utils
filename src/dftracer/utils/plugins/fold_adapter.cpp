@@ -926,6 +926,7 @@ const void* host_get_extension(void*, const char* ext_id) {
         return detail::result_ext_vtable();
     if (std::strcmp(ext_id, DFTU_EXT_MAP) == 0) return detail::map_ext_vtable();
     if (std::strcmp(ext_id, DFTU_EXT_AGG) == 0) return detail::agg_ext_vtable();
+    if (std::strcmp(ext_id, DFTU_EXT_OPS) == 0) return detail::ops_ext_vtable();
     return nullptr;
 }
 

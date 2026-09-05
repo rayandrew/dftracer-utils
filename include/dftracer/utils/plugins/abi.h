@@ -130,6 +130,19 @@ typedef struct dftu_dataframe dftu_dataframe;
    The concrete type is the dataframe engine's (dftracer/utils/dataframe/abi.h).
  */
 typedef struct dftu_lazyframe dftu_lazyframe;
+/** A single column handle for the vectorized fold seam. The concrete type is
+   the dataframe engine's (dftracer/utils/dataframe/abi.h); a plugin that uses
+   it includes that header for the column ops. */
+typedef struct dftu_series dftu_series;
+/** A registered dataframe op record and its call-site operand bag. The
+   concrete types are the dataframe engine's (dftracer/utils/dataframe/abi.h).
+ */
+typedef struct dftu_op_desc dftu_op_desc;
+typedef struct dftu_op_arg dftu_op_arg;
+/** A tagged scalar value. The concrete type is the dataframe engine's
+   (dftracer/utils/dataframe/abi.h); a plugin that reads its fields includes
+   that header. Passed by pointer here so this header need not define it. */
+typedef struct dftu_scalar dftu_scalar;
 
 typedef struct {
     uint64_t count;
@@ -242,6 +255,7 @@ typedef struct dftu_io {
 #define DFTU_EXT_RESULT "dftu.ext.result@1"
 #define DFTU_EXT_MAP "dftu.ext.map@1"
 #define DFTU_EXT_AGG "dftu.ext.agg@1"
+#define DFTU_EXT_OPS "dftu.ext.ops@1"
 
 typedef struct dftu_ext_coro {
     dftu_task* (*spawn)(void* h, dftu_work_fn fn, void* arg);
@@ -1018,6 +1032,42 @@ typedef struct dftu_ext_agg {
        slice's accumulator is touched by one thread. */
     void (*agg_accumulate)(void* h, dftu_agg* a, const dftu_dataframe* df);
 } dftu_ext_agg;
+
+/** Host-service group exposing the dataframe engine's op registry, fetched via
+   dftu_host::get_extension(DFTU_EXT_OPS). Each slot is a thin name-keyed
+   forwarder to the matching dftu_op_run / dftu_op_find / dftu_op_register
+   function (dftracer/utils/dataframe/abi.h): a plugin looks an op up by name
+   and runs it on Series/DataFrame handles it already holds, with no need to
+   link the dataframe C ABI itself. */
+typedef struct dftu_ext_ops {
+    /** find(name) then dftu_op_run: `in` are `n_in` borrowed input columns,
+       `args` supplies the op's other operands (NULL if none). Returns a new
+       owned column (free with dftu_series_free), or NULL if `name` is
+       unknown or the call mismatches the op's kind/arity/shape. */
+    dftu_series* (*run)(void* h, const char* name, const dftu_series* const* in,
+                        uint32_t n_in, const dftu_op_arg* args);
+    /** find(name) then dftu_op_run_aggregate on one column: `in[0]` is the
+       reduced column (n_in must be 1). Writes the reduction to *out (see
+       dftu_op_run_aggregate); *ok is set to 0 on a NULL/kind/shape mismatch or
+       unknown name (leaving *out zeroed), 1 otherwise. */
+    void (*run_aggregate)(void* h, const char* name,
+                          const dftu_series* const* in, uint32_t n_in,
+                          const dftu_op_arg* args, dftu_scalar* out, int* ok);
+    /** find(name) then dftu_op_run_frame: `in` are `n_in` borrowed input
+       dataframes. Returns a new owned dataframe (free with
+       dftu_dataframe_free), or NULL if `name` is unknown or the call
+       mismatches the op's kind/arity/shape. */
+    dftu_dataframe* (*run_frame)(void* h, const char* name,
+                                 const dftu_dataframe* const* in, uint32_t n_in,
+                                 const dftu_op_arg* args);
+    /** The registered op named `name` (built-in or user), or NULL if none. See
+       dftu_op_find. */
+    const dftu_op_desc* (*find)(void* h, const char* name);
+    /** Register a user op; see dftu_op_register. Returns 0 on success,
+       non-zero if `desc`/its name is NULL or the name is already
+       registered. */
+    int (*register_op)(void* h, const dftu_op_desc* desc);
+} dftu_ext_ops;
 
 /** Severity for dftu_host::log; higher is more severe. Mirrors the host's own
    logger levels, so a plugin's line is gated by the same threshold. */

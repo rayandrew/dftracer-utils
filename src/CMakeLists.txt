@@ -208,6 +208,7 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/map.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/agg.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/result.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/ops.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_join.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_grouping.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_unnest.cpp
