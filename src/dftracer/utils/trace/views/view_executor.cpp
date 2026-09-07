@@ -16,6 +16,7 @@
 #include <dftracer/utils/trace/views/index_fold_driver.h>
 #include <dftracer/utils/trace/views/mv_store.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
+#include <dftracer/utils/trace/views/pipeline.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <dftracer/utils/trace/views/typed_collect_fold.h>
 #include <dftracer/utils/trace/views/view_agg_engine.h>
@@ -691,8 +692,7 @@ coro::CoroTask<dataframe::DataFrame> run_collect_rows(const ViewPlan& plan) {
     }
     NativeRowFold fold(intern, plan.select, plan.time_scale, resolver,
                        plan.phase == Phase::Metadata);
-    std::array<Fold*, 1> folds{&fold};
-    co_await fuse(plan, vdef, folds, intern);
+    co_await execute(lower_single_fold(plan, vdef, fold), intern);
     dataframe::DataFrame b = fold.build();
     // sort_col/topk_col name a column the way a caller would select it (bare
     // or "args."-prefixed); canonicalize to match build_row_frame's actual

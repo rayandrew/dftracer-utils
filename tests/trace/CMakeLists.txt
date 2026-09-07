@@ -39,6 +39,7 @@ set(TRACE_TEST_SOURCES
     views/test_view_mv.cpp
     views/test_coverage.cpp
     views/test_fold.cpp
+    views/test_pipeline_plan.cpp
     views/test_vectorized_fold.cpp
     views/test_rollup_store.cpp
     views/test_dict_fold.cpp
