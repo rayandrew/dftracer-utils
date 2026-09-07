@@ -1,4 +1,5 @@
 #include <dftracer/utils/dataframe/types.h>
+#include <dftracer/utils/trace/views/batch_bridge.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/stream_row_fold.h>
 
@@ -27,36 +28,15 @@ std::uint64_t morsel_bytes(const dataframe::Morsel& m) {
 }
 
 void StreamRowFold::step(const FoldBatch& batch) {
-    std::vector<FoldEvent> events;
-    events.reserve(batch.events.size());
-    for (const FoldEvent& ev : batch.events) {
-        if (ev.phase == RecordPhase::UNKNOWN ||
-            (!keep_metadata_ && ev.phase == RecordPhase::METADATA))
-            continue;
-        events.push_back(ev);
-    }
+    std::vector<FoldEvent> events =
+        select_events(batch, [&](const FoldEvent& ev) {
+            return ev.phase != RecordPhase::UNKNOWN &&
+                   (keep_metadata_ || ev.phase != RecordPhase::METADATA);
+        });
     if (events.empty()) return;
 
-    dataframe::DataFrame df = build_row_frame(events, *intern_, select_,
-                                              time_scale_, resolver_.get());
-
-    dataframe::Morsel m;
-    m.rows = df.num_rows();
-    m.columns = std::move(df.columns);
-    m.name_ids.reserve(df.names.size());
-    for (const std::string& nm : df.names)
-        m.name_ids.push_back(intern_->get_or_insert(nm));
-    m.intern = intern_;
-
-    if (emit_dyn_) {
-        auto dyn = build_dyn_numeric_columns(events, *intern_);
-        m.dyn_names.reserve(dyn.size());
-        m.dyn_columns.reserve(dyn.size());
-        for (auto& [name, col] : dyn) {
-            m.dyn_names.push_back(std::move(name));
-            m.dyn_columns.push_back(std::move(col));
-        }
-    }
+    const ColumnSpec spec{select_, time_scale_, resolver_.get(), emit_dyn_};
+    dataframe::Morsel m = events_to_morsel(events, intern_, spec);
 
     const std::uint64_t bytes = morsel_bytes(m);
     pending_task_.emplace(send(std::move(m), bytes));

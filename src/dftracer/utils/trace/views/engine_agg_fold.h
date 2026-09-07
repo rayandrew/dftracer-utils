@@ -6,6 +6,7 @@
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/views/aggfold.h>
+#include <dftracer/utils/trace/views/batch_bridge.h>
 #include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/fold_event.h>
@@ -75,19 +76,17 @@ class EngineAggFold : public Fold {
     }
 
     void step(const FoldBatch& batch) override {
-        std::vector<FoldEvent> keep;
-        keep.reserve(batch.events.size());
-        for (const FoldEvent& ev : batch.events) {
-            if (ev.phase == RecordPhase::METADATA) {
-                if (want_ranks_) harvest_pr_rank(ev, *intern_, ranks_);
-                if (phase_target_ != RecordPhase::METADATA) continue;
-            }
-            if (phase_target_ != RecordPhase::UNKNOWN &&
-                ev.phase != phase_target_)
-                continue;
-            if (apply_query_ && !passes_query(ev)) continue;
-            keep.push_back(ev);
-        }
+        std::vector<FoldEvent> keep =
+            select_events(batch, [&](const FoldEvent& ev) {
+                if (ev.phase == RecordPhase::METADATA) {
+                    if (want_ranks_) harvest_pr_rank(ev, *intern_, ranks_);
+                    if (phase_target_ != RecordPhase::METADATA) return false;
+                }
+                if (phase_target_ != RecordPhase::UNKNOWN &&
+                    ev.phase != phase_target_)
+                    return false;
+                return !apply_query_ || passes_query(ev);
+            });
         if (keep.empty()) return;
         dftracer::utils::dataframe::DataFrame f =
             build_agg_input_frame(keep, *intern_, spec_, resolver_);

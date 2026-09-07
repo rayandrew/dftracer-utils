@@ -6,6 +6,7 @@
 #include <dftracer/utils/dataframe/expr.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/trace/views/aggfold.h>
+#include <dftracer/utils/trace/views/batch_bridge.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
@@ -732,15 +733,10 @@ dataframe::DataFrame build_agg_input_frame(
     const std::vector<FoldEvent>& events,
     const dftracer::utils::StringIntern& intern, const AggInputSpec& spec,
     const GroupResolver* resolver) {
-    dataframe::DataFrame f = build_row_frame(events, intern, spec.select,
-                                             spec.base_time_scale, nullptr);
+    dataframe::DataFrame f = events_to_frame(
+        events, intern,
+        ColumnSpec{spec.select, spec.base_time_scale, nullptr, spec.emit_dyn});
     const std::int64_t n = f.num_rows();
-
-    if (spec.emit_dyn)
-        for (auto& [name, col] : build_dyn_numeric_columns(events, intern)) {
-            f.names.push_back(std::move(name));
-            f.columns.push_back(std::move(col));
-        }
 
     append_transform_columns(f, spec.transforms, resolver);
 
