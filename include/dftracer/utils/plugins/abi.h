@@ -777,7 +777,7 @@ typedef struct dftu_ext_handles {
 
 /** Named result channel, fetched via dftu_host::get_extension(DFTU_EXT_RESULT).
    The host moves opaque bytes / user-schema Arrow and never interprets them;
-   PluginHost::run returns the collected results to the caller keyed by name. */
+   Plugins::run returns the collected results to the caller keyed by name. */
 typedef struct dftu_ext_result {
     /** Emit a named opaque result; the host COPIES len bytes. Intended for
        on_finalize (called on the merged master fold); if called concurrently

@@ -1364,7 +1364,6 @@ class Session:
 
         host = PluginHost()
         host.load(plugin, config)
-        host.resolve()
 
         def shape(raw: "Dict[str, Any]") -> object:
             shaped = {name: host._shape(name, val) for name, val in raw.items()}

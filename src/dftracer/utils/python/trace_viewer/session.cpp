@@ -1,5 +1,5 @@
 #include <dftracer/utils/core/common/config.h>  // DFTRACER_UTILS_ENABLE_ARROW
-#include <dftracer/utils/plugins/host.h>
+#include <dftracer/utils/plugins/plugins.h>
 #include <dftracer/utils/python/dataframe.h>
 #include <dftracer/utils/python/plugin_host.h>
 #include <dftracer/utils/python/py_runtime_mixin.h>
@@ -71,9 +71,11 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
         std::string index_dir;
         ViewerPlan plan;
         std::string sink;
-        // Plugin branch only: the C++ host attached to the session, and its
-        // Python object whose named results are read after execute.
-        dftracer::utils::plugins::PluginHost* host_cpp = nullptr;
+        // Plugin branch only: the built set attached to the session, the
+        // registry its folds fill, and the Python object the results are read
+        // back from after execute.
+        const dftracer::utils::plugins::Plugins* plugins = nullptr;
+        dftracer::utils::plugins::NamedResultRegistry* plugin_results = nullptr;
         PyObject* host_obj = nullptr;  // borrowed; the branches list holds it
         // Combine branch (Join/Compare) only: the two source branch indices and
         // the join type; n_key is inferred natively from the source branch.
@@ -164,9 +166,11 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                 return nullptr;
             }
             bdata[i].host_obj = vobj;  // borrowed; branches list holds it
-            bdata[i].host_cpp =
-                static_cast<dftracer::utils::plugins::PluginHost*>(
-                    ((PluginHostObject*)vobj)->host_ptr);
+            bdata[i].plugins =
+                dftracer::utils::python::plugin_host_plugins(vobj);
+            if (!bdata[i].plugins) return nullptr;
+            bdata[i].plugin_results =
+                dftracer::utils::python::plugin_host_results(vobj);
             continue;
         }
 
@@ -214,6 +218,11 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
     if (!run_blocking([&] {
             View base = build_view_from_data(base_files, base_index, base_plan,
                                              /*aggregate=*/false);
+            // A plugins-only session gets the set's index prune, matching
+            // Plugins::run. With another branch present the shared scan must
+            // stay whole, since that branch is not filtered by plugin queries.
+            if (nb == 1 && bdata[0].kind == Kind::Plugin)
+                base = bdata[0].plugins->prune(base);
             ViewSession sess = base.session();
             std::vector<Deferred<DataFrame> > agg_handles(nb);
             std::vector<Deferred<DataFrame> > agg_handles2(nb);
@@ -298,7 +307,8 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                     case Kind::Plugin:
                         // C++-only, safe with the GIL released; named results
                         // are read back after execute.
-                        bdata[i].host_cpp->attach_to_session(sess);
+                        bdata[i].plugins->attach(sess,
+                                                 *bdata[i].plugin_results);
                         break;
                     case Kind::Join:
                         agg_handles[i] = sess.join(

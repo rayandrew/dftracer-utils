@@ -1,14 +1,14 @@
-// Planner level 1: the host feeds the UNION of every plugin's plan_query into
-// the scan's index prune. Covers the union-query construction (dedup, bail on a
-// no-query or unparseable plugin, single-vs-multi) and the end-to-end property
-// that pruning skips files no plugin wants without changing any plugin's
-// result.
+// Planner level 1: the plugin set feeds the UNION of every plugin's plan_query
+// into the scan's index prune. Covers the union-query construction (dedup, bail
+// on a no-query or unparseable plugin, single-vs-multi) and the end-to-end
+// property that pruning skips files no plugin wants without changing any
+// plugin's result.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/plugins/abi.h>
-#include <dftracer/utils/plugins/host.h>
+#include <dftracer/utils/plugins/plugins_internal.h>
 #include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/views/view.h>
 #include <doctest/doctest.h>
@@ -22,7 +22,7 @@
 
 using dftracer::utils::CoroScope;
 using dftracer::utils::Runtime;
-using dftracer::utils::plugins::PluginHost;
+using dftracer::utils::plugins::build_injected_plugins;
 using dftracer::utils::plugins::detail::plugin_union_prune_query;
 using dftracer::utils::trace::internal::determine_index_path;
 using View = dftracer::utils::trace::views::View;
@@ -120,14 +120,15 @@ ViewFile index_trace(const std::string& gz) {
 
 ExportStats run_host(std::vector<dftu_plugin*> plugins,
                      std::vector<ViewFile> files) {
-    PluginHost host;
-    for (auto* p : plugins) host.inject_plugin(p);
+    auto set = build_injected_plugins(std::move(plugins));
+    REQUIRE(set.has_value());
     View view = View::from_files(std::move(files));
     ExportStats stats;
     Runtime rt(4);
     auto task = dftracer::utils::run_coro_scope(
         rt.executor(), [&](CoroScope&) -> coro::CoroTask<void> {
-            stats = co_await host.run(view);
+            auto run = co_await set->run(view);
+            if (run) stats = run->stats;
             co_return;
         });
     rt.submit(std::move(task), "plugin-planner").wait();

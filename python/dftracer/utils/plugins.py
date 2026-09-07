@@ -1,8 +1,8 @@
 """Load and run compiled DFTracer analysis plugins from Python.
 
 A plugin is a compiled shared library exporting the ``dftracer_plugin`` ABI
-symbol. :class:`PluginHost` loads one or more, resolves their capabilities, and
-runs them as folds over a single fused parallel scan of a trace set.
+symbol. :class:`PluginHost` loads one or more and runs them as folds over a
+single fused parallel scan of a trace set.
 
 Example::
 
@@ -11,7 +11,6 @@ Example::
     host = PluginHost()
     host.load("process_counts.so")     # a compiled .so path
     host.load(MyPlugin)                 # or a @jit.plugin class (compiled + cached)
-    assert host.resolve()
     results = host.run("./traces")
     print(results["process_counts"])          # the plugin's emitted bytes
     print(host.stats["events_scanned"])
@@ -94,12 +93,14 @@ class PluginHost:
 
     # config values are an arbitrary JSON-serializable object tree (json.dumps'd).
     def load(self, path: Union[str, type], config: Optional[Dict[str, JSONValue]] = None) -> None:
-        """dlopen the compiled plugin at ``path``.
+        """Queue the compiled plugin at ``path``.
 
         ``path`` is either a compiled ``.so`` path or a ``@jit.plugin`` class,
         which is AST-compiled to a cached native ``.so`` first. ``config`` is an
-        optional JSON-serializable dict handed to the plugin factory. Raises
-        ImportError on load/symbol/ABI failure, DFTUtilsValueError on a bad
+        optional JSON-serializable dict handed to the plugin factory. The dlopen,
+        the ABI check, and capability resolution all run when the plugin set is
+        first used, so :meth:`run` is what raises ImportError on a
+        load/symbol/ABI/capability failure. Raises DFTUtilsValueError on a bad
         config, or jit.JitError on a compile failure.
         """
         if not isinstance(path, str):
@@ -108,11 +109,6 @@ class PluginHost:
             self._renames.update(jit.plugin_renames(path))
             path = jit.compile_class(path)
         self._native.load(path, json.dumps(config) if config is not None else None)
-
-    def resolve(self) -> bool:
-        """Wire plugin capabilities. False on an unmet or reserved capability
-        (the reason is already logged)."""
-        return bool(self._native.resolve())
 
     def run(
         self,
@@ -125,7 +121,8 @@ class PluginHost:
 
         With ``auto_index`` the traces are normalized and indexed first. Returns
         the emitted named results as ``{name: value}``; the scan counters are on
-        :attr:`stats`.
+        :attr:`stats`. Raises ImportError if a loaded plugin fails to load, fails
+        the ABI check, or has an unmet or reserved capability.
 
         A result's type depends on what the plugin emitted:
 

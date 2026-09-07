@@ -45,12 +45,10 @@ def test_jit_config_threshold_drives_behavior(tmp_path):
 
     hi = PluginHost()
     hi.load(Slow, {"threshold": 45})
-    hi.resolve()
     assert _count(hi, str(tmp_path)) == 3  # 50, 60, 70
 
     lo = PluginHost()
     lo.load(Slow, {"threshold": 5})
-    lo.resolve()
     assert _count(lo, str(tmp_path)) == 7  # all
 
 

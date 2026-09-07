@@ -73,7 +73,6 @@ def test_new_build_load_run_c(tmp_path):
 
     host = PluginHost()
     host.load(str(so))
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "mycount" in results
@@ -98,7 +97,6 @@ def test_new_build_load_run_cpp(tmp_path):
 
     host = PluginHost()
     host.load(str(so))
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["mycount"])

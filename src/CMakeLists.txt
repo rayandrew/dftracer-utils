@@ -214,7 +214,7 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_join.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_grouping.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_unnest.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/host.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/plugins.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/plugin_exports.cpp
 
     # DFT Comparator

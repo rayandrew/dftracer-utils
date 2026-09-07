@@ -178,8 +178,8 @@ consumer reads it back during the same batch.
       / ``jit.f64``); it must match on both the publisher and the consumer. A
       consume port is read-only and a publish port is write-only; writing to a
       consume port (or reading a publish port) raises ``JitError`` at
-      decoration time. ``required=True`` makes a missing producer fail
-      ``PluginHost.resolve()``; the default (``required=False``) degrades to
+      decoration time. ``required=True`` makes a missing producer fail the
+      ``PluginHost`` plugin-set build; the default (``required=False``) degrades to
       reading ``0``. A JIT producer and a hand-written C++ or C consumer (or
       vice versa) interoperate freely: all three compile down to the same
       ``DFTU_EXT_PORTS`` machinery.
@@ -193,7 +193,7 @@ commonly because it runs after the consumer. A producer must run before its
 consumer in the fold order, which by default is the order plugins were
 registered (``--plugin a --plugin b`` on the command line, or the injection
 order into ``PluginHost``). Order your ``--plugin`` flags accordingly, or use
-capability requirements (below) to have the host order them for you.
+capability requirements (below) to have the build order them for you.
 
 A value published in one batch does not carry over to the next: the host
 clears every port between batches, so a consumer sees nothing published until
@@ -382,11 +382,11 @@ Two more rules govern the registry:
 
 - **The dftu. id prefix is reserved for the host.** A plugin declaring a
   ``dftu.*`` capability (or providing one of the host's blessed ids such as
-  ``DFTU_CAP_EVENTS``) fails ``resolve()`` for the whole run. Requiring a
+  ``DFTU_CAP_EVENTS``) fails the plugin-set build for the whole run. Requiring a
   blessed id is fine - only providing one is rejected.
-- **An unmet required capability fails resolve.** A requirement with
-  ``required = 1`` and no satisfying provider makes ``PluginHost::resolve()``
-  return false; an optional one (``required = 0``) just leaves the consumer
+- **An unmet required capability fails the build.** A requirement with
+  ``required = 1`` and no satisfying provider makes ``Plugins::Builder::build()``
+  return an error; an optional one (``required = 0``) just leaves the consumer
   unwired, as in the examples above.
 - **A provide/require edge orders the fold**: when plugin B requires
   something plugin A provides, the host's resolved fold order runs A before

@@ -743,7 +743,7 @@ merged value at ``finalize``. ``MonoidValue`` selects ``as_u64()`` /
          if (H->result(host->h, "com.example.total", &out) == 0) { /* out.as.u64 */ }
 
 **Named results (DFTU_EXT_RESULT)** emit an opaque blob or a user-schema Arrow
-array under a name; both surface from ``PluginHost::run`` keyed by that name.
+array under a name; both surface from ``Plugins::run`` keyed by that name.
 Use ``Host::emit_result`` / ``emit_result_arrow`` (C: ``emit`` / ``emit_arrow``
 on ``dftu_ext_result``), best called at finalize.
 

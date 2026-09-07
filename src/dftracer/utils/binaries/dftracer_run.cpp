@@ -5,7 +5,7 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/core/tasks/task.h>
 #include <dftracer/utils/plugins/config.h>
-#include <dftracer/utils/plugins/host.h>
+#include <dftracer/utils/plugins/plugins.h>
 #include <dftracer/utils/trace/indexing/resolve_and_build.h>
 #include <dftracer/utils/trace/internal/utils.h>
 #include <dftracer/utils/trace/views/view.h>
@@ -23,7 +23,7 @@ using namespace dftracer::utils::trace;
 using namespace dftracer::utils::trace::views;
 using namespace dftracer::utils::utilities::filesystem;
 using dftracer::utils::plugins::ConfigTree;
-using dftracer::utils::plugins::PluginHost;
+using dftracer::utils::plugins::Plugins;
 
 struct PluginBlock {
     std::string path;
@@ -216,29 +216,26 @@ static coro::CoroTask<int> run_plugins(const RunArgParse* cli,
         files = std::move(norm.files);
     }
 
-    PluginHost host;
+    auto builder = Plugins::builder();
     for (const auto& block : plugin_args->blocks) {
-        const dftu_value* root = nullptr;
         if (block_has_config(plugin_args->shared, block)) {
             try {
-                root =
-                    host.add_config(build_config(plugin_args->shared, block));
+                builder.add(block.path,
+                            build_config(plugin_args->shared, block));
             } catch (const std::exception& e) {
                 DFTRACER_UTILS_LOG_ERROR("Plugin '%s' config error: %s",
                                          block.path.c_str(), e.what());
                 co_return 1;
             }
-        }
-        if (!host.load(block.path, root)) {
-            DFTRACER_UTILS_LOG_ERROR("Failed to load plugin: %s",
-                                     block.path.c_str());
-            co_return 1;
+        } else {
+            builder.add(block.path);
         }
     }
 
-    // A capability conflict must stop the run before any scanning begins.
-    if (!host.resolve()) {
-        DFTRACER_UTILS_LOG_ERROR("%s", "Plugin capability resolution failed");
+    // A load or capability failure must stop the run before any scanning.
+    auto plugins = builder.build();
+    if (!plugins) {
+        DFTRACER_UTILS_LOG_ERROR("%s", plugins.error().format().c_str());
         co_return 1;
     }
 
@@ -262,7 +259,12 @@ static coro::CoroTask<int> run_plugins(const RunArgParse* cli,
                 co_await indexing::ensure_indexes_fresh(&ctx, "", files,
                                                         index_dir);
             View view = View::from_files(view_files);
-            stats = co_await host.run(view);
+            auto run = co_await plugins->run(view);
+            if (!run) {
+                DFTRACER_UTILS_LOG_ERROR("%s", run.error().format().c_str());
+                co_return;
+            }
+            stats = run->stats;
             co_return;
         },
         "DFTracerRun");
@@ -278,7 +280,7 @@ static coro::CoroTask<int> run_plugins(const RunArgParse* cli,
     std::fprintf(stderr,
                  "Run: plugins=%zu | Files: %zu | Chunks: scanned=%llu "
                  "skipped=%llu | Events: matched=%llu scanned=%llu\n",
-                 host.size(), files.size(),
+                 plugins->size(), files.size(),
                  (unsigned long long)stats.chunks_scanned,
                  (unsigned long long)stats.chunks_skipped,
                  (unsigned long long)stats.events_matched,

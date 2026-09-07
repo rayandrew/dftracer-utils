@@ -102,6 +102,17 @@ using NamedResult =
 
 class NamedResultRegistry {
    public:
+    NamedResultRegistry() = default;
+
+    /// Movable so a run can hand its results back by value. Only safe once the
+    /// scan that writes into it has finished; the mutex is not carried over.
+    NamedResultRegistry(NamedResultRegistry&& other) noexcept
+        : results_(std::move(other.results_)) {}
+    NamedResultRegistry& operator=(NamedResultRegistry&& other) noexcept {
+        if (this != &other) results_ = std::move(other.results_);
+        return *this;
+    }
+
     void emit_blob(const char* name, const void* data, std::uint64_t len) {
         if (!name) return;
         std::vector<std::byte> bytes(static_cast<std::size_t>(len));

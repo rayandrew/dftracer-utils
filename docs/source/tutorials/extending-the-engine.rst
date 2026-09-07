@@ -121,8 +121,8 @@ threading code.
    .. tab-item:: Python
 
       ``PluginHost`` compiles the class to a cached ``.so``, loads it, and folds
-      it over one scan of your traces. ``resolve()`` wires up the map service,
-      and ``run()`` returns the emitted results keyed by map name:
+      it over one scan of your traces. ``run()`` wires up the map service and
+      returns the emitted results keyed by map name:
 
       .. code-block:: python
 
@@ -131,7 +131,6 @@ threading code.
 
          host = PluginHost()
          host.load(EventsPerPid)
-         host.resolve()
          results = host.run("plugin_trace.pfw.gz")
 
          table = pa.table(results["hits"])
@@ -185,7 +184,7 @@ What you learned
   or in C++ as a ``Slice`` with ``step`` / ``merge`` / ``finalize`` exported by
   ``make_plugin`` and the ``dftracer_plugin`` factory - both compile to the same
   ABI.
-- Run it in Python with ``PluginHost.load`` / ``resolve`` / ``run``, or compile
+- Run it in Python with ``PluginHost.load`` / ``run``, or compile
   the ``.so`` and fold it with ``dftracer_run --plugin``.
 
 To go further, see the Extending the engine section of the

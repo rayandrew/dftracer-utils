@@ -254,7 +254,7 @@ the current batch (``0`` when no producer has published yet):
 ``jit.f64``); it must match on both the publisher and the consumer. A
 consume port is read-only (writing to it raises ``JitError`` at decoration
 time) and a publish port is write-only (reading it likewise raises). With
-``required=True`` a missing producer fails ``PluginHost.resolve()``; the
+``required=True`` a missing producer fails the ``PluginHost`` build; the
 default (``required=False``) degrades to reading ``0``.
 
 The ordering rule matters here exactly as it does in C++: a producer's

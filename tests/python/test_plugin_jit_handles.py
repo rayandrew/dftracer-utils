@@ -127,7 +127,6 @@ def test_jit_shared_handles_merge_across_scan(tmp_path):
 
     host = PluginHost()
     host.load(_stats_plugin())
-    assert host.resolve()
     results = host.run(str(tmp_path))
 
     # The per-pid map still materializes normally.
@@ -159,7 +158,6 @@ def test_jit_shared_only_plugin(tmp_path):
 
     host = PluginHost()
     host.load(CountOnly)
-    assert host.resolve()
     results = host.run(str(tmp_path))
 
     assert _u64(results["n"]) == len(durs)

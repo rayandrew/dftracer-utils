@@ -486,7 +486,7 @@ class Host {
 
     /// Named result channel: emit an opaque blob (the host copies `len` bytes)
     /// or a user-schema Arrow array (the host moves it); both surface from
-    /// PluginHost::run keyed by name. Best called at on_finalize.
+    /// Plugins::run keyed by name. Best called at on_finalize.
     void emit_result(const char* name, const void* data,
                      std::uint64_t len) const {
         const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
@@ -528,7 +528,7 @@ class Host {
 
     /// Mergeable map: get-or-create a named tuple-keyed map whose value is a
     /// scalar monoid; null if a key type or the value monoid is unsupported.
-    /// The result surfaces from PluginHost::run by name.
+    /// The result surfaces from Plugins::run by name.
     dftu_map* map_new(const char* name,
                       std::initializer_list<dftu_type> key_types,
                       dftu_monoid_kind value) const {

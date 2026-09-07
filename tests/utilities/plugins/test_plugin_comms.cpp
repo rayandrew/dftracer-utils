@@ -1,11 +1,12 @@
 // Coverage for the declare/resolve lifecycle and the runtime-authority
-// capability registry in PluginHost: provider discovery, semver best-provider
-// selection, reserved-namespace enforcement, and required-vs-optional handling.
+// capability registry in Plugins::build: provider discovery, semver
+// best-provider selection, reserved-namespace enforcement, and
+// required-vs-optional handling.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/plugins/abi.h>
-#include <dftracer/utils/plugins/host.h>
 #include <dftracer/utils/plugins/plugin.h>
+#include <dftracer/utils/plugins/plugins_internal.h>
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -13,7 +14,8 @@
 #include <cstring>
 #include <vector>
 
-using dftracer::utils::plugins::PluginHost;
+using dftracer::utils::plugins::build_injected_plugins;
+using dftracer::utils::plugins::fold_order;
 
 namespace {
 
@@ -161,10 +163,9 @@ TEST_SUITE("PluginComms") {
         CHECK(got.ver.major == 2);
         CHECK(got.ver.minor == 1);
 
-        PluginHost host;
-        host.inject_plugin(consumer);  // consumer first: resolve reorders
-        host.inject_plugin(provider);
-        CHECK(host.resolve());
+        // Consumer first: build reorders it after the provider.
+        auto set = build_injected_plugins({consumer, provider});
+        CHECK(set.has_value());
 
         CHECK(g_cxx_rec.provider_count == 1);
         CHECK(g_cxx_rec.wired);
@@ -184,12 +185,9 @@ TEST_SUITE("PluginComms") {
 
         dftu_plugin a = make_fake(&p12), b = make_fake(&p15),
                     c = make_fake(&consumer);
-        PluginHost host;
-        host.inject_plugin(&a);
-        host.inject_plugin(&b);
-        host.inject_plugin(&c);
+        auto set = build_injected_plugins({&a, &b, &c});
 
-        CHECK(host.resolve());
+        CHECK(set.has_value());
         CHECK(consumer.mode == MODE_WIRED);
         CHECK(consumer.provider_count == 2);
         CHECK(consumer.best.major == 1);
@@ -202,10 +200,9 @@ TEST_SUITE("PluginComms") {
         consumer.reqs = {
             req("com.example.tag", DFTU_VER_CARET, 1, 0, 0, /*required=*/0)};
         dftu_plugin c = make_fake(&consumer);
-        PluginHost host;
-        host.inject_plugin(&c);
+        auto set = build_injected_plugins({&c});
 
-        CHECK(host.resolve());
+        CHECK(set.has_value());
         CHECK(consumer.mode == MODE_STANDALONE);
         CHECK(consumer.provider_count == 0);
     }
@@ -214,20 +211,18 @@ TEST_SUITE("PluginComms") {
         FakeState bad;
         bad.provides = {cap("dftu.cap.events", 1, 0, 0)};
         dftu_plugin p = make_fake(&bad);
-        PluginHost host;
-        host.inject_plugin(&p);
+        auto set = build_injected_plugins({&p});
 
-        CHECK_FALSE(host.resolve());
+        CHECK_FALSE(set.has_value());
     }
 
     TEST_CASE("a plugin providing a blessed host capability id is rejected") {
         FakeState bad;
         bad.provides = {cap(DFTU_CAP_EVENTS, 1, 0, 0)};
         dftu_plugin p = make_fake(&bad);
-        PluginHost host;
-        host.inject_plugin(&p);
+        auto set = build_injected_plugins({&p});
 
-        CHECK_FALSE(host.resolve());  // reserved dft. namespace
+        CHECK_FALSE(set.has_value());  // reserved dft. namespace
 
         // The blessed ids are usable constants; requiring one is allowed.
         dftu_requirement r =
@@ -241,10 +236,9 @@ TEST_SUITE("PluginComms") {
         consumer.reqs = {
             req("com.example.tag", DFTU_VER_GE, 1, 0, 0, /*required=*/1)};
         dftu_plugin c = make_fake(&consumer);
-        PluginHost host;
-        host.inject_plugin(&c);
+        auto set = build_injected_plugins({&c});
 
-        CHECK_FALSE(host.resolve());
+        CHECK_FALSE(set.has_value());
     }
 
     TEST_CASE("an incompatible major hides the provider from the consumer") {
@@ -253,11 +247,9 @@ TEST_SUITE("PluginComms") {
         consumer.reqs = {
             req("com.example.tag", DFTU_VER_CARET, 1, 0, 0, /*required=*/0)};
         dftu_plugin a = make_fake(&p2), c = make_fake(&consumer);
-        PluginHost host;
-        host.inject_plugin(&a);
-        host.inject_plugin(&c);
+        auto set = build_injected_plugins({&a, &c});
 
-        CHECK(host.resolve());
+        CHECK(set.has_value());
         CHECK(consumer.mode == MODE_STANDALONE);
         CHECK(consumer.provider_count == 1);  // any-version count still sees it
     }
@@ -269,12 +261,11 @@ TEST_SUITE("PluginComms") {
         producer.provides = {cap("com.example.tag", 1, 0, 0)};
 
         dftu_plugin c = make_fake(&consumer), p = make_fake(&producer);
-        PluginHost host;
-        host.inject_plugin(&c);  // consumer first in CLI order
-        host.inject_plugin(&p);
+        // Consumer first in CLI order.
+        auto set = build_injected_plugins({&c, &p});
 
-        CHECK(host.resolve());
-        auto order = host.fold_order();
+        CHECK(set.has_value());
+        auto order = fold_order(*set);
         REQUIRE(order.size() == 2);
         CHECK(position_of(order, 1) < position_of(order, 0));  // producer first
     }
@@ -282,13 +273,10 @@ TEST_SUITE("PluginComms") {
     TEST_CASE("a no-dependency set keeps natural fold order") {
         FakeState a, b, c;
         dftu_plugin pa = make_fake(&a), pb = make_fake(&b), pc = make_fake(&c);
-        PluginHost host;
-        host.inject_plugin(&pa);
-        host.inject_plugin(&pb);
-        host.inject_plugin(&pc);
+        auto set = build_injected_plugins({&pa, &pb, &pc});
 
-        CHECK(host.resolve());
-        CHECK(host.fold_order() == std::vector<std::size_t>{0, 1, 2});
+        CHECK(set.has_value());
+        CHECK(fold_order(*set) == std::vector<std::size_t>{0, 1, 2});
     }
 
     TEST_CASE("a provide/require cycle falls back to natural order") {
@@ -299,11 +287,9 @@ TEST_SUITE("PluginComms") {
         y.reqs = {req("com.example.a", DFTU_VER_GE, 1, 0, 0, /*required=*/0)};
 
         dftu_plugin px = make_fake(&x), py = make_fake(&y);
-        PluginHost host;
-        host.inject_plugin(&px);
-        host.inject_plugin(&py);
+        auto set = build_injected_plugins({&px, &py});
 
-        CHECK(host.resolve());  // cycle does not fail resolve
-        CHECK(host.fold_order() == std::vector<std::size_t>{0, 1});
+        CHECK(set.has_value());  // a cycle does not fail the build
+        CHECK(fold_order(*set) == std::vector<std::size_t>{0, 1});
     }
 }

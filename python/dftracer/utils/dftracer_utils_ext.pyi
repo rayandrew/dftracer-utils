@@ -1104,9 +1104,9 @@ class PluginHost:
 
     def __init__(self, runtime: Optional[object] = ...) -> None: ...
     def load(self, path: str, config: Optional[str] = ...) -> None:
-        """dlopen a compiled plugin; ``config`` is a JSON object string."""
+        """Queue a compiled plugin; ``config`` is a JSON object string. The
+        dlopen and capability resolution run on first use."""
         ...
-    def resolve(self) -> bool: ...
     def run(
         self,
         traces: "str | List[str]",

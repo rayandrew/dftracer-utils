@@ -74,13 +74,11 @@ def test_jit_plan_query_narrows_scan(tmp_path):
 
     pruned_host = PluginHost()
     pruned_host.load(Pruned)
-    pruned_host.resolve()
     pruned_res = pruned_host.run(files)
     pruned_scanned = pruned_host.stats["events_scanned"]
 
     full_host = PluginHost()
     full_host.load(Full)
-    full_host.resolve()
     full_res = full_host.run(files)
     full_scanned = full_host.stats["events_scanned"]
 
@@ -122,7 +120,6 @@ def test_jit_string_literal_guard_counts_matching(tmp_path):
 
     host = PluginHost()
     host.load(OnlyPosix)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     val = pa.table(results["hits"]).column("value").to_numpy(zero_copy_only=False)
@@ -147,7 +144,6 @@ def test_jit_string_literal_ne_guard(tmp_path):
 
     host = PluginHost()
     host.load(NotPosix)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     val = pa.table(results["hits"]).column("value").to_numpy(zero_copy_only=False)
@@ -198,7 +194,6 @@ def test_jit_name_edges_matches_handwritten(tmp_path):
 
     host = PluginHost()
     host.load(NameEdges)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "edges" in results
@@ -232,7 +227,6 @@ def test_jit_wide_edges_matches_handwritten(tmp_path):
 
     host = PluginHost()
     host.load(WideEdges)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "edges" in results
@@ -271,7 +265,6 @@ def test_jit_dict_value_names_columns(tmp_path):
 
     host = PluginHost()
     host.load(Wide)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["edges"])
@@ -306,7 +299,6 @@ def test_jit_dict_value_positional_and_named(tmp_path):
 
     host = PluginHost()
     host.load(Wide)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["edges"])
@@ -341,7 +333,6 @@ def test_jit_record_value_form(tmp_path):
 
     host = PluginHost()
     host.load(Wide)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["edges"])
@@ -381,7 +372,6 @@ def test_jit_single_sum_map(tmp_path):
 
     host = PluginHost()
     host.load(DurSum)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["tot"])
@@ -408,7 +398,6 @@ def test_jit_arithmetic_doubles_sum(tmp_path):
 
     host = PluginHost()
     host.load(DurSumX2)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     val = pa.table(results["tot"]).column("value").to_numpy(zero_copy_only=False)
@@ -430,7 +419,6 @@ def test_jit_primitive_ilog2_buckets_duration(tmp_path):
 
     host = PluginHost()
     host.load(DurHist)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["hist"])
@@ -458,7 +446,6 @@ def test_jit_float_primitives_sum(tmp_path):
 
     host = PluginHost()
     host.load(SqrtSum)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     val = pa.table(results["tot"]).column("value").to_numpy(zero_copy_only=False)
@@ -623,7 +610,6 @@ def test_jit_cse_result_matches_unfused(tmp_path):
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, [1, 2], ["fileA"])
     host = PluginHost()
     host.load(Buckets)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     counts = dict(
@@ -693,7 +679,6 @@ def test_jit_fusion_result_matches_unfused(tmp_path):
     _write_trace(str(tmp_path / "trace.pfw.gz"), m, [1, 2], ["fileA"])
     host = PluginHost()
     host.load(Stats)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     # The fused maps still surface as the two separate declared tables.
@@ -742,7 +727,6 @@ def test_jit_accepts_large_in_range_literal(tmp_path):
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, [1], ["fileA"])
     host = PluginHost()
     host.load(BigKey)
-    host.resolve()
     results = host.run(str(tmp_path))
     tbl = pa.table(results["m"])
     assert tbl.column("k0").to_pylist() == [1099511627776]
@@ -772,7 +756,6 @@ def test_jit_raw_body_reproduces_name_edges(tmp_path):
 
     host = PluginHost()
     host.load(RawEdges)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["edges"])
@@ -825,7 +808,6 @@ def test_jit_quantiles_per_key(tmp_path):
 
     host = PluginHost()
     host.load(Lat)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["lat"])
@@ -873,7 +855,6 @@ def test_jit_distinct_count_per_key(tmp_path):
 
     host = PluginHost()
     host.load(OutDeg)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["outdeg"])
@@ -903,7 +884,6 @@ def test_jit_min_max_observe(tmp_path):
 
     host = PluginHost()
     host.load(Lat)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     exp_min: dict = {}
@@ -938,7 +918,6 @@ def test_jit_product_mixed_add_and_observe(tmp_path):
 
     host = PluginHost()
     host.load(Mixed)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["m"])
@@ -975,7 +954,6 @@ def test_jit_minf_maxf_observe(tmp_path):
 
     host = PluginHost()
     host.load(LatF)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     exp_min: dict = {}
@@ -1021,7 +999,6 @@ def test_jit_set_collects_distinct_names_per_pid(tmp_path):
 
     host = PluginHost()
     host.load(Files)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["files"])
@@ -1068,7 +1045,6 @@ def test_jit_list_collects_ts_ordered_names_per_pid(tmp_path):
 
     host = PluginHost()
     host.load(Seq)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["seq"])
@@ -1246,7 +1222,6 @@ def test_jit_set_i64_collects_distinct_durs_sorted(tmp_path):
 
     host = PluginHost()
     host.load(Durs)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["durs"])
@@ -1282,7 +1257,6 @@ def test_jit_list_i64_collects_ts_ordered_durs(tmp_path):
 
     host = PluginHost()
     host.load(Durs)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["durs"])
@@ -1347,7 +1321,6 @@ def test_jit_ordered_map_sorts_rows_by_key(tmp_path):
 
     host = PluginHost()
     host.load(Two)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     asc = pa.table(results["asc"])
@@ -1380,7 +1353,6 @@ def test_jit_typed_integer_key_columns(tmp_path):
 
     host = PluginHost()
     host.load(Typed)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["m"])
@@ -1416,7 +1388,6 @@ def test_jit_f64_key_column(tmp_path):
 
     host = PluginHost()
     host.load(ByDur)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["m"])
@@ -1449,7 +1420,6 @@ def test_jit_typed_min_max_value_columns(tmp_path):
 
     host = PluginHost()
     host.load(Vals)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     mn = pa.table(results["mn"])
@@ -1510,7 +1480,6 @@ def test_jit_arg_f64_as_value_sums(tmp_path):
 
     host = PluginHost()
     host.load(Bw)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["bw"])
@@ -1536,7 +1505,6 @@ def test_jit_arg_i64_into_counter_sums(tmp_path):
 
     host = PluginHost()
     host.load(Sizes)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     val = pa.table(results["tot"]).column("value").to_numpy(zero_copy_only=False)
@@ -1560,7 +1528,6 @@ def test_jit_arg_i64_as_key(tmp_path):
 
     host = PluginHost()
     host.load(ByRank)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["cnt"])
@@ -1588,7 +1555,6 @@ def test_jit_arg_str_set_element(tmp_path):
 
     host = PluginHost()
     host.load(Tags)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["tags"])
@@ -1668,7 +1634,6 @@ def test_jit_nested_counter_per_pid_file(tmp_path):
 
     host = PluginHost()
     host.load(PidFileCounts)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["m"])
@@ -1721,7 +1686,6 @@ def test_jit_nested_product_count_and_sum(tmp_path):
 
     host = PluginHost()
     host.load(PidFileStats)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["m"])
@@ -1784,7 +1748,6 @@ def test_jit_flat_multikey_chained_subscript_sugar(tmp_path):
 
     host = PluginHost()
     host.load(Chained)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["m"])
@@ -1830,12 +1793,10 @@ def test_jit_bare_single_key_matches_tuple_form(tmp_path):
 
     bare_host = PluginHost()
     bare_host.load(Bare)
-    bare_host.resolve()
     bare = _kv(pa.table(bare_host.run(str(tmp_path))["m"]))
 
     tup_host = PluginHost()
     tup_host.load(Tupled)
-    tup_host.resolve()
     tup = _kv(pa.table(tup_host.run(str(tmp_path))["m"]))
 
     assert {int(k): int(v) for k, v in bare.items()} == {int(k): int(v) for k, v in tup.items()}
@@ -1896,7 +1857,6 @@ def test_jit_ordered_str_key_map_sorts_by_label(tmp_path):
 
     host = PluginHost()
     host.load(ByName)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["by_name"])
@@ -1923,7 +1883,6 @@ def test_jit_variance_matches_handcomputed(tmp_path):
 
     host = PluginHost()
     host.load(DurVar)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["dv"])
@@ -1955,7 +1914,6 @@ def test_jit_mean_and_stddev_columns(tmp_path):
 
     host = PluginHost()
     host.load(DurStats)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert pa.types.is_float64(pa.table(results["mu"]).schema.field("value").type)
@@ -2000,7 +1958,6 @@ def test_jit_argmax_argmin_str_payload(tmp_path):
 
     host = PluginHost()
     host.load(HotCold)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     hot = pa.table(results["hot"])
@@ -2041,7 +1998,6 @@ def test_jit_argmax_i64_payload(tmp_path):
 
     host = PluginHost()
     host.load(SlowTid)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["tid_at_max"])
@@ -2130,7 +2086,6 @@ def test_jit_topk_keeps_extreme_payloads_in_order(tmp_path):
 
     host = PluginHost()
     host.load(Hot)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     hot = pa.table(results["hot"])
@@ -2169,7 +2124,6 @@ def test_jit_approx_topk_exact_when_k_ge_distinct(tmp_path):
 
     host = PluginHost()
     host.load(Freq)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["freq"])
@@ -2202,7 +2156,6 @@ def test_jit_sample_keeps_items_from_input(tmp_path):
 
     host = PluginHost()
     host.load(Samp)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     ts_by_pid = {1: {1000, 1001, 1002, 1003}, 2: {2000, 2001}}
@@ -2238,7 +2191,6 @@ def test_jit_argmax_row_keeps_whole_winning_row(tmp_path):
 
     host = PluginHost()
     host.load(Slow)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["slow"])
@@ -2392,7 +2344,6 @@ def test_jit_join_left_null_pads_unmatched(tmp_path):
 
     host = PluginHost()
     host.load(PidJoin)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     # Input maps still surface additively.
@@ -2440,7 +2391,6 @@ def test_jit_join_inner_keeps_only_matched(tmp_path):
 
     host = PluginHost()
     host.load(PidJoin)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["joined"])

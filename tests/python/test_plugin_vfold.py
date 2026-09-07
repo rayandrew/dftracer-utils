@@ -50,7 +50,6 @@ def test_vfold_scalar_sum(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), durs)
     host = PluginHost()
     host.load(Busy)
-    host.resolve()
     result = host.run(str(tmp_path))
     assert float(_value(result, "total").sum()) == float(sum(durs))  # 150
 
@@ -71,7 +70,6 @@ def test_vfold_scalar_min_max(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), durs)
     host = PluginHost()
     host.load(Bounds)
-    host.resolve()
     result = host.run(str(tmp_path))
     assert int(_value(result, "lo").sum()) == 10
     assert int(_value(result, "hi").sum()) == 50
@@ -92,7 +90,6 @@ def test_vfold_keyed_sum_per_pid(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
     host = PluginHost()
     host.load(PerPid)
-    host.resolve()
     got = _keyed(host.run(str(tmp_path)), "busy", "pid")
     assert got == {1: 40.0, 2: 60.0}  # pid1: 10+30, pid2: 20+40
 
@@ -117,7 +114,6 @@ def test_vfold_keyed_sum_per_name(tmp_path):
             )
     host = PluginHost()
     host.load(ByName)
-    host.resolve()
     got = _keyed(host.run(str(tmp_path)), "dur", "name")
     assert got == {"read": 60.0, "write": 300.0}
 
@@ -135,7 +131,6 @@ def test_vfold_keyed_max_per_pid(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), [10, 90, 30, 40], [1, 2, 1, 2])
     host = PluginHost()
     host.load(Peak)
-    host.resolve()
     got = _keyed(host.run(str(tmp_path)), "hi", "pid")
     assert got == {1: 30, 2: 90}  # per-pid max
 
@@ -153,7 +148,6 @@ def test_vfold_keyed_count_per_pid(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), [1, 1, 1, 1, 1], [1, 1, 2, 2, 2])
     host = PluginHost()
     host.load(Hits)
-    host.resolve()
     got = _keyed(host.run(str(tmp_path)), "n", "pid")
     assert got == {1: 2, 2: 3}
 
@@ -175,7 +169,6 @@ def test_vfold_keyed_pct_per_pid(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
     host = PluginHost()
     host.load(Median)
-    host.resolve()
     got = _keyed(host.run(str(tmp_path)), "p50", "pid")
     assert got[1] == pytest.approx(30.0, rel=0.05)  # median of pid1
     assert got[2] == pytest.approx(200.0, rel=0.05)  # median of pid2
@@ -209,7 +202,6 @@ def test_vfold_keyed_moments(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
     host = PluginHost()
     host.load(Moments)
-    host.resolve()
     result = host.run(str(tmp_path))
     var = _keyed(result, "variance", "pid")
     std = _keyed(result, "std", "pid")
@@ -243,7 +235,6 @@ def test_vfold_keyed_set_union(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
     host = PluginHost()
     host.load(Distinct)
-    host.resolve()
     got = _keyed(host.run(str(tmp_path)), "vals", "pid")
 
     # SET_UNION crosses as one text cell of distinct values, separated by 0x1e.
@@ -269,7 +260,6 @@ def test_vfold_keyed_first_last(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
     host = PluginHost()
     host.load(Ends)
-    host.resolve()
     result = host.run(str(tmp_path))
     lo = _keyed(result, "lo", "pid")
     hi = _keyed(result, "hi", "pid")
@@ -300,7 +290,6 @@ def test_vfold_keyed_hist(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
     host = PluginHost()
     host.load(Hist)
-    host.resolve()
     rows = _keyed_arrow(host.run(str(tmp_path)), "h", "pid")
     assert set(rows) == {1, 2}
     for pid, bins in rows.items():
@@ -329,7 +318,6 @@ def test_vfold_keyed_argmax(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), [10, 20, 30, 40], [1, 2, 1, 2])
     host = PluginHost()
     host.load(Peak)
-    host.resolve()
     # ts = 1000 + i; pid1 rows are i=0 (dur10) and i=2 (dur30); pid2 i=1 (dur20)
     # and i=3 (dur40). The max-ts row's dur is the argmax repr.
     got = _keyed(host.run(str(tmp_path)), "latest", "pid")
@@ -361,7 +349,6 @@ def test_vfold_keyed_occupancy(tmp_path):
             )
     host = PluginHost()
     host.load(Occ)
-    host.resolve()
     result = host.run(str(tmp_path))
     busy = _keyed(result, "busy", "pid")
     active = _keyed(result, "active", "pid")

@@ -321,7 +321,6 @@ def test_jit_ports_data_crosses_producer_to_consumer(tmp_path):
     host = PluginHost()
     host.load(_producer())
     host.load(_consumer())
-    assert host.resolve()
     results = host.run(str(tmp_path))
 
     seen = _pid_counts(pa.table(results["seen"]))
@@ -334,7 +333,7 @@ def test_jit_ports_data_crosses_producer_to_consumer(tmp_path):
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
 def test_jit_ports_resolve_orders_producer_first(tmp_path):
-    # Load the consumer BEFORE the producer; resolve() must still order the
+    # Load the consumer BEFORE the producer; the build must still order the
     # producer first so the value is present when the consumer reads it.
     n = 60
     pids = [1, 2]
@@ -343,7 +342,6 @@ def test_jit_ports_resolve_orders_producer_first(tmp_path):
     host = PluginHost()
     host.load(_consumer())
     host.load(_producer())
-    assert host.resolve()
     results = host.run(str(tmp_path))
 
     assert sum(_pid_counts(pa.table(results["got"])).values()) == n
@@ -358,7 +356,6 @@ def test_jit_ports_absent_producer_reads_zero(tmp_path):
 
     host = PluginHost()
     host.load(_consumer(required=False))
-    assert host.resolve()
     results = host.run(str(tmp_path))
 
     got = pa.table(results["got"])
@@ -366,11 +363,12 @@ def test_jit_ports_absent_producer_reads_zero(tmp_path):
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_ports_required_missing_producer_fails_resolve(tmp_path):
+def test_jit_ports_required_missing_producer_fails_the_build(tmp_path):
     host = PluginHost()
     host.load(_consumer(required=True))
-    # A required capability with no provider must fail resolve.
-    assert host.resolve() is False
+    # A required capability with no provider must fail the plugin-set build.
+    with pytest.raises(ImportError):
+        host.run(str(tmp_path))
 
 
 # --- end-to-end resolve-time adaptation (need a C++ compiler) ----------------
@@ -417,7 +415,6 @@ def test_jit_on_resolve_adapts_to_compatible_producer(tmp_path):
     host = PluginHost()
     host.load(_versioned_producer("2.1.0"))
     host.load(_adaptive_consumer(min_version="2.0.0"))
-    assert host.resolve()
     results = host.run(str(tmp_path))
 
     # The provider satisfies >=2.0.0, so on_resolve wires the consumer and it
@@ -433,7 +430,6 @@ def test_jit_on_resolve_stands_down_for_incompatible_version(tmp_path):
     host = PluginHost()
     host.load(_versioned_producer("1.0.0"))
     host.load(_adaptive_consumer(min_version="2.0.0"))
-    assert host.resolve()
     results = host.run(str(tmp_path))
 
     # The only provider is version 1.0.0, below the >=2.0.0 constraint, so

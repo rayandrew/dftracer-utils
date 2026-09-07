@@ -31,12 +31,11 @@ _skip = pytest.mark.skipif(
 
 @_skip
 class TestPluginHost:
-    def test_load_resolve_run_counts_events(self):
+    def test_load_run_counts_events(self):
         with Environment() as env:
             env.create_dft_trace_file("trace.pfw.gz", num_events=50)
             host = PluginHost()
             host.load(_PLUGIN)
-            assert host.resolve() is True
             host.run(env.temp_dir)
             assert host.stats["events_scanned"] == 50
             assert host.stats["events_matched"] == 50
@@ -46,7 +45,6 @@ class TestPluginHost:
             gz = env.create_dft_trace_file("one.pfw.gz", num_events=17)
             host = PluginHost()
             host.load(_PLUGIN)
-            host.resolve()
             host.run(gz)
             assert host.stats["events_scanned"] == 17
 
@@ -62,7 +60,6 @@ class TestPluginHost:
             env.create_dft_trace_file("cfg.pfw.gz", num_events=8)
             host = PluginHost()
             host.load(_PLUGIN, config={"threshold": 5, "label": "x"})
-            host.resolve()
             host.run(env.temp_dir)
             assert host.stats["events_scanned"] == 8
 
@@ -72,14 +69,15 @@ class TestPluginHost:
             os.makedirs(empty, exist_ok=True)
             host = PluginHost()
             host.load(_PLUGIN)
-            host.resolve()
             with pytest.raises(Exception):
                 host.run(empty)
 
-    def test_load_bad_path_raises(self):
+    def test_bad_path_raises_on_run(self):
+        # load() only queues the plugin; the dlopen happens when the set builds.
         host = PluginHost()
+        host.load("/nonexistent/does_not_exist.so")
         with pytest.raises(ImportError):
-            host.load("/nonexistent/does_not_exist.so")
+            host.run("/nonexistent")
 
 
 @pytest.mark.skipif(
@@ -92,7 +90,6 @@ class TestPluginResults:
             env.create_dft_trace_file("trace.pfw.gz", num_events=40)
             host = PluginHost()
             host.load(_RESULT_PLUGIN)
-            host.resolve()
             results = host.run(env.temp_dir)
 
             assert "process_counts" in results

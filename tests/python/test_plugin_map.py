@@ -60,7 +60,6 @@ def test_process_file_edges_builds_adjacency(tmp_path):
 
     host = PluginHost()
     host.load(_PLUGIN)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "process_file_edges" in results
@@ -95,7 +94,6 @@ def test_process_file_edges_wide_builds_product_columns(tmp_path):
 
     host = PluginHost()
     host.load(_PLUGIN_WIDE)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "process_file_edges_wide" in results
@@ -121,7 +119,6 @@ def test_name_edges_resolves_str_key_column(tmp_path):
 
     host = PluginHost()
     host.load(_PLUGIN_NAMES)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "name_edges" in results
@@ -149,7 +146,6 @@ def test_process_file_set_builds_list_string_column(tmp_path):
 
     host = PluginHost()
     host.load(_PLUGIN_SET)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "process_file_set" in results
@@ -194,7 +190,6 @@ def test_process_event_seq_builds_ts_ordered_list(tmp_path):
 
     host = PluginHost()
     host.load(_PLUGIN_SEQ)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "process_event_seq" in results
@@ -235,7 +230,6 @@ def test_streamed_map_returns_record_batch_reader(tmp_path, monkeypatch):
 
     host = PluginHost()
     host.load(_PLUGIN)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     reader = results["process_file_edges"]
@@ -277,7 +271,6 @@ def test_small_map_stays_eager_table(tmp_path):
 
     host = PluginHost()
     host.load(_PLUGIN)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     obj = results["process_file_edges"]
@@ -313,7 +306,6 @@ def test_process_pid_durs_builds_ts_ordered_int64_list(tmp_path):
 
     host = PluginHost()
     host.load(_PLUGIN_DURS)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     assert "process_pid_durs" in results
@@ -398,7 +390,6 @@ def test_unnest_aggregated_set_recovers_edges(tmp_path):
 
     host = PluginHost()
     host.load(_PLUGIN_SET)
-    host.resolve()
     results = host.run(str(tmp_path))
 
     # The aggregated per-pid file set explodes back into scannable (pid, file)
