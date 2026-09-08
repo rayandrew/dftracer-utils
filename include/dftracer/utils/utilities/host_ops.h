@@ -11,12 +11,25 @@ namespace dftracer::utils::utilities {
  * dftu.file.compress, dftu.file.decompress and dftu.text.line_filter. Each is
  * synchronous and materializes its result, unlike the async utility it wraps.
  *
- * Idempotent and thread-safe. A shared build runs it from a library
- * initializer, so only a consumer that links the static library (where the
- * linker may drop that initializer's object file) needs to call it.
+ * Idempotent and thread-safe. Both library variants run it from an
+ * initializer, so a consumer never has to call it.
  */
 void register_host_ops();
 
 }  // namespace dftracer::utils::utilities
+
+extern "C" {
+
+/**
+ * @brief Linker anchor for the host-op initializer; calls register_host_ops().
+ *
+ * An archive member is linked in only when something references it, so a
+ * static build would otherwise drop the translation unit holding the
+ * initializer and silently register no host op. The utilities static library
+ * forces this symbol in through an interface link option, which is why the
+ * name is unmangled. Not part of the API; call register_host_ops() instead.
+ */
+void dftu_register_host_ops(void);
+}
 
 #endif  // DFTRACER_UTILS_UTILITIES_HOST_OPS_H

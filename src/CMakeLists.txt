@@ -858,6 +858,20 @@ foreach(variant shared static)
       target_link_libraries(dftracer_utils_utilities_${variant}
                             PRIVATE ${LUSTREAPI_LIBRARY})
     endif()
+
+    # The host ops (dftu.fs.*, dftu.file.*, dftu.text.*) register from a static
+    # initializer. Nothing references that translation unit, so a static link
+    # drops the archive member and the ops silently do not exist; force it in
+    # through its unmangled anchor. Mach-O prefixes an underscore.
+    if(variant STREQUAL "static")
+      if(APPLE)
+        set(host_ops_anchor "_dftu_register_host_ops")
+      else()
+        set(host_ops_anchor "dftu_register_host_ops")
+      endif()
+      target_link_options(dftracer_utils_utilities_static
+                          INTERFACE "LINKER:-u,${host_ops_anchor}")
+    endif()
   endif()
 endforeach()
 

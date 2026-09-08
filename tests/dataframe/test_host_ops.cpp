@@ -77,9 +77,13 @@ class TempDir {
 }  // namespace
 
 TEST_SUITE("host_ops") {
-    TEST_CASE("every host op is registered with its documented signature") {
+    TEST_CASE("register_host_ops is idempotent") {
         dftracer::utils::utilities::register_host_ops();
+        dftracer::utils::utilities::register_host_ops();
+        CHECK(dftu_op_find("dftu.fs.scan_dir") != nullptr);
+    }
 
+    TEST_CASE("every host op is registered with its documented signature") {
         struct Expected {
             const char* name;
             const char* signature;
@@ -102,7 +106,6 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.fs.scan_dir lists a directory as a String column") {
-        dftracer::utils::utilities::register_host_ops();
         TempDir dir("scan");
         write_file(dir.path() / "a.log", "x");
         write_file(dir.path() / "b.txt", "y");
@@ -120,7 +123,6 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.fs.scan_dir reports a missing directory as a null column") {
-        dftracer::utils::utilities::register_host_ops();
         const std::string missing =
             (sfs::current_path() / "dftu_host_ops_absent").string();
         dftu_op_arg arg{};
@@ -130,7 +132,6 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.fs.scan_dir_pattern keeps only matching files") {
-        dftracer::utils::utilities::register_host_ops();
         TempDir dir("pattern");
         write_file(dir.path() / "a.log", "x");
         write_file(dir.path() / "b.txt", "y");
@@ -150,7 +151,6 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.file.compress and dftu.file.decompress round trip") {
-        dftracer::utils::utilities::register_host_ops();
         TempDir dir("gzip");
         const std::string text(64 * 1024, 'q');
         const std::string src = (dir.path() / "in.txt").string();
@@ -176,7 +176,6 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.file.compress reports a missing input as false") {
-        dftracer::utils::utilities::register_host_ops();
         TempDir dir("gzip_missing");
         const std::string src = (dir.path() / "absent.txt").string();
         const std::string gz = (dir.path() / "absent.txt.gz").string();
@@ -187,7 +186,6 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.text.line_filter keeps the rows containing the needle") {
-        dftracer::utils::utilities::register_host_ops();
         Series lines = Series::strings(
             {"ERROR: disk full", "INFO: ok", "ERROR: timeout", "DEBUG: trace"});
         const std::string needle = "ERROR";

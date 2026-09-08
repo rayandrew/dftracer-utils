@@ -154,3 +154,7 @@ namespace {
 }  // namespace
 
 }  // namespace dftracer::utils::utilities
+
+extern "C" void dftu_register_host_ops(void) {
+    dftracer::utils::utilities::register_host_ops();
+}
