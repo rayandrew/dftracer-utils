@@ -141,5 +141,5 @@ See also
   a compose op runs inside.
 - :doc:`../../jit` for ``@jit.plugin`` and ``@jit.each_event``, the Python
   plugin-authoring surface ``@jit.op`` complements.
-- :doc:`inter-plugin-comms` for the ports/comms model when two plugins need to
+- :doc:`inter-plugin-comms` for the ports model when two plugins need to
   share a value, a different problem from composing one op with another.

@@ -234,7 +234,6 @@ typedef struct dftu_io {
 #define DFTU_EXT_SKETCH "dftu.ext.sketch@1"
 #define DFTU_EXT_ARROW "dftu.ext.arrow@1"
 #define DFTU_EXT_TRACE "dftu.ext.trace@1"
-#define DFTU_EXT_COMMS "dftu.ext.comms@1"
 #define DFTU_EXT_PORTS "dftu.ext.ports@1"
 #define DFTU_EXT_RESULT "dftu.ext.result@1"
 #define DFTU_EXT_AGG "dftu.ext.agg@1"
@@ -350,228 +349,17 @@ typedef struct dftu_ext_trace {
                       void* ud);
 } dftu_ext_trace;
 
-/** Capability identity and versioning. A capability is a namespaced id plus a
-   semantic version; a requirement is an id plus a version constraint. Ids are
-   ASCII [a-z0-9._-]; the `dftu.` prefix is reserved for the host. */
-typedef struct {
-    uint16_t major, minor, patch;
-} dftu_version;
-
-typedef struct {
-    const char* id; /**< NUL-terminated capability id */
-    dftu_version ver;
-} dftu_capability;
-
-typedef enum {
-    DFTU_VER_GE =
-        0,       /**< >=X.Y.Z; a bare id parses to >=0.0.0, i.e. any version */
-    DFTU_VER_GT, /**< >X.Y.Z */
-    DFTU_VER_LE, /**< <=X.Y.Z */
-    DFTU_VER_LT, /**< <X.Y.Z */
-    DFTU_VER_EQ, /**< =X.Y.Z */
-    DFTU_VER_CARET, /**< ^X.Y.Z: compatible within major (0.y treats minor as
-                      the breaking axis, 0.0.z as exact), the sane default */
-    DFTU_VER_TILDE  /**< ~X.Y.Z: compatible within minor (same major and minor)
-                     */
-} dftu_ver_op;
-
-typedef struct {
-    const char* id; /**< NUL-terminated capability id */
-    dftu_ver_op op;
-    dftu_version ver;
-    int required;   /**< nonzero: unmet is a load error; zero: graceful fallback
-                     */
-} dftu_requirement;
-
-static inline int dftu_version_cmp(dftu_version a, dftu_version b) {
-    if (a.major != b.major) return a.major < b.major ? -1 : 1;
-    if (a.minor != b.minor) return a.minor < b.minor ? -1 : 1;
-    if (a.patch != b.patch) return a.patch < b.patch ? -1 : 1;
-    return 0;
-}
-
-/** Parse up to three dot-separated components; missing ones are 0. Rejects a
-   component above 65535, non-digits, and trailing junk. 0 ok, -1 malformed. */
-static inline int dftu_version_parse(const char* s, uint32_t len,
-                                     dftu_version* out) {
-    dftu_version v = {0, 0, 0};
-    uint16_t* parts[3];
-    uint32_t i = 0;
-    int part = 0;
-    if (len == 0) return -1;
-    parts[0] = &v.major;
-    parts[1] = &v.minor;
-    parts[2] = &v.patch;
-    for (;;) {
-        uint32_t n = 0;
-        int digits = 0;
-        for (; i < len && s[i] >= '0' && s[i] <= '9'; ++i) {
-            n = n * 10u + (uint32_t)(s[i] - '0');
-            if (n > 0xFFFFu) return -1;
-            ++digits;
-        }
-        if (!digits) return -1; /* empty component, including a trailing dot */
-        *parts[part++] = (uint16_t)n;
-        if (i == len) break;
-        if (s[i] != '.' || part == 3) return -1; /* junk, or too many parts */
-        ++i;
-    }
-    *out = v;
-    return 0;
-}
-
-/** Does a provider version satisfy a requirement's op and version? */
-static inline int dftu_version_satisfies(dftu_version have, dftu_ver_op op,
-                                         dftu_version want) {
-    int c = dftu_version_cmp(have, want);
-    switch (op) {
-        case DFTU_VER_GE:
-            return c >= 0;
-        case DFTU_VER_GT:
-            return c > 0;
-        case DFTU_VER_LE:
-            return c <= 0;
-        case DFTU_VER_LT:
-            return c < 0;
-        case DFTU_VER_EQ:
-            return c == 0;
-        case DFTU_VER_CARET:
-            if (c < 0) return 0;
-            if (want.major > 0) return have.major == want.major;
-            if (want.minor > 0)
-                return have.major == 0 && have.minor == want.minor;
-            return have.major == 0 && have.minor == 0 &&
-                   have.patch == want.patch;
-        case DFTU_VER_TILDE:
-            return c >= 0 && have.major == want.major &&
-                   have.minor == want.minor;
-        default:
-            return 0;
-    }
-}
-
-/** Parse "id@MAJOR.MINOR.PATCH" (a bare id yields version 0.0.0). The id is
-   copied NUL-terminated into id_buf. 0 ok, -1 on malformed input or too-small
-   id_buf. */
-static inline int dftu_capability_parse(const char* s, char* id_buf,
-                                        uint32_t id_buf_cap,
-                                        dftu_capability* out) {
-    uint32_t i = 0, vlen = 0;
-    if (!s || !id_buf || !out) return -1;
-    while (s[i] && s[i] != '@') ++i;
-    if (i == 0 || i >= id_buf_cap) return -1;
-    memcpy(id_buf, s, i);
-    id_buf[i] = '\0';
-    out->id = id_buf;
-    if (!s[i]) {
-        out->ver.major = out->ver.minor = out->ver.patch = 0;
-        return 0;
-    }
-    ++i; /* skip '@' */
-    while (s[i + vlen]) ++vlen;
-    return dftu_version_parse(s + i, vlen, &out->ver);
-}
-
-/** A provider satisfies a requirement iff the ids match and the version does.
- */
-static inline int dftu_capability_satisfies(const dftu_capability* cap,
-                                            const dftu_requirement* req) {
-    if (!cap || !req || !cap->id || !req->id) return 0;
-    if (strcmp(cap->id, req->id) != 0) return 0;
-    return dftu_version_satisfies(cap->ver, req->op, req->ver);
-}
-
-/** Blessed host-owned capability ids. These are reserved dft. ids: a plugin may
-   REQUIRE one, but the reserved-namespace rule forbids a plugin PROVIDING it.
-   A host provider is wired per id only once a real consumer needs it. */
-#define DFTU_CAP_EVENTS                                                \
-    "dftu.cap.events" /* the raw per-batch events already delivered to \
-                       * on_batch                                      \
-                       */
-#define DFTU_CAP_RESOLVED_EVENTS \
-    "dftu.cap.resolved_events" /* events with their string fields resolved */
-#define DFTU_CAP_TIME_WINDOW \
-    "dftu.cap.time_window"     /* the scan's [min,max] timestamp range */
-
-/** Parse "id", "id>=1.2", "id^1.2", "id~1.0", "id=1.2.3", "id<2", "id>1.0", or
-   "id<=1.4". The id (everything before the first of > < = ^ ~) is copied
-   NUL-terminated into id_buf; a bare id yields >=0.0.0. out->required is left
-   untouched. 0 ok, -1 on malformed input or too-small id_buf. */
-static inline int dftu_requirement_parse(const char* s, char* id_buf,
-                                         uint32_t id_buf_cap,
-                                         dftu_requirement* out) {
-    uint32_t i = 0, j, vlen = 0;
-    if (!s || !id_buf || !out) return -1;
-    while (s[i] && s[i] != '>' && s[i] != '<' && s[i] != '=' && s[i] != '^' &&
-           s[i] != '~')
-        ++i;
-    if (i == 0 || i >= id_buf_cap) return -1;
-    memcpy(id_buf, s, i);
-    id_buf[i] = '\0';
-    out->id = id_buf;
-    if (!s[i]) {
-        out->op = DFTU_VER_GE;
-        out->ver.major = out->ver.minor = out->ver.patch = 0;
-        return 0;
-    }
-    j = i;
-    if (s[j] == '>' && s[j + 1] == '=') {
-        out->op = DFTU_VER_GE;
-        j += 2;
-    } else if (s[j] == '>') {
-        out->op = DFTU_VER_GT;
-        j += 1;
-    } else if (s[j] == '<' && s[j + 1] == '=') {
-        out->op = DFTU_VER_LE;
-        j += 2;
-    } else if (s[j] == '<') {
-        out->op = DFTU_VER_LT;
-        j += 1;
-    } else if (s[j] == '=') {
-        out->op = DFTU_VER_EQ;
-        j += 1;
-    } else if (s[j] == '^') {
-        out->op = DFTU_VER_CARET;
-        j += 1;
-    } else if (s[j] == '~') {
-        out->op = DFTU_VER_TILDE;
-        j += 1;
-    } else {
-        return -1;
-    }
-    while (s[j + vlen]) ++vlen;
-    return dftu_version_parse(s + j, vlen, &out->ver);
-}
-
-/** Plugin-side capability negotiation, fetched via dftu_plugin::get_extension.
-   Fill functions return the count; if it exceeds max the fill is partial and
-   the return is the count needed. resolve runs once after every plugin
-   declared. */
-typedef struct dftu_plugin_comms {
-    uint32_t (*provides)(void* self, dftu_capability* out, uint32_t max);
-    uint32_t (*require_caps)(void* self, dftu_requirement* out, uint32_t max);
-    void (*resolve)(void* self, const dftu_host* host);
-} dftu_plugin_comms;
-
-/** Host-side registry queries, fetched via
-   dftu_host::get_extension(DFTU_EXT_COMMS) during resolve. */
-typedef struct dftu_ext_comms {
-    /** Providers of cap_id at any version; 0 means absent. */
-    uint32_t (*provider_count)(void* h, const char* cap_id);
-    /** Highest provider version satisfying req into *out_ver; 0 ok, -1 if none.
-     */
-    int (*provider_best)(void* h, const dftu_requirement* req,
-                         dftu_version* out_ver);
-} dftu_ext_comms;
-
 /** Batch-scoped ports for intra-batch producer -> consumer communication,
-   fetched via dftu_host::get_extension(DFTU_EXT_PORTS). The bus resets between
-   batches. A consume result is borrowed until the current on_batch returns
-   (copy to retain) and NULL if the producer has not published this batch. A
-   producer must run before its consumer in the fuse (registration/CLI) order.
+   fetched via dftu_host::get_extension(DFTU_EXT_PORTS). A port is a name; a
+   producer and a consumer are wired by naming the same one, and a name that
+   ever needs a version carries it in the name. The bus resets between batches.
+   A consume result is borrowed until the current on_batch returns (copy to
+   retain) and NULL if the producer has not published this batch. A producer
+   must run before its consumer in the fuse (registration) order.
  */
 typedef struct dftu_ext_ports {
-    uint64_t (*port_key)(void* h, const char* cap_id);
+    /** Stable key for the port named `name` (ASCII [a-z0-9._-]). */
+    uint64_t (*port_key)(void* h, const char* name);
     void (*publish)(void* h, uint64_t key, const void* data, uint32_t len);
     const void* (*consume)(void* h, uint64_t key, uint32_t* out_len);
 } dftu_ext_ports;
@@ -809,9 +597,6 @@ typedef struct dftu_plugin {
     dftu_task* (*on_finalize)(void* slice, const dftu_host* host);
     void (*destroy_slice)(void* slice); /**< one call per make_slice */
     void (*destroy)(void* self);        /**< plugin teardown; frees self */
-
-    /** Optional capability discovery, symmetric to dftu_host; NULL if none. */
-    const void* (*get_extension)(void* self, const char* ext_id);
 
     /** Optional vectorized-fold seam: when set, the host hands each batch as a
        dftu_dataframe (its events materialized into columns) instead of calling

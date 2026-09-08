@@ -4,7 +4,6 @@
 #include <dftracer/utils/plugins/plugins.h>
 #include <dftracer/utils/query/query.h>
 
-#include <cstddef>
 #include <optional>
 #include <vector>
 
@@ -32,11 +31,6 @@ std::optional<query::Query> plugin_union_prune_query(
 /// ABI gate. The caller keeps ownership of each struct (no destroy, no dlclose
 /// runs for it) and must outlive the set.
 Result<Plugins> build_injected_plugins(std::vector<dftu_plugin*> plugins);
-
-/// The fold order build() computed: a permutation of plugin indices with every
-/// capability provider before the plugins that require it. Natural order
-/// (0..n-1) when a provide/require cycle forced a fallback.
-std::vector<std::size_t> fold_order(const Plugins& set);
 
 }  // namespace dftracer::utils::plugins
 

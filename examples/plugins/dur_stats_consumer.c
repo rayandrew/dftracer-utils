@@ -1,9 +1,8 @@
-/* Example consumer plugin: optionally requires com.example.dur_stats>=1.0 and
- * in resolve() learns whether the producer is present. At finalize it asks
- * dft.ext.agg for the producer's cross-worker-merged accumulator by name; the
- * host hands back the finalized result as a one-row dataframe, which this
- * plugin reads with the dataframe C ABI and logs (WIRED). With no producer
- * registered the name is unknown and it logs the standalone fallback.
+/* Example consumer plugin: at finalize it asks dft.ext.agg for the producer's
+ * cross-worker-merged accumulator by name; the host hands back the finalized
+ * result as a one-row dataframe, which this plugin reads with the dataframe C
+ * ABI and logs (WIRED). With no producer registered the name is unknown and it
+ * logs the standalone fallback.
  *
  * The producer must be registered before this plugin: agg_result only sees an
  * accumulator whose owning fold has already finalized.
@@ -21,20 +20,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DUR_STATS_CAP "com.example.dur_stats"
-
-typedef struct {
-    int wired;
-} Cfg;
-
-static Cfg g_cfg;
+#define DUR_STATS_PORT "com.example.dur_stats"
 
 static uint32_t needs(void* self) {
     (void)self;
     return 0;
 }
 
-static void* make_slice(void* self) { return self; }
+static void* make_slice(void* self) {
+    (void)self;
+    return calloc(1, 1);
+}
 
 static void merge(void* into, void* other) {
     (void)into;
@@ -82,14 +78,13 @@ static double cell(const dftu_dataframe* df, const char* name, int* ok) {
 }
 
 static dftu_task* on_finalize(void* slice, const dftu_host* host) {
-    const Cfg* cfg = (const Cfg*)slice;
+    (void)slice;
     const dftu_ext_agg* agg =
         (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
     dftu_dataframe* res = NULL;
     char line[192];
     int n = 0;
-    if (cfg && cfg->wired && agg && agg->agg_result)
-        res = agg->agg_result(host->h, DUR_STATS_CAP);
+    if (agg && agg->agg_result) res = agg->agg_result(host->h, DUR_STATS_PORT);
     if (res) {
         int ok = 1;
         double count = cell(res, "count", &ok);
@@ -110,50 +105,15 @@ static dftu_task* on_finalize(void* slice, const dftu_host* host) {
     return NULL;
 }
 
-static void destroy_slice(void* slice) { (void)slice; }
+static void destroy_slice(void* slice) { free(slice); }
 static void destroy(void* self) { (void)self; }
-
-static dftu_requirement dur_stats_requirement(void) {
-    dftu_requirement r;
-    r.id = DUR_STATS_CAP;
-    r.op = DFTU_VER_GE;
-    r.ver.major = 1;
-    r.ver.minor = 0;
-    r.ver.patch = 0;
-    r.required = 0;
-    return r;
-}
-
-static uint32_t require_caps(void* self, dftu_requirement* out, uint32_t max) {
-    (void)self;
-    if (max >= 1) out[0] = dur_stats_requirement();
-    return 1;
-}
-
-static void resolve(void* self, const dftu_host* host) {
-    Cfg* cfg = (Cfg*)self;
-    const dftu_ext_comms* c =
-        (const dftu_ext_comms*)host->get_extension(host->h, DFTU_EXT_COMMS);
-    dftu_requirement req = dur_stats_requirement();
-    dftu_version v;
-    cfg->wired = c && c->provider_best(host->h, &req, &v) == 0;
-}
-
-static const dftu_plugin_comms g_comms = {NULL, require_caps, resolve};
-
-static const void* get_extension(void* self, const char* ext_id) {
-    (void)self;
-    if (ext_id && strcmp(ext_id, DFTU_EXT_COMMS) == 0) return &g_comms;
-    return NULL;
-}
 
 static dftu_plugin g_plugin;
 
 DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     (void)config;
-    g_cfg.wired = 0;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    g_plugin.self = &g_cfg;
+    g_plugin.self = NULL;
     g_plugin.needs = needs;
     g_plugin.plan_query = NULL;
     g_plugin.make_slice = make_slice;
@@ -162,6 +122,5 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     g_plugin.on_finalize = on_finalize;
     g_plugin.destroy_slice = destroy_slice;
     g_plugin.destroy = destroy;
-    g_plugin.get_extension = get_extension;
     return &g_plugin;
 }

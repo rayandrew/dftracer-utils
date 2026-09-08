@@ -17,29 +17,6 @@ using dftracer::utils::query::F;
 using dftracer::utils::query::Field;
 using dftracer::utils::query::resolved;
 
-/// Build a provided capability from an id and semantic version, for a Slice's
-/// static `provides()`. `id` must outlive the plugin (a string literal); the
-/// `dftu.` prefix is reserved for the host and rejected at resolve.
-constexpr dftu_capability capability(const char* id, std::uint16_t major = 0,
-                                     std::uint16_t minor = 0,
-                                     std::uint16_t patch = 0) noexcept {
-    return dftu_capability{id, dftu_version{major, minor, patch}};
-}
-
-/// Build a requirement from an id, version op, and version, for a Slice's
-/// static `requires_caps()`. `required` true makes an unmet requirement a load
-/// error; false falls back gracefully. `id` must outlive the plugin (a string
-/// literal).
-constexpr dftu_requirement requirement(const char* id,
-                                       dftu_ver_op op = DFTU_VER_GE,
-                                       std::uint16_t major = 0,
-                                       std::uint16_t minor = 0,
-                                       std::uint16_t patch = 0,
-                                       bool required = false) noexcept {
-    return dftu_requirement{id, op, dftu_version{major, minor, patch},
-                            required ? 1 : 0};
-}
-
 /// Scoped mirror of dftu_phase for Event::phase; each enumerator is its ABI
 /// constant, so static_cast<dftu_phase> recovers the raw value.
 enum class Phase : std::int32_t {
@@ -100,100 +77,6 @@ static_assert(static_cast<dftu_value_kind>(ValueKind::Str) == DFTU_VAL_STR);
 static_assert(static_cast<dftu_value_kind>(ValueKind::Array) == DFTU_VAL_ARRAY);
 static_assert(static_cast<dftu_value_kind>(ValueKind::Object) ==
               DFTU_VAL_OBJECT);
-
-/// Scoped mirror of dftu_ver_op for Version::satisfies; each enumerator is its
-/// ABI constant, so static_cast<dftu_ver_op> recovers the raw value.
-enum class VerOp : std::int32_t {
-    Ge = DFTU_VER_GE,
-    Gt = DFTU_VER_GT,
-    Le = DFTU_VER_LE,
-    Lt = DFTU_VER_LT,
-    Eq = DFTU_VER_EQ,
-    Caret = DFTU_VER_CARET,
-    Tilde = DFTU_VER_TILDE
-};
-static_assert(static_cast<dftu_ver_op>(VerOp::Ge) == DFTU_VER_GE);
-static_assert(static_cast<dftu_ver_op>(VerOp::Gt) == DFTU_VER_GT);
-static_assert(static_cast<dftu_ver_op>(VerOp::Le) == DFTU_VER_LE);
-static_assert(static_cast<dftu_ver_op>(VerOp::Lt) == DFTU_VER_LT);
-static_assert(static_cast<dftu_ver_op>(VerOp::Eq) == DFTU_VER_EQ);
-static_assert(static_cast<dftu_ver_op>(VerOp::Caret) == DFTU_VER_CARET);
-static_assert(static_cast<dftu_ver_op>(VerOp::Tilde) == DFTU_VER_TILDE);
-
-/// Wraps a dftu_version (major.minor.patch). Comparisons and satisfies() defer
-/// to the ABI's dftu_version_cmp / dftu_version_satisfies.
-class Version {
-   public:
-    constexpr Version() noexcept = default;
-    constexpr explicit Version(dftu_version v) noexcept : v_(v) {}
-    constexpr Version(std::uint16_t major, std::uint16_t minor,
-                      std::uint16_t patch) noexcept
-        : v_{major, minor, patch} {}
-
-    constexpr std::uint16_t major() const noexcept { return v_.major; }
-    constexpr std::uint16_t minor() const noexcept { return v_.minor; }
-    constexpr std::uint16_t patch() const noexcept { return v_.patch; }
-    constexpr dftu_version raw() const noexcept { return v_; }
-
-    friend bool operator==(Version a, Version b) noexcept {
-        return dftu_version_cmp(a.v_, b.v_) == 0;
-    }
-    friend bool operator!=(Version a, Version b) noexcept { return !(a == b); }
-    friend bool operator<(Version a, Version b) noexcept {
-        return dftu_version_cmp(a.v_, b.v_) < 0;
-    }
-    friend bool operator<=(Version a, Version b) noexcept {
-        return dftu_version_cmp(a.v_, b.v_) <= 0;
-    }
-    friend bool operator>(Version a, Version b) noexcept {
-        return dftu_version_cmp(a.v_, b.v_) > 0;
-    }
-    friend bool operator>=(Version a, Version b) noexcept {
-        return dftu_version_cmp(a.v_, b.v_) >= 0;
-    }
-
-    bool satisfies(dftu_ver_op op, Version want) const noexcept {
-        return dftu_version_satisfies(v_, op, want.v_) != 0;
-    }
-    bool satisfies(VerOp op, Version want) const noexcept {
-        return satisfies(static_cast<dftu_ver_op>(op), want);
-    }
-
-   private:
-    dftu_version v_{};
-};
-
-/// Read view over a dftu_capability (built with capability()): a namespaced id
-/// plus semantic version, as returned to an author from a provider listing.
-class Capability {
-   public:
-    Capability() = default;
-    constexpr explicit Capability(dftu_capability c) noexcept : c_(c) {}
-
-    std::string_view id() const noexcept { return c_.id ? c_.id : ""; }
-    Version version() const noexcept { return Version{c_.ver}; }
-    dftu_capability raw() const noexcept { return c_; }
-
-   private:
-    dftu_capability c_{};
-};
-
-/// Read view over a dftu_requirement (built with requirement()): an id, a
-/// version constraint, and whether it is load-blocking.
-class Requirement {
-   public:
-    Requirement() = default;
-    constexpr explicit Requirement(dftu_requirement r) noexcept : r_(r) {}
-
-    std::string_view id() const noexcept { return r_.id ? r_.id : ""; }
-    VerOp op() const noexcept { return static_cast<VerOp>(r_.op); }
-    Version version() const noexcept { return Version{r_.ver}; }
-    bool required() const noexcept { return r_.required != 0; }
-    dftu_requirement raw() const noexcept { return r_; }
-
-   private:
-    dftu_requirement r_{};
-};
 
 /// Scoped mirror of dftu_agg_op for AggCol/Host::agg; each enumerator is its
 /// DFTU_AGG_* constant, so static_cast<dftu_agg_op> recovers the raw value.

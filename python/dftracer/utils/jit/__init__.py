@@ -123,7 +123,6 @@ __all__ = [
     "vfold",
     "each_batch",
     "series",
-    "on_resolve",
     # numeric primitives
     "ilog2",
     "bit_width",
@@ -1100,40 +1099,25 @@ _PORT_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
 
 
 class _Port:
-    __slots__ = ("cap_id", "is_f64", "role", "required", "ver", "ver_op")
+    __slots__ = ("is_f64", "name", "role")
 
-    def __init__(
-        self,
-        cap_id: str,
-        is_f64: bool,
-        role: str,
-        required: bool,
-        ver: Tuple[int, int, int] = (0, 0, 0),
-        ver_op: str | None = None,
-    ) -> None:
-        self.cap_id = cap_id
+    def __init__(self, name: str, is_f64: bool, role: str) -> None:
+        self.name = name
         self.is_f64 = is_f64
         self.role = role
-        self.required = required
-        # publish: `ver` is the provided semantic version, `ver_op` is None.
-        # consume: `ver`/`ver_op` are the version constraint on a provider.
-        self.ver = ver
-        self.ver_op = ver_op
 
 
-def _check_cap_id(fn: str, cap_id: object) -> str:
-    if not isinstance(cap_id, str) or not cap_id:
+def _check_port_name(fn: str, name: object) -> str:
+    if not isinstance(name, str) or not name:
+        raise JitError(f"jit.{fn} needs a non-empty port name such as 'com.example.edges'")
+    if name.startswith("dftu."):
         raise JitError(
-            f"jit.{fn} needs a non-empty capability id string such as 'com.example.edges'"
-        )
-    if cap_id.startswith("dftu."):
-        raise JitError(
-            f"jit.{fn} capability id '{cap_id}' uses the reserved dftu. namespace; pick your own, "
+            f"jit.{fn} port name '{name}' uses the reserved dftu. namespace; pick your own, "
             "e.g. 'com.example.edges'"
         )
-    if any(c not in _PORT_ID_CHARS for c in cap_id):
-        raise JitError(f"jit.{fn} capability id '{cap_id}' must be ASCII [a-z0-9._-]")
-    return cap_id
+    if any(c not in _PORT_ID_CHARS for c in name):
+        raise JitError(f"jit.{fn} port name '{name}' must be ASCII [a-z0-9._-]")
+    return name
 
 
 def _port_is_f64(fn: str, of: "_Type[object]") -> bool:
@@ -1144,92 +1128,27 @@ def _port_is_f64(fn: str, of: "_Type[object]") -> bool:
     raise JitError(f"jit.{fn}(of=...) must be jit.u64, jit.i64, or jit.f64")
 
 
-# Version-constraint operator strings the require side accepts, mapped to the
-# DFTU_VER_* enum the ABI defines in abi.h.
-_VER_OP_ENUM: Dict[str, str] = {
-    ">=": "DFTU_VER_GE",
-    ">": "DFTU_VER_GT",
-    "<=": "DFTU_VER_LE",
-    "<": "DFTU_VER_LT",
-    "=": "DFTU_VER_EQ",
-    "^": "DFTU_VER_CARET",
-    "~": "DFTU_VER_TILDE",
-}
+def publish(name: str, of: "_Type[object]" = u64) -> Port:
+    """Declare a batch-scoped publish port called ``name``.
+
+    A consumer wires to it by naming the same port. In ``each_event`` accumulate
+    a per-batch total with ``self.<port> += <expr>`` (a u64 sum by default,
+    ``of=jit.f64`` for a double sum). The total is published once per batch and
+    reset for the next batch; ``of`` picks the wire width (u64/i64 as an 8-byte
+    int, f64 as a double)."""
+    _check_port_name("publish", name)
+    return cast(Port, _Port(name, _port_is_f64("publish", of), "publish"))
 
 
-def _parse_version(fn: str, s: object) -> Tuple[int, int, int]:
-    """Parse a ``MAJOR[.MINOR[.PATCH]]`` string into a 3-tuple, missing
-    components defaulting to 0. Each component must be a non-negative integer at
-    most 65535 (the ABI stores them as uint16)."""
-    if not isinstance(s, str) or not s:
-        raise JitError(f"jit.{fn} version must be a non-empty 'MAJOR.MINOR.PATCH' string")
-    parts = s.split(".")
-    if len(parts) > 3:
-        raise JitError(f"jit.{fn} version '{s}' has too many components; use MAJOR[.MINOR[.PATCH]]")
-    nums = [0, 0, 0]
-    for i, p in enumerate(parts):
-        if not p.isdigit():
-            raise JitError(f"jit.{fn} version '{s}' component '{p}' is not a non-negative integer")
-        v = int(p)
-        if v > 0xFFFF:
-            raise JitError(f"jit.{fn} version '{s}' component {v} exceeds 65535")
-        nums[i] = v
-    return (nums[0], nums[1], nums[2])
+def consume(name: str, of: "_Type[object]" = u64) -> Port:
+    """Declare a batch-scoped consume port called ``name``.
 
-
-def publish(cap_id: str, of: "_Type[object]" = u64, *, version: str = "0.0.0") -> Port:
-    """Declare a batch-scoped publish port under capability ``cap_id``.
-
-    The plugin PROVIDES ``cap_id`` at semantic ``version`` (``MAJOR.MINOR.PATCH``,
-    default ``0.0.0``); the host orders it before any consumer of the same id and
-    exposes the version to a consumer's version constraint. In ``each_event``
-    accumulate a per-batch total with ``self.<port> += <expr>`` (a u64 sum by
-    default, ``of=jit.f64`` for a double sum). The total is published once per
-    batch and reset for the next batch; ``of`` picks the wire width (u64/i64 as an
-    8-byte int, f64 as a double)."""
-    _check_cap_id("publish", cap_id)
-    ver = _parse_version("publish", version)
-    return cast(Port, _Port(cap_id, _port_is_f64("publish", of), "publish", False, ver, None))
-
-
-def consume(
-    cap_id: str,
-    of: "_Type[object]" = u64,
-    *,
-    required: bool = False,
-    min_version: str | None = None,
-    version_op: str | None = None,
-) -> Port:
-    """Declare a batch-scoped consume port for capability ``cap_id``.
-
-    The plugin REQUIRES ``cap_id``; the host wires a producer of it to run first.
-    In ``each_event`` read the value a producer published for the current batch as
-    a plain scalar ``self.<port>`` (0 when no producer published this batch). ``of``
-    must match the producer's width (u64/i64/f64). With ``required=True`` a missing
-    producer fails :meth:`resolve`; the default degrades to reading 0.
-
-    ``min_version`` adds a version constraint on the provider (default: any
-    version). It is a ``>=`` constraint unless ``version_op`` overrides the
-    operator (one of ``>=`` ``>`` ``<=`` ``<`` ``=`` ``^`` ``~``, matching the
-    ABI's ``DFTU_VER_*`` ops). A ``@jit.on_resolve`` method can inspect whether a
-    provider satisfying this constraint was found and at what version."""
-    _check_cap_id("consume", cap_id)
-    if min_version is None:
-        if version_op is not None:
-            raise JitError("jit.consume version_op requires min_version")
-        ver = (0, 0, 0)
-        op = "DFTU_VER_GE"
-    else:
-        ver = _parse_version("consume", min_version)
-        if version_op is None:
-            op = "DFTU_VER_GE"
-        else:
-            op = _VER_OP_ENUM.get(version_op, "")
-            if not op:
-                raise JitError("jit.consume version_op must be one of >= > <= < = ^ ~")
-    return cast(
-        Port, _Port(cap_id, _port_is_f64("consume", of), "consume", bool(required), ver, op)
-    )
+    In ``each_event`` read the value a producer published for the current batch
+    as a plain scalar ``self.<port>`` (0 when no producer published this batch).
+    ``of`` must match the producer's width (u64/i64/f64). The producer must be
+    registered before this plugin."""
+    _check_port_name("consume", name)
+    return cast(Port, _Port(name, _port_is_f64("consume", of), "consume"))
 
 
 class _EachEvent:
@@ -1270,33 +1189,6 @@ def each_batch(fn: Callable[..., object]) -> _EachBatch:
     Its body folds column reductions into the class's scalar accumulators, e.g.
     ``self.total += df["dur"].sum()``."""
     return _EachBatch(fn)
-
-
-class _OnResolve:
-    __slots__ = ("fn",)
-
-    def __init__(self, fn: Callable[..., object]) -> None:
-        self.fn = fn
-
-
-def on_resolve(fn: Callable[..., object]) -> _OnResolve:
-    """Mark the one resolve-time method to AST-compile into ``comms_resolve``.
-
-    The method takes ``(self)`` and runs once, after every plugin has declared,
-    to adapt behavior to whichever providers are present. Its body is a sequence
-    of ``self.<flag> = <expr>`` assignments; each ``<flag>`` becomes a plugin
-    state value a later ``each_event`` reads as ``self.<flag>``. Expressions may
-    read, for each :func:`consume` port on the class:
-
-    - ``self.<port>.resolved`` - 1 if a provider satisfying the port's version
-      constraint was found at resolve time, else 0;
-    - ``self.<port>.version`` - the found provider's version, comparable to a
-      ``(major, minor, patch)`` tuple literal (0.0.0 when unresolved);
-
-    combined with ``and`` / ``or`` / ``not``, integer comparisons, and integer
-    literals. The host always populates each port's ``resolved``/``version``
-    before this body runs, so an empty body still records provider presence."""
-    return _OnResolve(fn)
 
 
 class JitPlugin:
@@ -1505,14 +1397,10 @@ class _Compiler:
         maps: Dict[str, _MapDecl],
         ops: Dict[str, Op] | None = None,
         ports: Dict[str, _Port] | None = None,
-        resolve_flags: builtins.set[str] | None = None,
         config_fields: "Dict[str, bool] | None" = None,
     ) -> None:
         self.maps = maps
         self.ports = ports if ports is not None else {}
-        # Flags a @jit.on_resolve method sets; each_event reads them as
-        # self.<flag>, lowering to the file-scope _rflag_<flag> static.
-        self.resolve_flags = resolve_flags if resolve_flags is not None else builtins.set()
         # Config fields {name: is_f64}; each_event reads them as self.<name>,
         # lowering to the file-scope _cfg_<name> static set at load.
         self.config_fields = config_fields if config_fields is not None else {}
@@ -2000,8 +1888,6 @@ class _Compiler:
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             if node.value.id == self.self_name and node.attr in self.ports:
                 return self._consume_ref(node.attr)
-            if node.value.id == self.self_name and node.attr in self.resolve_flags:
-                return f"_rflag_{node.attr}"
             if node.value.id == self.self_name and node.attr in self.config_fields:
                 return f"_cfg_{node.attr}"
             if node.value.id == self.event_name:
@@ -2048,8 +1934,6 @@ class _Compiler:
             if node.value.id == self.self_name and node.attr in self.ports:
                 port = self.ports[node.attr]
                 return self._consume_ref(node.attr), port.is_f64
-            if node.value.id == self.self_name and node.attr in self.resolve_flags:
-                return f"_rflag_{node.attr}", False
             if node.value.id == self.self_name and node.attr in self.config_fields:
                 return f"_cfg_{node.attr}", self.config_fields[node.attr]
             if node.value.id == self.event_name:
@@ -2085,281 +1969,6 @@ class _Compiler:
         return expr
 
 
-def _reject_resolve(what: str) -> NoReturn:
-    raise JitError(f"unsupported in @jit.on_resolve: {what}; use a raw C++ plugin")
-
-
-def _ver_pack(major: int, minor: int, patch: int) -> int:
-    """Pack a version into one comparable uint64 (same layout the emitted
-    ``_resolved_ver_*`` statics use), so a version compare is a plain integer
-    compare in the generated C."""
-    return (major << 32) | (minor << 16) | patch
-
-
-class _ResolveCompiler:
-    """Compiles a ``@jit.on_resolve`` body into ``comms_resolve`` C statements.
-
-    The expressible surface is intentionally narrow (see :func:`on_resolve`):
-    ``self.<flag> = <expr>`` assignments whose expressions read each consume
-    port's ``.resolved`` / ``.version`` and combine them with boolean ops,
-    comparisons, and integer literals. Everything else is rejected rather than
-    silently ignored."""
-
-    def __init__(self, self_name: str, ports: Dict[str, _Port]) -> None:
-        self.self_name = self_name
-        self.ports = ports
-        self.flags: List[str] = []
-        self.flag_set: builtins.set[str] = builtins.set()
-
-    def compile(self, stmts: List[ast.stmt]) -> List[str]:
-        lines: List[str] = []
-        for stmt in stmts:
-            lines.extend(self._stmt(stmt))
-        return lines
-
-    def _stmt(self, stmt: ast.stmt) -> List[str]:
-        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
-            _reject_resolve("statement other than a single self.<flag> = <expr> assignment")
-        target = stmt.targets[0]
-        if not (
-            isinstance(target, ast.Attribute)
-            and isinstance(target.value, ast.Name)
-            and target.value.id == self.self_name
-        ):
-            _reject_resolve("assignment target other than self.<flag>")
-        name = target.attr
-        if name in self.ports:
-            _reject_resolve(f"self.{name} names a port; pick a new flag name")
-        if name not in self.flag_set:
-            self.flag_set.add(name)
-            self.flags.append(name)
-        return [f"_rflag_{name} = ({self._expr(stmt.value)});"]
-
-    def _expr(self, node: ast.expr) -> str:
-        if isinstance(node, ast.BoolOp):
-            sym = "&&" if isinstance(node.op, ast.And) else "||"
-            parts = [self._expr(v) for v in node.values]
-            return "(" + f" {sym} ".join(parts) + ")"
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            return f"(!({self._expr(node.operand)}))"
-        if isinstance(node, ast.Compare):
-            return self._compare(node)
-        val = self._int_operand(node)
-        if val is not None:
-            return val
-        _reject_resolve(_describe(node))
-
-    def _compare(self, node: ast.Compare) -> str:
-        if len(node.ops) != 1:
-            _reject_resolve("chained comparison")
-        op = _CMP_OP.get(type(node.ops[0]))
-        if op is None:
-            _reject_resolve("comparison operator")
-        left, right = node.left, node.comparators[0]
-        lv, rv = self._ver_operand(left), self._ver_operand(right)
-        if lv is not None or rv is not None:
-            if lv is None or rv is None:
-                _reject_resolve("version compared to a non-version operand")
-            return f"({lv} {op} {rv})"
-        li, ri = self._int_operand(left), self._int_operand(right)
-        if li is None or ri is None:
-            _reject_resolve("comparison operand")
-        return f"({li} {op} {ri})"
-
-    def _ver_operand(self, node: ast.expr) -> str | None:
-        if (
-            isinstance(node, ast.Attribute)
-            and node.attr == "version"
-            and isinstance(node.value, ast.Attribute)
-            and isinstance(node.value.value, ast.Name)
-            and node.value.value.id == self.self_name
-        ):
-            return f"_resolved_ver_{self._consume_attr(node.value.attr)}"
-        if isinstance(node, ast.Tuple):
-            comps = [0, 0, 0]
-            if len(node.elts) > 3:
-                _reject_resolve("version tuple with more than three components")
-            for i, e in enumerate(node.elts):
-                if not (isinstance(e, ast.Constant) and isinstance(e.value, int)) or isinstance(
-                    e.value, bool
-                ):
-                    _reject_resolve("version tuple component (expected an integer literal)")
-                if e.value < 0 or e.value > 0xFFFF:
-                    _reject_resolve("version tuple component out of range 0..65535")
-                comps[i] = e.value
-            return f"{_ver_pack(*comps)}ULL"
-        return None
-
-    def _int_operand(self, node: ast.expr) -> str | None:
-        if (
-            isinstance(node, ast.Constant)
-            and isinstance(node.value, int)
-            and not isinstance(node.value, bool)
-        ):
-            return str(node.value)
-        if (
-            isinstance(node, ast.Attribute)
-            and node.attr == "resolved"
-            and isinstance(node.value, ast.Attribute)
-            and isinstance(node.value.value, ast.Name)
-            and node.value.value.id == self.self_name
-        ):
-            return f"_resolved_{self._consume_attr(node.value.attr)}"
-        if (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == self.self_name
-            and node.attr in self.flag_set
-        ):
-            return f"_rflag_{node.attr}"
-        return None
-
-    def _consume_attr(self, attr: str) -> str:
-        port = self.ports.get(attr)
-        if port is None or port.role != "consume":
-            _reject_resolve(
-                f"self.{attr}.<field>; only a jit.consume port exposes .resolved/.version"
-            )
-        return attr
-
-
-def _compile_resolve(
-    fn: Callable[..., object], ports: Dict[str, _Port]
-) -> Tuple[List[str], List[str]]:
-    """Compile an ``@jit.on_resolve`` method to (flag names, C statements)."""
-    src = textwrap.dedent(inspect.getsource(fn))
-    mod = ast.parse(src)
-    funcs = [n for n in mod.body if isinstance(n, ast.FunctionDef)]
-    if len(funcs) != 1:
-        _reject_resolve("on_resolve must decorate a single method")
-    fn_ast = funcs[0]
-    params = fn_ast.args.args
-    if len(params) != 1:
-        _reject_resolve("on_resolve must take exactly (self)")
-    rc = _ResolveCompiler(params[0].arg, ports)
-    lines = rc.compile(fn_ast.body)
-    return rc.flags, lines
-
-
-def _emit_comms(
-    pub_ports: List[Tuple[str, _Port]],
-    sub_ports: List[Tuple[str, _Port]],
-    resolve_flags: List[str] | None = None,
-    resolve_body: List[str] | None = None,
-) -> List[str]:
-    """C for the plugin-side dftu_plugin_comms: publish ports become provides,
-    consume ports become requirements, exposed via get_extension(DFTU_EXT_COMMS)."""
-    out: List[str] = [
-        "static uint32_t comms_provides(void* self, dftu_capability* out, uint32_t max) {",
-        "    (void)self;",
-    ]
-    n = len(pub_ports)
-    if n:
-        ids = ", ".join(_c_str_literal(p.cap_id) for _, p in pub_ports)
-        vers = ", ".join(f"{{{p.ver[0]}, {p.ver[1]}, {p.ver[2]}}}" for _, p in pub_ports)
-        out += [
-            f"    static const char* ids[{n}] = {{{ids}}};",
-            f"    static const dftu_version vers[{n}] = {{{vers}}};",
-            f"    for (uint32_t i = 0; i < {n}u && i < max; ++i) {{",
-            "        out[i].id = ids[i];",
-            "        out[i].ver = vers[i];",
-            "    }",
-            f"    return {n}u;",
-        ]
-    else:
-        out += ["    (void)out; (void)max;", "    return 0u;"]
-    out += ["}", ""]
-
-    out += [
-        "static uint32_t comms_require(void* self, dftu_requirement* out, uint32_t max) {",
-        "    (void)self;",
-    ]
-    m = len(sub_ports)
-    if m:
-        ids = ", ".join(_c_str_literal(p.cap_id) for _, p in sub_ports)
-        ops = ", ".join((p.ver_op or "DFTU_VER_GE") for _, p in sub_ports)
-        vers = ", ".join(f"{{{p.ver[0]}, {p.ver[1]}, {p.ver[2]}}}" for _, p in sub_ports)
-        reqd = ", ".join("1" if p.required else "0" for _, p in sub_ports)
-        out += [
-            f"    static const char* ids[{m}] = {{{ids}}};",
-            f"    static const dftu_ver_op ops[{m}] = {{{ops}}};",
-            f"    static const dftu_version vers[{m}] = {{{vers}}};",
-            f"    static const int reqd[{m}] = {{{reqd}}};",
-            f"    for (uint32_t i = 0; i < {m}u && i < max; ++i) {{",
-            "        out[i].id = ids[i];",
-            "        out[i].op = ops[i];",
-            "        out[i].ver = vers[i];",
-            "        out[i].required = reqd[i];",
-            "    }",
-            f"    return {m}u;",
-        ]
-    else:
-        out += ["    (void)out; (void)max;", "    return 0u;"]
-    out += ["}", ""]
-
-    resolve_flags = resolve_flags or []
-    resolve_body = resolve_body or []
-    # Per consume port: whether a satisfying provider was found and its version
-    # (packed major<<32|minor<<16|patch). Written once in comms_resolve before
-    # any slice runs, then read from on_batch - write-once-then-read, no race.
-    for name, _ in sub_ports:
-        out += [
-            f"static int _resolved_{name} = 0;",
-            f"static uint64_t _resolved_ver_{name} = 0;",
-        ]
-    for flag in resolve_flags:
-        out.append(f"static int64_t _rflag_{flag} = 0;")
-    if sub_ports or resolve_flags:
-        out.append("")
-
-    out.append("static void comms_resolve(void* self, const dftu_host* host) {")
-    out.append("    (void)self;")
-    if sub_ports:
-        out += [
-            "    const dftu_ext_comms* _c =",
-            "        (const dftu_ext_comms*)host->get_extension(host->h, DFTU_EXT_COMMS);",
-            "    if (_c && _c->provider_best) {",
-            "        dftu_requirement _req;",
-            "        dftu_version _bv;",
-        ]
-        for name, port in sub_ports:
-            cap = _c_str_literal(port.cap_id)
-            op = port.ver_op or "DFTU_VER_GE"
-            mj, mn, pt = port.ver
-            reqd = 1 if port.required else 0
-            out += [
-                f"        _req.id = {cap};",
-                f"        _req.op = {op};",
-                f"        _req.ver.major = {mj}; _req.ver.minor = {mn}; _req.ver.patch = {pt};",
-                f"        _req.required = {reqd};",
-                "        if (_c->provider_best(host->h, &_req, &_bv) == 0) {",
-                f"            _resolved_{name} = 1;",
-                f"            _resolved_ver_{name} = ((uint64_t)_bv.major << 32)"
-                " | ((uint64_t)_bv.minor << 16) | (uint64_t)_bv.patch;",
-                "        }",
-            ]
-        out.append("    }")
-    else:
-        out.append("    (void)host;")
-    for line in resolve_body:
-        out.append("    " + line)
-    out.append("}")
-    out += [
-        "",
-        "static const dftu_plugin_comms g_plugin_comms = {",
-        "    comms_provides, comms_require, comms_resolve",
-        "};",
-        "",
-        "static const void* plugin_get_extension(void* self, const char* ext_id) {",
-        "    (void)self;",
-        "    if (ext_id && strcmp(ext_id, DFTU_EXT_COMMS) == 0) return &g_plugin_comms;",
-        "    return NULL;",
-        "}",
-        "",
-    ]
-    return out
-
-
 def _port_ctype(port: _Port) -> Tuple[str, str]:
     return ("double", "0.0") if port.is_f64 else ("uint64_t", "0")
 
@@ -2377,7 +1986,7 @@ def _emit_port_pre(
     ]
     for name, port in sub_ports:
         ctype, zero = _port_ctype(port)
-        cap = _c_str_literal(port.cap_id)
+        cap = _c_str_literal(port.name)
         out += [
             f"    {ctype} _sub_{name} = {zero};",
             "    if (_ports && _ports->consume) {",
@@ -2397,7 +2006,7 @@ def _emit_port_flush(pub_ports: List[Tuple[str, _Port]]) -> List[str]:
     """Publish each publish port's per-batch accumulator after the event loop."""
     out: List[str] = []
     for name, port in pub_ports:
-        cap = _c_str_literal(port.cap_id)
+        cap = _c_str_literal(port.name)
         out += [
             "    if (_ports && _ports->publish) {",
             f"        _ports->publish(host->h, _ports->port_key(host->h, {cap}), &_pub_{name}, 8u);",
@@ -2638,8 +2247,6 @@ def _emit(
     rows_per_event: Dict[str, int],
     op_defs: List[str] | None = None,
     ports: Dict[str, _Port] | None = None,
-    resolve_flags: List[str] | None = None,
-    resolve_body: List[str] | None = None,
     config_fields: "Dict[str, bool] | None" = None,
 ) -> str:
     op_defs = op_defs or []
@@ -2706,8 +2313,6 @@ def _emit(
             "}",
             "",
         ]
-    if ports:
-        out += _emit_comms(pub_ports, sub_ports, resolve_flags, resolve_body)
     out += [
         "static void* make_slice(void* self) {",
         "    (void)self;",
@@ -2799,8 +2404,6 @@ def _emit(
             "    g_plugin.destroy = destroy;",
         ]
     )
-    if ports:
-        out.append("    g_plugin.get_extension = plugin_get_extension;")
     out.extend(
         [
             "    return &g_plugin;",
@@ -2852,7 +2455,6 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
     ports: Dict[str, _Port] = {}
     configs: Dict[str, _Config] = {}
     each: List[_EachEvent] = []
-    resolves: List[_OnResolve] = []
     for attr, val in vars(cls).items():
         if isinstance(val, _MapDecl):
             maps[attr] = val
@@ -2862,8 +2464,6 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
             configs[attr] = val
         elif isinstance(val, _EachEvent):
             each.append(val)
-        elif isinstance(val, _OnResolve):
-            resolves.append(val)
     if not maps and not ports:
         raise JitError(
             "@jit.plugin needs at least one jit.map or jit.publish/jit.consume attribute"
@@ -2877,14 +2477,6 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
             )
     if len(each) != 1:
         raise JitError("@jit.plugin needs exactly one @jit.each_event method")
-    if len(resolves) > 1:
-        raise JitError("@jit.plugin allows at most one @jit.on_resolve method")
-    resolve_flags: List[str] = []
-    resolve_body: List[str] = []
-    if resolves:
-        if not any(p.role == "consume" for p in ports.values()):
-            raise JitError("@jit.on_resolve needs at least one jit.consume port to inspect")
-        resolve_flags, resolve_body = _compile_resolve(resolves[0].fn, ports)
     plan_query = getattr(cls, "plan_query", None)
     if plan_query is not None and not isinstance(plan_query, str):
         raise JitError("@jit.plugin plan_query must be a query DSL string")
@@ -2906,7 +2498,6 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
             maps,
             _referenced_ops(each[0].fn),
             ports=ports,
-            resolve_flags=builtins.set(resolve_flags),
             config_fields=config_f64,
         )
         body = compiler.lower(each[0].fn)
@@ -2927,8 +2518,6 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
         rows_per_event,
         op_defs,
         ports,
-        resolve_flags,
-        resolve_body,
         config_f64,
     )
     setattr(cls, "_jit_plugin", JitPlugin(cls.__name__, source, {}))

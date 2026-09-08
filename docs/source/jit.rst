@@ -208,11 +208,11 @@ Talking to another plugin
 --------------------------
 
 Two JIT plugins loaded in the same run can pass a batch-scoped value between
-them: ``jit.publish`` declares a port this plugin **provides**, ``jit.consume``
-one it **requires** - both keyed by a capability id string, the same
-mechanism the hand-written C++ ``Host::publish_port`` / ``consume_port`` API
-uses (see :doc:`guides/plugins/inter-plugin-comms`). The host resolves the
-producer to run before the consumer regardless of load order.
+them: ``jit.publish`` declares a port this plugin writes, ``jit.consume`` one
+it reads - both keyed by a port name, the same mechanism the hand-written C++
+``Host::publish_port`` / ``consume_port`` API uses (see
+:doc:`guides/plugins/inter-plugin-comms`). Load the producer before the
+consumer.
 
 A publish port is written with ``self.<port> += <expr>`` inside
 ``each_event``: the host sums the per-event contributions into one per-batch
@@ -235,7 +235,7 @@ the current batch (``0`` when no producer has published yet):
    @jit.plugin
    class Consumer:
        got = jit.map(key=(jit.i64,), value=jit.count())
-       sig = jit.consume("com.example.batchsig", of=jit.u64, required=True)
+       sig = jit.consume("com.example.batchsig", of=jit.u64)
 
        @jit.each_event
        def step(self, e):
@@ -245,60 +245,13 @@ the current batch (``0`` when no producer has published yet):
 ``of`` picks the wire width shared by both ends (``jit.u64`` / ``jit.i64`` /
 ``jit.f64``); it must match on both the publisher and the consumer. A
 consume port is read-only (writing to it raises ``JitError`` at decoration
-time) and a publish port is write-only (reading it likewise raises). With
-``required=True`` a missing producer fails the ``PluginHost`` build; the
-default (``required=False``) degrades to reading ``0``.
+time) and a publish port is write-only (reading it likewise raises). A missing
+producer degrades to reading ``0``.
 
 The ordering rule matters here exactly as it does in C++: a producer's
-``step`` must run before the consumer's for the same batch, which is why
-``jit.consume`` declares a requirement rather than assuming load order - the
-host reorders the fold to satisfy it. A JIT plugin can publish for a
-hand-written C++ consumer and vice versa; both sides go through the same
-``DFTU_EXT_PORTS`` / ``DFTU_EXT_COMMS`` machinery.
-
-Versioned negotiation and ``@jit.on_resolve``
-.............................................
-
-Both ports carry a semantic version. A producer states the version it offers
-with ``jit.publish(cap_id, version="2.1.0")``; a consumer states a constraint
-on its provider with ``jit.consume(cap_id, min_version="2.0.0")`` (a ``>=``
-constraint by default, or pass ``version_op=`` for one of ``>= > <= < = ^ ~``,
-the ABI's ``DFTU_VER_*`` operators). Versions are ``MAJOR[.MINOR[.PATCH]]``
-strings, each component 0..65535.
-
-An ``@jit.on_resolve`` method adapts behavior to whichever providers are
-present. It takes ``(self)``, runs once after every plugin has declared, and
-its body is a sequence of ``self.<flag> = <expr>`` assignments. Each
-expression may read, for a consume port, ``self.<port>.resolved`` (1 if a
-provider satisfying the constraint was found, else 0) and ``self.<port>.version``
-(the found provider's version, comparable to a ``(major, minor, patch)`` tuple),
-combined with ``and`` / ``or`` / ``not``, integer comparisons, and integer
-literals. Each ``<flag>`` becomes plugin state a later ``each_event`` reads as
-``self.<flag>`` (as an integer, so branch with ``if self.<flag> > 0:``):
-
-.. code-block:: python
-
-   @jit.plugin
-   class Consumer:
-       got = jit.map(key=(jit.i64,), value=jit.count())
-       tag = jit.consume("com.example.tag", of=jit.u64, min_version="2.0.0")
-
-       @jit.on_resolve
-       def on_resolve(self):
-           self.wired  = self.tag.resolved
-           self.modern = self.tag.resolved and (self.tag.version >= (2, 1, 0))
-
-       @jit.each_event
-       def step(self, e):
-           if self.wired > 0:              # a compatible provider exists
-               self.got[(e.pid,)] += 1
-
-The host always records each consume port's ``resolved`` / ``version`` before
-the body runs, so even an empty ``on_resolve`` captures provider presence. The
-body compiles to the same ``comms_resolve`` / ``provider_best`` C the C and C++
-plugins use; it cannot run arbitrary Python or call other host services, so for
-logic beyond flag-setting author the plugin in C or C++ (see
-:doc:`guides/plugins/inter-plugin-comms`).
+``step`` must run before the consumer's for the same batch, so register the
+producer first. A JIT plugin can publish for a hand-written C++ consumer and
+vice versa; both sides go through the same ``DFTU_EXT_PORTS`` machinery.
 
 Raw bodies: the full ABI without leaving JIT
 --------------------------------------------

@@ -14,10 +14,8 @@
 #include <deque>
 #include <memory>
 #include <optional>
-#include <queue>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -51,8 +49,6 @@ struct Plugins::Impl {
     // deque pins each ConfigTree so factory-held roots stay valid until
     // teardown.
     std::deque<ConfigTree> configs;
-    // Providers before requirers; a full permutation of plugin indices.
-    std::vector<std::size_t> order;
     // The union prune, settled once at build so run() and attach() agree.
     std::optional<Query> prune;
 };
@@ -128,215 +124,6 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                                  plugin_name_from_path(path)};
 }
 
-struct CapProvider {
-    dftu_version ver;
-    std::size_t plugin_index;
-};
-
-struct ResolveCtx {
-    std::unordered_map<std::string, std::vector<CapProvider>> caps;
-    dftracer::utils::StringIntern intern;
-};
-
-std::uint32_t comms_provider_count(void* h, const char* cap_id) {
-    if (!cap_id) return 0;
-    auto* ctx = static_cast<ResolveCtx*>(h);
-    auto it = ctx->caps.find(cap_id);
-    return it == ctx->caps.end()
-               ? 0u
-               : static_cast<std::uint32_t>(it->second.size());
-}
-
-int comms_provider_best(void* h, const dftu_requirement* req,
-                        dftu_version* out_ver) {
-    if (!req || !req->id) return -1;
-    auto* ctx = static_cast<ResolveCtx*>(h);
-    auto it = ctx->caps.find(req->id);
-    if (it == ctx->caps.end()) return -1;
-    const dftu_version* best = nullptr;
-    for (const auto& p : it->second) {
-        dftu_capability cap{req->id, p.ver};
-        if (!dftu_capability_satisfies(&cap, req)) continue;
-        if (!best || dftu_version_cmp(p.ver, *best) > 0) best = &p.ver;
-    }
-    if (!best) return -1;
-    if (out_ver) *out_ver = *best;
-    return 0;
-}
-
-const dftu_ext_comms g_comms = {comms_provider_count, comms_provider_best};
-
-const void* resolve_get_extension(void*, const char* ext_id) {
-    if (ext_id && std::strcmp(ext_id, DFTU_EXT_COMMS) == 0) return &g_comms;
-    return nullptr;
-}
-
-const char* resolve_host_resolve(void* h, dftu_str id, std::uint32_t* out_len) {
-    if (out_len) *out_len = 0;
-    if (id == DFTU_STR_NONE ||
-        id >= dftracer::utils::StringIntern::FAST_CAPACITY)
-        return nullptr;
-    std::string_view sv = static_cast<ResolveCtx*>(h)->intern.resolve(id);
-    if (out_len) *out_len = static_cast<std::uint32_t>(sv.size());
-    return sv.data();
-}
-
-dftu_str resolve_host_intern(void* h, const char* s, std::uint32_t len) {
-    if (!s) return DFTU_STR_NONE;
-    try {
-        return static_cast<ResolveCtx*>(h)->intern.get_or_insert(
-            std::string_view{s, len});
-    } catch (...) {
-        return DFTU_STR_NONE;
-    }
-}
-
-// Route a plugin's log line through our logger so it honors the configured
-// (compile-time and runtime) level, instead of an unconditional stderr write.
-void resolve_host_log(void*, std::uint8_t level, const char* s,
-                      std::uint32_t n) {
-    const int len = static_cast<int>(n);
-    const char* msg = s ? s : "";
-    switch (level) {
-        case DFTU_LOG_ERROR:
-            DFTRACER_UTILS_LOG_ERROR("[plugin] %.*s", len, msg);
-            break;
-        case DFTU_LOG_WARN:
-            DFTRACER_UTILS_LOG_WARN("[plugin] %.*s", len, msg);
-            break;
-        case DFTU_LOG_DEBUG:
-            DFTRACER_UTILS_LOG_DEBUG("[plugin] %.*s", len, msg);
-            break;
-        case DFTU_LOG_TRACE:
-            DFTRACER_UTILS_LOG_TRACE("[plugin] %.*s", len, msg);
-            break;
-        default:
-            DFTRACER_UTILS_LOG_INFO("[plugin] %.*s", len, msg);
-            break;
-    }
-}
-
-const dftu_plugin_comms* plugin_comms(const dftu_plugin* pl) {
-    if (!pl->get_extension) return nullptr;
-    return static_cast<const dftu_plugin_comms*>(
-        pl->get_extension(pl->self, DFTU_EXT_COMMS));
-}
-
-// Kahn topological sort of `n` nodes over `from -> to` edges (from must precede
-// to). Ready nodes are drained lowest-index first so an independent set keeps
-// its natural order. Empty return signals a cycle.
-std::vector<std::size_t> topo_sort(
-    std::size_t n,
-    const std::vector<std::pair<std::size_t, std::size_t>>& edges) {
-    std::vector<std::vector<std::size_t>> succ(n);
-    std::vector<std::size_t> indeg(n, 0);
-    for (const auto& [a, b] : edges) {
-        succ[a].push_back(b);
-        ++indeg[b];
-    }
-    std::priority_queue<std::size_t, std::vector<std::size_t>,
-                        std::greater<std::size_t>>
-        ready;
-    for (std::size_t i = 0; i < n; ++i)
-        if (indeg[i] == 0) ready.push(i);
-    std::vector<std::size_t> order;
-    order.reserve(n);
-    while (!ready.empty()) {
-        std::size_t u = ready.top();
-        ready.pop();
-        order.push_back(u);
-        for (std::size_t v : succ[u])
-            if (--indeg[v] == 0) ready.push(v);
-    }
-    if (order.size() != n) return {};
-    return order;
-}
-
-// The plugin name a diagnostic should use: the load-path stem, or the index for
-// an injected plugin that has none.
-std::string plugin_label(const Plugins::Impl& impl, std::size_t i) {
-    const std::string& name = impl.plugins[i].name;
-    return name.empty() ? ("plugin " + std::to_string(i)) : ("'" + name + "'");
-}
-
-/// Declare every plugin's capabilities into an authoritative registry, resolve
-/// each plugin's requirements against it, call its resolve() once, and settle
-/// the fold order.
-Result<void> resolve_capabilities(Plugins::Impl& impl) {
-    ResolveCtx ctx;
-
-    for (std::size_t i = 0; i < impl.plugins.size(); ++i) {
-        const dftu_plugin* pl = impl.plugins[i].plugin;
-        const dftu_plugin_comms* comms = plugin_comms(pl);
-        if (!comms || !comms->provides) continue;
-        std::uint32_t n = comms->provides(pl->self, nullptr, 0);
-        std::vector<dftu_capability> caps(n);
-        if (n) comms->provides(pl->self, caps.data(), n);
-        for (std::uint32_t k = 0; k < n; ++k) {
-            const dftu_capability& c = caps[k];
-            if (!c.id) continue;
-            // The dftu. namespace is the host's alone; a plugin claiming it is
-            // a hard error, not a silent shadow.
-            if (std::strncmp(c.id, "dftu.", 5) == 0)
-                return make_error(ErrorCode::INVALID_ARGUMENT,
-                                  "plugin " + plugin_label(impl, i) +
-                                      " declares reserved capability '" + c.id +
-                                      "'; the 'dftu.' namespace is host-only");
-            ctx.caps[c.id].push_back({c.ver, i});
-        }
-    }
-
-    dftu_host rhost{};
-    rhost.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    rhost.h = &ctx;
-    rhost.get_extension = resolve_get_extension;
-    rhost.resolve = resolve_host_resolve;
-    rhost.intern = resolve_host_intern;
-    rhost.log = resolve_host_log;
-
-    // Every provider of a required capability must precede the requirer.
-    std::vector<std::pair<std::size_t, std::size_t>> edges;
-    for (std::size_t i = 0; i < impl.plugins.size(); ++i) {
-        const dftu_plugin* pl = impl.plugins[i].plugin;
-        const dftu_plugin_comms* comms = plugin_comms(pl);
-        if (!comms) continue;
-        if (comms->require_caps) {
-            std::uint32_t n = comms->require_caps(pl->self, nullptr, 0);
-            std::vector<dftu_requirement> reqs(n);
-            if (n) comms->require_caps(pl->self, reqs.data(), n);
-            for (std::uint32_t k = 0; k < n; ++k) {
-                const dftu_requirement& req = reqs[k];
-                if (req.required &&
-                    comms_provider_best(&ctx, &req, nullptr) != 0)
-                    return make_error(ErrorCode::NOT_FOUND,
-                                      "plugin " + plugin_label(impl, i) +
-                                          " requires unmet capability '" +
-                                          (req.id ? req.id : "") + "'");
-                if (!req.id) continue;
-                auto it = ctx.caps.find(req.id);
-                if (it == ctx.caps.end()) continue;
-                for (const auto& p : it->second)
-                    if (p.plugin_index != i)
-                        edges.emplace_back(p.plugin_index, i);
-            }
-        }
-        if (comms->resolve) comms->resolve(pl->self, &rhost);
-    }
-
-    impl.order = topo_sort(impl.plugins.size(), edges);
-    if (impl.order.size() != impl.plugins.size()) {
-        // Ports are best-effort (consume yields NULL when unpublished), so a
-        // provide/require cycle degrades to natural order rather than failing.
-        if (!impl.plugins.empty())
-            DFTRACER_UTILS_LOG_WARN(
-                "Plugin capability graph has a cycle; keeping natural fold "
-                "order");
-        impl.order.resize(impl.plugins.size());
-        for (std::size_t i = 0; i < impl.order.size(); ++i) impl.order[i] = i;
-    }
-    return {};
-}
-
 void settle_prune(Plugins::Impl& impl) {
     std::vector<const char*> plan_queries;
     plan_queries.reserve(impl.plugins.size());
@@ -408,8 +195,6 @@ Result<Plugins> Plugins::Builder::build() {
         if (!loaded) return unexpected(std::move(loaded).error());
         impl->plugins.push_back(std::move(*loaded));
     }
-    auto resolved = resolve_capabilities(*impl);
-    if (!resolved) return unexpected(std::move(resolved).error());
     settle_prune(*impl);
     return PluginsInternalAccess::make(std::move(impl));
 }
@@ -437,7 +222,7 @@ coro::CoroTask<Result<PluginRun>> Plugins::run(const View& view) const {
     owned.reserve(impl_->plugins.size());
     std::vector<Fold*> folds;
     folds.reserve(impl_->plugins.size());
-    for (std::size_t i : impl_->order) {
+    for (std::size_t i = 0; i < impl_->plugins.size(); ++i) {
         owned.push_back(std::make_unique<PluginFold>(
             impl_->plugins[i].plugin, intern, &shared, &out.results,
             impl_->plugins[i].name));
@@ -457,7 +242,7 @@ void Plugins::attach(trace::views::ViewSession& session,
     auto shared = std::make_shared<SharedResultRegistry>();
     results.clear();
     NamedResultRegistry* named = &results;
-    for (std::size_t i : impl_->order) {
+    for (std::size_t i = 0; i < impl_->plugins.size(); ++i) {
         const dftu_plugin* plugin = impl_->plugins[i].plugin;
         std::string name = impl_->plugins[i].name;
         session.attach_fold_factory(
@@ -475,14 +260,8 @@ Result<Plugins> build_injected_plugins(std::vector<dftu_plugin*> plugins) {
     impl->plugins.reserve(plugins.size());
     for (dftu_plugin* pl : plugins)
         impl->plugins.push_back({nullptr, pl, false, {}});
-    auto resolved = resolve_capabilities(*impl);
-    if (!resolved) return unexpected(std::move(resolved).error());
     settle_prune(*impl);
     return PluginsInternalAccess::make(std::move(impl));
-}
-
-std::vector<std::size_t> fold_order(const Plugins& set) {
-    return PluginsInternalAccess::impl(set).order;
 }
 
 }  // namespace dftracer::utils::plugins

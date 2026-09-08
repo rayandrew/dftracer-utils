@@ -133,39 +133,6 @@ class Host {
     /// compile() for a predicate built with `F`/`Field`.
     class Query compile(const Expr& e) const;
 
-    /// Capability-registry queries, meaningful during a comms resolve() (or any
-    /// time after): how many plugins provide `cap_id` at any version.
-    std::uint32_t provider_count(const char* cap_id) const {
-        const dftu_ext_comms* e = ext(DFTU_EXT_COMMS, comms_ext_);
-        return e && e->provider_count ? e->provider_count(h_->h, cap_id) : 0;
-    }
-    /// Highest provider version satisfying `req` into *out_ver; true on a
-    /// match, false if none (or the comms group is absent).
-    bool provider_best(const dftu_requirement& req,
-                       dftu_version* out_ver) const {
-        const dftu_ext_comms* e = ext(DFTU_EXT_COMMS, comms_ext_);
-        return e && e->provider_best &&
-               e->provider_best(h_->h, &req, out_ver) == 0;
-    }
-    /// Typed form of provider_best; nullopt if no provider satisfies `req`.
-    std::optional<dftu_version> provider_best(
-        const dftu_requirement& req) const {
-        dftu_version v{};
-        return provider_best(req, &v) ? std::optional<dftu_version>{v}
-                                      : std::nullopt;
-    }
-    /// Version-wrapped form of provider_best; nullopt if no provider satisfies
-    /// `req`.
-    std::optional<Version> provider_best_v(const dftu_requirement& req) const {
-        dftu_version v{};
-        return provider_best(req, &v) ? std::optional<Version>{Version{v}}
-                                      : std::nullopt;
-    }
-    /// Version-wrapped provider_best for a wrapped Requirement.
-    std::optional<Version> provider_best_v(const Requirement& req) const {
-        return provider_best_v(req.raw());
-    }
-
     /// Caller owns the handle and must sketch_free it.
     dftu_sketch* sketch_create() const {
         const dftu_ext_sketch* e = ext(DFTU_EXT_SKETCH, sketch_ext_);
@@ -284,9 +251,9 @@ class Host {
     /// consumer reads for the same batch. consume returns NULL (and 0 len) when
     /// the producer has not published this batch; the borrow is valid only
     /// until the current on_batch returns.
-    std::uint64_t port_key(const char* cap_id) const {
+    std::uint64_t port_key(const char* name) const {
         const dftu_ext_ports* e = ext(DFTU_EXT_PORTS, ports_ext_);
-        return e && e->port_key ? e->port_key(h_->h, cap_id) : 0;
+        return e && e->port_key ? e->port_key(h_->h, name) : 0;
     }
     void publish(std::uint64_t key, const void* data, std::uint32_t len) const {
         const dftu_ext_ports* e = ext(DFTU_EXT_PORTS, ports_ext_);
@@ -417,13 +384,13 @@ class Host {
     }
 
     /// Typed batch-scoped output port: send() publishes a trivially-copyable T
-    /// under `cap_id` for a same-batch consumer. See publish/consume.
+    /// under `name` for a same-batch consumer. See publish/consume.
     template <class T>
-    OutPort<T> publish_port(const char* cap_id) const;
+    OutPort<T> publish_port(const char* name) const;
     /// Typed batch-scoped input port: recv() reads the T a producer published
-    /// under `cap_id` this batch, or nullopt if none. See publish/consume.
+    /// under `name` this batch, or nullopt if none. See publish/consume.
     template <class T>
-    InPort<T> consume_port(const char* cap_id) const;
+    InPort<T> consume_port(const char* name) const;
 
     const dftu_host* raw() const { return h_; }
 
@@ -441,7 +408,6 @@ class Host {
     const dftu_host* h_;
     mutable const dftu_ext_coro* coro_ext_ = nullptr;
     mutable const dftu_ext_query* query_ext_ = nullptr;
-    mutable const dftu_ext_comms* comms_ext_ = nullptr;
     mutable const dftu_ext_writer* writer_ext_ = nullptr;
     mutable const dftu_ext_sketch* sketch_ext_ = nullptr;
     mutable const dftu_ext_arrow* arrow_ext_ = nullptr;
@@ -652,12 +618,12 @@ class InPort {
 };
 
 template <class T>
-inline OutPort<T> Host::publish_port(const char* cap_id) const {
-    return OutPort<T>{*this, port_key(cap_id)};
+inline OutPort<T> Host::publish_port(const char* name) const {
+    return OutPort<T>{*this, port_key(name)};
 }
 template <class T>
-inline InPort<T> Host::consume_port(const char* cap_id) const {
-    return InPort<T>{*this, port_key(cap_id)};
+inline InPort<T> Host::consume_port(const char* name) const {
+    return InPort<T>{*this, port_key(name)};
 }
 
 /// Non-owning typed view over one flattened event arg. The value is one of

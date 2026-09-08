@@ -81,8 +81,6 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_cxx_ergonomics.cpp
     plugins/test_plugin_cxx_wrappers.cpp
     plugins/test_plugin_abi_features.cpp
-    plugins/test_plugin_versioning.cpp
-    plugins/test_plugin_comms.cpp
     plugins/test_plugin_ports.cpp
     plugins/test_plugin_results.cpp
     plugins/test_plugin_agg.cpp

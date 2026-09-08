@@ -263,101 +263,11 @@ dftu_task* drive_coro(const dftu_host* host, Coro&& coro) {
                          : nullptr;
 }
 
-/// A Slice that publishes capabilities via a static `provides()` returning a
-/// range of dftu_capability (build them with capability()).
-template <class Slice>
-concept DeclaresProvides = requires {
-    { std::begin(Slice::provides()) };
-    { std::end(Slice::provides()) };
-};
-
-/// A Slice that consumes capabilities via a static `requires_caps()` returning
-/// a range of dftu_requirement (build them with requirement()). Named
-/// requires_caps because `requires` is a C++20 keyword.
-template <class Slice>
-concept DeclaresRequires = requires {
-    { std::begin(Slice::requires_caps()) };
-    { std::end(Slice::requires_caps()) };
-};
-
-/// A Slice that reacts to the post-declare capability resolution via a static
-/// `on_resolve(Host)`; use Host::provider_count / Host::provider_best inside.
-template <class Slice>
-concept DeclaresResolve = requires(Host h) { Slice::on_resolve(h); };
-
-/// A Slice that declares any comms hook, so make_plugin wires get_extension.
-template <class Slice>
-concept HasComms = DeclaresProvides<Slice> || DeclaresRequires<Slice> ||
-                   DeclaresResolve<Slice>;
-
-template <class Slice>
-std::uint32_t comms_provides(void*, dftu_capability* out, std::uint32_t max) {
-    std::uint32_t n = 0;
-    for (const dftu_capability& c : Slice::provides()) {
-        if (out && n < max) out[n] = c;
-        ++n;
-    }
-    return n;
-}
-
-template <class Slice>
-std::uint32_t comms_requires(void*, dftu_requirement* out, std::uint32_t max) {
-    std::uint32_t n = 0;
-    for (const dftu_requirement& r : Slice::requires_caps()) {
-        if (out && n < max) out[n] = r;
-        ++n;
-    }
-    return n;
-}
-
-template <class Slice>
-void comms_resolve(void*, const dftu_host* host) {
-    try {
-        Slice::on_resolve(Host{host});
-    } catch (const std::exception& e) {
-        Host{host}.log(DFTU_LOG_ERROR, e.what());
-    } catch (...) {
-        Host{host}.log(DFTU_LOG_ERROR, "plugin resolve threw");
-    }
-}
-
-template <class Slice>
-constexpr auto provides_thunk() {
-    if constexpr (DeclaresProvides<Slice>)
-        return &comms_provides<Slice>;
-    else
-        return static_cast<decltype(dftu_plugin_comms::provides)>(nullptr);
-}
-template <class Slice>
-constexpr auto requires_thunk() {
-    if constexpr (DeclaresRequires<Slice>)
-        return &comms_requires<Slice>;
-    else
-        return static_cast<decltype(dftu_plugin_comms::require_caps)>(nullptr);
-}
-template <class Slice>
-constexpr auto resolve_thunk() {
-    if constexpr (DeclaresResolve<Slice>)
-        return &comms_resolve<Slice>;
-    else
-        return static_cast<decltype(dftu_plugin_comms::resolve)>(nullptr);
-}
-
-/// Per-Slice comms table with static storage; only ODR-used when HasComms.
-template <class Slice>
-inline const dftu_plugin_comms comms_table = {
-    provides_thunk<Slice>(), requires_thunk<Slice>(), resolve_thunk<Slice>()};
-
 }  // namespace detail
 
 /** Build a dftu_plugin from a Slice providing Slice(const Config&), merge, and
    either sync step/finalize or a Task-returning on_batch/on_finalize coroutine,
-   plus optionally `static constexpr uint32_t needs`. For inter-plugin comms a
-   Slice may also declare any of: `static ... provides()` (a range of
-   dftu_capability, built with capability()), `static ... requires_caps()` (a
-   range of dftu_requirement, built with requirement()), and `static void
-   on_resolve(Host)`; when present, make_plugin wires dftu_plugin::get_extension
-   to a per-Slice dftu_plugin_comms so the host discovers and resolves them.
+   plus optionally `static constexpr uint32_t needs`.
    Exceptions must not escape the ABI boundary, so every callback catches. */
 template <class Slice>
 dftu_plugin* make_plugin(const dftu_value* config) {
@@ -449,14 +359,6 @@ dftu_plugin* make_plugin(const dftu_value* config) {
 
     vt.destroy_slice = [](void* slice) { delete static_cast<Slice*>(slice); };
     vt.destroy = [](void* self) { delete detail::holder_of<Slice>(self); };
-
-    if constexpr (detail::HasComms<Slice>) {
-        vt.get_extension = [](void*, const char* ext_id) -> const void* {
-            if (ext_id && std::strcmp(ext_id, DFTU_EXT_COMMS) == 0)
-                return &detail::comms_table<Slice>;
-            return nullptr;
-        };
-    }
 
     return &vt;
 }

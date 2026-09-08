@@ -39,28 +39,6 @@ target_include_directories(query_filter_plugin
                            PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_enable_coroutine(query_filter_plugin)
 
-add_library(tag_provider_plugin MODULE tag_provider.c)
-set_target_properties(
-  tag_provider_plugin
-  PROPERTIES OUTPUT_NAME tag_provider
-             PREFIX ""
-             POSITION_INDEPENDENT_CODE ON
-             C_STANDARD 99
-             C_STANDARD_REQUIRED ON)
-target_include_directories(tag_provider_plugin
-                           PRIVATE ${CMAKE_SOURCE_DIR}/include)
-
-add_library(tag_consumer_plugin MODULE tag_consumer.c)
-set_target_properties(
-  tag_consumer_plugin
-  PROPERTIES OUTPUT_NAME tag_consumer
-             PREFIX ""
-             POSITION_INDEPENDENT_CODE ON
-             C_STANDARD 99
-             C_STANDARD_REQUIRED ON)
-target_include_directories(tag_consumer_plugin
-                           PRIVATE ${CMAKE_SOURCE_DIR}/include)
-
 add_library(perbatch_producer_plugin MODULE perbatch_producer.c)
 set_target_properties(
   perbatch_producer_plugin
@@ -183,7 +161,6 @@ target_include_directories(process_regr_stats_plugin
 
 install(TARGETS event_counter_plugin duration_histogram_plugin
                 query_filter_plugin
-                tag_provider_plugin tag_consumer_plugin
                 perbatch_producer_plugin perbatch_consumer_plugin
                 dur_stats_producer_plugin dur_stats_consumer_plugin
                 process_counts_plugin process_file_edges_plugin

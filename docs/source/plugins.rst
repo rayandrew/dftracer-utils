@@ -612,11 +612,11 @@ section 6.
 8. Inter-plugin communication
 -----------------------------
 
-Within the one shared scan, one plugin can hand values to another. Three
+Within the one shared scan, one plugin can hand values to another. Two
 mechanisms, each its own extension group. See
 :doc:`guides/plugins/inter-plugin-comms` for the full treatment.
 
-**Ports (DFTU_EXT_PORTS)** are a batch-scoped slot keyed by a capability id: a
+**Ports (DFTU_EXT_PORTS)** are a batch-scoped slot keyed by a port name: a
 producer publishes during a batch, a consumer reads it back during the same
 batch (NULL if the producer has not published, or runs after the consumer). The
 bus resets between batches. A producer must run before its consumer in fold
@@ -694,72 +694,6 @@ the cross-worker-merged, finalized result by that name at ``on_finalize``.
 array under a name; both surface from ``Plugins::run`` keyed by that name.
 Use ``Host::emit_result`` / ``emit_result_arrow`` (C: ``emit`` / ``emit_arrow``
 on ``dftu_ext_result``), best called at finalize.
-
-**Capabilities (DFTU_EXT_COMMS)** let a consumer discover whether a compatible
-producer was loaded and order the fold accordingly. On the raw ABI this is
-reached through the plugin's own ``get_extension`` returning a
-``dftu_plugin_comms`` of ``provides`` / ``require_caps`` / ``resolve``; see
-:doc:`guides/plugins/inter-plugin-comms` for the full protocol.
-
-A C++ Slice declares the same three hooks as optional ``static`` members and
-``make_plugin<Slice>`` wires ``get_extension`` to a per-Slice
-``dftu_plugin_comms`` automatically (nothing is emitted when a Slice declares
-none, so existing plugins are unaffected). Build the entries with
-``dftracer::utils::plugins::capability`` and ``dftracer::utils::plugins::requirement``; the consumer hook
-is named ``requires_caps`` because ``requires`` is a C++20 keyword. Inside
-``on_resolve`` use ``Host::provider_count`` / ``Host::provider_best`` to inspect
-the registry.
-
-.. tab-set::
-
-   .. tab-item:: C++ (SDK)
-
-      .. code-block:: cpp
-
-         struct Slice {
-             explicit Slice(const dftracer::utils::plugins::Config&) {}
-             void step(const dftracer::utils::plugins::Batch&, dftracer::utils::plugins::Host) {}
-             void merge(Slice&) {}
-             void finalize(dftracer::utils::plugins::Host) {}
-
-             // Capabilities this plugin publishes.
-             static std::array<dftu_capability, 1> provides() {
-                 return {dftracer::utils::plugins::capability("com.example.tag", 1, 0, 0)};
-             }
-             // Capabilities it consumes (optional == graceful fallback).
-             static std::array<dftu_requirement, 1> requires_caps() {
-                 return {dftracer::utils::plugins::requirement("com.example.peer",
-                                                  DFTU_VER_CARET, 1, 0, 0,
-                                                  /*required=*/false)};
-             }
-             // Runs once after every plugin has declared.
-             static void on_resolve(dftracer::utils::plugins::Host h) {
-                 if (auto v = h.provider_best(requires_caps()[0])) {
-                     // a compatible provider is present at version *v
-                 }
-             }
-         };
-
-   .. tab-item:: C (raw ABI)
-
-      .. code-block:: c
-
-         static uint32_t provides(void* self, dftu_capability* out, uint32_t max) {
-             (void)self;
-             if (max >= 1) {
-                 out[0].id = "com.example.tag";
-                 out[0].ver.major = 1;
-                 out[0].ver.minor = out[0].ver.patch = 0;
-             }
-             return 1;
-         }
-         static const dftu_plugin_comms g_comms = {provides, NULL, NULL};
-         static const void* get_extension(void* self, const char* ext_id) {
-             (void)self;
-             if (ext_id && strcmp(ext_id, DFTU_EXT_COMMS) == 0) return &g_comms;
-             return NULL;
-         }
-         /* ... vt.get_extension = get_extension; in the factory ... */
 
 9. Async work and I/O
 ---------------------
@@ -1045,9 +979,6 @@ that covers it:
      - `8. Inter-plugin communication`_
    * - ``Host::emit_result`` / ``emit_result_arrow``
      - ``DFTU_EXT_RESULT``
-     - `8. Inter-plugin communication`_
-   * - Slice ``provides`` / ``requires_caps`` / ``on_resolve``
-     - ``DFTU_EXT_COMMS``
      - `8. Inter-plugin communication`_
    * - ``Host::all`` / ``any`` / ``run_blocking``
      - ``DFTU_EXT_CORO``

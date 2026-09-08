@@ -1,8 +1,8 @@
 /* Example producer plugin: a ZERO-KEY dft.ext.agg accumulator, the AggState
  * form of a scalar handle. Each batch arrives as a column dataframe and is
- * folded whole into one accumulator named after the capability this plugin
- * provides, com.example.dur_stats@1.0.0, computing the whole-scan event count
- * and the duration median, min and max. The host merges the accumulator across
+ * folded whole into one accumulator named com.example.dur_stats, computing the
+ * whole-scan event count and the duration median, min and max. A consumer
+ * reads it back by that name. The host merges the accumulator across
  * every worker slice, so a consumer reads stats no single slice ever saw.
  *
  * Build: cc -std=c99 -shared -fPIC -I<repo>/include \
@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define DUR_STATS_CAP "com.example.dur_stats"
+#define DUR_STATS_PORT "com.example.dur_stats"
 
 static uint32_t needs(void* self) {
     (void)self;
@@ -38,7 +38,7 @@ static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
     (void)slice;
     if (!agg || !agg->agg_new) return NULL;
     /* No key columns: the whole scan is one group, i.e. a scalar handle. */
-    a = agg->agg_new(host->h, DUR_STATS_CAP, NULL, 0, specs, 4);
+    a = agg->agg_new(host->h, DUR_STATS_PORT, NULL, 0, specs, 4);
     if (a) agg->agg_accumulate(host->h, a, df);
     return NULL;
 }
@@ -57,25 +57,6 @@ static dftu_task* on_finalize(void* slice, const dftu_host* host) {
 static void destroy_slice(void* slice) { free(slice); }
 static void destroy(void* self) { (void)self; }
 
-static uint32_t provides(void* self, dftu_capability* out, uint32_t max) {
-    (void)self;
-    if (max >= 1) {
-        out[0].id = DUR_STATS_CAP;
-        out[0].ver.major = 1;
-        out[0].ver.minor = 0;
-        out[0].ver.patch = 0;
-    }
-    return 1;
-}
-
-static const dftu_plugin_comms g_comms = {provides, NULL, NULL};
-
-static const void* get_extension(void* self, const char* ext_id) {
-    (void)self;
-    if (ext_id && strcmp(ext_id, DFTU_EXT_COMMS) == 0) return &g_comms;
-    return NULL;
-}
-
 static dftu_plugin g_plugin;
 
 DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
@@ -90,7 +71,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     g_plugin.on_finalize = on_finalize;
     g_plugin.destroy_slice = destroy_slice;
     g_plugin.destroy = destroy;
-    g_plugin.get_extension = get_extension;
     g_plugin.on_batch_columns = on_batch_columns;
     return &g_plugin;
 }
