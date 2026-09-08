@@ -40,8 +40,7 @@ const dftu_ext_agg g_agg = {host_agg_new, host_agg_accumulate, host_agg_result};
 ::dftu_dataframe* finalize_to_frame(const AggAccum& acc) {
     if (!acc.state) return nullptr;
     try {
-        dataframe::DataFrame out =
-            dataframe::agg_finalize(*acc.state, acc.key_names);
+        dataframe::DataFrame out = acc.spiller.drain(*acc.state, acc.key_names);
         std::vector<dftu_series*> handles;
         handles.reserve(out.columns.size());
         for (dataframe::Series& c : out.columns) handles.push_back(c.release());
@@ -116,6 +115,7 @@ const void* detail::agg_ext_vtable() { return &g_agg; }
             acc->key_names.emplace_back(key_names[i] ? key_names[i] : "");
         acc->value_names = std::move(value_names);
         acc->state = dataframe::agg_new(std::move(aspecs));
+        acc->spiller = dataframe::AggSpiller(memory_budget_);
         return acc;
     });
     return slot ? reinterpret_cast<::dftu_agg*>(slot->get()) : nullptr;
@@ -157,6 +157,7 @@ void PluginFold::agg_accumulate(::dftu_agg* a, const ::dftu_dataframe* df) {
         // case) has no key column for the engine to size the batch from.
         dataframe::agg_accumulate(*acc.state, keys, values, 0,
                                   dftu_dataframe_num_rows(df));
+        acc.spiller.maybe_spill(acc.state);
     } catch (...) {
         DFTRACER_UTILS_LOG_ERROR("Plugin agg '%s' accumulate failed",
                                  acc.name.c_str());
@@ -172,6 +173,15 @@ void PluginFold::agg_accumulate(::dftu_agg* a, const ::dftu_dataframe* df) {
     auto it = results_->aggs.find(dftracer::utils::hash::fnv1a_hash(name));
     if (it == results_->aggs.end() || !it->second) return nullptr;
     return finalize_to_frame(*it->second);
+}
+
+std::size_t PluginFold::agg_spill_runs(const char* name) const {
+    if (!name) return 0;
+    const std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
+    auto it = aggs_.index().find(key);
+    if (it == aggs_.index().end()) return 0;
+    const std::unique_ptr<AggAccum>& acc = aggs_[it->second];
+    return acc ? acc->spiller.runs() : 0;
 }
 
 void PluginFold::publish_aggs() {

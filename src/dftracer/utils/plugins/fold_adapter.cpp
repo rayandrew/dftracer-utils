@@ -1144,13 +1144,14 @@ PluginFold::PluginFold(const dftu_plugin* plugin,
                        dftracer::utils::StringIntern& intern,
                        SharedResultRegistry* results,
                        NamedResultRegistry* named_results,
-                       std::string plugin_name)
+                       std::string plugin_name, std::uint64_t memory_budget)
     : plugin_(plugin),
       plugin_name_(std::move(plugin_name)),
       intern_(&intern),
       slice_(plugin->make_slice(plugin->self)),
       results_(results),
-      named_results_(named_results) {
+      named_results_(named_results),
+      memory_budget_(memory_budget) {
     host_.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     host_.h = this;
     host_.get_extension = host_get_extension;
@@ -1405,6 +1406,10 @@ void PluginFold::merge(Fold& other) {
             aggs_.push(key, std::move(src));
         } else if ((*dst)->state) {
             dataframe::agg_merge(*(*dst)->state, *src->state);
+            // The worker's spilled runs are part of its aggregate, so the
+            // master takes them over with the in-memory half.
+            (*dst)->spiller.adopt(src->spiller);
+            (*dst)->spiller.maybe_spill((*dst)->state);
         }
     }
 }

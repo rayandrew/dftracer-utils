@@ -142,10 +142,14 @@ class PluginFold : public trace::views::detail::Fold {
     using FoldPortBus = trace::views::detail::FoldPortBus;
 
    public:
+    /// `memory_budget` is the scan's out-of-core aggregation budget in bytes,
+    /// the same knob as View::memory_budget: 0 means auto (~1/3 of available
+    /// memory) and NO_SPILL_BUDGET disables spilling. Past it, an accumulator's
+    /// live group map spills to a sorted temp run instead of growing.
     PluginFold(const dftu_plugin* plugin, dftracer::utils::StringIntern& intern,
                SharedResultRegistry* results = nullptr,
                NamedResultRegistry* named_results = nullptr,
-               std::string plugin_name = {});
+               std::string plugin_name = {}, std::uint64_t memory_budget = 0);
     ~PluginFold() override;
 
     PluginFold(const PluginFold&) = delete;
@@ -158,7 +162,8 @@ class PluginFold : public trace::views::detail::Fold {
 
     std::unique_ptr<Fold> slice() const override {
         return std::make_unique<PluginFold>(plugin_, *intern_, results_,
-                                            named_results_, plugin_name_);
+                                            named_results_, plugin_name_,
+                                            memory_budget_);
     }
 
     /// Name this plugin logs under (its load-path stem); empty if unknown.
@@ -211,6 +216,10 @@ class PluginFold : public trace::views::detail::Fold {
     // fuse, as a new owned handle the caller frees; null when no plugin has
     // published that name yet. Finalize-time read (see SharedResultRegistry).
     dftu_dataframe* agg_result(const char* name) const;
+    /// Spill runs written by the accumulator named `name` (0 when it stayed in
+    /// memory, or when there is no such accumulator). The observable signal
+    /// that the memory budget engaged.
+    std::size_t agg_spill_runs(const char* name) const;
 
     // Allocate a lazy CoroTask into this step's arena, returning its stable
     // address as an opaque dftu_task*; null if allocation throws.
@@ -267,6 +276,7 @@ class PluginFold : public trace::views::detail::Fold {
     FoldPortBus* port_bus_ = nullptr;
     SharedResultRegistry* results_ = nullptr;
     NamedResultRegistry* named_results_ = nullptr;
+    std::uint64_t memory_budget_ = 0;
 
     // dft.ext.agg accumulators; unique_ptr keeps each handed-out dftu_agg*
     // stable and lets the header forward-declare AggAccum.

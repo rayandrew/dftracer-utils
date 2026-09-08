@@ -467,6 +467,7 @@ set(DFTRACER_UTILS_VEC_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/agg/finalize.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/agg/seed.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/agg/serialize.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/agg/spill.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/agg/group.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/agg_expr.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/expr.cpp

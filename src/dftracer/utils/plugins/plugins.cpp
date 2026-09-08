@@ -5,6 +5,7 @@
 #include <dftracer/utils/plugins/plugins.h>
 #include <dftracer/utils/plugins/plugins_internal.h>
 #include <dftracer/utils/plugins/reserved_names.h>
+#include <dftracer/utils/trace/views/view_plan.h>
 #include <dlfcn.h>
 
 #include <algorithm>
@@ -337,7 +338,7 @@ coro::CoroTask<Result<PluginRun>> Plugins::run(const View& view) const {
     for (std::size_t i : impl_->order) {
         owned.push_back(std::make_unique<PluginFold>(
             impl_->plugins[i].plugin, intern, &shared, &out.results,
-            impl_->plugins[i].name));
+            impl_->plugins[i].name, view.plan().memory_budget));
         folds.push_back(owned.back().get());
     }
 
@@ -357,6 +358,9 @@ void Plugins::attach(trace::views::ViewSession& session,
     for (std::size_t i : impl_->order) {
         const dftu_plugin* plugin = impl_->plugins[i].plugin;
         std::string name = impl_->plugins[i].name;
+        // A session does not expose its plan's budget here, so an attached
+        // plugin's accumulators spill on the auto policy rather than on an
+        // explicit session budget.
         session.attach_fold_factory(
             [plugin, shared, named, name](dftracer::utils::StringIntern& intern)
                 -> std::unique_ptr<views::detail::Fold> {

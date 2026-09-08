@@ -3,6 +3,7 @@
 
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/dataframe/agg.h>
+#include <dftracer/utils/dataframe/agg_spill.h>
 #include <dftracer/utils/plugins/abi.h>
 
 #include <string>
@@ -19,12 +20,15 @@ namespace dftracer::utils::plugins {
 
 // Per-slice engine-backed aggregation accumulator (dft.ext.agg). value_names
 // are the distinct value/by columns the specs reference, ordered so each spec's
-// value_col/by_col indexes into it.
+// value_col/by_col indexes into it. `spiller` bounds the live group map to the
+// scan's memory budget, so a high-cardinality key does not grow `state`
+// without limit; it holds the spilled runs and drains them at finalize.
 struct AggAccum {
     std::string name;
     std::vector<std::string> key_names;
     std::vector<std::string> value_names;
     dataframe::AggStatePtr state;
+    dataframe::AggSpiller spiller;
 };
 
 inline std::string_view resolve_id(dftracer::utils::StringIntern& intern,
