@@ -17,15 +17,6 @@
 // opaque bytes or a user-schema Arrow array and never interprets either.
 namespace dftracer::utils::plugins {
 
-/// A streamed map result: an ordered sequence of same-schema Arrow batches the
-/// registry owns, materialized one partition at a time so peak memory stays
-/// near one partition instead of the whole map. Surfaces to Python as a
-/// pull-based RecordBatchReader. Each batch is self-contained (STR labels
-/// already copied in) so it outlives the intern table and the producing fold.
-struct OwnedArrowBatches {
-    std::vector<OwnedArrow> batches;
-};
-
 /// A native columnar result carried across the ABI as a dftu_dataframe handle
 /// (the dataframe engine's own boundary type), freed via the dataframe C ABI.
 /// Lets an engine-backed result (the aggregation accumulator) cross as our own
@@ -96,9 +87,8 @@ struct OwnedLazyFrame {
     }
 };
 
-using NamedResult =
-    std::variant<std::vector<std::byte>, OwnedArrow, OwnedArrowBatches,
-                 OwnedDataFrame, OwnedLazyFrame>;
+using NamedResult = std::variant<std::vector<std::byte>, OwnedArrow,
+                                 OwnedDataFrame, OwnedLazyFrame>;
 
 class NamedResultRegistry {
    public:
@@ -150,14 +140,6 @@ class NamedResultRegistry {
         if (!name || !handle) return;
         std::lock_guard<std::mutex> lock(mutex_);
         results_[name] = OwnedLazyFrame{handle};
-    }
-
-    /// Take ownership of a multi-batch streamed result. Empty batches are a
-    /// no-op (nothing to stream).
-    void emit_arrow_batches(const char* name, OwnedArrowBatches&& batches) {
-        if (!name || batches.batches.empty()) return;
-        std::lock_guard<std::mutex> lock(mutex_);
-        results_[name] = std::move(batches);
     }
 
     void clear() {

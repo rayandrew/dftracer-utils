@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from .dataframe import DataFrame
 from .dftracer_utils_ext import PluginHost as _NativePluginHost
 from .dftracer_utils_ext import _DataFrame
+from .lazyframe import LazyFrame
 
 if TYPE_CHECKING:
     import pyarrow as pa  # ty: ignore[unresolved-import]
@@ -35,9 +36,9 @@ __all__ = ["PluginHost", "unnest"]
 # A JSON-serializable value tree (config is handed straight to json.dumps).
 JSONValue = Union[str, int, float, bool, None, List["JSONValue"], Dict[str, "JSONValue"]]
 
-# A run() map result value: emitted bytes, an eager Arrow table, or a pull-based
-# reader when the map streamed to multiple batches.
-_RunResult = Union[bytes, "DataFrame", "pa.Table", "pa.RecordBatchReader"]
+# One run() result value per emit kind: bytes, a native frame, a lazy plan, or
+# an Arrow table.
+_RunResult = Union[bytes, "DataFrame", "LazyFrame", "pa.Table"]
 
 
 def unnest(
@@ -126,43 +127,47 @@ class PluginHost:
 
         A result's type depends on what the plugin emitted:
 
-        - An in-memory map (the default) -> our
-          :class:`~dftracer.utils.DataFrame`, zero-copy from the plugin's Arrow
-          output. Call ``.to_arrow()`` / ``.to_pandas()`` for other shapes.
-        - A map with a nested value the columnar engine cannot import yet -> a
-          ``pyarrow.Table`` fallback.
-        - A streamed map (``DFTRACER_PLUGIN_MAP_STREAM=1``, spilled to several
-          batches) -> a pull-based ``pyarrow.RecordBatchReader``, left lazy.
-          Call ``.read_all()`` for a table.
+        The shape follows the plugin's emit call, never whether a conversion
+        happens to succeed:
+
+        - ``emit_frame`` -> our :class:`~dftracer.utils.DataFrame`, zero-copy.
+          Call ``.to_arrow()`` / ``.to_pandas()`` for other shapes.
+        - ``emit_arrow`` -> a ``pyarrow.Table`` as emitted, nested types
+          included.
+        - ``emit_lazyframe`` -> a :class:`~dftracer.utils.LazyFrame`.
         - ``emit_result`` bytes -> ``bytes``.
         """
         raw = self._native.run(traces, index_dir, auto_index)
         return {name: self._shape(name, obj) for name, obj in raw.items()}
 
     def _shape(self, name: str, obj: object) -> "_RunResult":
-        """Wrap an in-memory tabular result as a DataFrame, renaming jit v0..
-        columns to the declared field names. Readers and bytes pass through."""
+        """Return the result in the shape its emit kind implies.
+
+        The native layer already hands back one Python type per emit kind, so
+        this only renames a jit result's positional v0.. value columns. It must
+        never re-derive the kind by trying a conversion: coercing an Arrow
+        result into a DataFrame made the return type depend on whether the
+        engine could import the schema, so the same plugin returned a DataFrame
+        for a flat result and a pyarrow.Table for a nested one.
+        """
         if isinstance(obj, bytes):
             return obj
         if isinstance(obj, _DataFrame):
             return DataFrame(obj)
+        fields = self._renames.get(name)
+        if not fields:
+            return obj
+
         import pyarrow as pa
 
-        if isinstance(obj, pa.RecordBatchReader):
+        if not isinstance(obj, pa.Table):
             return obj
-        table = pa.table(obj)
-        fields = self._renames.get(name)
-        if fields:
-            cols = list(table.column_names)
-            for i, field in enumerate(fields):
-                v = f"v{i}"
-                if v in cols:
-                    cols[cols.index(v)] = field
-            table = table.rename_columns(cols)
-        try:
-            return DataFrame.from_arrow(table)
-        except ValueError:
-            return table  # nested Arrow type the engine cannot import yet
+        cols = list(obj.column_names)
+        for i, field in enumerate(fields):
+            v = f"v{i}"
+            if v in cols:
+                cols[cols.index(v)] = field
+        return obj.rename_columns(cols)
 
     @property
     def stats(self) -> Optional[Dict[str, int]]:
