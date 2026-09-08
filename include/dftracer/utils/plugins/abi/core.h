@@ -1,0 +1,194 @@
+#ifndef DFTRACER_UTILS_PLUGINS_ABI_CORE_H
+#define DFTRACER_UTILS_PLUGINS_ABI_CORE_H
+
+/** @file
+ * Fundamental types shared by every plugin ABI service group: value types,
+ * opaque handles, the error/result channel, and the host descriptor. Include
+ * dftracer/utils/plugins/abi.h rather than this file directly.
+ */
+
+#include <dftracer/utils/core/common/export.h>
+#include <dftracer/utils/plugins/abi_version.h> /* DFTRACER_PLUGIN_ABI_VERSION */
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** The standard Arrow C Data Interface structs (defined in arrow_abi.h); only
+   opaque pointers to them cross this ABI. */
+struct ArrowArray;
+struct ArrowSchema;
+
+/** Interned string id; resolve for bytes stable for the whole scan.
+   DFTU_STR_NONE marks an absent field. */
+typedef uint32_t dftu_str;
+#define DFTU_STR_NONE ((dftu_str)0xFFFFFFFFu)
+
+typedef enum {
+    DFTU_T_VOID = 0,
+    DFTU_T_F64,
+    DFTU_T_I64,
+    DFTU_T_STR,
+    DFTU_T_BYTES,
+    DFTU_T_TABLE,
+    /** Fixed-width map-key/column scalar types; appended, never renumbered. */
+    DFTU_T_I8,
+    DFTU_T_I16,
+    DFTU_T_I32,
+    DFTU_T_U8,
+    DFTU_T_U16,
+    DFTU_T_U32,
+    DFTU_T_U64,
+    /** Float key components are bit-cast into the int64 key slot (exact bit
+       equality) and materialize as float32/float64; F64 reuses its enumerator
+       above for an f64 key. */
+    DFTU_T_F32,
+    /** A column handle carried by value: the compose value is a `dftu_series*`
+       pointer (size = sizeof(pointer)), passed zero-copy - only the handle
+       moves, never the column data. Ownership moves to the receiver unless the
+       op documents a borrow; the final owner frees with `dftu_series_free`.
+       DFTU_T_TABLE is the matching tag for a `dftu_dataframe*` handle. */
+    DFTU_T_SERIES
+} dftu_type;
+
+/** ABI-stable phase values; the host adapter maps these to the internal enum.
+ */
+typedef enum {
+    DFTU_PH_UNKNOWN = 0,
+    DFTU_PH_COMPLETE,
+    DFTU_PH_COUNTER,
+    DFTU_PH_AGGREGATED,
+    DFTU_PH_METADATA
+} dftu_phase;
+
+typedef struct dftu_host dftu_host;
+typedef struct dftu_task dftu_task;     /**< async node; awaited exactly once */
+typedef struct dftu_writer dftu_writer; /**< parallel output; host-owned */
+typedef struct dftu_query dftu_query;   /**< compiled filter; scan-lifetime */
+typedef struct dftu_sketch
+    dftu_sketch;                /**< quantile accumulator; plugin-owned */
+typedef struct dftu_trace_writer
+    dftu_trace_writer;          /**< trace output; host-owned */
+typedef struct dftu_op dftu_op; /**< composable async op node; scan-lifetime */
+/** A columnar batch/table handle for the vectorized fold seam. The concrete
+   type is the dataframe engine's (dftracer/utils/dataframe/abi.h); a plugin
+   that uses it includes that header for the dftu_dataframe and dftu_series
+   column ops. */
+typedef struct dftu_dataframe dftu_dataframe;
+/** A deferred columnar plan handle (the lazy counterpart to dftu_dataframe).
+   The concrete type is the dataframe engine's (dftracer/utils/dataframe/abi.h).
+ */
+typedef struct dftu_lazyframe dftu_lazyframe;
+/** A single column handle for the vectorized fold seam. The concrete type is
+   the dataframe engine's (dftracer/utils/dataframe/abi.h); a plugin that uses
+   it includes that header for the column ops. */
+typedef struct dftu_series dftu_series;
+/** A registered dataframe op record and its call-site operand bag. The
+   concrete types are the dataframe engine's (dftracer/utils/dataframe/abi.h).
+ */
+typedef struct dftu_op_desc dftu_op_desc;
+typedef struct dftu_op_arg dftu_op_arg;
+/** A tagged scalar value. The concrete type is the dataframe engine's
+   (dftracer/utils/dataframe/abi.h); a plugin that reads its fields includes
+   that header. Passed by pointer here so this header need not define it. */
+typedef struct dftu_scalar dftu_scalar;
+
+/** Portable, cross-domain error category mirroring
+   dftracer::utils::Condition; a caller switches on this without learning any
+   subsystem's private codes. */
+typedef enum {
+    DFTU_COND_UNKNOWN = 0,
+    DFTU_COND_INTERNAL,
+    DFTU_COND_INVALID_ARGUMENT,
+    DFTU_COND_NOT_FOUND,
+    DFTU_COND_IO,
+    DFTU_COND_PARSE,
+    DFTU_COND_COMPRESSION,
+    DFTU_COND_TIMEOUT,
+    DFTU_COND_UNSUPPORTED,
+    DFTU_COND_CANCELLED
+} dftu_condition;
+
+/** A fallible call's error: (domain, code) is the precise identity (mirrors
+   dftracer::utils::Error), `condition` the portable match key. `message` is
+   BORROWED - valid only until the next call on the same host handle; copy it
+   if it must outlive that. */
+typedef struct dftu_error {
+    uint64_t domain;
+    int32_t code;
+    int32_t condition; /**< a dftu_condition value */
+    const char* message;
+} dftu_error;
+
+/** Declare a value-or-error tagged union result type `name` carrying a `T` on
+   success; one declaration per T (two mentions of a bare `DFTU_RESULT(T)`
+   would be distinct, incompatible struct types in C). See
+   DFTU_RESULT_OK/VALUE/ERROR to use the result and DFTU_RESULT_MUST_CHECK to
+   mark a function returning one. */
+#define DFTU_RESULT_DECL(name, T) \
+    typedef struct name {         \
+        int32_t ok;               \
+        union {                   \
+            T value;              \
+            dftu_error err;       \
+        } u;                      \
+    } name
+
+#define DFTU_RESULT_OK(r) ((r).ok != 0)
+#define DFTU_RESULT_VALUE(r) ((r).u.value)
+#define DFTU_RESULT_ERROR(r) ((r).u.err)
+
+#if defined(__GNUC__) || defined(__clang__)
+#define DFTU_RESULT_MUST_CHECK __attribute__((warn_unused_result))
+#else
+#define DFTU_RESULT_MUST_CHECK
+#endif
+
+DFTU_RESULT_DECL(dftu_result_series, dftu_series*);
+DFTU_RESULT_DECL(dftu_result_frame, dftu_dataframe*);
+DFTU_RESULT_DECL(dftu_result_u64, uint64_t);
+
+/** Work function for spawn()/then(); arg is plugin-owned. */
+typedef void (*dftu_work_fn)(void* arg);
+
+/** Per-item sink; `item` points at the producer's item struct, borrowed for the
+   call only. `ud` is plugin-owned. */
+typedef void (*dftu_stream_item_fn)(const void* item, void* ud);
+
+/** Severity for dftu_host::log; higher is more severe. Mirrors the host's own
+   logger levels, so a plugin's line is gated by the same threshold. */
+typedef enum {
+    DFTU_LOG_TRACE = 0,
+    DFTU_LOG_DEBUG = 1,
+    DFTU_LOG_INFO = 2,
+    DFTU_LOG_WARN = 3,
+    DFTU_LOG_ERROR = 4
+} dftu_log_level;
+
+/** Services the host lends the plugin; all calls are safe from any slice
+ * thread.
+ */
+struct dftu_host {
+    uint32_t abi_version;
+    void* h;
+
+    /** Fetch an optional host-service group by id (DFTU_EXT_*); NULL if absent.
+     */
+    const void* (*get_extension)(void* h, const char* ext_id);
+
+    const char* (*resolve)(void* h, dftu_str id, uint32_t* out_len);
+    dftu_str (*intern)(void* h, const char* s, uint32_t len);
+
+    /** Emit a diagnostic line at `level` (a dftu_log_level); `s`/`n` need no
+     * NUL.
+     */
+    void (*log)(void* h, uint8_t level, const char* s, uint32_t n);
+};
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* DFTRACER_UTILS_PLUGINS_ABI_CORE_H */

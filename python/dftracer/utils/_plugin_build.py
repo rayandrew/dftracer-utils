@@ -42,20 +42,30 @@ def compiler() -> str:
     return os.environ.get("CXX") or shutil.which("c++") or shutil.which("clang++") or "c++"
 
 
+def _plugin_abi_headers(base: Path) -> List[Path]:
+    # plugins/abi.h plus every part header it includes (plugins/abi/*.h),
+    # sorted for a deterministic hash order.
+    plugins_dir = base / "plugins"
+    headers = [plugins_dir / "abi.h"]
+    headers += sorted((plugins_dir / "abi").glob("*.h"))
+    return headers
+
+
 def _abi_version_hex(include: str) -> str:
     # Mirrors cmake/scripts/plugin_abi_version.cmake: a hash-of-hashes over the
-    # same two files, truncated to 32 bits, so a plugin built from source
-    # headers alone (no CMake build ever ran) still stamps the version its
-    # headers hash to.
+    # same files, truncated to 32 bits, so a plugin built from source headers
+    # alone (no CMake build ever ran) still stamps the version its headers
+    # hash to.
     base = Path(include) / "dftracer" / "utils"
 
-    def file_hash(rel: str) -> str:
+    def file_hash_bytes(path: Path) -> str:
         try:
-            return hashlib.sha256((base / rel).read_bytes()).hexdigest()
+            return hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
             return hashlib.sha256(b"\0").hexdigest()
 
-    combined = file_hash("plugins/abi.h") + file_hash("dataframe/abi.h")
+    combined = "".join(file_hash_bytes(p) for p in _plugin_abi_headers(base))
+    combined += file_hash_bytes(base / "dataframe/abi.h")
     return hashlib.sha256(combined.encode("ascii")).hexdigest()[:8].upper()
 
 
@@ -106,11 +116,15 @@ def _abi_fingerprint(include: str) -> str:
     # not, silently reusing a .so built against an incompatible layout.
     h = hashlib.sha256()
     base = Path(include) / "dftracer" / "utils"
-    for rel in ("plugins/abi.h", "dataframe/abi.h"):
+    for path in _plugin_abi_headers(base):
         try:
-            h.update((base / rel).read_bytes())
+            h.update(path.read_bytes())
         except OSError:
             h.update(b"\0")
+    try:
+        h.update((base / "dataframe/abi.h").read_bytes())
+    except OSError:
+        h.update(b"\0")
     return h.hexdigest()[:16]
 
 

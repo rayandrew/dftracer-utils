@@ -242,21 +242,23 @@ else()
 endif()
 
 # Regenerate the plugin ABI version header on every configure, and reconfigure
-# automatically whenever either ABI header it hashes changes (even without a
+# automatically whenever any ABI header it hashes changes (even without a
 # CMakeLists.txt edit), so a rebuilt plugin and the host it loads into always
 # agree on DFTRACER_PLUGIN_ABI_VERSION. See cmake/scripts/plugin_abi_version.cmake.
-set(DFTRACER_PLUGIN_ABI_HEADER
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/dftracer/utils/plugins/abi.h")
+set(DFTRACER_PLUGIN_ABI_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/dftracer/utils/plugins")
 set(DFTRACER_DATAFRAME_ABI_HEADER
     "${CMAKE_CURRENT_SOURCE_DIR}/include/dftracer/utils/dataframe/abi.h")
+file(GLOB_RECURSE DFTRACER_PLUGIN_ABI_HEADERS
+     "${DFTRACER_PLUGIN_ABI_DIR}/abi.h" "${DFTRACER_PLUGIN_ABI_DIR}/abi/*.h")
 set_property(
   DIRECTORY
   APPEND
-  PROPERTY CMAKE_CONFIGURE_DEPENDS "${DFTRACER_PLUGIN_ABI_HEADER}"
+  PROPERTY CMAKE_CONFIGURE_DEPENDS "${DFTRACER_PLUGIN_ABI_HEADERS}"
            "${DFTRACER_DATAFRAME_ABI_HEADER}")
 execute_process(
   COMMAND
-    "${CMAKE_COMMAND}" -DPLUGINS_ABI=${DFTRACER_PLUGIN_ABI_HEADER}
+    "${CMAKE_COMMAND}" -DPLUGINS_ABI_DIR=${DFTRACER_PLUGIN_ABI_DIR}
     -DDATAFRAME_ABI=${DFTRACER_DATAFRAME_ABI_HEADER}
     -DOUTPUT=${CMAKE_BINARY_DIR}/include/dftracer/utils/plugins/abi_version.h
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/scripts/plugin_abi_version.cmake"
