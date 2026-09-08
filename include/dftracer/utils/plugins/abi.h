@@ -354,11 +354,14 @@ typedef struct dftu_ext_trace {
    producer and a consumer are wired by naming the same one, and a name that
    ever needs a version carries it in the name. The bus resets between batches.
    A consume result is borrowed until the current on_batch returns (copy to
-   retain) and NULL if the producer has not published this batch. A producer
-   must run before its consumer in the fuse (registration) order.
+   retain) and NULL if the producer has not published this batch. The host runs
+   a producer before every consumer of its ports; that order comes from the
+   plugins' declared dftu_plugin::provides / dftu_plugin::consumes, not from
+   registration order.
  */
 typedef struct dftu_ext_ports {
-    /** Stable key for the port named `name` (ASCII [a-z0-9._-]). */
+    /** Stable key for the port named `name` (ASCII [a-z0-9._-]). The "dftu."
+       namespace belongs to the host and is refused to plugins. */
     uint64_t (*port_key)(void* h, const char* name);
     void (*publish)(void* h, uint64_t key, const void* data, uint32_t len);
     const void* (*consume)(void* h, uint64_t key, uint32_t* out_len);
@@ -428,8 +431,9 @@ typedef struct dftu_ext_agg {
        in `key_names` and computing each of `spec_n` aggregates. Returns a
        stable handle owned by the host (freed at fold teardown, never by the
        plugin); NULL on a bad op code, a missing output name, or allocation
-       failure. A name seen before returns the existing handle and ignores the
-       new spec. Safe from any slice thread on that slice's host. */
+       failure, or a `name` in the host's own "dftu." namespace, which is
+       refused to plugins. A name seen before returns the existing handle and
+       ignores the new spec. Safe from any slice thread on that slice's host. */
     dftu_agg* (*agg_new)(void* h, const char* name,
                          const char* const* key_names, uint32_t key_n,
                          const dftu_agg_col* specs, uint32_t spec_n);
@@ -440,9 +444,11 @@ typedef struct dftu_ext_agg {
     void (*agg_accumulate)(void* h, dftu_agg* a, const dftu_dataframe* df);
     /** The cross-worker-merged, finalized result of the accumulator named
        `name` - any plugin's, which is how one plugin reads another's whole-scan
-       aggregate. Call at on_finalize; the producer must finalize first, i.e. be
-       registered first. Returns a NEW owned dataframe the caller frees with
-       dftu_dataframe_free, or NULL if no plugin produced that name. */
+       aggregate. Call at on_finalize; the host finalizes the producer first,
+       from the plugins' declared dftu_plugin::provides / dftu_plugin::consumes
+       rather than registration order. Returns a NEW owned dataframe the caller
+       frees with dftu_dataframe_free, or NULL if the producer created no such
+       accumulator (an empty scan). */
     dftu_dataframe* (*agg_result)(void* h, const char* name);
 } dftu_ext_agg;
 
@@ -476,9 +482,12 @@ typedef struct dftu_ext_ops {
     /** The registered op named `name` (built-in or user), or NULL if none. See
        dftu_op_find. */
     const dftu_op_desc* (*find)(void* h, const char* name);
-    /** Register a user op; see dftu_op_register. Returns 0 on success,
-       non-zero if `desc`/its name is NULL or the name is already
-       registered. */
+    /** Register a user op; see dftu_op_register. A plugin op must be named
+       `<plugin>.<name>`: the bare namespace holds the host's built-in ops
+       (`add`, `sum`, ...) and the "dftu." prefix its internal ones, so both
+       belong to the host and are refused here, and a host op can never be
+       shadowed. Returns 0 on success, non-zero if `desc`/its name is NULL, the
+       name is already registered, or the name is one the host keeps. */
     int (*register_op)(void* h, const dftu_op_desc* desc);
 } dftu_ext_ops;
 
@@ -605,6 +614,18 @@ typedef struct dftu_plugin {
        owned by the host and valid only for the call. */
     dftu_task* (*on_batch_columns)(void* slice, const dftu_dataframe* df,
                                    const dftu_host* host);
+
+    /** The names this plugin produces, as a NULL-terminated array that outlives
+       the plugin; NULL = none. One namespace covers both edge kinds: a
+       dftu_ext_ports port it publishes and a dftu_ext_agg accumulator it
+       creates. Two plugins providing the same name is a load error. */
+    const char* const* (*provides)(void* self);
+    /** The names this plugin reads, as a NULL-terminated array that outlives
+       the plugin; NULL = none: ports it consumes and accumulators it fetches
+       with dftu_ext_agg::agg_result. The host runs every provider of a
+       consumed name first, and rejects the set when no loaded plugin provides
+       one or when the resulting graph has a cycle. */
+    const char* const* (*consumes)(void* self);
 } dftu_plugin;
 
 /** The one symbol the loader resolves via dlsym; config is NULL when none

@@ -86,6 +86,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_agg.cpp
     plugins/test_plugin_ops.cpp
     plugins/test_plugin_planner.cpp
+    plugins/test_plugin_order.cpp
 )
 
 # +++++++++++++++++++++++++++++++++++++++++

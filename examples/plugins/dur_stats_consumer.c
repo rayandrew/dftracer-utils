@@ -1,11 +1,12 @@
 /* Example consumer plugin: at finalize it asks dft.ext.agg for the producer's
  * cross-worker-merged accumulator by name; the host hands back the finalized
  * result as a one-row dataframe, which this plugin reads with the dataframe C
- * ABI and logs (WIRED). With no producer registered the name is unknown and it
- * logs the standalone fallback.
+ * ABI and logs (WIRED). An empty scan creates no accumulator, so it logs the
+ * no-data fallback instead.
  *
- * The producer must be registered before this plugin: agg_result only sees an
- * accumulator whose owning fold has already finalized.
+ * It names the accumulator in `consumes`, so the host finalizes the producer
+ * first whatever order the two are given in, and refuses to run at all when no
+ * loaded plugin provides that name.
  *
  * Build: cc -std=c11 -shared -fPIC -I<repo>/include \
  *           -o dur_stats_consumer.so dur_stats_consumer.c \
@@ -108,6 +109,13 @@ static dftu_task* on_finalize(void* slice, const dftu_host* host) {
 static void destroy_slice(void* slice) { free(slice); }
 static void destroy(void* self) { (void)self; }
 
+static const char* const consumed[2] = {DUR_STATS_PORT, NULL};
+
+static const char* const* consumes(void* self) {
+    (void)self;
+    return consumed;
+}
+
 static dftu_plugin g_plugin;
 
 DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
@@ -122,5 +130,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     g_plugin.on_finalize = on_finalize;
     g_plugin.destroy_slice = destroy_slice;
     g_plugin.destroy = destroy;
+    g_plugin.consumes = consumes;
     return &g_plugin;
 }

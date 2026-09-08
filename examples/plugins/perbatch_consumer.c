@@ -1,7 +1,8 @@
 /* Example consumer plugin: each batch it consumes the producer's per-batch
  * value on the port named com.example.perbatch_dur and accumulates it, logging
- * a total at finalize. With no producer every consume returns NULL, so it logs
- * the standalone/no-data fallback instead.
+ * a total at finalize. It names the port in `consumes`, so the host runs the
+ * producer first whatever order the two are given in, and refuses to run at
+ * all when no loaded plugin provides that port.
  *
  * Build: cc -std=c99 -shared -fPIC -I<repo>/include \
  *           -o perbatch_consumer.so perbatch_consumer.c
@@ -73,6 +74,13 @@ static dftu_task* on_finalize(void* slice, const dftu_host* host) {
 static void destroy_slice(void* slice) { free(slice); }
 static void destroy(void* self) { (void)self; }
 
+static const char* const consumed[2] = {PERBATCH_PORT, NULL};
+
+static const char* const* consumes(void* self) {
+    (void)self;
+    return consumed;
+}
+
 static dftu_plugin g_plugin;
 
 DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
@@ -87,5 +95,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     g_plugin.on_finalize = on_finalize;
     g_plugin.destroy_slice = destroy_slice;
     g_plugin.destroy = destroy;
+    g_plugin.consumes = consumes;
     return &g_plugin;
 }

@@ -1973,6 +1973,30 @@ def _port_ctype(port: _Port) -> Tuple[str, str]:
     return ("double", "0.0") if port.is_f64 else ("uint64_t", "0")
 
 
+def _emit_name_lists(provides: List[str], consumes: List[str]) -> Tuple[List[str], List[str]]:
+    """The dftu_plugin::provides / ::consumes definitions and the two factory
+    assignment lines. Both lists are derived, never author-declared: a plugin
+    produces the ports it publishes and the accumulators it creates, and reads
+    the ports it consumes."""
+    defs: List[str] = []
+    assigns: List[str] = []
+    for slot, names in (("provides", provides), ("consumes", consumes)):
+        if not names:
+            assigns.append(f"    g_plugin.{slot} = NULL;")
+            continue
+        rows = ", ".join(_c_str_literal(n) for n in names)
+        defs += [
+            f"static const char* const _{slot}_names[{len(names) + 1}] = {{{rows}, NULL}};",
+            f"static const char* const* {slot}(void* self) {{",
+            "    (void)self;",
+            f"    return _{slot}_names;",
+            "}",
+            "",
+        ]
+        assigns.append(f"    g_plugin.{slot} = {slot};")
+    return defs, assigns
+
+
 def _emit_port_pre(
     pub_ports: List[Tuple[str, _Port]], sub_ports: List[Tuple[str, _Port]]
 ) -> List[str]:
@@ -2313,6 +2337,11 @@ def _emit(
             "}",
             "",
         ]
+    name_defs, name_assigns = _emit_name_lists(
+        sorted([p.name for _, p in pub_ports] + [*maps]),
+        sorted(p.name for _, p in sub_ports),
+    )
+    out += name_defs
     out += [
         "static void* make_slice(void* self) {",
         "    (void)self;",
@@ -2403,6 +2432,7 @@ def _emit(
             "    g_plugin.destroy_slice = destroy_slice;",
             "    g_plugin.destroy = destroy;",
         ]
+        + name_assigns
     )
     out.extend(
         [
@@ -2728,6 +2758,8 @@ def _emit_vfold(
             "}",
             "",
         ]
+    name_defs, name_assigns = _emit_name_lists(sorted({cast(str, opd["attr"]) for opd in ops}), [])
+    out += name_defs
     out += [
         "static void* make_slice(void* self) {",
         "    (void)self;",
@@ -2795,6 +2827,9 @@ def _emit_vfold(
         "    g_plugin.destroy_slice = destroy_slice;",
         "    g_plugin.destroy = destroy;",
         "    g_plugin.on_batch_columns = on_batch_columns;",
+    ]
+    out += name_assigns
+    out += [
         "    return &g_plugin;",
         "}",
         "",

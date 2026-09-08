@@ -25,8 +25,8 @@ struct PluginRun {
 };
 
 /// An immutable set of loaded plugins. Everything a run needs - dlopen, the ABI
-/// gate, and the index prune - is settled by Builder::build(), so the set holds
-/// no per-run state. Adding a plugin means building a new set.
+/// gate, the fold order, and the index prune - is settled by Builder::build(),
+/// so the set holds no per-run state. Adding a plugin means building a new set.
 class Plugins {
    public:
     class Builder {
@@ -40,7 +40,8 @@ class Plugins {
         Builder& add(std::string path, ConfigTree config);
         Builder& add(std::string path);
 
-        /// dlopen and gate the ABI version, in queue order. The first failure
+        /// dlopen and gate the ABI version in queue order, then order the fold
+        /// from the plugins' declared provides/consumes. The first failure
         /// names the plugin and the cause; nothing is partially built and no
         /// plugin outlives the failed call.
         Result<Plugins> build();
@@ -73,10 +74,9 @@ class Plugins {
     /// that session the pruning run() does.
     trace::views::View prune(const trace::views::View& view) const;
 
-    /// Attach every plugin to `session` as a fused fold branch, in
-    /// registration order, so they co-scan with its other branches. Call before
-    /// session.execute(); `results` must outlive the session and holds the
-    /// named results after it.
+    /// Attach every plugin to `session` as a fused fold branch, in fold order,
+    /// so they co-scan with its other branches. Call before session.execute();
+    /// `results` must outlive the session and holds the named results after it.
     void attach(trace::views::ViewSession& session,
                 NamedResultRegistry& results) const;
 

@@ -1,5 +1,7 @@
+#include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/fold_adapter/ext.h>
+#include <dftracer/utils/plugins/reserved_names.h>
 
 #include <cstdint>
 
@@ -44,6 +46,13 @@ const ::dftu_op_desc* host_ops_find(void*, const char* name) {
 }
 
 int host_ops_register(void*, const ::dftu_op_desc* desc) {
+    if (desc && refuse_plugin_op_name(desc->name)) {
+        DFTRACER_UTILS_LOG_ERROR(
+            "Plugin op '%s' refused: the bare and 'dftu.' namespaces hold the "
+            "host's built-in ops, so a plugin op must be '<plugin>.<name>'",
+            desc->name ? desc->name : "(null)");
+        return -1;
+    }
     return ::dftu_op_register(desc);
 }
 

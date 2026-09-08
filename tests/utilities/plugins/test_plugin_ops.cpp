@@ -93,3 +93,54 @@ TEST_CASE("plugin ops: find_op resolves a built-in by name") {
     CHECK(dftu_op_kind_of(desc->sig) == DFTU_OP_KIND_SERIES);
     CHECK(h.find_op("dftu.test.nonexistent_op") == nullptr);
 }
+
+TEST_CASE("plugin ops: a dftu. op name is refused") {
+    HostFixture fx;
+    const auto* ops = static_cast<const dftu_ext_ops*>(
+        fx.host().get_extension(fx.host().h, DFTU_EXT_OPS));
+    REQUIRE(ops);
+    REQUIRE(ops->register_op);
+
+    // Shadowing a host op would silently change what every other plugin and
+    // the planner resolve, so the name is refused before registration and the
+    // host's own op keeps the name.
+    const dftu_op_desc* host_op = ops->find(fx.host().h, "dftu.hash.fnv1a");
+    REQUIRE(host_op);
+    dftu_op_desc shadow{};
+    shadow.name = "dftu.hash.fnv1a";
+    CHECK(ops->register_op(fx.host().h, &shadow) != 0);
+    CHECK(ops->find(fx.host().h, "dftu.hash.fnv1a") == host_op);
+
+    dftu_op_desc fresh{};
+    fresh.name = "dftu.test.plugin_shadow";
+    CHECK(ops->register_op(fx.host().h, &fresh) != 0);
+    CHECK(ops->find(fx.host().h, "dftu.test.plugin_shadow") == nullptr);
+}
+
+TEST_CASE("plugin ops: a bare op name is refused") {
+    HostFixture fx;
+    const auto* ops = static_cast<const dftu_ext_ops*>(
+        fx.host().get_extension(fx.host().h, DFTU_EXT_OPS));
+    REQUIRE(ops);
+
+    // The bare namespace holds the host's built-in column ops, so a plugin op
+    // must be <plugin>.<name>.
+    dftu_op_desc bare{};
+    bare.name = "my_op";
+    CHECK(ops->register_op(fx.host().h, &bare) != 0);
+    CHECK(ops->find(fx.host().h, "my_op") == nullptr);
+}
+
+TEST_CASE("plugin agg: a dftu. accumulator name is refused") {
+    HostFixture fx;
+    const auto* agg = static_cast<const dftu_ext_agg*>(
+        fx.host().get_extension(fx.host().h, DFTU_EXT_AGG));
+    REQUIRE(agg);
+
+    const dftu_agg_col specs[1] = {
+        {DFTU_AGG_COUNT, nullptr, "count", 0.0, nullptr}};
+    CHECK(agg->agg_new(fx.host().h, "dftu.scan.count", nullptr, 0, specs, 1) ==
+          nullptr);
+    CHECK(agg->agg_new(fx.host().h, "com.example.count", nullptr, 0, specs,
+                       1) != nullptr);
+}

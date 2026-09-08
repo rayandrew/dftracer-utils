@@ -183,10 +183,10 @@ TEST_SUITE("DFTracerRun") {
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, N).empty());
 
-        // Producer before consumer in CLI order == fuse order, so the consumer
-        // reads the value the producer published for the same batch.
+        // Consumer first on the command line: the fold order comes from the
+        // declared provides/consumes, so the producer still runs first.
         RunResult r = run_capture_stderr(run, {"-d", env.get_dir(), "--plugin",
-                                               producer, "--plugin", consumer});
+                                               consumer, "--plugin", producer});
         CHECK(r.exit_code == 0);
         CHECK(r.err.find("perbatch_consumer: WIRED") != std::string::npos);
         // Every generated event carries a duration, so the producer's summed
@@ -197,7 +197,7 @@ TEST_SUITE("DFTracerRun") {
         MESSAGE("perbatch wired: " << r.err);
     }
 
-    TEST_CASE("consumer alone logs the no-data fallback (no producer)") {
+    TEST_CASE("consumer alone fails before scanning (no producer)") {
         std::string run = env_or_probe("DFTRACER_RUN_PATH", "dftracer_run");
         std::string consumer = env_or_probe(
             "DFTRACER_PERBATCH_CONSUMER_PLUGIN_PATH", "perbatch_consumer.so");
@@ -212,9 +212,10 @@ TEST_SUITE("DFTracerRun") {
 
         RunResult r = run_capture_stderr(
             run, {"-d", env.get_dir(), "--plugin", consumer});
-        CHECK(r.exit_code == 0);
-        CHECK(r.err.find("perbatch_consumer: STANDALONE") != std::string::npos);
-        MESSAGE("perbatch standalone: " << r.err);
+        CHECK(r.exit_code != 0);
+        CHECK(r.err.find("com.example.perbatch_dur") != std::string::npos);
+        CHECK(r.err.find("no loaded plugin provides") != std::string::npos);
+        MESSAGE("perbatch unmet: " << r.err);
     }
 
     TEST_CASE("consumer reads producer's cross-worker-merged accumulator") {
@@ -233,8 +234,10 @@ TEST_SUITE("DFTracerRun") {
         REQUIRE(env.is_valid());
         REQUIRE(!create_pfw_gz(env, N).empty());
 
+        // Consumer first on the command line: agg_result still finds the
+        // producer's merged accumulator because the fold order is derived.
         RunResult r = run_capture_stderr(run, {"-d", env.get_dir(), "--plugin",
-                                               producer, "--plugin", consumer});
+                                               consumer, "--plugin", producer});
         CHECK(r.exit_code == 0);
         CHECK(r.err.find("dur_stats_consumer: WIRED") != std::string::npos);
         // The merged count equals the whole-scan event count only if every
@@ -249,7 +252,7 @@ TEST_SUITE("DFTracerRun") {
         MESSAGE("dur_stats wired: " << r.err);
     }
 
-    TEST_CASE("dur_stats consumer alone logs the standalone fallback") {
+    TEST_CASE("dur_stats consumer alone fails before scanning") {
         std::string run = env_or_probe("DFTRACER_RUN_PATH", "dftracer_run");
         std::string consumer = env_or_probe(
             "DFTRACER_DUR_STATS_CONSUMER_PLUGIN_PATH", "dur_stats_consumer.so");
@@ -264,10 +267,10 @@ TEST_SUITE("DFTracerRun") {
 
         RunResult r = run_capture_stderr(
             run, {"-d", env.get_dir(), "--plugin", consumer});
-        CHECK(r.exit_code == 0);
-        CHECK(r.err.find("dur_stats_consumer: STANDALONE") !=
-              std::string::npos);
-        MESSAGE("dur_stats standalone: " << r.err);
+        CHECK(r.exit_code != 0);
+        CHECK(r.err.find("com.example.dur_stats") != std::string::npos);
+        CHECK(r.err.find("no loaded plugin provides") != std::string::npos);
+        MESSAGE("dur_stats unmet: " << r.err);
     }
 
     TEST_CASE("missing plugin path fails cleanly") {

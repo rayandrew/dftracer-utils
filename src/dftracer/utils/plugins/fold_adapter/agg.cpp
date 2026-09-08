@@ -5,6 +5,7 @@
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/fold_adapter/ext.h>
+#include <dftracer/utils/plugins/reserved_names.h>
 
 #include <cstdint>
 #include <memory>
@@ -63,6 +64,13 @@ const void* detail::agg_ext_vtable() { return &g_agg; }
                                 const ::dftu_agg_col* specs,
                                 std::uint32_t spec_n) {
     if (!name || (key_n && !key_names) || spec_n == 0 || !specs) return nullptr;
+    if (is_host_namespace(name)) {
+        DFTRACER_UTILS_LOG_ERROR(
+            "Plugin agg '%s' refused: the 'dftu.' namespace belongs to the "
+            "host",
+            name);
+        return nullptr;
+    }
     std::uint64_t key = dftracer::utils::hash::fnv1a_hash(name);
     if (std::unique_ptr<AggAccum>* slot = aggs_.find(key))
         return reinterpret_cast<::dftu_agg*>(slot->get());
@@ -155,9 +163,10 @@ void PluginFold::agg_accumulate(::dftu_agg* a, const ::dftu_dataframe* df) {
     }
 }
 
-// Cross-plugin reads see only what a plugin that already finalized published,
-// which is the registration-order rule: an unpublished name reads back null
-// rather than this fold's own partial state.
+// Cross-plugin reads see only what a plugin that already finalized published.
+// The fold order puts every provider before its consumers, so a declared name
+// is always there; an undeclared one reads back null rather than this fold's
+// own partial state.
 ::dftu_dataframe* PluginFold::agg_result(const char* name) const {
     if (!name || !results_) return nullptr;
     auto it = results_->aggs.find(dftracer::utils::hash::fnv1a_hash(name));

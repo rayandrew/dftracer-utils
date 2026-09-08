@@ -232,7 +232,7 @@ static coro::CoroTask<int> run_plugins(const RunArgParse* cli,
         }
     }
 
-    // A load or capability failure must stop the run before any scanning.
+    // A load or fold-ordering failure must stop the run before any scanning.
     auto plugins = builder.build();
     if (!plugins) {
         DFTRACER_UTILS_LOG_ERROR("%s", plugins.error().format().c_str());

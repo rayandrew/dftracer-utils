@@ -3,10 +3,11 @@
 
 A jit plugin declares a batch-scoped publish port with jit.publish and another a
 consume port with jit.consume under the same port name; the host hands the
-per-batch published value across via DFTU_EXT_PORTS, producer first in
-registration order. These tests cover the generated C (publish/consume
-scaffolding) without a compiler, and the end-to-end data crossing (plus the
-absent-producer fallback) with one.
+per-batch published value across via DFTU_EXT_PORTS, running the producer first
+from the provides/consumes the JIT derives from the two bodies. These tests
+cover the generated C (publish/consume scaffolding and the derived name lists)
+without a compiler, and the end-to-end data crossing - in either declaration
+order, plus the absent-producer build error - with one.
 """
 
 import gzip
@@ -84,6 +85,43 @@ def test_jit_f64_publish_uses_double():
     src = P._jit_plugin.source
     assert "double _pub_tot = 0.0;" in src
     assert "_pub_tot += (double)" in src
+
+
+def test_jit_derives_provides_and_consumes():
+    @jit.plugin
+    class Both:
+        counts = jit.map(key=(jit.i64,), value=jit.count())
+        out = jit.publish("com.example.out", of=jit.u64)
+        inp = jit.consume("com.example.in", of=jit.u64)
+
+        @jit.each_event
+        def step(self, e):
+            if self.inp > 0:
+                self.counts[(e.pid,)] += 1
+            self.out += 1
+
+    src = Both._jit_plugin.source
+    # Produced: the published port and the accumulator this plugin creates.
+    assert (
+        'static const char* const _provides_names[3] = {"com.example.out", "counts", NULL};' in src
+    )
+    assert 'static const char* const _consumes_names[2] = {"com.example.in", NULL};' in src
+    assert "g_plugin.provides = provides;" in src
+    assert "g_plugin.consumes = consumes;" in src
+
+
+def test_jit_derives_no_consumes_without_a_consume_port():
+    @jit.plugin
+    class Solo:
+        counts = jit.map(key=(jit.i64,), value=jit.count())
+
+        @jit.each_event
+        def step(self, e):
+            self.counts[(e.pid,)] += 1
+
+    src = Solo._jit_plugin.source
+    assert "g_plugin.consumes = NULL;" in src
+    assert 'static const char* const _provides_names[2] = {"counts", NULL};' in src
 
 
 def test_jit_port_rejects_reserved_namespace():
@@ -185,15 +223,31 @@ def test_jit_ports_data_crosses_producer_to_consumer(tmp_path):
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_ports_absent_producer_reads_zero(tmp_path):
-    # A consume port with no producer degrades to reading 0, so the
-    # guard never fires and nothing is counted.
-    n = 40
-    _write_trace(str(tmp_path / "trace.pfw.gz"), n, [1, 2])
+def test_jit_ports_cross_in_either_declaration_order(tmp_path):
+    # The consumer is loaded first, which before the derived ordering left it
+    # reading nothing. The publish/consume names now decide the fold order.
+    n = 80
+    pids = [1, 2, 3]
+    _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids)
 
     host = PluginHost()
     host.load(_consumer())
+    host.load(_producer())
     results = host.run(str(tmp_path))
 
-    got = pa.table(results["got"])
-    assert got.num_rows == 0
+    seen = _pid_counts(pa.table(results["seen"]))
+    got = _pid_counts(pa.table(results["got"]))
+    assert got == seen
+    assert sum(got.values()) == n
+
+
+@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
+def test_jit_consume_without_a_producer_fails_the_build(tmp_path):
+    # A consume port no loaded plugin publishes is a load error, not a whole
+    # scan that quietly reads zero.
+    _write_trace(str(tmp_path / "trace.pfw.gz"), 40, [1, 2])
+
+    host = PluginHost()
+    host.load(_consumer())
+    with pytest.raises(Exception, match="com.example.batchsig"):
+        host.run(str(tmp_path))

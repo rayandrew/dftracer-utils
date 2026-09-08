@@ -158,10 +158,10 @@ def test_jit_scalar_only_plugin(tmp_path):
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_same_named_accumulator_is_shared_across_plugins(tmp_path):
-    # An accumulator is host-merged across a plugin's worker slices, so each
-    # plugin folds the whole scan into its own. A name two plugins share is one
-    # result name, not a summed one: it holds a single whole-scan fold.
+def test_jit_same_named_accumulator_in_two_plugins_fails_the_build(tmp_path):
+    # One accumulator name is one result name, so two plugins claiming it is a
+    # collision the host refuses at load rather than resolving last-writer-wins
+    # after a whole scan.
     @jit.plugin
     class A:
         shared_total = jit.map(key=(), value=jit.sum())
@@ -188,10 +188,5 @@ def test_jit_same_named_accumulator_is_shared_across_plugins(tmp_path):
     host = PluginHost()
     host.load(A)
     host.load(B)
-    results = host.run(str(tmp_path))
-
-    # Both plugins ran and each folded every event's dur.
-    assert _scalar(results, "a_total") == pytest.approx(float(sum(durs)))
-    assert _scalar(results, "b_total") == pytest.approx(float(sum(durs)))
-    # The shared name carries one whole-scan fold, not the two added together.
-    assert _scalar(results, "shared_total") == pytest.approx(float(sum(durs)))
+    with pytest.raises(Exception, match="shared_total"):
+        host.run(str(tmp_path))

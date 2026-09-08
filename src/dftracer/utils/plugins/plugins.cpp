@@ -4,6 +4,7 @@
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/plugins.h>
 #include <dftracer/utils/plugins/plugins_internal.h>
+#include <dftracer/utils/plugins/reserved_names.h>
 #include <dlfcn.h>
 
 #include <algorithm>
@@ -14,8 +15,10 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -49,6 +52,8 @@ struct Plugins::Impl {
     // deque pins each ConfigTree so factory-held roots stay valid until
     // teardown.
     std::deque<ConfigTree> configs;
+    // Providers before consumers; a full permutation of plugin indices.
+    std::vector<std::size_t> order;
     // The union prune, settled once at build so run() and attach() agree.
     std::optional<Query> prune;
 };
@@ -124,6 +129,111 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                                  plugin_name_from_path(path)};
 }
 
+// Kahn topological sort of `n` nodes over `from -> to` edges (from must precede
+// to). Ready nodes are drained lowest-index first so an independent set keeps
+// its registration order. A short return signals a cycle.
+std::vector<std::size_t> topo_sort(
+    std::size_t n,
+    const std::vector<std::pair<std::size_t, std::size_t>>& edges) {
+    std::vector<std::vector<std::size_t>> succ(n);
+    std::vector<std::size_t> indeg(n, 0);
+    for (const auto& [a, b] : edges) {
+        succ[a].push_back(b);
+        ++indeg[b];
+    }
+    std::priority_queue<std::size_t, std::vector<std::size_t>,
+                        std::greater<std::size_t>>
+        ready;
+    for (std::size_t i = 0; i < n; ++i)
+        if (indeg[i] == 0) ready.push(i);
+    std::vector<std::size_t> order;
+    order.reserve(n);
+    while (!ready.empty()) {
+        std::size_t u = ready.top();
+        ready.pop();
+        order.push_back(u);
+        for (std::size_t v : succ[u])
+            if (--indeg[v] == 0) ready.push(v);
+    }
+    return order;
+}
+
+// The plugin name a diagnostic should use: the load-path stem, or the index for
+// an injected plugin that has none.
+std::string plugin_label(const Plugins::Impl& impl, std::size_t i) {
+    const std::string& name = impl.plugins[i].name;
+    return name.empty() ? ("plugin " + std::to_string(i)) : ("'" + name + "'");
+}
+
+std::vector<std::string> name_list(const char* const* (*slot)(void*),
+                                   void* self) {
+    std::vector<std::string> out;
+    if (!slot) return out;
+    const char* const* names = slot(self);
+    if (!names) return out;
+    for (; *names; ++names)
+        if (**names) out.emplace_back(*names);
+    return out;
+}
+
+/// Order the fold so every provider of a name runs before the plugins that
+/// consume it, from the plugins' declared provides/consumes.
+Result<void> settle_order(Plugins::Impl& impl) {
+    for (std::size_t i = 0; i < impl.plugins.size(); ++i) {
+        const dftu_plugin* pl = impl.plugins[i].plugin;
+        for (const auto* slot : {&pl->provides, &pl->consumes})
+            for (const std::string& name : name_list(*slot, pl->self))
+                if (is_host_namespace(name))
+                    return make_error(
+                        ErrorCode::INVALID_ARGUMENT,
+                        "plugin " + plugin_label(impl, i) + " declares '" +
+                            name +
+                            "'; the 'dftu.' namespace belongs to the host and "
+                            "is refused to plugins");
+    }
+
+    std::unordered_map<std::string, std::size_t> producer;
+    for (std::size_t i = 0; i < impl.plugins.size(); ++i) {
+        const dftu_plugin* pl = impl.plugins[i].plugin;
+        for (const std::string& name : name_list(pl->provides, pl->self)) {
+            auto [it, fresh] = producer.emplace(name, i);
+            if (!fresh)
+                return make_error(ErrorCode::INVALID_ARGUMENT,
+                                  "plugins " + plugin_label(impl, it->second) +
+                                      " and " + plugin_label(impl, i) +
+                                      " both provide '" + name + "'");
+        }
+    }
+
+    std::vector<std::pair<std::size_t, std::size_t>> edges;
+    for (std::size_t i = 0; i < impl.plugins.size(); ++i) {
+        const dftu_plugin* pl = impl.plugins[i].plugin;
+        for (const std::string& name : name_list(pl->consumes, pl->self)) {
+            auto it = producer.find(name);
+            if (it == producer.end())
+                return make_error(ErrorCode::NOT_FOUND,
+                                  "plugin " + plugin_label(impl, i) +
+                                      " consumes '" + name +
+                                      "' which no loaded plugin provides");
+            if (it->second != i) edges.emplace_back(it->second, i);
+        }
+    }
+
+    impl.order = topo_sort(impl.plugins.size(), edges);
+    if (impl.order.size() != impl.plugins.size()) {
+        std::vector<bool> sorted(impl.plugins.size(), false);
+        for (std::size_t i : impl.order) sorted[i] = true;
+        std::size_t stuck = 0;
+        while (stuck < sorted.size() && sorted[stuck]) ++stuck;
+        impl.order.clear();
+        return make_error(
+            ErrorCode::INVALID_ARGUMENT,
+            "plugin provides/consumes graph has a cycle through " +
+                plugin_label(impl, stuck));
+    }
+    return {};
+}
+
 void settle_prune(Plugins::Impl& impl) {
     std::vector<const char*> plan_queries;
     plan_queries.reserve(impl.plugins.size());
@@ -195,6 +305,8 @@ Result<Plugins> Plugins::Builder::build() {
         if (!loaded) return unexpected(std::move(loaded).error());
         impl->plugins.push_back(std::move(*loaded));
     }
+    auto ordered = settle_order(*impl);
+    if (!ordered) return unexpected(std::move(ordered).error());
     settle_prune(*impl);
     return PluginsInternalAccess::make(std::move(impl));
 }
@@ -222,7 +334,7 @@ coro::CoroTask<Result<PluginRun>> Plugins::run(const View& view) const {
     owned.reserve(impl_->plugins.size());
     std::vector<Fold*> folds;
     folds.reserve(impl_->plugins.size());
-    for (std::size_t i = 0; i < impl_->plugins.size(); ++i) {
+    for (std::size_t i : impl_->order) {
         owned.push_back(std::make_unique<PluginFold>(
             impl_->plugins[i].plugin, intern, &shared, &out.results,
             impl_->plugins[i].name));
@@ -242,7 +354,7 @@ void Plugins::attach(trace::views::ViewSession& session,
     auto shared = std::make_shared<SharedResultRegistry>();
     results.clear();
     NamedResultRegistry* named = &results;
-    for (std::size_t i = 0; i < impl_->plugins.size(); ++i) {
+    for (std::size_t i : impl_->order) {
         const dftu_plugin* plugin = impl_->plugins[i].plugin;
         std::string name = impl_->plugins[i].name;
         session.attach_fold_factory(
@@ -260,8 +372,14 @@ Result<Plugins> build_injected_plugins(std::vector<dftu_plugin*> plugins) {
     impl->plugins.reserve(plugins.size());
     for (dftu_plugin* pl : plugins)
         impl->plugins.push_back({nullptr, pl, false, {}});
+    auto ordered = settle_order(*impl);
+    if (!ordered) return unexpected(std::move(ordered).error());
     settle_prune(*impl);
     return PluginsInternalAccess::make(std::move(impl));
+}
+
+std::vector<std::size_t> fold_order(const Plugins& set) {
+    return PluginsInternalAccess::impl(set).order;
 }
 
 }  // namespace dftracer::utils::plugins

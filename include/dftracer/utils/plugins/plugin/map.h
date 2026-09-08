@@ -334,8 +334,9 @@ class Host {
         return e && e->find ? e->find(h_->h, name) : nullptr;
     }
     /// Register a user op in the host's shared registry; see dftu_op_register.
-    /// Returns non-zero on a NULL desc/name, an already-registered name, or if
-    /// the host lacks the ops group.
+    /// The op must be named `<plugin>.<name>`: the bare and "dftu." namespaces
+    /// are the host's. Returns non-zero on a NULL desc/name, a name the host
+    /// keeps, an already-registered name, or if the host lacks the ops group.
     int register_op(const dftu_op_desc* desc) const {
         const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
         return e && e->register_op ? e->register_op(h_->h, desc) : -1;

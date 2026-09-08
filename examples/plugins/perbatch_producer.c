@@ -52,6 +52,13 @@ static dftu_task* on_finalize(void* slice, const dftu_host* host) {
 static void destroy_slice(void* slice) { free(slice); }
 static void destroy(void* self) { (void)self; }
 
+static const char* const provided[2] = {PERBATCH_PORT, NULL};
+
+static const char* const* provides(void* self) {
+    (void)self;
+    return provided;
+}
+
 static dftu_plugin g_plugin;
 
 DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
@@ -66,5 +73,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     g_plugin.on_finalize = on_finalize;
     g_plugin.destroy_slice = destroy_slice;
     g_plugin.destroy = destroy;
+    g_plugin.provides = provides;
     return &g_plugin;
 }

@@ -263,11 +263,47 @@ dftu_task* drive_coro(const dftu_host* host, Coro&& coro) {
                          : nullptr;
 }
 
+/// A Slice naming the ports and accumulators it produces via a static
+/// `provides()` returning a range of const char*.
+template <class Slice>
+concept DeclaresProvides = requires {
+    { std::begin(Slice::provides()) };
+    { std::end(Slice::provides()) };
+};
+
+/// A Slice naming the ports and accumulators it reads via a static
+/// `consumes()` returning a range of const char*.
+template <class Slice>
+concept DeclaresConsumes = requires {
+    { std::begin(Slice::consumes()) };
+    { std::end(Slice::consumes()) };
+};
+
+// The declared range copied into a NULL-terminated array with static storage,
+// which is the lifetime dftu_plugin::provides/consumes require.
+template <class Slice, bool Produced>
+const char* const* name_list_thunk(void*) {
+    static const std::vector<const char*> names = [] {
+        std::vector<const char*> v;
+        if constexpr (Produced) {
+            for (const char* n : Slice::provides()) v.push_back(n);
+        } else {
+            for (const char* n : Slice::consumes()) v.push_back(n);
+        }
+        v.push_back(nullptr);
+        return v;
+    }();
+    return names.data();
+}
+
 }  // namespace detail
 
 /** Build a dftu_plugin from a Slice providing Slice(const Config&), merge, and
    either sync step/finalize or a Task-returning on_batch/on_finalize coroutine,
-   plus optionally `static constexpr uint32_t needs`.
+   plus optionally `static constexpr uint32_t needs`. To take part in the fold
+   ordering a Slice may also declare `static ... provides()` and `static ...
+   consumes()`, each a range of const char* port/accumulator names outliving the
+   plugin; make_plugin wires them to dftu_plugin::provides / ::consumes.
    Exceptions must not escape the ABI boundary, so every callback catches. */
 template <class Slice>
 dftu_plugin* make_plugin(const dftu_value* config) {
@@ -359,6 +395,11 @@ dftu_plugin* make_plugin(const dftu_value* config) {
 
     vt.destroy_slice = [](void* slice) { delete static_cast<Slice*>(slice); };
     vt.destroy = [](void* self) { delete detail::holder_of<Slice>(self); };
+
+    if constexpr (detail::DeclaresProvides<Slice>)
+        vt.provides = &detail::name_list_thunk<Slice, true>;
+    if constexpr (detail::DeclaresConsumes<Slice>)
+        vt.consumes = &detail::name_list_thunk<Slice, false>;
 
     return &vt;
 }
