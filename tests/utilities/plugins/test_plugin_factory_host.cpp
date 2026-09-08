@@ -40,6 +40,9 @@ namespace fs = std::filesystem;
 #ifndef FACTORY_ESCAPES_PLUGIN_PATH
 #error "FACTORY_ESCAPES_PLUGIN_PATH must be defined by CMake"
 #endif
+#ifndef BUILDER_PLUGIN_PATH
+#error "BUILDER_PLUGIN_PATH must be defined by CMake"
+#endif
 
 namespace {
 
@@ -83,6 +86,14 @@ PluginRun run_set(const Plugins& set, const View& view) {
     return out;
 }
 
+std::string result_text(PluginRun& run, const char* name) {
+    auto it = run.results.results().find(name);
+    if (it == run.results.results().end()) return "(missing)";
+    const auto& bytes = std::get<std::vector<std::byte>>(it->second);
+    return std::string(reinterpret_cast<const char*>(bytes.data()),
+                       bytes.size());
+}
+
 }  // namespace
 
 TEST_CASE("an op registered by the factory is live before the scan") {
@@ -107,6 +118,27 @@ TEST_CASE("an op registered by the factory is live before the scan") {
     std::int64_t total = 0;
     std::memcpy(&total, bytes.data(), sizeof(total));
     CHECK(total == 2 * EVENTS);
+}
+
+TEST_CASE("the C++ builder registers a fold, an op and a state at once") {
+    auto set = Plugins::builder().add(BUILDER_PLUGIN_PATH).build();
+    INFO((set.has_value() ? std::string{} : set.error().message));
+    REQUIRE(set.has_value());
+
+    CHECK(dftu_op_find("builder_plugin.double_rows") != nullptr);
+
+    dftu_utils_test::TestEnvironment env(0);
+    REQUIRE(env.is_valid());
+    View view = View::from_files({make_trace(env, "builder")});
+    PluginRun run = run_set(*set, view);
+
+    // The fold half and the registered-state half of the same factory.
+    CHECK(result_text(run, "builder_plugin.rows") == std::to_string(EVENTS));
+    std::uint64_t want_dur = 0;
+    for (int i = 0; i < EVENTS; ++i)
+        want_dur += static_cast<std::uint64_t>(10 + i);
+    CHECK(result_text(run, "builder_plugin.total_dur") ==
+          std::to_string(want_dur));
 }
 
 TEST_CASE("a factory reaching past the registration surface fails the load") {

@@ -8,12 +8,15 @@
 
 #include <concepts>
 #include <coroutine>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <exception>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace dftracer::utils::plugins {
@@ -361,6 +364,228 @@ dftu_plugin* make_plugin(const dftu_value* config) {
         vt.consumes = &detail::name_list_thunk<Slice, false>;
 
     return &vt;
+}
+
+namespace detail {
+
+/// A state type whose whole-scan answer is a native dataframe the host takes
+/// ownership of; anything else must produce a byte string.
+template <class State>
+concept FrameFinalize = requires(State& s) {
+    { s.finalize() } -> std::same_as<dftu_dataframe*>;
+};
+
+/// A state that can be written out and read back, which is what lets the host
+/// spill it under the scan's memory budget.
+template <class State>
+concept Spillable = requires(const State& s, std::string_view b) {
+    { s.serialize() } -> std::convertible_to<std::string>;
+    { State::deserialize(b) } -> std::same_as<State*>;
+};
+
+/// A state that can say how big it is, which is the host's only measure of it
+/// against the memory budget.
+template <class State>
+concept Measurable = requires(const State& s) {
+    { s.bytes() } -> std::convertible_to<std::uint64_t>;
+};
+
+/// The fold a state-only plugin gets, so the host still has a slice to drive
+/// its registered states through.
+struct EmptySlice {
+    explicit EmptySlice(const Config&) {}
+    void step(const dftu_dataframe*, Host) {}
+    void merge(EmptySlice&) {}
+    void finalize(Host) {}
+};
+
+/// The state as the host holds it: the plugin's type plus the buffer a bytes
+/// finalize or a serialize hands back, so the pointer the host reads outlives
+/// the call that produced it.
+template <class State>
+struct StateBox {
+    State state;
+    std::string scratch;
+};
+
+/// The dftu_state_desc for `State`, filled from what State actually offers.
+/// Static so the address of every callback outlives the registration.
+template <class State>
+const dftu_state_desc& state_desc_of(const char* name) {
+    static dftu_state_desc desc = [name] {
+        using Box = StateBox<State>;
+        dftu_state_desc d{};
+        d.name = name;
+        d.init = [](void*) -> void* {
+            try {
+                return new Box();
+            } catch (...) {
+                return nullptr;
+            }
+        };
+        d.update = [](void* s, const dftu_dataframe* df, dftu_error*) -> int {
+            try {
+                static_cast<Box*>(s)->state.update(df);
+                return 0;
+            } catch (...) {
+                return -1;
+            }
+        };
+        d.merge = [](void* into, void* other, dftu_error*) -> int {
+            try {
+                static_cast<Box*>(into)->state.merge(
+                    static_cast<Box*>(other)->state);
+                return 0;
+            } catch (...) {
+                return -1;
+            }
+        };
+        if constexpr (Measurable<State>)
+            d.bytes = [](const void* s) -> std::uint64_t {
+                return static_cast<const Box*>(s)->state.bytes();
+            };
+        if constexpr (Spillable<State>) {
+            d.serialize = [](const void* s, dftu_bytes* out,
+                             dftu_error*) -> int {
+                try {
+                    auto* buf = new std::string(
+                        static_cast<const Box*>(s)->state.serialize());
+                    out->data = buf->data();
+                    out->len = buf->size();
+                    out->ud = buf;
+                    out->free_fn = [](void*, void* ud) {
+                        delete static_cast<std::string*>(ud);
+                    };
+                    return 0;
+                } catch (...) {
+                    return -1;
+                }
+            };
+            d.deserialize = [](void*, dftu_bytes in, dftu_error*) -> void* {
+                try {
+                    auto box = std::make_unique<Box>();
+                    std::unique_ptr<State> s{State::deserialize(
+                        std::string_view{static_cast<const char*>(in.data),
+                                         static_cast<std::size_t>(in.len)})};
+                    if (!s) return nullptr;
+                    box->state = std::move(*s);
+                    return box.release();
+                } catch (...) {
+                    return nullptr;
+                }
+            };
+        }
+        d.finalize = [](void* s, dftu_result_value* out, dftu_error*) -> int {
+            try {
+                Box& box = *static_cast<Box*>(s);
+                if constexpr (FrameFinalize<State>) {
+                    dftu_dataframe* frame = box.state.finalize();
+                    if (!frame) return -1;
+                    out->kind = DFTU_RESULT_KIND_FRAME;
+                    out->u.frame = frame;
+                } else {
+                    box.scratch = box.state.finalize();
+                    out->kind = DFTU_RESULT_KIND_BYTES;
+                    out->u.bytes.data = box.scratch.data();
+                    out->u.bytes.len = box.scratch.size();
+                }
+                return 0;
+            } catch (...) {
+                return -1;
+            }
+        };
+        d.destroy = [](void* s) { delete static_cast<Box*>(s); };
+        return d;
+    }();
+    return desc;
+}
+
+}  // namespace detail
+
+/** Assemble a plugin from the host the factory was handed. A plugin is no
+   longer just one fold: it may also register ops and state types, so the
+   descriptor is built up rather than reflected off a single Slice type.
+
+       return plugin(h, config).fold<MySlice>().state<MyGraph>("me.graph")
+                               .build();
+
+   Every step is optional and the order does not matter. build() returns NULL
+   if any step failed, which fails the load. Unrelated to Plugins::builder(),
+   which is how a caller LOADS plugins. */
+class PluginBuilder {
+   public:
+    PluginBuilder(dftu_host* host, const dftu_value* config)
+        : host_(host), config_(config) {}
+
+    /// The fold half, exactly as make_plugin<Slice> builds it. At most one.
+    template <class Slice>
+    PluginBuilder& fold() {
+        if (vt_) {
+            fail("a plugin has at most one fold");
+            return *this;
+        }
+        vt_ = make_plugin<Slice>(config_);
+        if (!vt_) fail("fold construction failed");
+        return *this;
+    }
+
+    /// Register a dataframe op, which must be named `<plugin>.<name>`.
+    PluginBuilder& op(const dftu_op_desc& desc) {
+        const dftu_ext_ops* ops = ext<dftu_ext_ops>(DFTU_EXT_OPS);
+        if (!ops || !ops->register_op) return fail("no op registry at load");
+        if (ops->register_op(host_->h, &desc) != 0)
+            return fail("op registration refused");
+        return *this;
+    }
+
+    /// Register `State` as a mergeable state type under `name`, which must be
+    /// `<plugin>.<name>` and outlive the plugin. State needs update(const
+    /// dftu_dataframe*), merge(State&) and finalize(); it additionally gets a
+    /// memory budget from bytes() and spilling from serialize() plus a static
+    /// deserialize(std::string_view) -> State*.
+    template <class State>
+    PluginBuilder& state(const char* name) {
+        const dftu_ext_agg* agg = ext<dftu_ext_agg>(DFTU_EXT_AGG);
+        if (!agg || !agg->register_state)
+            return fail("no state registry at load");
+        if (agg->register_state(host_->h, &detail::state_desc_of<State>(name),
+                                nullptr) != 0)
+            return fail("state registration refused");
+        return *this;
+    }
+
+    /// The finished descriptor, or NULL if any step failed. A plugin with no
+    /// fold still gets one: the host drives its registered states through it.
+    dftu_plugin* build() {
+        if (!ok_) return nullptr;
+        if (!vt_) fold<detail::EmptySlice>();
+        return vt_;
+    }
+
+   private:
+    template <class Ext>
+    const Ext* ext(const char* id) const {
+        if (!host_ || !host_->get_extension) return nullptr;
+        return static_cast<const Ext*>(host_->get_extension(host_->h, id));
+    }
+
+    PluginBuilder& fail(const char* why) {
+        ok_ = false;
+        if (host_ && host_->log)
+            host_->log(host_->h, DFTU_LOG_ERROR, why,
+                       static_cast<std::uint32_t>(std::strlen(why)));
+        return *this;
+    }
+
+    dftu_host* host_;
+    const dftu_value* config_;
+    dftu_plugin* vt_ = nullptr;
+    bool ok_ = true;
+};
+
+/// Entry point for the builder; see PluginBuilder.
+inline PluginBuilder plugin(dftu_host* host, const dftu_value* config) {
+    return PluginBuilder{host, config};
 }
 
 }  // namespace dftracer::utils::plugins
