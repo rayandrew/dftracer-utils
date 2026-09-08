@@ -633,45 +633,6 @@ class TopkCursor : public Cursor {
 // One run: single-group AggState blobs (agg_extract_group + agg_serialize),
 // length-prefixed, in ascending composite-key order (agg_sort_groups). The
 // on-disk unit a bounded k-way merge reads back one group at a time.
-void agg_write_run(AggState& st, const std::string& path) {
-    agg_sort_groups(st);
-    std::ofstream os(path, std::ios::binary);
-    const std::int64_t ng = agg_num_groups(st);
-    for (std::int64_t g = 0; g < ng; ++g) {
-        const std::string blob = agg_serialize(*agg_extract_group(st, g));
-        const std::uint32_t len = static_cast<std::uint32_t>(blob.size());
-        os.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        os.write(blob.data(), static_cast<std::streamsize>(blob.size()));
-    }
-}
-
-// Streams one sorted run's single-group states back, one record at a time.
-class AggRunReader {
-   public:
-    explicit AggRunReader(const std::string& path)
-        : is_(path, std::ios::binary) {
-        advance();
-    }
-    bool valid() const { return valid_; }
-    const AggState& state() const { return *cur_; }
-    void advance() {
-        std::uint32_t len = 0;
-        if (!is_.read(reinterpret_cast<char*>(&len), sizeof(len))) {
-            valid_ = false;
-            return;
-        }
-        std::string blob(len, '\0');
-        is_.read(blob.data(), static_cast<std::streamsize>(len));
-        cur_ = agg_deserialize(blob);
-        valid_ = true;
-    }
-
-   private:
-    std::ifstream is_;
-    AggStatePtr cur_;
-    bool valid_ = false;
-};
-
 // Streaming group-by: fold every morsel into one mergeable AggState. When the
 // accumulated state exceeds `budget`, flush it to a sorted-by-key run on disk
 // and start a fresh state (mirrors SortMergeCursor's external merge sort). No
@@ -821,7 +782,7 @@ class GroupByCursor : public Cursor {
                     if (p) agg_merge(*state, *p);
             }
             if (budget_ > 0 && agg_approx_bytes(*state) > budget_) {
-                agg_write_run(*state, dir_.run_path(run_id++));
+                spill::write_agg_run(*state, dir_.run_path(run_id++));
                 state = agg_new(specs_, dyn_specs_);
             }
         }
@@ -833,11 +794,11 @@ class GroupByCursor : public Cursor {
             spilled_ = false;
         } else {
             if (agg_num_groups(*state) > 0)
-                agg_write_run(*state, dir_.run_path(run_id++));
+                spill::write_agg_run(*state, dir_.run_path(run_id++));
             runs_.reserve(static_cast<std::size_t>(run_id));
             for (int i = 0; i < run_id; ++i)
                 runs_.push_back(
-                    std::make_unique<AggRunReader>(dir_.run_path(i)));
+                    std::make_unique<spill::AggRunReader>(dir_.run_path(i)));
             spilled_ = true;
         }
         built_ = true;
@@ -912,7 +873,7 @@ class GroupByCursor : public Cursor {
     bool dyn_drained_ = false;
     Morsel result_;
     spill::Dir dir_;
-    std::vector<std::unique_ptr<AggRunReader>> runs_;
+    std::vector<std::unique_ptr<spill::AggRunReader>> runs_;
 };
 
 // Streaming tumbling/sliding time-window aggregation over an ascending Int64

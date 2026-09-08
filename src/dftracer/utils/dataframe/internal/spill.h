@@ -1,6 +1,7 @@
 #ifndef DFTRACER_UTILS_DATAFRAME_INTERNAL_SPILL_H
 #define DFTRACER_UTILS_DATAFRAME_INTERNAL_SPILL_H
 
+#include <dftracer/utils/dataframe/agg.h>        // AggState, AggStatePtr
 #include <dftracer/utils/dataframe/lazyframe.h>  // Cursor, Morsel
 #include <dftracer/utils/dataframe/series.h>
 
@@ -58,6 +59,28 @@ class Reader : public Cursor {
 
    private:
     std::ifstream is_;
+};
+
+/// One aggregation run file: the groups of an AggState sorted by composite
+/// key, each `agg_extract_group` + `agg_serialize` blob written with a u32
+/// length prefix. Both spill drivers (the lazy group-by breaker and the
+/// long-lived AggSpiller) read and write this one format, so it cannot drift
+/// between them. Throws std::runtime_error if `path` cannot be opened - a
+/// silently empty run loses the groups it was meant to hold.
+void write_agg_run(AggState& state, const std::string& path);
+
+/// Streams one run's single-group states back in key order.
+class AggRunReader {
+   public:
+    explicit AggRunReader(const std::string& path);
+    bool valid() const { return valid_; }
+    const AggState& state() const { return *cur_; }
+    void advance();
+
+   private:
+    std::ifstream is_;
+    AggStatePtr cur_;
+    bool valid_ = false;
 };
 
 /// A replayable copy of a morsel stream: keeps morsels in memory up to `budget`

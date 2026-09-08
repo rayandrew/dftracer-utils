@@ -232,4 +232,34 @@ coro::CoroTask<std::optional<Morsel>> Reader::next(std::int64_t /*max_rows*/) {
     co_return m;
 }
 
+void write_agg_run(AggState& state, const std::string& path) {
+    agg_sort_groups(state);
+    std::ofstream os(path, std::ios::binary);
+    if (!os) throw std::runtime_error("agg spill: cannot open run " + path);
+    const std::int64_t ng = agg_num_groups(state);
+    for (std::int64_t g = 0; g < ng; ++g) {
+        const std::string blob = agg_serialize(*agg_extract_group(state, g));
+        const std::uint32_t len = static_cast<std::uint32_t>(blob.size());
+        os.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        os.write(blob.data(), static_cast<std::streamsize>(blob.size()));
+    }
+}
+
+AggRunReader::AggRunReader(const std::string& path)
+    : is_(path, std::ios::binary) {
+    advance();
+}
+
+void AggRunReader::advance() {
+    std::uint32_t len = 0;
+    if (!is_.read(reinterpret_cast<char*>(&len), sizeof(len))) {
+        valid_ = false;
+        return;
+    }
+    std::string blob(len, '\0');
+    is_.read(blob.data(), static_cast<std::streamsize>(len));
+    cur_ = agg_deserialize(blob);
+    valid_ = true;
+}
+
 }  // namespace dftracer::utils::dataframe::spill

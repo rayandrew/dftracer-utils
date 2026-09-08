@@ -32,21 +32,6 @@ bool op_is_nested(AggOp op) {
            op == AggOp::BottomK || op == AggOp::ApproxTopK;
 }
 
-// One run file: single-group AggState blobs (agg_extract_group +
-// agg_serialize), length-prefixed, in ascending composite-key order.
-void write_run(AggState& st, const std::string& path) {
-    agg_sort_groups(st);
-    std::ofstream os(path, std::ios::binary);
-    if (!os) throw std::runtime_error("agg spill: cannot open run " + path);
-    const std::int64_t ng = agg_num_groups(st);
-    for (std::int64_t g = 0; g < ng; ++g) {
-        const std::string blob = agg_serialize(*agg_extract_group(st, g));
-        const std::uint32_t len = static_cast<std::uint32_t>(blob.size());
-        os.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        os.write(blob.data(), static_cast<std::streamsize>(blob.size()));
-    }
-}
-
 // A key-ordered stream of single-group states, so the drain merge is a k-way
 // merge over readers however the groups are stored.
 class GroupSource {
@@ -59,27 +44,13 @@ class GroupSource {
 
 class RunSource : public GroupSource {
    public:
-    explicit RunSource(const std::string& path) : is_(path, std::ios::binary) {
-        advance();
-    }
-    bool valid() const override { return valid_; }
-    const AggState& state() const override { return *cur_; }
-    void advance() override {
-        std::uint32_t len = 0;
-        if (!is_.read(reinterpret_cast<char*>(&len), sizeof(len))) {
-            valid_ = false;
-            return;
-        }
-        std::string blob(len, '\0');
-        is_.read(blob.data(), static_cast<std::streamsize>(len));
-        cur_ = agg_deserialize(blob);
-        valid_ = true;
-    }
+    explicit RunSource(const std::string& path) : reader_(path) {}
+    bool valid() const override { return reader_.valid(); }
+    const AggState& state() const override { return reader_.state(); }
+    void advance() override { reader_.advance(); }
 
    private:
-    std::ifstream is_;
-    AggStatePtr cur_;
-    bool valid_ = false;
+    spill::AggRunReader reader_;
 };
 
 // The still-live state, read in key order without mutating (and so without
@@ -142,7 +113,7 @@ bool AggSpiller::maybe_spill(AggStatePtr& state) {
     if (!state || impl_->budget == NO_SPILL_BUDGET) return false;
     if (agg_approx_bytes(*state) <= impl_->budget) return false;
     std::vector<AggSpec> specs = agg_specs(*state);
-    write_run(*state, impl_->new_run_path());
+    spill::write_agg_run(*state, impl_->new_run_path());
     DFTRACER_UTILS_LOG_DEBUG(
         "Aggregation spilled run %d (%lld groups) past the %llu byte budget",
         impl_->next_id - 1, static_cast<long long>(agg_num_groups(*state)),
