@@ -53,10 +53,22 @@ void agg_sort_groups(AggState& st) {
         permute_blocks(st.fl_last_idx, perm, st.nf);
     }
     if (st.has_sketch) permute_blocks(st.sketches, perm, st.n_sketch);
-    if (st.has_argmax) {
-        permute_blocks(st.argmax_by, perm, st.n_argmax);
-        permute_blocks(st.argmax_has, perm, st.n_argmax);
-        permute_blocks(st.argmax_repr, perm, st.n_argmax);
+    if (st.has_arg) {
+        permute_blocks(st.arg_by, perm, st.n_arg);
+        permute_blocks(st.arg_has, perm, st.n_arg);
+        permute_blocks(st.arg_repr, perm, st.n_arg_repr);
+    }
+    if (st.has_bitor) permute_blocks(st.bitor_acc, perm, st.n_bitor);
+    if (st.has_kmv) permute_blocks(st.kmv, perm, st.n_kmv);
+    if (st.has_lst) permute_blocks(st.lst, perm, st.n_lst);
+    if (st.has_ss) permute_blocks(st.ss_counters, perm, st.n_ss);
+    if (st.has_co) {
+        permute_blocks(st.co_n, perm, st.n_co);
+        permute_blocks(st.co_sx, perm, st.n_co);
+        permute_blocks(st.co_sy, perm, st.n_co);
+        permute_blocks(st.co_sxx, perm, st.n_co);
+        permute_blocks(st.co_syy, perm, st.n_co);
+        permute_blocks(st.co_sxy, perm, st.n_co);
     }
     if (st.has_set) permute_blocks(st.sets, perm, st.n_set);
     if (st.has_occ) {
@@ -116,12 +128,45 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
         for (std::size_t sk = 0; sk < st.n_sketch; ++sk)
             out->sketches[sk] = st.sketches[sbase + sk];
     }
-    if (st.has_argmax) {
-        const std::size_t abase = static_cast<std::size_t>(g) * st.n_argmax;
-        for (std::size_t slot = 0; slot < st.n_argmax; ++slot) {
-            out->argmax_by[slot] = st.argmax_by[abase + slot];
-            out->argmax_has[slot] = st.argmax_has[abase + slot];
-            out->argmax_repr[slot] = st.argmax_repr[abase + slot];
+    if (st.has_arg) {
+        const std::size_t abase = static_cast<std::size_t>(g) * st.n_arg;
+        for (std::size_t slot = 0; slot < st.n_arg; ++slot) {
+            out->arg_by[slot] = st.arg_by[abase + slot];
+            out->arg_has[slot] = st.arg_has[abase + slot];
+        }
+        const std::size_t rbase = static_cast<std::size_t>(g) * st.n_arg_repr;
+        for (std::size_t ri = 0; ri < st.n_arg_repr; ++ri)
+            out->arg_repr[ri] = st.arg_repr[rbase + ri];
+    }
+    if (st.has_bitor) {
+        const std::size_t bbase = static_cast<std::size_t>(g) * st.n_bitor;
+        for (std::size_t slot = 0; slot < st.n_bitor; ++slot)
+            out->bitor_acc[slot] = st.bitor_acc[bbase + slot];
+    }
+    if (st.has_kmv) {
+        const std::size_t kbase = static_cast<std::size_t>(g) * st.n_kmv;
+        for (std::size_t slot = 0; slot < st.n_kmv; ++slot)
+            out->kmv[slot] = st.kmv[kbase + slot];
+    }
+    if (st.has_lst) {
+        const std::size_t lbase = static_cast<std::size_t>(g) * st.n_lst;
+        for (std::size_t slot = 0; slot < st.n_lst; ++slot)
+            out->lst[slot] = st.lst[lbase + slot];
+    }
+    if (st.has_ss) {
+        const std::size_t sbase = static_cast<std::size_t>(g) * st.n_ss;
+        for (std::size_t slot = 0; slot < st.n_ss; ++slot)
+            out->ss_counters[slot] = st.ss_counters[sbase + slot];
+    }
+    if (st.has_co) {
+        const std::size_t cbase = static_cast<std::size_t>(g) * st.n_co;
+        for (std::size_t slot = 0; slot < st.n_co; ++slot) {
+            out->co_n[slot] = st.co_n[cbase + slot];
+            out->co_sx[slot] = st.co_sx[cbase + slot];
+            out->co_sy[slot] = st.co_sy[cbase + slot];
+            out->co_sxx[slot] = st.co_sxx[cbase + slot];
+            out->co_syy[slot] = st.co_syy[cbase + slot];
+            out->co_sxy[slot] = st.co_sxy[cbase + slot];
         }
     }
     if (st.has_set) {
@@ -147,8 +192,8 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
 }
 
 // The seed path rebuilds a group only from a FieldStat + optional DDSketch;
-// First/Last, ArgMax, SetUnion and occupancy keep no such state. No default:
-// -Wswitch keeps this complete.
+// First/Last, the extremum/list/sketch ops, SetUnion, the co-moments and
+// occupancy keep no such state. No default: -Wswitch keeps this complete.
 static bool agg_op_seedable(AggOp op) {
     switch (op) {
         case AggOp::Count:
@@ -168,7 +213,21 @@ static bool agg_op_seedable(AggOp op) {
         case AggOp::First:
         case AggOp::Last:
         case AggOp::ArgMax:
+        case AggOp::ArgMin:
         case AggOp::SetUnion:
+        case AggOp::BitOr:
+        case AggOp::Distinct:
+        case AggOp::ListSorted:
+        case AggOp::TopK:
+        case AggOp::BottomK:
+        case AggOp::ApproxTopK:
+        case AggOp::Sample:
+        case AggOp::Corr:
+        case AggOp::CovarPop:
+        case AggOp::CovarSamp:
+        case AggOp::RegrSlope:
+        case AggOp::RegrIntercept:
+        case AggOp::RegrR2:
         case AggOp::Busy:
         case AggOp::Concurrency:
         case AggOp::Utilization:
@@ -197,7 +256,8 @@ void agg_seed_group(AggState& st, const std::vector<std::string>& str_keys,
         if (!agg_op_seedable(sp.op))
             throw std::logic_error(
                 "agg_seed_group: an aggregate op has no FieldStat/sketch seed "
-                "representation (First/Last/ArgMax/SetUnion/occupancy)");
+                "representation (First/Last, the extremum/list/sketch ops, "
+                "SetUnion, the co-moments, occupancy)");
     const std::int64_t g = st.find_or_add_group(
         [](std::size_t) -> std::int64_t { return 0; },
         [&](std::size_t k) -> std::string_view { return str_keys[k]; });

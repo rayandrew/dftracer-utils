@@ -47,7 +47,7 @@ def unnest(
 ) -> "pa.Table":
     """Explode a list-typed ``column`` of a ``run()`` map result into one row per
     element, repeating the other columns; the inverse of the set/list/top-k
-    monoids.
+    aggregates.
 
     ``result`` is any ``run()`` map value (an eager Arrow table, a
     ``pyarrow.RecordBatchReader``, or a ``pyarrow.RecordBatch``). ``column`` names

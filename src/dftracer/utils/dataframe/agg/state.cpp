@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/hash/fnv1a.h>
 #include <dftracer/utils/dataframe/agg/detail.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_i64/u64/f64
 #include <dftracer/utils/dataframe/sketch.h>  // DDSketch, sketch_bucket_keys
@@ -7,6 +8,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace dftracer::utils::dataframe {
@@ -98,6 +100,14 @@ std::string cell_repr(const Series& c, std::int64_t i) {
     }
 }
 
+// KMV element hash. FNV-1a avalanches poorly, so the mix is what makes the
+// bottom-k order (and the [0,1) normalization the estimator divides by)
+// uniform.
+std::uint64_t kmv_hash(std::string_view v) {
+    return dftracer::utils::hash::fnv1a_mix(
+        dftracer::utils::hash::fnv1a_hash(v));
+}
+
 }  // namespace
 
 void AggStateDeleter::operator()(AggState* p) const noexcept { delete p; }
@@ -143,7 +153,13 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
         }
         st.inited = true;
     }
-    if (end < 0) end = keys.empty() ? 0 : keys[0]->length();
+    // A zero-key state (the whole batch is one group) has no key column to read
+    // the row count from, so fall back to a value column; a caller with neither
+    // must pass `end` explicitly.
+    if (end < 0)
+        end = !keys.empty()     ? keys[0]->length()
+              : !values.empty() ? values[0]->length()
+                                : 0;
     const std::int64_t clen = end - begin;
 
     // Precompute DDSketch bucket keys for each sketch field in one SIMD pass
@@ -206,28 +222,114 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                 }
             }
         }
-        if (st.has_argmax) {
-            for (std::size_t slot = 0; slot < st.n_argmax; ++slot) {
+        if (st.has_arg) {
+            const std::size_t abase = static_cast<std::size_t>(g) * st.n_arg;
+            const std::size_t rbase =
+                static_cast<std::size_t>(g) * st.n_arg_repr;
+            for (std::size_t slot = 0; slot < st.n_arg; ++slot) {
                 const Series* byc =
-                    values[static_cast<std::size_t>(st.argmax_by_col[slot])];
+                    values[static_cast<std::size_t>(st.arg_by_col[slot])];
                 if (byc->is_null(i)) continue;
-                // argmax_by is double-keyed (storage, merge compare,
-                // serialize), so an integer by-value above 2^53 loses exactness
-                // here.
+                // arg_by is double-keyed (storage, merge compare, serialize),
+                // so an integer by-value above 2^53 loses exactness here.
                 const double byv =
                     read_as_double(*byc, i, col_domain(byc->type()));
-                const std::size_t as =
-                    static_cast<std::size_t>(g) * st.n_argmax + slot;
-                if (!st.argmax_has[as] || byv > st.argmax_by[as]) {
-                    st.argmax_by[as] = byv;
-                    st.argmax_has[as] = 1;
+                const std::size_t as = abase + slot;
+                const std::vector<int>& reprs = st.arg_slot_reprs[slot];
+                // A missing value at the winning row reprs as "" (matches the
+                // View fold's src.value(field) for an absent field).
+                auto repr_of = [&](int ri) -> std::string {
                     const Series* vc = values[static_cast<std::size_t>(
-                        st.argmax_val_col[slot])];
-                    // A missing value at the max-by row reprs as "" (matches
-                    // the View fold's src.value(field) for an absent field).
-                    st.argmax_repr[as] =
-                        vc->is_null(i) ? std::string() : cell_repr(*vc, i);
-                }
+                        st.arg_val_col[static_cast<std::size_t>(ri)])];
+                    return vc->is_null(i) ? std::string() : cell_repr(*vc, i);
+                };
+                // Strict compare, so a tie keeps the row seen first; the View
+                // fold does the same and the two engines are compared row for
+                // row.
+                const bool adopt =
+                    !st.arg_has[as] ||
+                    (st.arg_dir[slot] == ArgDir::Max ? byv > st.arg_by[as]
+                                                     : byv < st.arg_by[as]);
+                if (!adopt) continue;
+                st.arg_by[as] = byv;
+                st.arg_has[as] = 1;
+                for (int ri : reprs)
+                    st.arg_repr[rbase + static_cast<std::size_t>(ri)] =
+                        repr_of(ri);
+            }
+        }
+        if (st.has_bitor) {
+            const std::size_t bbase = static_cast<std::size_t>(g) * st.n_bitor;
+            for (std::size_t slot = 0; slot < st.n_bitor; ++slot) {
+                const Series* vc =
+                    values[static_cast<std::size_t>(st.bitor_val_col[slot])];
+                if (vc->is_null(i)) continue;
+                st.bitor_acc[bbase + slot] |=
+                    read_u64_exact(*vc, i, col_domain(vc->type()));
+            }
+        }
+        if (st.has_kmv) {
+            const std::size_t kbase = static_cast<std::size_t>(g) * st.n_kmv;
+            for (std::size_t slot = 0; slot < st.n_kmv; ++slot) {
+                const Series* vc =
+                    values[static_cast<std::size_t>(st.kmv_val_col[slot])];
+                if (vc->is_null(i)) continue;
+                std::string v = cell_repr(*vc, i);
+                KmvMap& m = st.kmv[kbase + slot];
+                const std::uint64_t h = kmv_hash(v);
+                // Past the k-th smallest hash the element cannot enter, so the
+                // common case costs one compare and no allocation.
+                if (m.size() >= st.kmv_k[slot] && h >= m.rbegin()->first)
+                    continue;
+                m.insert_or_assign(h, std::move(v));
+                kmv_trim(m, st.kmv_k[slot]);
+            }
+        }
+        if (st.has_lst) {
+            const std::size_t lbase = static_cast<std::size_t>(g) * st.n_lst;
+            for (std::size_t slot = 0; slot < st.n_lst; ++slot) {
+                const Series* vc =
+                    values[static_cast<std::size_t>(st.lst_val_col[slot])];
+                const Series* byc =
+                    values[static_cast<std::size_t>(st.lst_by_col[slot])];
+                if (byc->is_null(i) || vc->is_null(i)) continue;
+                ListItems& items = st.lst[lbase + slot];
+                items.emplace_back(
+                    read_as_double(*byc, i, col_domain(byc->type())),
+                    cell_repr(*vc, i));
+                const std::size_t k = st.lst_k[slot];
+                if (k > 0 && items.size() > k)
+                    list_bound(items, st.lst_kind[slot], k);
+            }
+        }
+        if (st.has_ss) {
+            const std::size_t sbase = static_cast<std::size_t>(g) * st.n_ss;
+            for (std::size_t slot = 0; slot < st.n_ss; ++slot) {
+                const Series* vc =
+                    values[static_cast<std::size_t>(st.ss_val_col[slot])];
+                if (vc->is_null(i)) continue;
+                space_saving_offer(st.ss_counters[sbase + slot], st.ss_k[slot],
+                                   cell_repr(*vc, i), 1);
+            }
+        }
+        if (st.has_co) {
+            const std::size_t cbase = static_cast<std::size_t>(g) * st.n_co;
+            for (std::size_t slot = 0; slot < st.n_co; ++slot) {
+                const Series* vc =
+                    values[static_cast<std::size_t>(st.co_val_col[slot])];
+                const Series* byc =
+                    values[static_cast<std::size_t>(st.co_by_col[slot])];
+                if (vc->is_null(i) || byc->is_null(i)) continue;
+                const double x =
+                    read_as_double(*byc, i, col_domain(byc->type()));
+                const double y = read_as_double(*vc, i, col_domain(vc->type()));
+                const std::size_t cs = cbase + slot;
+                st.co_n[cs] += 1.0;
+                st.co_sx[cs] += x;
+                st.co_sy[cs] += y;
+                st.co_sxx[cs] += x * x;
+                st.co_syy[cs] += y * y;
+                st.co_sxy[cs] += x * y;
             }
         }
         if (st.has_set) {

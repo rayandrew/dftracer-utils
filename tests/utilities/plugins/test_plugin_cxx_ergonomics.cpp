@@ -1,6 +1,6 @@
 // Exercises the additive C++-ergonomics layer over the plugin C ABI: the
-// Sketch RAII owner, co_await-able Io ops, typed row/key encoders, the
-// MonoidValue view, and the owning Arrow helpers.
+// Sketch RAII owner, co_await-able Io ops, the StrId interning view, the
+// AggCol / agg:: aggregate builders, and the owning Arrow helpers.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/string_intern.h>
@@ -8,8 +8,13 @@
 #include <dftracer/utils/plugins/abi.h>
 #include <dftracer/utils/plugins/dftu_generated_utilities.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
+// After fold_adapter.h so nanoarrow is set up before dataframe/abi.h's
+// arrow_abi.
+#include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/agg_op_codes.h>
 #include <dftracer/utils/plugins/plugin.h>
 #include <dftracer/utils/plugins/result_registry.h>
+#include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/fold_event.h>
 #include <doctest/doctest.h>
@@ -31,10 +36,14 @@
 using dftracer::utils::CoroScope;
 using dftracer::utils::Runtime;
 using dftracer::utils::StringIntern;
+using dftracer::utils::plugins::AggCol;
+using dftracer::utils::plugins::AggOp;
 using dftracer::utils::plugins::NamedResultRegistry;
 using dftracer::utils::plugins::OwnedArrow;
+using dftracer::utils::plugins::OwnedDataFrame;
 using dftracer::utils::plugins::PluginFold;
 using dftracer::utils::plugins::SharedResultRegistry;
+namespace agg = dftracer::utils::plugins::agg;
 namespace views = dftracer::utils::trace::views;
 using views::detail::CoverageSet;
 using views::detail::FoldBatch;
@@ -142,52 +151,69 @@ TEST_CASE("plugin cxx: Io ops are co_await-able directly") {
     CHECK(bytes == static_cast<std::int64_t>(body.size()));
 }
 
-TEST_CASE("plugin cxx: typed row and key helpers encode without hand casts") {
-    using namespace dftracer::utils::plugins;
-
-    dftu_row_val ru = row_u64(2, 7);
-    CHECK(ru.comp == 2);
-    CHECK(ru.is_f64 == 0);
-    CHECK(ru.value.u == 7u);
-
-    dftu_row_val rf = row_f64(1, 3.5);
-    CHECK(rf.comp == 1);
-    CHECK(rf.is_f64 == 1);
-    CHECK(rf.value.f == doctest::Approx(3.5));
-
-    CHECK(key_of(static_cast<std::int32_t>(-5)) == -5);
-    CHECK(key_of(static_cast<std::uint32_t>(11)) == 11);
-    CHECK(key_of(static_cast<std::int64_t>(1LL << 40)) == (1LL << 40));
-
-    double d = 2.718281828;
-    std::int64_t bits = key_of(d);
-    double back = 0;
-    std::memcpy(&back, &bits, sizeof(back));
-    CHECK(back == d);  // exact-bit round-trip
-
+TEST_CASE("plugin cxx: StrId hides the raw interned-id integer") {
     HostFixture fx;
     dftracer::utils::plugins::Host h{&fx.host()};
-    std::int64_t id = key_of(h, std::string_view("POSIX"));
-    CHECK(id != DFTU_STR_NONE);
-    CHECK(h.str(dftracer::utils::plugins::StrId{static_cast<dftu_str>(id)}) ==
-          "POSIX");
-    CHECK(key_of(h, std::string_view("POSIX")) == id);  // interning is stable
+
+    const dftracer::utils::plugins::StrId id = h.intern("POSIX");
+    CHECK_FALSE(id.absent());
+    CHECK(h.str(id) == "POSIX");
+    CHECK(h.intern("POSIX") == id);  // interning is stable
+    CHECK(h.intern("STDIO") != id);
+
+    // A default StrId is the DFTU_STR_NONE sentinel and resolves to nothing.
+    const dftracer::utils::plugins::StrId none;
+    CHECK(none.absent());
+    CHECK(none.raw() == DFTU_STR_NONE);
+    CHECK(h.str(none).empty());
 }
 
-TEST_CASE("plugin cxx: MonoidValue typed accessors select by kind") {
-    dftu_monoid_value mv{};
-    mv.kind = DFTU_MONOID_COUNTER;
-    mv.as.u64 = 42;
-    dftracer::utils::plugins::MonoidValue counter{mv};
-    CHECK(counter.kind() == DFTU_MONOID_COUNTER);
-    CHECK(counter.as_u64() == 42u);
+TEST_CASE("plugin cxx: AggCol builds a dftu_agg_col without hand casts") {
+    const dftu_agg_col raw =
+        AggCol(AggOp::Pct).value("dur").out("p90_dur").param(0.9).raw();
+    CHECK(raw.op == DFTU_AGG_PCT);
+    CHECK(std::string(raw.value) == "dur");
+    CHECK(std::string(raw.out) == "p90_dur");
+    CHECK(raw.param == doctest::Approx(0.9));
+    CHECK(raw.by == nullptr);
 
-    dftu_monoid_value mf{};
-    mf.kind = DFTU_MONOID_SUM_F64;
-    mf.as.f64 = 1.25;
-    dftracer::utils::plugins::MonoidValue sum{mf};
-    CHECK(sum.kind() == DFTU_MONOID_SUM_F64);
-    CHECK(sum.as_f64() == doctest::Approx(1.25));
+    // The op stays a named enum on both sides of the seam.
+    CHECK(static_cast<dftu_agg_op>(AggOp::Argmax) == DFTU_AGG_ARGMAX);
+    CHECK(static_cast<dftu_agg_op>(AggOp::SetUnion) == DFTU_AGG_SET_UNION);
+}
+
+TEST_CASE("plugin cxx: agg:: factories fill only the fields their op takes") {
+    // Single-input reductions: value + out, no param, no by.
+    for (const AggCol& c :
+         {agg::sumsq("dur", "sumsq_dur"), agg::var("dur", "var_dur"),
+          agg::std_dev("dur", "std_dur"), agg::skew("dur", "skew_dur"),
+          agg::kurt("dur", "kurt_dur"), agg::first("name", "first_name"),
+          agg::last("name", "last_name"), agg::set_union("name", "names"),
+          agg::hist("dur", "hist_dur"), agg::count_valid("dur", "n_dur")}) {
+        const dftu_agg_col raw = c.raw();
+        CHECK(raw.value != nullptr);
+        CHECK(raw.out != nullptr);
+        CHECK(raw.by == nullptr);
+        CHECK(raw.param == doctest::Approx(0.0));
+    }
+    CHECK(agg::sumsq("dur", "sumsq_dur").raw().op == DFTU_AGG_SUMSQ);
+    CHECK(agg::hist("dur", "hist_dur").raw().op == DFTU_AGG_HIST);
+    CHECK(agg::count_valid("dur", "n_dur").raw().op == DFTU_AGG_COUNT_VALID);
+
+    // The occupancy ops take the (ts, dur) pair plus the snap tolerance.
+    const dftu_agg_col conc = agg::concurrency("ts", "dur", "conc", 4.0).raw();
+    CHECK(conc.op == DFTU_AGG_CONCURRENCY);
+    CHECK(std::string(conc.value) == "ts");
+    CHECK(std::string(conc.by) == "dur");
+    CHECK(conc.param == doctest::Approx(4.0));
+
+    const dftu_agg_col util = agg::utilization("ts", "dur", "util").raw();
+    CHECK(util.op == DFTU_AGG_UTILIZATION);
+    CHECK(util.param == doctest::Approx(0.0));  // exact endpoints by default
+
+    const dftu_agg_col act = agg::active("ts", "dur", "peak").raw();
+    CHECK(act.op == DFTU_AGG_ACTIVE);
+    CHECK(std::string(act.by) == "dur");
 }
 
 TEST_CASE("plugin cxx: Batch view iterates typed Events") {
@@ -386,110 +412,132 @@ TEST_CASE("plugin cxx: owning batch_to_arrow releases in its destructor") {
 
 namespace {
 
-using dftracer::utils::plugins::Key;
-using dftracer::utils::plugins::Map;
-using dftracer::utils::plugins::Monoid;
-
-// Feeds two typed Maps per event: a counter keyed on pid via the map[key] += 1
-// sugar, and a single-value ARGMAX_I64 keyed on pid that keeps the tid at the
-// largest duration. Neither names a DFTU_MONOID_* nor hand-encodes a key.
-struct TypedMapSlice {
-    explicit TypedMapSlice(const dftracer::utils::plugins::Config&) {}
-    void step(const dftracer::utils::plugins::Batch& b,
-              dftracer::utils::plugins::Host h) {
-        Map<std::int64_t> hits = h.counter_map("hits", Key<std::int64_t>{});
-        Map<std::int64_t> amax =
-            h.map("amax", Monoid::ArgMax_I64, Key<std::int64_t>{});
-        for (const dftracer::utils::plugins::Event& e : b) {
-            const std::int64_t pid = static_cast<std::int64_t>(e.pid());
-            hits[pid] += 1;
-            amax.add_argby(pid, static_cast<double>(e.dur()),
-                           static_cast<std::int64_t>(e.tid()));
-        }
-    }
-    void merge(TypedMapSlice&) {}
-    void finalize(dftracer::utils::plugins::Host) {}
-};
-
-struct FoldHolder {
-    dftu_plugin* plugin;
-    std::unique_ptr<PluginFold> fold;
-    FoldHolder(dftu_plugin* p, StringIntern& intern, SharedResultRegistry* reg,
-               NamedResultRegistry* named)
-        : plugin(p),
-          fold(std::make_unique<PluginFold>(p, intern, reg, named)) {}
-    ~FoldHolder() {
-        fold.reset();
-        if (plugin && plugin->destroy) plugin->destroy(plugin->self);
-    }
-};
-
 FoldEvent evt(std::uint64_t pid, std::uint64_t dur, std::uint64_t tid) {
     FoldEvent e;
     e.pid = pid;
     e.dur = dur;
     e.has_dur = true;
     e.tid = tid;
+    e.phase = dftracer::utils::trace::RecordPhase::COMPLETE;
     return e;
 }
 
-template <class Slice>
-void run_slices(NamedResultRegistry& named, SharedResultRegistry& reg,
-                StringIntern& intern,
-                const std::vector<std::vector<FoldEvent>>& slices) {
-    FoldHolder master(dftracer::utils::plugins::make_plugin<Slice>(nullptr),
-                      intern, &reg, &named);
-    for (const auto& evs : slices) {
-        auto slice = master.fold->slice();
-        auto* pf = static_cast<PluginFold*>(slice.get());
-        ScanUnit unit;
-        FoldBatch fb{std::span<const FoldEvent>(evs), unit};
-        pf->step(fb);
-        master.fold->merge(*pf);
+// One accumulator keyed on pid built through the ergonomic Host::agg + agg::
+// factories: a per-key row count and the tid at the largest duration. Neither
+// names a raw DFTU_AGG_* code nor fills a dftu_agg_col by hand.
+::dftu_task* agg_facade_columns(void* slice, const dftu_dataframe* df,
+                                const dftu_host* host) {
+    (void)slice;
+    dftracer::utils::plugins::Host h{host};
+    const auto acc =
+        h.agg("by_pid", {"pid"},
+              {agg::count("hits"), agg::argmax("tid", "tid_at_max", "dur")});
+    if (acc) acc.accumulate(df);
+    return nullptr;
+}
+
+dftu_plugin make_agg_facade_plugin() {
+    dftu_plugin p{};
+    p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
+    p.needs = [](void*) -> std::uint32_t { return 0; };
+    p.plan_query = [](void*) -> const char* { return nullptr; };
+    p.make_slice = [](void*) -> void* {
+        static int sentinel;
+        return &sentinel;
+    };
+    p.merge = [](void*, void*) {};
+    p.on_finalize = [](void*, const dftu_host*) -> ::dftu_task* {
+        return nullptr;
+    };
+    p.destroy_slice = [](void*) {};
+    p.destroy = [](void*) {};
+    p.on_batch_columns = agg_facade_columns;
+    return p;
+}
+
+std::string cell_str(const dftu_series* col, std::int64_t r) {
+    dftu_series* flat = dftu_series_materialize(col);
+    const std::int32_t* off = dftu_series_offsets(flat);
+    const char* data = static_cast<const char*>(dftu_series_data(flat));
+    std::string out(data + off[r],
+                    static_cast<std::size_t>(off[r + 1] - off[r]));
+    dftu_series_free(flat);
+    return out;
+}
+
+double cell_num(const dftu_series* col, std::int64_t r) {
+    dftu_series* flat = dftu_series_materialize(col);
+    const void* d = dftu_series_data(flat);
+    double out = 0.0;
+    switch (dftu_series_type(flat)) {
+        case DFTU_TYPE_INT64:
+            out = static_cast<double>(static_cast<const std::int64_t*>(d)[r]);
+            break;
+        case DFTU_TYPE_UINT64:
+            out = static_cast<double>(static_cast<const std::uint64_t*>(d)[r]);
+            break;
+        case DFTU_TYPE_FLOAT64:
+            out = static_cast<const double*>(d)[r];
+            break;
+        default:
+            break;
     }
-    Runtime rt(1);
-    rt.scope("fin", [&](CoroScope&) -> coro::CoroTask<void> {
-          co_await master.fold->finalize(CoverageSet{});
-      }).wait();
-    rt.shutdown();
+    dftu_series_free(flat);
+    return out;
 }
 
 }  // namespace
 
-TEST_CASE("plugin cxx: typed Map merges counter and argmax across slices") {
+TEST_CASE("plugin cxx: Host::agg merges a count and an argmax across slices") {
     StringIntern intern;
-    SharedResultRegistry reg;
+    dftu_plugin p = make_agg_facade_plugin();
     NamedResultRegistry named;
+    PluginFold master(&p, intern, nullptr, &named);
 
     // Merged counts: pid 1 -> 3, pid 2 -> 2. Argmax tid by duration: pid 1 at
     // dur 30 -> tid 300; pid 2 at dur 50 -> tid 500.
     const std::vector<std::vector<FoldEvent>> slices = {
         {evt(1, 10, 100), evt(1, 30, 300), evt(2, 5, 50)},
         {evt(1, 20, 200), evt(2, 50, 500)}};
-    run_slices<TypedMapSlice>(named, reg, intern, slices);
+    for (const auto& evs : slices) {
+        auto slice = master.slice();
+        auto* pf = static_cast<PluginFold*>(slice.get());
+        ScanUnit unit;
+        pf->step(FoldBatch{std::span<const FoldEvent>(evs), unit, {}});
+        master.merge(*pf);
+    }
+    Runtime rt(1);
+    rt.scope("fin", [&](CoroScope&) -> coro::CoroTask<void> {
+          co_await master.finalize(CoverageSet{});
+      }).wait();
+    rt.shutdown();
 
-#ifdef DFTRACER_UTILS_ENABLE_ARROW
-    auto column = [](const ArrowArray& a, int c) {
-        const ArrowArray* ch = a.children[c];
-        return static_cast<const std::int64_t*>(ch->buffers[1]) + ch->offset;
-    };
-    auto value_by_pid = [&](const char* name, std::int64_t pid) {
-        auto it = named.results().find(name);
-        REQUIRE(it != named.results().end());
-        REQUIRE(std::holds_alternative<OwnedArrow>(it->second));
-        const ArrowArray& a = std::get<OwnedArrow>(it->second).array;
-        REQUIRE(a.n_children == 2);
-        const std::int64_t* k = column(a, 0);
-        const std::int64_t* v = column(a, 1);
-        for (std::int64_t r = 0; r < a.length; ++r)
-            if (k[r + a.offset] == pid) return v[r + a.offset];
-        FAIL("pid not found");
-        return std::int64_t{0};
-    };
+    auto it = named.results().find("by_pid");
+    REQUIRE(it != named.results().end());
+    REQUIRE(std::holds_alternative<OwnedDataFrame>(it->second));
+    dftu_dataframe* out = std::get<OwnedDataFrame>(it->second).handle;
+    REQUIRE(out != nullptr);
+    REQUIRE(dftu_dataframe_num_rows(out) == 2);
 
-    CHECK(value_by_pid("hits", 1) == 3);
-    CHECK(value_by_pid("hits", 2) == 2);
-    CHECK(value_by_pid("amax", 1) == 300);
-    CHECK(value_by_pid("amax", 2) == 500);
-#endif
+    dftu_series* pid = dftu_dataframe_column(out, "pid");
+    dftu_series* hits = dftu_dataframe_column(out, "hits");
+    dftu_series* tid_at_max = dftu_dataframe_column(out, "tid_at_max");
+    REQUIRE(pid);
+    REQUIRE(hits);
+    REQUIRE(tid_at_max);
+
+    for (std::int64_t r = 0; r < dftu_dataframe_num_rows(out); ++r) {
+        if (cell_num(pid, r) == doctest::Approx(1.0)) {
+            CHECK(cell_num(hits, r) == doctest::Approx(3.0));
+            CHECK(cell_str(tid_at_max, r) == "300");
+        } else {
+            CHECK(cell_num(pid, r) == doctest::Approx(2.0));
+            CHECK(cell_num(hits, r) == doctest::Approx(2.0));
+            CHECK(cell_str(tid_at_max, r) == "500");
+        }
+    }
+
+    dftu_series_free(pid);
+    dftu_series_free(hits);
+    dftu_series_free(tid_at_max);
 }

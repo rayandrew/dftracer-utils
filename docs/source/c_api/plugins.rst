@@ -13,7 +13,7 @@ The stable plugin C ABI. A plugin includes only ``abi.h`` and fills a
 optional extension groups (``dftu_ext_coro``, ``dftu_ext_compose``,
 ``dftu_ext_query``, ``dftu_ext_util``, ``dftu_ext_writer``, ``dftu_ext_sketch``,
 ``dftu_ext_arrow``, ``dftu_ext_trace``, ``dftu_ext_comms``, ``dftu_ext_ports``,
-``dftu_ext_handles``, ``dftu_ext_result``, ``dftu_ext_map``, ``dftu_ext_agg``).
+``dftu_ext_result``, ``dftu_ext_agg``, ``dftu_ext_ops``).
 
 .. code-block:: c
 

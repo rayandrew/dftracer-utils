@@ -10,9 +10,12 @@ comparison on ``e.<field>``) wrapping ``self.<map>[(<key>)] += <1 | e.<field>>``
 Anything outside it raises :class:`JitError` at decoration time, pointing at the
 raw-C++ escape hatch, never a silent miscompile.
 
-``jit.bytes`` exists for declaring and typing a ``DFTU_T_BYTES``-keyed map; the
-per-event subset exposes no raw byte blob, so a bytes key is authored via the C
-ABI / a ``raw=True`` body, not a bare ``each_event`` subscript.
+Every :func:`map` is one named accumulator on the dataframe engine's ``AggState``,
+reached through the host's ``DFTU_EXT_AGG`` service: the key tuple names its
+grouping columns (an empty tuple makes it a whole-scan scalar) and each value
+reduction is one aggregate. Per-event contributions buffer into per-batch columns
+that are folded into that accumulator at the end of each batch; the host merges
+same-named accumulators across worker slices and finalizes each to a frame.
 
 Example::
 
@@ -34,16 +37,13 @@ import inspect
 import textwrap
 from typing import (
     TYPE_CHECKING,
-    Any,
     Callable,
     Dict,
     Generic,
     List,
-    Literal,
     NoReturn,
     Protocol,
     Tuple,
-    TypedDict,
     TypeVar,
     cast,
     overload,
@@ -75,13 +75,9 @@ __all__ = [
     "run_op",
     "plugin",
     "map",
-    "join",
-    "nested",
     "publish",
     "consume",
-    "shared",
     "Port",
-    "Handle",
     "count",
     "sum",
     "min",
@@ -114,8 +110,13 @@ __all__ = [
     "bottomk",
     "approx_topk",
     "sample",
-    "argmin_row",
-    "argmax_row",
+    "bitset",
+    "corr",
+    "covar_pop",
+    "covar_samp",
+    "regr_slope",
+    "regr_intercept",
+    "regr_r2",
     "record",
     "config",
     "each_event",
@@ -155,8 +156,6 @@ __all__ = [
     "lerp",
     "copysign",
     "Map",
-    "JoinDecl",
-    "Nested",
     "Event",
     "Str",
     "Counter",
@@ -176,8 +175,6 @@ __all__ = [
     "BottomK",
     "ApproxTopK",
     "Sample",
-    "ArgMinRow",
-    "ArgMaxRow",
     "Product",
     "i64",
     "str_",
@@ -204,14 +201,12 @@ class JitError(Exception):
 
 T = TypeVar("T")
 T_co = TypeVar("T_co", covariant=True)
-V2 = TypeVar("V2")
 K = TypeVar("K")
 V = TypeVar("V")
 K1 = TypeVar("K1")
 K2 = TypeVar("K2")
 K3 = TypeVar("K3")
 K4 = TypeVar("K4")
-IK = TypeVar("IK")
 _C = TypeVar("_C")
 
 
@@ -291,10 +286,22 @@ NEED_HHASH = _Need("DFTU_NEED_HHASH")
 
 
 class _Monoid:
-    __slots__ = ("dft",)
+    """One aggregate of a jit accumulator, lowered to a ``dftu_agg_col``.
 
-    def __init__(self, dft: str) -> None:
+    ``dft`` is the ``DFTU_AGG_*`` op code, ``param`` its scalar parameter (a
+    quantile, a k, an occupancy cell tolerance), ``needs_by`` marks an op that
+    reads a second (ordering / x) column, and ``elem`` is the value column's
+    family: ``"none"`` (no value column), ``"i64"``, ``"f64"`` or ``"str"``."""
+
+    __slots__ = ("dft", "param", "needs_by", "elem")
+
+    def __init__(
+        self, dft: str, param: float = 0.0, needs_by: bool = False, elem: str = "f64"
+    ) -> None:
         self.dft = dft
+        self.param = param
+        self.needs_by = needs_by
+        self.elem = elem
 
 
 class Counter(_Monoid):
@@ -365,25 +372,20 @@ class Stddev(_Monoid):
 
 
 class AggReduce(_Monoid):
-    """A @jit.vfold-only keyed reduction with no DFTU_EXT_MAP monoid; it folds
-    through the engine's DFTU_EXT_AGG accumulator. ``dft`` carries the DFTU_AGG_*
-    op code. ``param`` feeds dftu_agg_col.param (occupancy cell tolerance); a
-    reduction with ``needs_by`` reads a second (by) column. Not valid as a
-    @jit.plugin map value."""
+    """A reduction with no ``+=`` / ``.observe`` shorthand of its own; it is
+    declared as a map value and folded by the engine like any other aggregate."""
 
-    __slots__ = ("param", "needs_by")
-
-    def __init__(self, dft: str, param: float = 0.0, needs_by: bool = False) -> None:
-        super().__init__(dft)
-        self.param = param
-        self.needs_by = needs_by
+    __slots__ = ()
 
 
 class Quantiles(_Monoid):
+    """A DDSketch quantile aggregate; ``qs`` materializes one ``p<q*100>``
+    column per quantile alongside a ``count`` column."""
+
     __slots__ = ("qs",)
 
-    def __init__(self, dft: str, qs: "Tuple[float, ...]") -> None:
-        super().__init__(dft)
+    def __init__(self, qs: "Tuple[float, ...]") -> None:
+        super().__init__("DFTU_AGG_PCT", param=qs[0], elem="f64")
         self.qs = qs
 
     def observe(self, v: float) -> None: ...
@@ -402,65 +404,27 @@ class ArgMax(_Monoid, Generic[T]):
 
 
 class TopK(_Monoid, Generic[T]):
-    __slots__ = ("k",)
-
-    def __init__(self, dft: str, k: int) -> None:
-        super().__init__(dft)
-        self.k = k
+    __slots__ = ()
 
     def observe(self, payload: T, *, by: float) -> None: ...
 
 
 class BottomK(_Monoid, Generic[T]):
-    __slots__ = ("k",)
-
-    def __init__(self, dft: str, k: int) -> None:
-        super().__init__(dft)
-        self.k = k
+    __slots__ = ()
 
     def observe(self, payload: T, *, by: float) -> None: ...
 
 
 class ApproxTopK(_Monoid, Generic[T]):
-    __slots__ = ("k",)
-
-    def __init__(self, dft: str, k: int) -> None:
-        super().__init__(dft)
-        self.k = k
+    __slots__ = ()
 
     def observe(self, x: T) -> None: ...
 
 
 class Sample(_Monoid, Generic[T]):
-    __slots__ = ("k",)
-
-    def __init__(self, dft: str, k: int) -> None:
-        super().__init__(dft)
-        self.k = k
+    __slots__ = ()
 
     def observe(self, x: T) -> None: ...
-
-
-class ArgMinRow(_Monoid):
-    __slots__ = ("payload_types",)
-    is_max = False
-
-    def __init__(self, payload_types: "Tuple[_Type[object], ...]") -> None:
-        super().__init__("DFTU_MONOID_ARGMIN_ROW")
-        self.payload_types = payload_types
-
-    def observe(self, payload: "Tuple[object, ...]", *, by: float) -> None: ...
-
-
-class ArgMaxRow(_Monoid):
-    __slots__ = ("payload_types",)
-    is_max = True
-
-    def __init__(self, payload_types: "Tuple[_Type[object], ...]") -> None:
-        super().__init__("DFTU_MONOID_ARGMAX_ROW")
-        self.payload_types = payload_types
-
-    def observe(self, payload: "Tuple[object, ...]", *, by: float) -> None: ...
 
 
 class _Accum(_Monoid):
@@ -489,13 +453,15 @@ class Product(_Monoid):
 
 
 def count() -> Counter:
-    """A COUNTER value monoid (u64 sum)."""
-    return Counter("DFTU_MONOID_COUNTER")
+    """An integer counting value: ``+= 1`` counts, ``+= <expr>`` sums.
+
+    Materializes to an int64 column."""
+    return Counter("DFTU_AGG_SUM", elem="i64")
 
 
 def sum() -> Sum:
-    """A SUM_F64 value monoid (double sum)."""
-    return Sum("DFTU_MONOID_SUM_F64")
+    """A double-summing value; materializes to an f64 column."""
+    return Sum("DFTU_AGG_SUM", elem="f64")
 
 
 # ---- numeric primitives -----------------------------------------------------
@@ -623,25 +589,28 @@ copysign = _primf("copysign")
 """Magnitude of x with the sign of y. ``dftu_copysign_f64``."""
 
 
-_MINMAX_WIDTHS = {
-    "DFTU_T_I8": "I8",
-    "DFTU_T_I16": "I16",
-    "DFTU_T_I32": "I32",
-    "DFTU_T_I64": "I64",
-    "DFTU_T_U8": "U8",
-    "DFTU_T_U16": "U16",
-    "DFTU_T_U32": "U32",
-    "DFTU_T_U64": "U64",
-    "DFTU_T_F32": "F32",
-    "DFTU_T_F64": "F64",
-}
+_MINMAX_WIDTHS = frozenset(
+    {
+        "DFTU_T_I8",
+        "DFTU_T_I16",
+        "DFTU_T_I32",
+        "DFTU_T_I64",
+        "DFTU_T_U8",
+        "DFTU_T_U16",
+        "DFTU_T_U32",
+        "DFTU_T_U64",
+        "DFTU_T_F32",
+        "DFTU_T_F64",
+    }
+)
+
+_FLOAT_TYPES = frozenset({"DFTU_T_F32", "DFTU_T_F64"})
 
 
-def _minmax_dft(op: str, of: "_Type[object]") -> str:
-    width = _MINMAX_WIDTHS.get(of.dft)
-    if width is None:
-        raise JitError(f"jit.{op.lower()}(of=...) must be a fixed-width int or float type")
-    return f"DFTU_MONOID_{op}_{width}"
+def _minmax_elem(op: str, of: "_Type[object]") -> str:
+    if of.dft not in _MINMAX_WIDTHS:
+        raise JitError(f"jit.{op}(of=...) must be a fixed-width int or float type")
+    return "f64" if of.dft in _FLOAT_TYPES else "i64"
 
 
 @overload
@@ -649,10 +618,10 @@ def min() -> "Min[int]": ...
 @overload
 def min(of: "_Type[T]") -> "Min[T]": ...
 def min(of: "_Type[object]" = u64) -> "Min[object]":
-    """A typed min value monoid (default u64); ``of=`` sets the element width.
+    """A typed min value (default u64); ``of=`` picks the int or float element.
 
-    ``.observe(v)`` contributes; the result column materializes at ``of``'s exact width."""
-    return Min(_minmax_dft("MIN", of))
+    ``.observe(v)`` contributes."""
+    return Min("DFTU_AGG_MIN", elem=_minmax_elem("min", of))
 
 
 @overload
@@ -660,25 +629,38 @@ def max() -> "Max[int]": ...
 @overload
 def max(of: "_Type[T]") -> "Max[T]": ...
 def max(of: "_Type[object]" = u64) -> "Max[object]":
-    """A typed max value monoid (default u64); ``of=`` sets the element width.
+    """A typed max value (default u64); ``of=`` picks the int or float element.
 
-    ``.observe(v)`` contributes; the result column materializes at ``of``'s exact width."""
-    return Max(_minmax_dft("MAX", of))
+    ``.observe(v)`` contributes."""
+    return Max("DFTU_AGG_MAX", elem=_minmax_elem("max", of))
 
 
 def minf() -> "Min[float]":
-    """A MIN_F64 value monoid; contribute with ``.observe(v)``."""
-    return Min("DFTU_MONOID_MIN_F64")
+    """A double min value; contribute with ``.observe(v)``."""
+    return Min("DFTU_AGG_MIN", elem="f64")
 
 
 def maxf() -> "Max[float]":
-    """A MAX_F64 value monoid; contribute with ``.observe(v)``."""
-    return Max("DFTU_MONOID_MAX_F64")
+    """A double max value; contribute with ``.observe(v)``."""
+    return Max("DFTU_AGG_MAX", elem="f64")
 
 
 def distinct() -> Distinct:
-    """A DISTINCT value monoid (approx distinct count, u64); contribute with ``.observe(v)``."""
-    return Distinct("DFTU_MONOID_DISTINCT")
+    """An approximate distinct count (u64); contribute with ``.observe(v)``."""
+    return Distinct("DFTU_AGG_DISTINCT", elem="i64")
+
+
+def bitset() -> _Monoid:
+    """The bitwise OR of the observed integers; contribute with ``.observe(v)``."""
+    return _Monoid("DFTU_AGG_BIT_OR", elem="i64")
+
+
+def _elem_of(fn: str, of: "_Type[object]") -> str:
+    if of is i64:
+        return "i64"
+    if of is str_:
+        return "str"
+    raise JitError(f"jit.{fn}(of=...) must be jit.str_ or jit.i64")
 
 
 @overload
@@ -686,15 +668,12 @@ def set() -> "SetV[Str]": ...
 @overload
 def set(of: "_Type[T]") -> "SetV[T]": ...
 def set(of: "_Type[object]" = str_) -> "SetV[object]":
-    """A set value monoid collecting distinct elements added with ``.observe``.
+    """A set value collecting distinct elements added with ``.observe``.
 
-    ``of=jit.str_`` (default) collects interned strings into a list<string> column;
-    ``of=jit.i64`` collects int64 values into a list<int64> column sorted ascending."""
-    if of is i64:
-        return SetV("DFTU_MONOID_SET_I64")
-    if of is str_:
-        return SetV("DFTU_MONOID_SET_STR")
-    raise JitError("jit.set(of=...) must be jit.str_ or jit.i64")
+    ``of=jit.str_`` (default) observes strings, ``of=jit.i64`` int64 values.
+    The result is one String cell per group: the distinct values as reprs,
+    sorted and joined by ``\\x1e``. Use ``jit.list`` for a list column."""
+    return SetV("DFTU_AGG_SET_UNION", elem=_elem_of("set", of))
 
 
 @overload
@@ -702,130 +681,135 @@ def list() -> "ListV[Str]": ...
 @overload
 def list(of: "_Type[T]") -> "ListV[T]": ...
 def list(of: "_Type[object]" = str_) -> "ListV[object]":
-    """An ordered-list value monoid collecting elements added with ``.append``.
+    """An ordered-list value collecting elements added with ``.append``.
 
-    ``of=jit.str_`` (default) collects interned strings into a list<string>
-    column; ``of=jit.i64`` collects raw int64 values into a list<int64> column.
-    Both materialize sorted by the ``order_by`` key."""
-    if of is i64:
-        return ListV("DFTU_MONOID_LIST_I64")
-    if of is str_:
-        return ListV("DFTU_MONOID_LIST_STR")
-    raise JitError("jit.list(of=...) must be jit.str_ or jit.i64")
+    ``of=jit.str_`` (default) collects strings, ``of=jit.i64`` int64 values;
+    both materialize as a list<string> of reprs sorted by ``order_by``."""
+    return ListV("DFTU_AGG_LIST_SORTED", needs_by=True, elem=_elem_of("list", of))
 
 
 def mean() -> Mean:
-    """A MEAN value monoid; contribute one value with ``.observe(v)``.
-
-    Materializes to a double column (the running mean of the observed values)."""
-    return Mean("DFTU_MONOID_MEAN")
+    """A mean value; contribute one value with ``.observe(v)``."""
+    return Mean("DFTU_AGG_MEAN", elem="f64")
 
 
 def variance() -> Variance:
-    """A VARIANCE value monoid (sample, n-1); contribute with ``.observe(v)``.
-
-    Materializes to a double column; 0 for n<2, matching the aggregator."""
-    return Variance("DFTU_MONOID_VARIANCE")
+    """A sample (n-1) variance value; contribute with ``.observe(v)``."""
+    return Variance("DFTU_AGG_VAR", elem="f64")
 
 
 var = variance
 
 
 def stddev() -> Stddev:
-    """A STDDEV value monoid (sample, n-1); contribute with ``.observe(v)``.
-
-    Materializes to a double column; 0 for n<2, matching the aggregator."""
-    return Stddev("DFTU_MONOID_STDDEV")
+    """A sample (n-1) standard deviation value; contribute with ``.observe(v)``."""
+    return Stddev("DFTU_AGG_STD", elem="f64")
 
 
 std = stddev
 
 
 def quantiles(qs: "Tuple[float, ...]" = (0.5, 0.9, 0.95, 0.99)) -> Quantiles:
-    """A DDSketch quantile value monoid; contribute with ``.observe(v)``.
+    """A DDSketch quantile value; contribute with ``.observe(v)``.
 
-    Materializes to a ``count`` int64 column plus one f64 column per quantile in
+    Materializes a ``count`` int64 column plus one f64 column per quantile in
     ``qs`` (each in [0, 1]), named ``p<q*100>`` (``p50``, ``p90``, ``p99``, ..).
     Quantiles are approximate (DDSketch, ~1% relative error). Top-level only:
-    it cannot be a product/nested/record component."""
+    it cannot be a product/record component."""
     qs = tuple(float(q) for q in qs)
     if not qs:
         raise JitError("jit.quantiles needs at least one quantile")
     for q in qs:
         if not 0.0 <= q <= 1.0:
             raise JitError(f"jit.quantiles value {q} is outside [0, 1]")
-    return Quantiles("DFTU_MONOID_SKETCH", qs)
+    return Quantiles(qs)
 
 
 def skew() -> AggReduce:
-    """@jit.vfold-only keyed reduction: population skewness of the value column."""
-    return AggReduce("DFTU_AGG_SKEW")
+    """Population skewness of the observed values."""
+    return AggReduce("DFTU_AGG_SKEW", elem="f64")
 
 
 def kurt() -> AggReduce:
-    """@jit.vfold-only keyed reduction: excess (population) kurtosis."""
-    return AggReduce("DFTU_AGG_KURT")
+    """Excess (population) kurtosis of the observed values."""
+    return AggReduce("DFTU_AGG_KURT", elem="f64")
 
 
 def sumsq() -> AggReduce:
-    """@jit.vfold-only keyed reduction: sum of squares (Float64)."""
-    return AggReduce("DFTU_AGG_SUMSQ")
+    """Sum of squares (Float64)."""
+    return AggReduce("DFTU_AGG_SUMSQ", elem="f64")
 
 
 def first() -> AggReduce:
-    """@jit.vfold-only keyed reduction: first non-null value in row order."""
-    return AggReduce("DFTU_AGG_FIRST")
+    """First non-null value in row order."""
+    return AggReduce("DFTU_AGG_FIRST", elem="f64")
 
 
 def last() -> AggReduce:
-    """@jit.vfold-only keyed reduction: last non-null value in row order."""
-    return AggReduce("DFTU_AGG_LAST")
+    """Last non-null value in row order."""
+    return AggReduce("DFTU_AGG_LAST", elem="f64")
 
 
 def count_valid() -> AggReduce:
-    """@jit.vfold-only keyed reduction: count of non-null values in the column."""
-    return AggReduce("DFTU_AGG_COUNT_VALID")
+    """Count of non-null observed values."""
+    return AggReduce("DFTU_AGG_COUNT_VALID", elem="f64")
 
 
 def hist() -> AggReduce:
-    """@jit.vfold-only keyed reduction: the DDSketch histogram of the value
-    column, a list<struct{lo, hi, count}> column (mergeable, relative-error
-    buckets)."""
-    return AggReduce("DFTU_AGG_HIST")
+    """The DDSketch histogram of the observed values, a
+    list<struct{lo, hi, count}> column (mergeable, relative-error buckets)."""
+    return AggReduce("DFTU_AGG_HIST", elem="f64")
 
 
 def busy(cell: float = 0.0) -> AggReduce:
-    """@jit.vfold-only keyed occupancy reduction: interval-union length (us)
-    where overlap depth > 0, over the (ts, dur) column pair. ``cell`` is the
-    optional endpoint-snap tolerance in us (0 = exact union). Contribute the
-    pair with ``self.m[df["k"]] += df["ts"], df["dur"]``."""
-    return AggReduce("DFTU_AGG_BUSY", param=float(cell), needs_by=True)
+    """Occupancy: interval-union length (us) where overlap depth > 0, over a
+    (ts, dur) pair. ``cell`` is the endpoint-snap tolerance in us (0 = exact)."""
+    return AggReduce("DFTU_AGG_BUSY", param=float(cell), needs_by=True, elem="f64")
 
 
 def concurrency(cell: float = 0.0) -> AggReduce:
-    """@jit.vfold-only keyed occupancy reduction: sum(dur) / busy over the
-    (ts, dur) pair. ``cell`` is the endpoint-snap tolerance in us."""
-    return AggReduce("DFTU_AGG_CONCURRENCY", param=float(cell), needs_by=True)
+    """Occupancy: sum(dur) / busy over a (ts, dur) pair."""
+    return AggReduce("DFTU_AGG_CONCURRENCY", param=float(cell), needs_by=True, elem="f64")
 
 
 def utilization(cell: float = 0.0) -> AggReduce:
-    """@jit.vfold-only keyed occupancy reduction: busy / (max_end - min_ts) over
-    the (ts, dur) pair. ``cell`` is the endpoint-snap tolerance in us."""
-    return AggReduce("DFTU_AGG_UTILIZATION", param=float(cell), needs_by=True)
+    """Occupancy: busy / (max_end - min_ts) over a (ts, dur) pair."""
+    return AggReduce("DFTU_AGG_UTILIZATION", param=float(cell), needs_by=True, elem="f64")
 
 
 def active(cell: float = 0.0) -> AggReduce:
-    """@jit.vfold-only keyed occupancy reduction: peak overlap depth over the
-    (ts, dur) pair. ``cell`` is the endpoint-snap tolerance in us."""
-    return AggReduce("DFTU_AGG_ACTIVE", param=float(cell), needs_by=True)
+    """Occupancy: peak overlap depth over a (ts, dur) pair."""
+    return AggReduce("DFTU_AGG_ACTIVE", param=float(cell), needs_by=True, elem="f64")
 
 
-def _argby_dft(op: str, of: "_Type[object]") -> str:
-    if of is str_:
-        return f"DFTU_MONOID_{op}_STR"
-    if of is i64:
-        return f"DFTU_MONOID_{op}_I64"
-    raise JitError(f"jit.{op.lower()}(of=...) must be jit.str_ or jit.i64")
+def corr() -> AggReduce:
+    """Pearson correlation of the (y, x) pair; y is the value, x the ``by``."""
+    return AggReduce("DFTU_AGG_CORR", needs_by=True, elem="f64")
+
+
+def covar_pop() -> AggReduce:
+    """Population covariance of the (y, x) pair."""
+    return AggReduce("DFTU_AGG_COVAR_POP", needs_by=True, elem="f64")
+
+
+def covar_samp() -> AggReduce:
+    """Sample covariance of the (y, x) pair."""
+    return AggReduce("DFTU_AGG_COVAR_SAMP", needs_by=True, elem="f64")
+
+
+def regr_slope() -> AggReduce:
+    """Least-squares slope of y on x."""
+    return AggReduce("DFTU_AGG_REGR_SLOPE", needs_by=True, elem="f64")
+
+
+def regr_intercept() -> AggReduce:
+    """Least-squares intercept of y on x."""
+    return AggReduce("DFTU_AGG_REGR_INTERCEPT", needs_by=True, elem="f64")
+
+
+def regr_r2() -> AggReduce:
+    """Coefficient of determination of the least-squares fit of y on x."""
+    return AggReduce("DFTU_AGG_REGR_R2", needs_by=True, elem="f64")
 
 
 @overload
@@ -835,9 +819,10 @@ def argmin(of: "_Type[T]") -> "ArgMin[T]": ...
 def argmin(of: "_Type[object]" = str_) -> "ArgMin[object]":
     """An argmin value: keep the payload whose ``by=`` key is smallest.
 
-    ``of=jit.str_`` (default) keeps an interned-string payload (string column);
-    ``of=jit.i64`` keeps a raw int64 payload. Contribute with ``.observe(payload, by=<expr>)``."""
-    return ArgMin(_argby_dft("ARGMIN", of))
+    ``of=jit.str_`` (default) observes a string payload, ``of=jit.i64`` an
+    int64 one; the result is the payload's String repr. Contribute with
+    ``.observe(payload, by=<expr>)``."""
+    return ArgMin("DFTU_AGG_ARGMIN", needs_by=True, elem=_elem_of("argmin", of))
 
 
 @overload
@@ -847,23 +832,16 @@ def argmax(of: "_Type[T]") -> "ArgMax[T]": ...
 def argmax(of: "_Type[object]" = str_) -> "ArgMax[object]":
     """An argmax value: keep the payload whose ``by=`` key is largest.
 
-    ``of=jit.str_`` (default) keeps an interned-string payload (string column);
-    ``of=jit.i64`` keeps a raw int64 payload. Contribute with ``.observe(payload, by=<expr>)``."""
-    return ArgMax(_argby_dft("ARGMAX", of))
+    ``of=jit.str_`` (default) observes a string payload, ``of=jit.i64`` an
+    int64 one; the result is the payload's String repr. Contribute with
+    ``.observe(payload, by=<expr>)``."""
+    return ArgMax("DFTU_AGG_ARGMAX", needs_by=True, elem=_elem_of("argmax", of))
 
 
-def _check_k(op: str, k: int) -> int:
+def _check_k(op: str, k: int) -> float:
     if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
         raise JitError(f"jit.{op}(k, ...) k must be a positive integer")
-    return k
-
-
-def _kv_dft(op: str, of: "_Type[object]") -> str:
-    if of is str_:
-        return f"DFTU_MONOID_{op}_STR"
-    if of is i64:
-        return f"DFTU_MONOID_{op}_I64"
-    raise JitError(f"jit.{op.lower()}(of=...) must be jit.str_ or jit.i64")
+    return float(k)
 
 
 @overload
@@ -873,11 +851,12 @@ def topk(k: int, of: "_Type[T]") -> "TopK[T]": ...
 def topk(k: int, of: "_Type[object]" = str_) -> "TopK[object]":
     """A bounded top-k value: keep the k payloads at the k largest ``by=`` keys.
 
-    ``of=jit.str_`` (default) keeps interned-string payloads into a list<string>
-    column; ``of=jit.i64`` keeps raw int64 payloads into a list<int64>. Payloads
-    emit in ``by`` order (descending). Contribute with
+    ``of=jit.str_`` (default) observes string payloads, ``of=jit.i64`` int64
+    ones; the result is a list<string> of their reprs. Contribute with
     ``.observe(payload, by=<expr>)``."""
-    return TopK(_kv_dft("TOPK", of), _check_k("topk", k))
+    return TopK(
+        "DFTU_AGG_TOPK", param=_check_k("topk", k), needs_by=True, elem=_elem_of("topk", of)
+    )
 
 
 @overload
@@ -886,9 +865,13 @@ def bottomk(k: int) -> "BottomK[Str]": ...
 def bottomk(k: int, of: "_Type[T]") -> "BottomK[T]": ...
 def bottomk(k: int, of: "_Type[object]" = str_) -> "BottomK[object]":
     """A bounded bottom-k value: keep the k payloads at the k smallest ``by=``
-    keys. ``of=`` selects a string (default) or int64 payload, mirroring
-    :func:`topk`. Contribute with ``.observe(payload, by=<expr>)``."""
-    return BottomK(_kv_dft("BOTTOMK", of), _check_k("bottomk", k))
+    keys, mirroring :func:`topk`."""
+    return BottomK(
+        "DFTU_AGG_BOTTOMK",
+        param=_check_k("bottomk", k),
+        needs_by=True,
+        elem=_elem_of("bottomk", of),
+    )
 
 
 @overload
@@ -897,12 +880,12 @@ def approx_topk(k: int) -> "ApproxTopK[Str]": ...
 def approx_topk(k: int, of: "_Type[T]") -> "ApproxTopK[T]": ...
 def approx_topk(k: int, of: "_Type[object]" = str_) -> "ApproxTopK[object]":
     """An approximate heavy-hitters value: the k most FREQUENT observed values
-    (SpaceSaving), in bounded memory.
-
-    ``of=jit.str_`` (default) counts interned string ids; ``of=jit.i64`` counts
-    raw int64 values. Contribute with ``.observe(value)``; materializes to a
-    list<struct<value, count>> column ordered by count descending."""
-    return ApproxTopK(_kv_dft("APPROX_TOPK", of), _check_k("approx_topk", k))
+    (SpaceSaving), in bounded memory. Contribute with ``.observe(value)``."""
+    return ApproxTopK(
+        "DFTU_AGG_APPROX_TOPK",
+        param=_check_k("approx_topk", k),
+        elem=_elem_of("approx_topk", of),
+    )
 
 
 @overload
@@ -910,75 +893,13 @@ def sample(k: int) -> "Sample[Str]": ...
 @overload
 def sample(k: int, of: "_Type[T]") -> "Sample[T]": ...
 def sample(k: int, of: "_Type[object]" = str_) -> "Sample[object]":
-    """A deterministic mergeable sample: keep k DISTINCT items by smallest
-    hash(item) (bottom-k / KMV), not an Algorithm-R reservoir.
-
-    ``of=jit.str_`` (default) samples interned string ids; ``of=jit.i64`` samples
-    raw int64 items. Feeding a unique per-row item makes it a uniform row sample.
-    Contribute with ``.observe(item)``; materializes to a sorted list column."""
-    return Sample(_kv_dft("SAMPLE", of), _check_k("sample", k))
-
-
-def _argrow_payload(op: str, of: object) -> "Tuple[_Type[object], ...]":
-    if not isinstance(of, tuple) or not of:
-        raise JitError(
-            f"jit.{op}(of=...) must be a non-empty tuple of jit types such as "
-            "(jit.str_, jit.i64, jit.f64)"
-        )
-    for t in of:
-        if not isinstance(t, _Type):
-            raise JitError(
-                f"jit.{op}(of=...) components must be jit types (jit.str_, jit.i64, ...)"
-            )
-    return tuple(of)
-
-
-def argmin_row(of: "Tuple[_Type[object], ...]") -> "ArgMinRow":
-    """An argmin-row value (full-row min-by, DISTINCT ON): keep the ENTIRE payload
-    row - a fixed tuple of typed components ``of=(jit.str_, jit.i64, ...)`` - from
-    the contribution whose ``by=`` key is smallest. Materializes to one column per
-    payload component (p0..p{n-1}). Contribute with
-    ``.observe((p0, p1, ...), by=<expr>)``."""
-    return ArgMinRow(_argrow_payload("argmin_row", of))
-
-
-def argmax_row(of: "Tuple[_Type[object], ...]") -> "ArgMaxRow":
-    """An argmax-row value (full-row max-by, DISTINCT ON): keep the ENTIRE payload
-    row at the largest ``by=`` key, mirroring :func:`argmin_row`. Contribute with
-    ``.observe((p0, p1, ...), by=<expr>)``."""
-    return ArgMaxRow(_argrow_payload("argmax_row", of))
-
-
-class Nested(Generic[IK, V]):
-    """A nested-preserved map value: at each outer key, a sub-map inner_key -> V.
-
-    Runtime decl for a :func:`nested` value and the authoring-only type of a
-    nested outer-key lookup; ``[inner_key]`` yields the inner accumulator ``V``.
-    Its inner values must be a scalar monoid or a product of them (collections
-    and ordered lists are rejected, matching the engine)."""
-
-    __slots__ = ("inner_key_types", "values", "is_product", "value_names")
-
-    def __init__(
-        self,
-        inner_key_types: "Tuple[_Type[object], ...]",
-        values: Tuple[_Monoid, ...],
-        is_product: bool,
-        value_names: Tuple[str, ...] | None = None,
-    ) -> None:
-        self.inner_key_types = inner_key_types
-        self.values = values
-        self.is_product = is_product
-        self.value_names = value_names
-
-    def __getitem__(self, inner_key: IK) -> V:
-        raise NotImplementedError
-
-    def __setitem__(self, inner_key: IK, value: V) -> None: ...
+    """A deterministic mergeable sample of k items, a list<string> of their
+    reprs; contribute with ``.observe(item)``."""
+    return Sample("DFTU_AGG_SAMPLE", param=_check_k("sample", k), elem=_elem_of("sample", of))
 
 
 class Map(Generic[K, V]):
-    __slots__ = ("key_types", "values", "is_product", "value_names", "ordered", "nested", "argrow")
+    __slots__ = ("key_types", "values", "is_product", "value_names")
 
     def __init__(
         self,
@@ -986,17 +907,11 @@ class Map(Generic[K, V]):
         values: Tuple[_Monoid, ...],
         is_product: bool,
         value_names: Tuple[str, ...] | None = None,
-        ordered: bool = False,
-        nested: "Nested[Any, Any] | None" = None,
-        argrow: "ArgMinRow | ArgMaxRow | None" = None,
     ) -> None:
         self.key_types = key_types
         self.values = values
         self.is_product = is_product
         self.value_names = value_names
-        self.ordered = ordered
-        self.nested = nested
-        self.argrow = argrow
 
     @overload
     def __getitem__(self, key: K) -> V: ...
@@ -1082,204 +997,92 @@ def _value_spec(value: object) -> Tuple[Tuple[_Monoid, ...], bool, Tuple[str, ..
     raise JitError("map value must be a monoid, a tuple/dict of monoids, or a @jit.record")
 
 
-@overload
-def nested(*, key: "Tuple[_Type[K1]]", value: V) -> "Nested[Tuple[K1], V]": ...
-@overload
-def nested(*, key: "Tuple[_Type[K1], _Type[K2]]", value: V) -> "Nested[Tuple[K1, K2], V]": ...
-@overload
-def nested(
-    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]", value: V
-) -> "Nested[Tuple[K1, K2, K3], V]": ...
-@overload
-def nested(
-    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]", value: V
-) -> "Nested[Tuple[K1, K2, K3, K4], V]": ...
-@overload
-def nested(*, key: "Tuple[_Type[object], ...]", value: V) -> "Nested[Tuple[object, ...], V]": ...
-def nested(key: "Tuple[_Type[object], ...]", value: object) -> "Nested[object, object]":
-    """Declare a nested-preserved map value: an inner typed-tuple key and a scalar
-    value monoid (or a tuple/dict/``@jit.record`` product of them).
-
-    Pass the result as a :func:`map` ``value`` to keep the outer key's sub-map as
-    one ``list<struct<inner_keys.., values..>>`` column instead of flattening it
-    into the row key. Inner values must be materializable scalars; a set/list
-    collection is rejected here, mirroring the engine."""
-    if not isinstance(key, tuple) or not key:
-        raise JitError("nested key must be a non-empty tuple of jit.i64 / jit.str_")
-    for k in key:
-        if not isinstance(k, _Type):
-            raise JitError("nested key components must be jit.i64 or jit.str_")
-    values, is_product, value_names = _value_spec(value)
-    for m in values:
-        if m.dft in _SET_MONOIDS or m.dft in _LIST_MONOIDS:
-            raise JitError(
-                "jit.nested value cannot be a set/list collection; inner values must be "
-                "scalar (count/sum/min/max/distinct/mean/variance/stddev) or a product of them"
-            )
-        if m.dft in _ARGBY_MONOIDS:
-            raise JitError(
-                "jit.nested value cannot be an argmin/argmax; there is no nested argby add"
-            )
-        if m.dft in _TOPK_MONOIDS or m.dft in _APPROX_MONOIDS or m.dft in _SAMPLE_MONOIDS:
-            raise JitError(
-                "jit.nested value cannot be a top-k/approx_top-k/sample collection; inner "
-                "values must be scalar or a product of them"
-            )
-        if m.dft in _ARGROW_MONOIDS:
-            raise JitError(
-                "jit.nested value cannot be an argmin_row/argmax_row; it is created only via "
-                "map_new_argrow"
-            )
-    return Nested(key, values, is_product, value_names)
-
-
 # A dict/tuple of monoids is a product (value type Product); these precede the
 # generic `value: V` forms so it is not typed as a bare dict/tuple.
 @overload
-def map(
-    *, key: "_Type[K1]", value: "Dict[str, _Monoid]", ordered: bool = False
-) -> "Map[Tuple[K1], Product]": ...
+def map(*, key: "_Type[K1]", value: "Dict[str, _Monoid]") -> "Map[Tuple[K1], Product]": ...
+@overload
+def map(*, key: "_Type[K1]", value: "Tuple[_Monoid, ...]") -> "Map[Tuple[K1], Product]": ...
+@overload
+def map(*, key: "Tuple[_Type[K1]]", value: "Dict[str, _Monoid]") -> "Map[Tuple[K1], Product]": ...
+@overload
+def map(*, key: "Tuple[_Type[K1]]", value: "Tuple[_Monoid, ...]") -> "Map[Tuple[K1], Product]": ...
 @overload
 def map(
-    *, key: "_Type[K1]", value: "Tuple[_Monoid, ...]", ordered: bool = False
-) -> "Map[Tuple[K1], Product]": ...
-@overload
-def map(
-    *, key: "Tuple[_Type[K1]]", value: "Dict[str, _Monoid]", ordered: bool = False
-) -> "Map[Tuple[K1], Product]": ...
-@overload
-def map(
-    *, key: "Tuple[_Type[K1]]", value: "Tuple[_Monoid, ...]", ordered: bool = False
-) -> "Map[Tuple[K1], Product]": ...
-@overload
-def map(
-    *, key: "Tuple[_Type[K1], _Type[K2]]", value: "Dict[str, _Monoid]", ordered: bool = False
+    *, key: "Tuple[_Type[K1], _Type[K2]]", value: "Dict[str, _Monoid]"
 ) -> "Map[Tuple[K1, K2], Product]": ...
 @overload
 def map(
-    *, key: "Tuple[_Type[K1], _Type[K2]]", value: "Tuple[_Monoid, ...]", ordered: bool = False
+    *, key: "Tuple[_Type[K1], _Type[K2]]", value: "Tuple[_Monoid, ...]"
 ) -> "Map[Tuple[K1, K2], Product]": ...
 @overload
 def map(
-    *,
-    key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]",
-    value: "Dict[str, _Monoid]",
-    ordered: bool = False,
+    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]", value: "Dict[str, _Monoid]"
 ) -> "Map[Tuple[K1, K2, K3], Product]": ...
 @overload
 def map(
-    *,
-    key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]",
-    value: "Tuple[_Monoid, ...]",
-    ordered: bool = False,
+    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]", value: "Tuple[_Monoid, ...]"
 ) -> "Map[Tuple[K1, K2, K3], Product]": ...
 @overload
 def map(
-    *,
-    key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]",
-    value: "Dict[str, _Monoid]",
-    ordered: bool = False,
+    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]", value: "Dict[str, _Monoid]"
 ) -> "Map[Tuple[K1, K2, K3, K4], Product]": ...
 @overload
 def map(
-    *,
-    key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]",
-    value: "Tuple[_Monoid, ...]",
-    ordered: bool = False,
+    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]", value: "Tuple[_Monoid, ...]"
 ) -> "Map[Tuple[K1, K2, K3, K4], Product]": ...
 @overload
 def map(
-    *, key: "Tuple[_Type[object], ...]", value: "Dict[str, _Monoid]", ordered: bool = False
+    *, key: "Tuple[_Type[object], ...]", value: "Dict[str, _Monoid]"
 ) -> "Map[Tuple[object, ...], Product]": ...
 @overload
 def map(
-    *, key: "Tuple[_Type[object], ...]", value: "Tuple[_Monoid, ...]", ordered: bool = False
+    *, key: "Tuple[_Type[object], ...]", value: "Tuple[_Monoid, ...]"
 ) -> "Map[Tuple[object, ...], Product]": ...
 @overload
-def map(*, key: "_Type[K1]", value: V, ordered: bool = False) -> "Map[Tuple[K1], V]": ...
+def map(*, key: "_Type[K1]", value: V) -> "Map[Tuple[K1], V]": ...
 @overload
-def map(*, key: "Tuple[_Type[K1]]", value: V, ordered: bool = False) -> "Map[Tuple[K1], V]": ...
+def map(*, key: "Tuple[_Type[K1]]", value: V) -> "Map[Tuple[K1], V]": ...
 @overload
-def map(
-    *, key: "Tuple[_Type[K1], _Type[K2]]", value: V, ordered: bool = False
-) -> "Map[Tuple[K1, K2], V]": ...
+def map(*, key: "Tuple[_Type[K1], _Type[K2]]", value: V) -> "Map[Tuple[K1, K2], V]": ...
 @overload
 def map(
-    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]", value: V, ordered: bool = False
+    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3]]", value: V
 ) -> "Map[Tuple[K1, K2, K3], V]": ...
 @overload
 def map(
-    *,
-    key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]",
-    value: V,
-    ordered: bool = False,
+    *, key: "Tuple[_Type[K1], _Type[K2], _Type[K3], _Type[K4]]", value: V
 ) -> "Map[Tuple[K1, K2, K3, K4], V]": ...
 @overload
-def map(
-    *, key: "Tuple[_Type[object], ...]", value: V, ordered: bool = False
-) -> "Map[Tuple[object, ...], V]": ...
-def map(
-    key: "Tuple[_Type[object], ...] | _Type[object]", value: object, ordered: bool = False
-) -> "Map[object, object]":
-    """Declare a mergeable map class-attribute: a typed-tuple key, and either one
-    value monoid, a tuple of monoids (a positional product), a dict of
-    name->monoid, or a :func:`record` class (both named products).
+def map(*, key: "Tuple[_Type[object], ...]", value: V) -> "Map[Tuple[object, ...], V]": ...
+def map(key: "Tuple[_Type[object], ...] | _Type[object]", value: object) -> "Map[object, object]":
+    """Declare a keyed accumulator: a typed-tuple key, and either one value
+    reduction, a tuple of reductions (a positional product), a dict of
+    name->reduction, or a :func:`record` class (both named products).
+
+    It lowers to the engine's ``AggState`` grouped by the key columns, one
+    aggregate per value reduction; the host merges same-named accumulators
+    across worker slices and finalizes each to a native DataFrame.
 
     A single-component key may be passed bare (``key=jit.i64``); it normalizes to
     the 1-tuple ``(jit.i64,)`` and the body may then use a bare subscript
     ``self.m[k]`` as well as ``self.m[(k,)]``. Multi-key maps stay tuple-only.
-
-    With ``ordered=True`` the map's result rows materialize sorted by key in the
-    native engine (I64 components by value, STR components by resolved label);
-    default is unordered."""
+    An empty key tuple declares a scalar accumulator: one whole-scan row."""
     if isinstance(key, _Type):
         key = (key,)
-    if not isinstance(key, tuple) or not key:
-        raise JitError("map key must be a non-empty tuple of jit.i64 / jit.str_")
+    if not isinstance(key, tuple):
+        raise JitError("map key must be a tuple of jit.i64 / jit.str_")
     for k in key:
         if not isinstance(k, _Type):
             raise JitError("map key components must be jit.i64 or jit.str_")
-    if isinstance(value, Nested):
-        return _MapDecl(key, value.values, value.is_product, value.value_names, nested=value)
-    if isinstance(value, (ArgMinRow, ArgMaxRow)):
-        return _MapDecl(key, (value,), False, None, argrow=value)
+        if k.dft == "DFTU_T_BYTES":
+            raise JitError(
+                "a bytes map key has no column form; group by jit.str_ or jit.i64 instead"
+            )
     values, is_product, value_names = _value_spec(value)
-    if is_product and any(v.dft == "DFTU_MONOID_SKETCH" for v in values):
+    if is_product and any(isinstance(v, Quantiles) for v in values):
         raise JitError("jit.quantiles is top-level only; it cannot be a product/record component")
-    return _MapDecl(key, values, is_product, value_names, ordered=ordered)
-
-
-_JOIN_TYPES: Dict[str, str] = {
-    "inner": "DFTU_JOIN_INNER",
-    "left": "DFTU_JOIN_LEFT",
-    "right": "DFTU_JOIN_RIGHT",
-    "full": "DFTU_JOIN_FULL",
-}
-
-
-class JoinDecl(Generic[K, V, K2, V2]):
-    __slots__ = ("left", "right", "how")
-
-    def __init__(self, left: "Map[K, V]", right: "Map[K2, V2]", how: str) -> None:
-        self.left = left
-        self.right = right
-        self.how = how
-
-
-def join(
-    left: "Map[K, V]",
-    right: "Map[K2, V2]",
-    *,
-    how: Literal["inner", "left", "right", "full"] = "inner",
-) -> "JoinDecl[K, V, K2, V2]":
-    """Declare a class-level equi-join of two of this plugin's maps on their shared
-    key tuple; the host runs it at finalize and emits the result under this
-    attribute's name. ``how`` is one of inner (default), left, right, full."""
-    if not isinstance(left, _MapDecl) or not isinstance(right, _MapDecl):
-        raise JitError("jit.join(left, right) operands must be jit.map declarations")
-    if how not in _JOIN_TYPES:
-        raise JitError("jit.join how must be one of inner / left / right / full")
-    return JoinDecl(left, right, how)
+    return _MapDecl(key, values, is_product, value_names)
 
 
 class Port(Protocol):
@@ -1429,85 +1232,6 @@ def consume(
     )
 
 
-class Handle(Protocol):
-    """Authoring-only handle for a cross-worker mergeable shared value.
-
-    A :func:`shared` handle accumulates one scalar monoid across every worker
-    slice: contribute in ``each_event`` with ``self.<handle>.add(<expr>)`` (or
-    ``self.<handle> += <expr>`` for the additive count/sum kinds). The host merges
-    same-cap handles across all slices; at scan end the plugin's generated
-    finalize reads the merged value and emits it under the attribute's name, so
-    :meth:`PluginHost.run` returns it (8 raw little-endian bytes: a ``uint64`` for
-    an integer kind, a ``double`` for a float kind). Never instantiated."""
-
-    def add(self, x: float) -> None: ...
-    def __iadd__(self, x: float) -> "Handle": ...
-
-
-# Monoid kinds the DFTU_EXT_HANDLES ABI can accumulate and reduce to one 8-byte
-# scalar: add_u64 kinds (result read as uint64) and add_f64 kinds (result read as
-# double). SKETCH is a handle kind too but its result is a quantiles struct, not
-# a scalar, so it is not offered here.
-_HANDLE_U64_KINDS = frozenset(
-    {
-        "DFTU_MONOID_COUNTER",
-        "DFTU_MONOID_MIN_U64",
-        "DFTU_MONOID_MAX_U64",
-        "DFTU_MONOID_DISTINCT",
-    }
-)
-
-_HANDLE_F64_KINDS = frozenset(
-    {
-        "DFTU_MONOID_SUM_F64",
-        "DFTU_MONOID_MIN_F64",
-        "DFTU_MONOID_MAX_F64",
-    }
-)
-
-
-class _Shared:
-    __slots__ = ("cap_id", "kind", "is_f64")
-
-    def __init__(self, cap_id: str, kind: str, is_f64: bool) -> None:
-        self.cap_id = cap_id
-        self.kind = kind
-        self.is_f64 = is_f64
-
-
-def shared(cap_id: str, monoid: object) -> Handle:
-    """Declare a cross-worker mergeable shared handle under capability ``cap_id``.
-
-    ``monoid`` is one of :func:`count`, :func:`sum`, :func:`distinct`,
-    :func:`min` / :func:`max` (u64), or :func:`minf` / :func:`maxf` (f64) - the
-    scalar monoids the host can merge across workers into one value. In
-    ``each_event`` contribute with ``self.<handle>.add(<expr>)`` (count and sum
-    also accept ``self.<handle> += <expr>``). The merged value is emitted under
-    the attribute's name at finalize; ``run()`` returns it as 8 raw bytes (a
-    little-endian ``uint64`` for an integer kind, a ``double`` for a float kind).
-    """
-    _check_cap_id("shared", cap_id)
-    if callable(monoid) and not isinstance(monoid, _Monoid):
-        monoid = cast(Callable[[], object], monoid)()
-    if not isinstance(monoid, _Monoid):
-        raise JitError(
-            "jit.shared monoid must be a scalar monoid such as jit.count(), jit.sum(), "
-            "jit.distinct(), jit.min()/jit.max() (u64), or jit.minf()/jit.maxf() (f64)"
-        )
-    dft = monoid.dft
-    if dft in _HANDLE_U64_KINDS:
-        is_f64 = False
-    elif dft in _HANDLE_F64_KINDS:
-        is_f64 = True
-    else:
-        raise JitError(
-            f"jit.shared does not support the {dft} monoid; a shared handle merges one "
-            "scalar across workers - use jit.count(), jit.sum(), jit.distinct(), "
-            "jit.min()/jit.max() (u64 only), or jit.minf()/jit.maxf() (f64)"
-        )
-    return cast(Handle, _Shared(cap_id, dft, is_f64))
-
-
 class _EachEvent:
     __slots__ = ("fn", "raw")
 
@@ -1522,8 +1246,11 @@ def each_event(
     """Mark the one per-event method to AST-compile.
 
     With ``raw=True`` the method instead returns a C++ string spliced verbatim
-    into the per-event loop; available C names are ``host``, ``map``, each
-    declared map handle by its attribute name, ``e``, ``b``, and ``i``."""
+    into the per-event loop; available C names are ``host``, ``e``, ``b``, ``i``,
+    and, for each declared accumulator ``m``, its row buffers ``_n_m``,
+    ``_cap_m``, ``_k<i>_m``, ``_v<c>_m`` (plus ``_o<c>_m`` for a product and
+    ``_b<c>_m`` for a by-reading reduction). A raw body appends at most
+    ``_RAW_ROWS_PER_EVENT`` rows per event per accumulator."""
     if fn is None:
         return lambda f: _EachEvent(f, raw)
     return _EachEvent(fn, raw)
@@ -1641,90 +1368,27 @@ _ARG_HELPER_DEFS: Dict[str, List[str]] = {
 
 _STR_FIELDS = frozenset({"cat", "name", "fhash", "hhash"})
 
-_F64_MONOIDS = frozenset(
-    {
-        "DFTU_MONOID_SUM_F64",
-        "DFTU_MONOID_MIN_F64",
-        "DFTU_MONOID_MAX_F64",
-        "DFTU_MONOID_MIN_F32",
-        "DFTU_MONOID_MAX_F32",
-        "DFTU_MONOID_MEAN",
-        "DFTU_MONOID_VARIANCE",
-        "DFTU_MONOID_STDDEV",
-        "DFTU_MONOID_SKETCH",
-    }
-)
+# Reductions contributed with `+=` (everything else takes .observe / .append).
+_ADDITIVE_OPS = frozenset({"DFTU_AGG_SUM"})
 
-_ARGBY_MONOIDS = frozenset(
-    {
-        "DFTU_MONOID_ARGMIN_I64",
-        "DFTU_MONOID_ARGMAX_I64",
-        "DFTU_MONOID_ARGMIN_STR",
-        "DFTU_MONOID_ARGMAX_STR",
-    }
-)
+_ARGBY_OPS = frozenset({"DFTU_AGG_ARGMIN", "DFTU_AGG_ARGMAX"})
 
-_ARGBY_STR = frozenset({"DFTU_MONOID_ARGMIN_STR", "DFTU_MONOID_ARGMAX_STR"})
+_TOPK_OPS = frozenset({"DFTU_AGG_TOPK", "DFTU_AGG_BOTTOMK"})
 
-_ARGBY_I64 = frozenset({"DFTU_MONOID_ARGMIN_I64", "DFTU_MONOID_ARGMAX_I64"})
+_SET_OPS = frozenset({"DFTU_AGG_SET_UNION"})
 
-_TOPK_MONOIDS = frozenset(
-    {
-        "DFTU_MONOID_TOPK_I64",
-        "DFTU_MONOID_TOPK_STR",
-        "DFTU_MONOID_BOTTOMK_I64",
-        "DFTU_MONOID_BOTTOMK_STR",
-    }
-)
+_LIST_OPS = frozenset({"DFTU_AGG_LIST_SORTED"})
 
-_APPROX_MONOIDS = frozenset({"DFTU_MONOID_APPROX_TOPK_I64", "DFTU_MONOID_APPROX_TOPK_STR"})
+# The C buffer element type and the batch column dtype for each value family.
+_ELEM_CTYPE = {"i64": "int64_t", "f64": "double", "str": "dftu_str"}
+_ELEM_DTYPE = {"i64": "DFTU_TYPE_INT64", "f64": "DFTU_TYPE_FLOAT64", "str": "DFTU_TYPE_STRING"}
 
-_SAMPLE_MONOIDS = frozenset({"DFTU_MONOID_SAMPLE_I64", "DFTU_MONOID_SAMPLE_STR"})
-
-_ARGROW_MONOIDS = frozenset({"DFTU_MONOID_ARGMIN_ROW", "DFTU_MONOID_ARGMAX_ROW"})
-
-_KV_STR = frozenset(
-    {
-        "DFTU_MONOID_TOPK_STR",
-        "DFTU_MONOID_BOTTOMK_STR",
-        "DFTU_MONOID_APPROX_TOPK_STR",
-        "DFTU_MONOID_SAMPLE_STR",
-    }
-)
-
-_KV_I64 = frozenset(
-    {
-        "DFTU_MONOID_TOPK_I64",
-        "DFTU_MONOID_BOTTOMK_I64",
-        "DFTU_MONOID_APPROX_TOPK_I64",
-        "DFTU_MONOID_SAMPLE_I64",
-    }
-)
-
-_ADDITIVE_MONOIDS = frozenset({"DFTU_MONOID_COUNTER", "DFTU_MONOID_SUM_F64"})
-
-_SET_MONOIDS = frozenset({"DFTU_MONOID_SET_STR", "DFTU_MONOID_SET_I64"})
-
-_LIST_MONOIDS = frozenset({"DFTU_MONOID_LIST_STR", "DFTU_MONOID_LIST_I64"})
-
-_STR_COLLECTIONS = frozenset({"DFTU_MONOID_SET_STR", "DFTU_MONOID_LIST_STR"})
-
-_I64_COLLECTIONS = frozenset({"DFTU_MONOID_SET_I64", "DFTU_MONOID_LIST_I64"})
-
-_FLOAT_KEYS = frozenset({"DFTU_T_F32", "DFTU_T_F64"})
-
-# Monoids whose contribution is not a single u64/f64 add, so a map holding one
-# cannot be coalesced into a fused map (which drives components via map_add_row).
-_NON_FUSABLE_MONOIDS = frozenset(
-    _ARGBY_MONOIDS
-    | _TOPK_MONOIDS
-    | _APPROX_MONOIDS
-    | _SAMPLE_MONOIDS
-    | _ARGROW_MONOIDS
-    | _SET_MONOIDS
-    | _LIST_MONOIDS
-    | {"DFTU_MONOID_SKETCH"}
-)
+# Key component type -> (C buffer element type, batch column dtype).
+_KEY_CTYPE = {
+    "DFTU_T_STR": ("dftu_str", "DFTU_TYPE_STRING"),
+    "DFTU_T_F32": ("double", "DFTU_TYPE_FLOAT64"),
+    "DFTU_T_F64": ("double", "DFTU_TYPE_FLOAT64"),
+}
 
 _CMP_OP: Dict[type, str] = {
     ast.Eq: "==",
@@ -1821,33 +1485,31 @@ def _int_literal(v: int) -> str:
     return f"{v}ULL" if v > _I64_MAX else str(v)
 
 
-class _FusedGroup(TypedDict):
-    """One coalesced group of same-key maps fused into a single product."""
+def _key_ctype(ktype: str) -> Tuple[str, str]:
+    """(C buffer element type, batch column dtype) for a key component type."""
+    return _KEY_CTYPE.get(ktype, ("int64_t", "DFTU_TYPE_INT64"))
 
-    cname: str
-    key_elts: List[ast.expr]
-    key_types: "Tuple[_Type[object], ...]"
-    members: List[str]
-    ordered: bool
+
+def _out_name(decl: _MapDecl, comp: int) -> str:
+    """Result column name for value component ``comp``."""
+    if not decl.is_product:
+        return "value"
+    if decl.value_names is not None:
+        return decl.value_names[comp]
+    return f"v{comp}"
 
 
 class _Compiler:
     def __init__(
         self,
         maps: Dict[str, _MapDecl],
-        joins: builtins.set[str] | None = None,
-        no_fuse: builtins.set[str] | None = None,
         ops: Dict[str, Op] | None = None,
         ports: Dict[str, _Port] | None = None,
-        shared: Dict[str, _Shared] | None = None,
         resolve_flags: builtins.set[str] | None = None,
         config_fields: "Dict[str, bool] | None" = None,
     ) -> None:
         self.maps = maps
-        self.joins = joins if joins is not None else builtins.set()
-        self.no_fuse = no_fuse if no_fuse is not None else builtins.set()
         self.ports = ports if ports is not None else {}
-        self.shared = shared if shared is not None else {}
         # Flags a @jit.on_resolve method sets; each_event reads them as
         # self.<flag>, lowering to the file-scope _rflag_<flag> static.
         self.resolve_flags = resolve_flags if resolve_flags is not None else builtins.set()
@@ -1860,22 +1522,18 @@ class _Compiler:
         self.op_defs: List[str] = []
         self.op_emitted: builtins.set[str] = builtins.set()
         self.needs: builtins.set[str] = builtins.set()
-        self.funcs: builtins.set[str] = builtins.set()
         self.str_literals: List[str] = []
         self.arg_keys: List[str] = []
         self.arg_helpers: builtins.set[str] = builtins.set()
         self.self_name = "self"
         self.event_name = "e"
+        # Contribution statements per accumulator; the emitted row buffers hold
+        # this many rows per scanned event.
+        self.rows_per_event: Dict[str, int] = {}
         # CSE: ast.dump(node) -> (local name, is_float) for a hoisted expression
         # shared within the current scope.
         self._cse: Dict[str, Tuple[str, bool]] = {}
         self._cse_n = 0
-        # Fusion plan: same-key maps coalesced into one product.
-        # fused_of: map name -> (fused C name, component index, is_f64).
-        self.fused_of: Dict[str, Tuple[str, int, bool]] = {}
-        self.fused_groups: List[_FusedGroup] = []
-        # Per-scope batched contributions: fused C name -> [(comp, is_f64, rhs)].
-        self._fused_pending: Dict[str, List[Tuple[int, bool, str]]] = {}
 
     def lower(self, fn: Callable[..., object]) -> List[str]:
         src = textwrap.dedent(inspect.getsource(fn))
@@ -1889,69 +1547,8 @@ class _Compiler:
             _reject("each_event must take exactly (self, e)")
         self.self_name = params[0].arg
         self.event_name = params[1].arg
-        self._plan_fusion(fn_ast.body)
         defs, lines = self._compile_scope(fn_ast.body)
         return defs + lines
-
-    # Coalesce plain single-value maps that are always subscripted at the same
-    # key into one product, so their per-event updates share one hash lookup.
-    # The product still materializes as the separate maps the user declared.
-    def _plan_fusion(self, stmts: List[ast.stmt]) -> None:
-        sigs: Dict[str, builtins.set[str]] = {}
-        key_of: Dict[str, List[ast.expr]] = {}
-
-        def visit(stmt_list: List[ast.stmt]) -> None:
-            for st in stmt_list:
-                if isinstance(st, ast.If):
-                    visit(st.body)
-                for node in ast.walk(st):
-                    if not (
-                        isinstance(node, ast.Subscript)
-                        and isinstance(node.value, ast.Attribute)
-                        and isinstance(node.value.value, ast.Name)
-                        and node.value.value.id == self.self_name
-                    ):
-                        continue
-                    attr = node.value.attr
-                    decl = self.maps.get(attr)
-                    if decl is None or attr in self.no_fuse:
-                        continue
-                    # Only plain single-value maps with a fusable monoid coalesce.
-                    if decl.nested is not None or decl.argrow is not None or decl.is_product:
-                        continue
-                    if decl.values[0].dft in _NON_FUSABLE_MONOIDS:
-                        continue
-                    elts = self._slice_elts(node.slice)
-                    sigs.setdefault(attr, builtins.set()).add("|".join(ast.dump(e) for e in elts))
-                    key_of[attr] = elts
-
-        visit(stmts)
-        # Group maps with a single, identical key signature, key types, and
-        # ordered flag (a differing flag would change one member's row order).
-        groups: Dict[Tuple[str, Tuple[str, ...], bool], List[str]] = {}
-        for attr, sset in sigs.items():
-            if len(sset) != 1:
-                continue  # a map keyed inconsistently cannot fuse
-            decl = self.maps[attr]
-            kt = tuple(k.dft for k in decl.key_types)
-            groups.setdefault((next(iter(sset)), kt, decl.ordered), []).append(attr)
-        for gi, ((_, _, ordered), members) in enumerate(sorted(groups.items())):
-            if len(members) < 2:
-                continue
-            members.sort()  # deterministic component order
-            cname = f"fused{gi}"
-            self.fused_groups.append(
-                {
-                    "cname": cname,
-                    "key_elts": key_of[members[0]],
-                    "key_types": self.maps[members[0]].key_types,
-                    "members": members,
-                    "ordered": ordered,
-                }
-            )
-            for ci, a in enumerate(members):
-                is_f64 = self.maps[a].values[0].dft in _F64_MONOIDS
-                self.fused_of[a] = (cname, ci, is_f64)
 
     def _slice_elts(self, sl: ast.expr) -> List[ast.expr]:
         sl = _unwrap_index(sl)
@@ -1989,40 +1586,11 @@ class _Compiler:
             self._cse_n += 1
             defs.append(f"{'double' if is_float else 'int64_t'} {name} = ({expr});")
             self._cse[d] = (name, is_float)
-        # Fused contributions collected while compiling this scope's statements
-        # flush to one map_add_row per group at the scope's end.
-        outer_pending = self._fused_pending
-        self._fused_pending = {}
         lines: List[str] = []
         for stmt in stmts:
             lines.extend(self._stmt(stmt))
-        lines.extend(self._flush_fused_rows())
-        self._fused_pending = outer_pending
         self._cse = outer
         return defs, lines
-
-    def _flush_fused_rows(self) -> List[str]:
-        out: List[str] = []
-        for group in self.fused_groups:
-            cname = group["cname"]
-            pending = self._fused_pending.get(cname)
-            if not pending:
-                continue
-            self.funcs.add("map_add_row")
-            n = len(group["key_types"])
-            block = ["{", f"    int64_t key[{n}];"]
-            block.extend(self._key_assigns(group["key_types"], group["key_elts"]))
-            k = len(pending)
-            block.append(f"    dftu_row_val _row[{k}];")
-            for i, (comp, is_f64, rhs) in enumerate(pending):
-                block.append(f"    _row[{i}].comp = {comp}u;")
-                block.append(f"    _row[{i}].is_f64 = {1 if is_f64 else 0};")
-                slot = "f" if is_f64 else "u"
-                block.append(f"    _row[{i}].value.{slot} = {rhs};")
-            block.append(f"    map->map_add_row(host->h, m_{cname}, key, _row, {k}u);")
-            block.append("}")
-            out.extend(block)
-        return out
 
     def _is_cse_candidate(self, node: ast.expr) -> bool:
         if isinstance(node, ast.BinOp) and type(node.op) in _ARITH_OP:
@@ -2056,13 +1624,6 @@ class _Compiler:
             func = stmt.value.func
             if isinstance(func, ast.Attribute) and func.attr == "append":
                 return self._append(stmt.value)
-            if isinstance(func, ast.Attribute) and func.attr == "add":
-                sh = self._shared_target(func.value)
-                if sh is not None:
-                    call = stmt.value
-                    if len(call.args) != 1 or call.keywords:
-                        _reject(f"self.{sh}.add expects exactly one value argument")
-                    return self._shared_add(sh, call.args[0])
             return self._observe(stmt.value)
         _reject(_describe(stmt))
 
@@ -2187,9 +1748,7 @@ class _Compiler:
             self.str_literals.append(s)
         return f"lit_{self.str_literals.index(s)}"
 
-    def _resolve_accum(
-        self, target: ast.expr
-    ) -> Tuple[str, List[ast.expr], int | None, _Monoid, List[ast.expr] | None]:
+    def _resolve_accum(self, target: ast.expr) -> Tuple[str, List[ast.expr], int, _Monoid]:
         comp_name: str | None = None
         node = target
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Subscript):
@@ -2212,19 +1771,12 @@ class _Compiler:
             _reject("assignment target (expected self.<map>[(...)])")
         decl = self.maps.get(base.attr)
         if decl is None:
-            if base.attr in self.joins:
-                _reject(
-                    f"self.{base.attr} is a jit.join result computed at finalize; "
-                    "observe the input maps, not the join"
-                )
             _reject(f"unknown map self.{base.attr}")
-        if decl.nested is not None:
-            return self._resolve_nested(base.attr, decl, subs, comp_name)
         return self._resolve_flat(base.attr, decl, subs, comp_name)
 
     def _resolve_flat(
         self, attr: str, decl: _MapDecl, subs: List[ast.expr], comp_name: str | None
-    ) -> Tuple[str, List[ast.expr], int | None, _Monoid, None]:
+    ) -> Tuple[str, List[ast.expr], int, _Monoid]:
         if decl.is_product:
             keys = self._keys(subs[0])
             comp_node = subs[1] if len(subs) > 1 else None
@@ -2236,125 +1788,16 @@ class _Compiler:
                 comp = self._comp(comp_node, decl, attr)
             else:
                 _reject(f"product map self.{attr} add without a component")
-            monoid = decl.values[comp]
         else:
             if comp_name is not None:
                 _reject(f"single-value map self.{attr} add with a component")
             keys = []
             for sl in subs:
                 keys.extend(self._keys(sl))
-            comp = None
-            monoid = decl.values[0]
+            comp = 0
         if len(keys) != len(decl.key_types):
             _reject(f"self.{attr} takes {len(decl.key_types)} key components, got {len(keys)}")
-        return attr, keys, comp, monoid, None
-
-    def _resolve_nested(
-        self, attr: str, decl: _MapDecl, subs: List[ast.expr], comp_name: str | None
-    ) -> Tuple[str, List[ast.expr], int | None, _Monoid, List[ast.expr]]:
-        assert decl.nested is not None
-        if len(subs) < 2:
-            _reject(f"nested map self.{attr} needs [outer][inner] subscripts")
-        outer_keys = self._keys(subs[0])
-        inner_keys = self._keys(subs[1])
-        comp_node = subs[2] if len(subs) > 2 else None
-        if len(subs) > 3:
-            _reject(f"too many subscripts for nested map self.{attr}")
-        outer_n = len(decl.key_types)
-        inner_n = len(decl.nested.inner_key_types)
-        if len(outer_keys) != outer_n:
-            _reject(f"self.{attr} takes {outer_n} outer key components, got {len(outer_keys)}")
-        if len(inner_keys) != inner_n:
-            _reject(f"self.{attr} takes {inner_n} inner key components, got {len(inner_keys)}")
-        if decl.is_product:
-            if comp_name is not None:
-                comp = self._named_comp(comp_name, decl, attr)
-            elif comp_node is not None:
-                comp = self._comp(comp_node, decl, attr)
-            else:
-                _reject(f"nested product map self.{attr} add without a component")
-            monoid = decl.values[comp]
-        else:
-            if comp_name is not None or comp_node is not None:
-                _reject(f"single-value nested map self.{attr} add with a component")
-            comp = 0
-            monoid = decl.values[0]
-        return attr, outer_keys, comp, monoid, inner_keys
-
-    def _key_assigns(
-        self,
-        key_types: "Tuple[_Type[object], ...]",
-        keys: List[ast.expr],
-        var: str = "key",
-    ) -> List[str]:
-        # A float key component is bit-cast into its int64 key slot (a numeric
-        # expr, so float arithmetic is allowed); other keys take an i64 expr.
-        lines: List[str] = []
-        for idx, kn in enumerate(keys):
-            ktype = key_types[idx].dft
-            if ktype == "DFTU_T_BYTES":
-                _reject("a bytes key; e.<field> exposes no raw byte blob, author it raw")
-            if ktype == "DFTU_T_F64":
-                expr, _ = self._arith(kn)
-                lines.append(
-                    f"    {{ double _t = (double)({expr}); std::memcpy(&{var}[{idx}], &_t, 8); }}"
-                )
-            elif ktype == "DFTU_T_F32":
-                expr, _ = self._arith(kn)
-                lines.append(
-                    f"    {{ float _t = (float)({expr}); uint32_t _u; "
-                    f"std::memcpy(&_u, &_t, 4); {var}[{idx}] = (int64_t)_u; }}"
-                )
-            else:
-                lines.append(f"    {var}[{idx}] = (int64_t)({self._value(kn)});")
-        return lines
-
-    def _emit_add(
-        self,
-        attr: str,
-        keys: List[ast.expr],
-        comp: int | None,
-        monoid: _Monoid,
-        value: ast.expr,
-        inner_keys: List[ast.expr] | None = None,
-    ) -> List[str]:
-        float_target = monoid.dft in _F64_MONOIDS
-        rhs = self._rhs(value, float_target)
-        # A fused map's contribution is deferred and batched into one map_add_row
-        # per scope (built in _compile_scope), sharing the group's single lookup.
-        fused = self.fused_of.get(attr) if inner_keys is None else None
-        if fused is not None:
-            cname, comp_idx, is_f64 = fused
-            self._fused_pending.setdefault(cname, []).append((comp_idx, is_f64, rhs))
-            return []
-        var = f"m_{attr}"
-        decl = self.maps[attr]
-        if inner_keys is not None:
-            assert decl.nested is not None
-            fn = "map_add_nested_f64" if float_target else "map_add_nested_u64"
-            self.funcs.add(fn)
-            lines = [
-                "{",
-                f"    int64_t okey[{len(keys)}];",
-                f"    int64_t ikey[{len(inner_keys)}];",
-            ]
-            lines.extend(self._key_assigns(decl.key_types, keys, "okey"))
-            lines.extend(self._key_assigns(decl.nested.inner_key_types, inner_keys, "ikey"))
-            lines.append(f"    map->{fn}(host->h, {var}, okey, ikey, {comp}, {rhs});")
-            lines.append("}")
-            return lines
-        lines = ["{", f"    int64_t key[{len(keys)}];"]
-        lines.extend(self._key_assigns(decl.key_types, keys))
-        if comp is None:
-            fn = "map_add_f64" if float_target else "map_add_u64"
-            self.funcs.add(fn)
-            lines.append(f"    map->{fn}(host->h, {var}, key, {rhs});")
-        else:
-            fn = "map_add_f64_at" if float_target else "map_add_u64_at"
-            self.funcs.add(fn)
-            lines.append(f"    map->{fn}(host->h, {var}, key, {comp}, {rhs});")
-        lines.append("}")
-        return lines
+        return attr, keys, comp, decl.values[comp]
 
     def _publish_target(self, target: ast.expr) -> str | None:
         if (
@@ -2370,8 +1813,11 @@ class _Compiler:
         port = self.ports[name]
         if port.role != "publish":
             _reject(f"self.{name} is a jit.consume port; read its value, do not += into it")
-        rhs = self._rhs(value, port.is_f64)
-        return [f"_pub_{name} += {rhs};"]
+        expr, saw_float = self._arith(value)
+        if not port.is_f64 and saw_float:
+            _reject("float value into a u64 publish port")
+        cast = "double" if port.is_f64 else "uint64_t"
+        return [f"_pub_{name} += ({cast})({expr});"]
 
     def _consume_ref(self, name: str) -> str:
         port = self.ports[name]
@@ -2379,246 +1825,43 @@ class _Compiler:
             _reject(f"self.{name} is a jit.publish port; publish into it with +=, do not read it")
         return f"_sub_{name}"
 
-    def _shared_target(self, target: ast.expr) -> str | None:
-        if (
-            isinstance(target, ast.Attribute)
-            and isinstance(target.value, ast.Name)
-            and target.value.id == self.self_name
-            and target.attr in self.shared
-        ):
-            return target.attr
-        return None
-
-    def _shared_add(self, name: str, value: ast.expr) -> List[str]:
-        sh = self.shared[name]
-        rhs = self._rhs(value, sh.is_f64)
-        if sh.is_f64:
-            return [f"if (_hd_{name}) _handles->add_f64(host->h, _hd_{name}, {rhs}, 1.0);"]
-        return [f"if (_hd_{name}) _handles->add_u64(host->h, _hd_{name}, {rhs});"]
-
-    def _shared_aug(self, name: str, value: ast.expr) -> List[str]:
-        sh = self.shared[name]
-        if sh.kind not in _ADDITIVE_MONOIDS:
-            _reject(
-                f"+= on the non-additive shared handle self.{name} ({sh.kind}); "
-                "use self." + name + ".add(<expr>)"
-            )
-        return self._shared_add(name, value)
-
     def _aug(self, stmt: ast.AugAssign) -> List[str]:
         if not isinstance(stmt.op, ast.Add):
             _reject("augmented operator other than +=")
         pub = self._publish_target(stmt.target)
         if pub is not None:
             return self._publish(pub, stmt.value)
-        sh = self._shared_target(stmt.target)
-        if sh is not None:
-            return self._shared_aug(sh, stmt.value)
-        attr, keys, comp, monoid, inner_keys = self._resolve_accum(stmt.target)
-        if monoid.dft in _LIST_MONOIDS:
+        attr, keys, comp, monoid = self._resolve_accum(stmt.target)
+        if monoid.dft in _LIST_OPS:
             _reject("+= on an ordered-list monoid; use .append(elem, order_by=<expr>)")
-        if monoid.dft not in _ADDITIVE_MONOIDS:
+        if monoid.dft not in _ADDITIVE_OPS:
             _reject(f"+= on the non-additive monoid {monoid.dft}; use .observe(v) instead")
-        return self._emit_add(attr, keys, comp, monoid, stmt.value, inner_keys)
+        return self._emit_row(attr, keys, comp, monoid, stmt.value, None)
 
     def _observe(self, call: ast.Call) -> List[str]:
         func = call.func
         if not (isinstance(func, ast.Attribute) and func.attr == "observe"):
             _reject("method call other than .observe(v)")
-        attr, keys, comp, monoid, inner_keys = self._resolve_accum(func.value)
-        if monoid.dft in _ARGBY_MONOIDS:
-            return self._observe_argby(call, attr, keys, comp, monoid)
-        if monoid.dft in _TOPK_MONOIDS:
-            return self._observe_topk(call, attr, keys, comp, monoid)
-        if monoid.dft in _ARGROW_MONOIDS:
-            return self._observe_argrow(call, attr, keys, monoid)
-        if len(call.args) != 1 or call.keywords:
-            _reject(".observe expects exactly one value argument")
-        if monoid.dft in _LIST_MONOIDS:
+        attr, keys, comp, monoid = self._resolve_accum(func.value)
+        if monoid.dft in _LIST_OPS:
             _reject(".observe on an ordered-list monoid; use .append(elem, order_by=<expr>)")
-        if monoid.dft in _SET_MONOIDS:
-            self._check_element(call.args[0], monoid)
-        if monoid.dft in _APPROX_MONOIDS:
-            self._check_kv_element(call.args[0], monoid)
-            return self._emit_kv_add(
-                "map_add_approx_topk_at", attr, keys, comp, monoid, call.args[0]
-            )
-        if monoid.dft in _SAMPLE_MONOIDS:
-            self._check_kv_element(call.args[0], monoid)
-            return self._emit_kv_add("map_add_sample_at", attr, keys, comp, monoid, call.args[0])
-        return self._emit_add(attr, keys, comp, monoid, call.args[0], inner_keys)
-
-    def _check_kv_element(self, node: ast.expr, monoid: _Monoid) -> None:
-        is_str = self._is_str_element(node)
-        if monoid.dft in _KV_STR and not is_str:
-            raise JitError(
-                "a str-valued top-k/sample element must be a string field such as e.fhash; "
-                "use of=jit.i64 for an int64 value"
-            )
-        if monoid.dft in _KV_I64 and is_str:
-            raise JitError(
-                "an i64-valued top-k/sample element must be an int64 expr such as e.dur; "
-                "use of=jit.str_ for a string value"
-            )
-
-    def _observe_topk(
-        self,
-        call: ast.Call,
-        attr: str,
-        keys: List[ast.expr],
-        comp: int | None,
-        monoid: _Monoid,
-    ) -> List[str]:
-        if len(call.args) != 1:
-            _reject("top-k/bottom-k .observe takes one payload and by=<expr>")
         by: ast.expr | None = None
-        for kw in call.keywords:
-            if kw.arg == "by":
-                by = kw.value
-            else:
-                _reject(f"top-k/bottom-k .observe keyword other than by ({kw.arg})")
-        if by is None:
-            raise JitError(
-                "top-k/bottom-k .observe requires by=<expr>; the by key ranks the kept payloads"
-            )
-        payload = call.args[0]
-        self._check_kv_element(payload, monoid)
-        k = getattr(monoid, "k", 0)
-        self.funcs.add("map_add_topk_at")
-        by_expr, _ = self._arith(by)
-        payload_expr = self._value(payload)
-        var = f"m_{attr}"
-        c = 0 if comp is None else comp
-        lines = ["{", f"    int64_t key[{len(keys)}];"]
-        lines.extend(self._key_assigns(self.maps[attr].key_types, keys))
-        lines.append(
-            f"    map->map_add_topk_at(host->h, {var}, key, {c}, {k}u, "
-            f"(double)({by_expr}), (int64_t)({payload_expr}));"
-        )
-        lines.append("}")
-        return lines
-
-    def _emit_kv_add(
-        self,
-        fn: str,
-        attr: str,
-        keys: List[ast.expr],
-        comp: int | None,
-        monoid: _Monoid,
-        value: ast.expr,
-    ) -> List[str]:
-        self.funcs.add(fn)
-        k = getattr(monoid, "k", 0)
-        val_expr = self._value(value)
-        var = f"m_{attr}"
-        c = 0 if comp is None else comp
-        lines = ["{", f"    int64_t key[{len(keys)}];"]
-        lines.extend(self._key_assigns(self.maps[attr].key_types, keys))
-        lines.append(f"    map->{fn}(host->h, {var}, key, {c}, {k}u, (int64_t)({val_expr}));")
-        lines.append("}")
-        return lines
-
-    def _observe_argrow(
-        self,
-        call: ast.Call,
-        attr: str,
-        keys: List[ast.expr],
-        monoid: _Monoid,
-    ) -> List[str]:
-        if len(call.args) != 1:
-            _reject("argmin_row/argmax_row .observe takes one payload tuple and by=<expr>")
-        by: ast.expr | None = None
-        for kw in call.keywords:
-            if kw.arg == "by":
-                by = kw.value
-            else:
-                _reject(f"argmin_row/argmax_row .observe keyword other than by ({kw.arg})")
-        if by is None:
-            raise JitError(
-                "argmin_row/argmax_row .observe requires by=<expr>; the by key selects the row"
-            )
-        payload_node = call.args[0]
-        if not isinstance(payload_node, ast.Tuple):
-            raise JitError(
-                "argmin_row/argmax_row .observe payload must be a tuple such as "
-                "(e.fhash, e.tid, e.ts) matching the of= schema"
-            )
-        payload = builtins.list(payload_node.elts)
-        decl = self.maps[attr]
-        assert decl.argrow is not None
-        ptypes = decl.argrow.payload_types
-        if len(payload) != len(ptypes):
-            raise JitError(
-                f"self.{attr} arg-row payload takes {len(ptypes)} components, got {len(payload)}"
-            )
-        self.funcs.add("map_add_argrow")
-        by_expr, _ = self._arith(by)
-        var = f"m_{attr}"
-        pn = len(payload)
-        lines = ["{", f"    int64_t key[{len(keys)}];", f"    int64_t payload[{pn}];"]
-        lines.extend(self._key_assigns(decl.key_types, keys))
-        lines.extend(self._key_assigns(ptypes, payload, "payload"))
-        lines.append(
-            f"    map->map_add_argrow(host->h, {var}, key, (double)({by_expr}), payload, {pn}u);"
-        )
-        lines.append("}")
-        return lines
-
-    def _observe_argby(
-        self,
-        call: ast.Call,
-        attr: str,
-        keys: List[ast.expr],
-        comp: int | None,
-        monoid: _Monoid,
-    ) -> List[str]:
-        if len(call.args) != 1:
-            _reject("argmin/argmax .observe takes one payload and by=<expr>")
-        by: ast.expr | None = None
-        for kw in call.keywords:
-            if kw.arg == "by":
-                by = kw.value
-            else:
-                _reject(f"argmin/argmax .observe keyword other than by ({kw.arg})")
-        if by is None:
-            raise JitError(
-                "argmin/argmax .observe requires by=<expr>; the by key selects the extreme payload"
-            )
-        payload = call.args[0]
-        is_str = self._is_str_element(payload)
-        if monoid.dft in _ARGBY_STR and not is_str:
-            raise JitError(
-                "an argmin/argmax(of=jit.str_) payload must be a string field such as "
-                "e.fhash; use jit.argmin/argmax(of=jit.i64) for an int64 payload"
-            )
-        if monoid.dft in _ARGBY_I64 and is_str:
-            raise JitError(
-                "an argmin/argmax(of=jit.i64) payload must be an int64 expr such as "
-                "e.dur; use jit.argmin/argmax(of=jit.str_) for a string payload"
-            )
-        return self._emit_argby(attr, keys, comp, by, payload)
-
-    def _emit_argby(
-        self,
-        attr: str,
-        keys: List[ast.expr],
-        comp: int | None,
-        by: ast.expr,
-        payload: ast.expr,
-    ) -> List[str]:
-        self.funcs.add("map_add_argby_at")
-        by_expr, _ = self._arith(by)
-        payload_expr = self._value(payload)
-        var = f"m_{attr}"
-        c = 0 if comp is None else comp
-        lines = ["{", f"    int64_t key[{len(keys)}];"]
-        lines.extend(self._key_assigns(self.maps[attr].key_types, keys))
-        lines.append(
-            f"    map->map_add_argby_at(host->h, {var}, key, {c}, "
-            f"(double)({by_expr}), (int64_t)({payload_expr}));"
-        )
-        lines.append("}")
-        return lines
+        if monoid.needs_by:
+            if len(call.args) != 1:
+                _reject(".observe takes one payload and by=<expr>")
+            for kw in call.keywords:
+                if kw.arg == "by":
+                    by = kw.value
+                else:
+                    _reject(f".observe keyword other than by ({kw.arg})")
+            if by is None:
+                raise JitError(
+                    f"self.{attr} .observe requires by=<expr>; the by key ranks the payloads"
+                )
+        elif len(call.args) != 1 or call.keywords:
+            _reject(".observe expects exactly one value argument")
+        self._check_element(call.args[0], monoid)
+        return self._emit_row(attr, keys, comp, monoid, call.args[0], by)
 
     def _append(self, call: ast.Call) -> List[str]:
         func = call.func
@@ -2631,27 +1874,34 @@ class _Compiler:
                 order = kw.value
             else:
                 _reject(f".append keyword other than order_by ({kw.arg})")
-        attr, keys, comp, monoid, _inner = self._resolve_accum(func.value)
-        if monoid.dft not in _LIST_MONOIDS:
+        attr, keys, comp, monoid = self._resolve_accum(func.value)
+        if monoid.dft not in _LIST_OPS:
             _reject(f".append on the non-list monoid {monoid.dft}; use += or .observe(v)")
         if order is None:
             raise JitError(
                 "ordered list requires order_by=<expr>; order-by-arrival is not parallel-safe"
             )
         self._check_element(call.args[0], monoid)
-        return self._emit_ordered(attr, keys, comp, order, call.args[0])
+        return self._emit_row(attr, keys, comp, monoid, call.args[0], order)
 
     def _check_element(self, node: ast.expr, monoid: _Monoid) -> None:
-        is_str_field = self._is_str_element(node)
-        if monoid.dft in _STR_COLLECTIONS and not is_str_field:
+        if monoid.elem not in ("str", "i64"):
+            return
+        if monoid.dft not in (_SET_OPS | _LIST_OPS | _ARGBY_OPS | _TOPK_OPS) and monoid.dft not in (
+            "DFTU_AGG_APPROX_TOPK",
+            "DFTU_AGG_SAMPLE",
+        ):
+            return
+        is_str = self._is_str_element(node)
+        if monoid.elem == "str" and not is_str:
             raise JitError(
-                "a str collection element must be a string field such as "
-                "e.name; use jit.set(of=jit.i64) / jit.list(of=jit.i64) for int64"
+                "a str-valued element must be a string field such as e.name; "
+                "use of=jit.i64 for an int64 value"
             )
-        if monoid.dft in _I64_COLLECTIONS and is_str_field:
+        if monoid.elem == "i64" and is_str:
             raise JitError(
-                "an i64 collection element must be an int64 expr such as e.dur; "
-                "use jit.set() / jit.list() for string fields"
+                "an i64-valued element must be an int64 expr such as e.dur; "
+                "use of=jit.str_ for a string value"
             )
 
     def _is_str_element(self, node: ast.expr) -> bool:
@@ -2665,25 +1915,43 @@ class _Compiler:
         arg = self._arg_call(node)
         return arg is not None and arg[0] == "arg_str"
 
-    def _emit_ordered(
+    def _emit_row(
         self,
         attr: str,
         keys: List[ast.expr],
-        comp: int | None,
-        order: ast.expr,
-        elem: ast.expr,
+        comp: int,
+        monoid: _Monoid,
+        value: ast.expr,
+        by: ast.expr | None,
     ) -> List[str]:
-        self.funcs.add("map_add_ordered_at")
-        order_expr = self._value(order)
-        elem_expr = self._value(elem)
-        var = f"m_{attr}"
-        c = 0 if comp is None else comp
-        lines = ["{", f"    int64_t key[{len(keys)}];"]
-        lines.extend(self._key_assigns(self.maps[attr].key_types, keys))
-        lines.append(
-            f"    map->map_add_ordered_at(host->h, {var}, key, {c}, "
-            f"(int64_t)({order_expr}), (uint64_t)({elem_expr}));"
-        )
+        """Append one contribution row to ``attr``'s per-batch column buffers;
+        the buffers are folded into the DFTU_EXT_AGG accumulator after the loop."""
+        decl = self.maps[attr]
+        self.rows_per_event[attr] = self.rows_per_event.get(attr, 0) + 1
+        lines = ["{", f"    uint32_t _r = _n_{attr}++;"]
+        for idx, kn in enumerate(keys):
+            ktype = decl.key_types[idx].dft
+            if ktype == "DFTU_T_BYTES":
+                _reject("a bytes key; e.<field> exposes no raw byte blob, author it raw")
+            slot = f"_k{idx}_{attr}[_r]"
+            if ktype == "DFTU_T_STR":
+                lines.append(f"    {slot} = (dftu_str)({self._value(kn)});")
+            elif ktype in _FLOAT_TYPES:
+                expr, _ = self._arith(kn)
+                lines.append(f"    {slot} = (double)({expr});")
+            else:
+                lines.append(f"    {slot} = (int64_t)({self._value(kn)});")
+        if decl.is_product:
+            for c, m in enumerate(decl.values):
+                lines.append(f"    _v{c}_{attr}[_r] = ({_ELEM_CTYPE[m.elem]})0;")
+                lines.append(f"    _o{c}_{attr}[_r] = 0;")
+                if m.needs_by:
+                    lines.append(f"    _b{c}_{attr}[_r] = 0.0;")
+            lines.append(f"    _o{comp}_{attr}[_r] = 1;")
+        lines.append(f"    _v{comp}_{attr}[_r] = {self._rhs(value, monoid.elem)};")
+        if by is not None:
+            by_expr, _ = self._arith(by)
+            lines.append(f"    _b{comp}_{attr}[_r] = (double)({by_expr});")
         lines.append("}")
         return lines
 
@@ -2744,12 +2012,14 @@ class _Compiler:
             return self._const(node)
         _reject(_describe(node))
 
-    def _rhs(self, node: ast.expr, float_target: bool) -> str:
+    def _rhs(self, node: ast.expr, elem: str) -> str:
+        """Cast an expression into a value buffer of family ``elem``."""
+        if elem == "str":
+            return f"(dftu_str)({self._value(node)})"
         expr, saw_float = self._arith(node)
-        if not float_target and saw_float:
+        if elem != "f64" and saw_float:
             _reject("float value into a u64 monoid component")
-        cast = "double" if float_target else "uint64_t"
-        return f"({cast})({expr})"
+        return f"({'double' if elem == 'f64' else 'int64_t'})({expr})"
 
     def _arith(self, node: ast.expr) -> Tuple[str, bool]:
         node = _unwrap_index(node)
@@ -3123,47 +2393,6 @@ def _emit_port_pre(
     return out
 
 
-def _emit_handles_pre(shared_decls: List[Tuple[str, _Shared]]) -> List[str]:
-    """Batch-scoped handle setup emitted before the event loop: fetch the handles
-    extension and get-or-create each shared handle for this worker slice; the host
-    merges same-cap handles across slices."""
-    out: List[str] = [
-        "    const dftu_ext_handles* _handles =",
-        "        (const dftu_ext_handles*)host->get_extension(host->h, DFTU_EXT_HANDLES);",
-    ]
-    for name, sh in shared_decls:
-        cap = _c_str_literal(sh.cap_id)
-        out += [
-            f"    dftu_handle* _hd_{name} = (_handles && _handles->shared_get)",
-            f"        ? _handles->shared_get(host->h, {cap}, {sh.kind}) : NULL;",
-            f"    (void)_hd_{name};",
-        ]
-    return out
-
-
-def _emit_handles_finalize(shared_decls: List[Tuple[str, _Shared]]) -> List[str]:
-    """on_finalize body that reads each cross-worker-merged handle and emits its
-    scalar value (8 raw bytes) over the result channel under the attribute name."""
-    out: List[str] = [
-        "    (void)slice;",
-        "    const dftu_ext_handles* _handles =",
-        "        (const dftu_ext_handles*)host->get_extension(host->h, DFTU_EXT_HANDLES);",
-        "    const dftu_ext_result* _result =",
-        "        (const dftu_ext_result*)host->get_extension(host->h, DFTU_EXT_RESULT);",
-        "    if (_handles && _handles->result && _result && _result->emit) {",
-        "        dftu_monoid_value _v;",
-    ]
-    for name, sh in shared_decls:
-        cap = _c_str_literal(sh.cap_id)
-        rname = _c_str_literal(name)
-        out += [
-            f"        if (_handles->result(host->h, {cap}, &_v) == 0)",
-            f"            _result->emit(host->h, {rname}, &_v.as, 8u);",
-        ]
-    out += ["    }", "    return NULL;"]
-    return out
-
-
 def _emit_port_flush(pub_ports: List[Tuple[str, _Port]]) -> List[str]:
     """Publish each publish port's per-batch accumulator after the event loop."""
     out: List[str] = []
@@ -3177,57 +2406,256 @@ def _emit_port_flush(pub_ports: List[Tuple[str, _Port]]) -> List[str]:
     return out
 
 
+_STR_COL_HELPER = [
+    "static dftu_series* dftu_jit_str_col(const dftu_host* host, const dftu_str* ids,",
+    "                                     uint32_t n) {",
+    "    int32_t* off = (int32_t*)malloc(sizeof(int32_t) * (size_t)(n + 1u));",
+    "    if (!off) return NULL;",
+    "    uint32_t tot = 0;",
+    "    for (uint32_t i = 0; i < n; ++i) {",
+    "        uint32_t len = 0;",
+    "        const char* s = host->resolve(host->h, ids[i], &len);",
+    "        if (!s) len = 0;",
+    "        off[i] = (int32_t)tot;",
+    "        tot += len;",
+    "    }",
+    "    off[n] = (int32_t)tot;",
+    "    char* buf = (char*)malloc(tot ? tot : 1u);",
+    "    if (!buf) { free(off); return NULL; }",
+    "    for (uint32_t i = 0; i < n; ++i) {",
+    "        uint32_t len = 0;",
+    "        const char* s = host->resolve(host->h, ids[i], &len);",
+    "        if (s && len) std::memcpy(buf + off[i], s, len);",
+    "    }",
+    "    dftu_series* col = dftu_series_new_string(DFTU_TYPE_STRING, off, buf, (int64_t)n, NULL);",
+    "    free(buf);",
+    "    free(off);",
+    "    return col;",
+    "}",
+    "",
+]
+
+_BITMAP_HELPER = [
+    "static uint8_t* dftu_jit_bitmap(const uint8_t* flags, uint32_t n) {",
+    "    uint32_t nb = (n + 7u) / 8u;",
+    "    uint8_t* bm = (uint8_t*)calloc(nb ? nb : 1u, 1);",
+    "    if (!bm) return NULL;",
+    "    for (uint32_t i = 0; i < n; ++i)",
+    "        if (flags[i]) bm[i >> 3] |= (uint8_t)(1u << (i & 7u));",
+    "    return bm;",
+    "}",
+    "",
+]
+
+
+def _quantile_name(q: float) -> str:
+    return f"p{q * 100:g}"
+
+
+def _agg_specs(decl: _MapDecl) -> List[Tuple[str, str, str, str, str]]:
+    """The (op, value, out, param, by) dftu_agg_col rows for one accumulator."""
+    specs: List[Tuple[str, str, str, str, str]] = []
+    for c, m in enumerate(decl.values):
+        if isinstance(m, Quantiles):
+            specs.append(("DFTU_AGG_COUNT", "NULL", _c_str_literal("count"), "0.0", "NULL"))
+            for q in m.qs:
+                specs.append(
+                    (
+                        "DFTU_AGG_PCT",
+                        _c_str_literal(f"v{c}"),
+                        _c_str_literal(_quantile_name(q)),
+                        repr(q),
+                        "NULL",
+                    )
+                )
+            continue
+        specs.append(
+            (
+                m.dft,
+                _c_str_literal(f"v{c}"),
+                _c_str_literal(_out_name(decl, c)),
+                repr(m.param),
+                _c_str_literal(f"b{c}") if m.needs_by else "NULL",
+            )
+        )
+    return specs
+
+
+def _emit_buffers(attr: str, decl: _MapDecl, rows: int) -> List[str]:
+    """Per-batch row buffers for one accumulator, sized to the batch."""
+    out = [
+        f"    uint32_t _cap_{attr} = b->count * {rows}u;",
+        f"    uint32_t _n_{attr} = 0;",
+    ]
+    for idx, kt in enumerate(decl.key_types):
+        ct, _ = _key_ctype(kt.dft)
+        out.append(
+            f"    {ct}* _k{idx}_{attr} = ({ct}*)malloc(sizeof({ct}) * "
+            f"(size_t)(_cap_{attr} ? _cap_{attr} : 1u));"
+        )
+        out.append(f"    if (!_k{idx}_{attr}) _alloc_ok = 0;")
+    for c, m in enumerate(decl.values):
+        ct = _ELEM_CTYPE[m.elem]
+        out.append(
+            f"    {ct}* _v{c}_{attr} = ({ct}*)malloc(sizeof({ct}) * "
+            f"(size_t)(_cap_{attr} ? _cap_{attr} : 1u));"
+        )
+        out.append(f"    if (!_v{c}_{attr}) _alloc_ok = 0;")
+        if decl.is_product:
+            out.append(
+                f"    uint8_t* _o{c}_{attr} = (uint8_t*)malloc("
+                f"(size_t)(_cap_{attr} ? _cap_{attr} : 1u));"
+            )
+            out.append(f"    if (!_o{c}_{attr}) _alloc_ok = 0;")
+        if m.needs_by:
+            out.append(
+                f"    double* _b{c}_{attr} = (double*)malloc(sizeof(double) * "
+                f"(size_t)(_cap_{attr} ? _cap_{attr} : 1u));"
+            )
+            out.append(f"    if (!_b{c}_{attr}) _alloc_ok = 0;")
+    return out
+
+
+def _emit_flush(attr: str, decl: _MapDecl) -> List[str]:
+    """Build one batch frame from the row buffers and fold it into the named
+    DFTU_EXT_AGG accumulator."""
+    cols: List[Tuple[str, List[str]]] = []
+    for idx, kt in enumerate(decl.key_types):
+        _, dtype = _key_ctype(kt.dft)
+        if kt.dft == "DFTU_T_STR":
+            cols.append((f"k{idx}", [f"dftu_jit_str_col(host, _k{idx}_{attr}, _n_{attr})"]))
+        else:
+            cols.append(
+                (
+                    f"k{idx}",
+                    [f"dftu_series_new_flat({dtype}, _k{idx}_{attr}, (int64_t)_n_{attr}, NULL)"],
+                )
+            )
+    for c, m in enumerate(decl.values):
+        dtype = _ELEM_DTYPE[m.elem]
+        if m.elem == "str":
+            cols.append((f"v{c}", [f"dftu_jit_str_col(host, _v{c}_{attr}, _n_{attr})"]))
+        elif decl.is_product:
+            cols.append(
+                (
+                    f"v{c}",
+                    [
+                        f"dftu_series_new_flat({dtype}, _v{c}_{attr}, (int64_t)_n_{attr}, "
+                        f"_bm_{attr})"
+                    ],
+                )
+            )
+        else:
+            cols.append(
+                (
+                    f"v{c}",
+                    [f"dftu_series_new_flat({dtype}, _v{c}_{attr}, (int64_t)_n_{attr}, NULL)"],
+                )
+            )
+        if m.needs_by:
+            cols.append(
+                (
+                    f"b{c}",
+                    [
+                        f"dftu_series_new_flat(DFTU_TYPE_FLOAT64, _b{c}_{attr}, "
+                        f"(int64_t)_n_{attr}, NULL)"
+                    ],
+                )
+            )
+    n_cols = len(cols)
+    specs = _agg_specs(decl)
+    n_keys = len(decl.key_types)
+    # The accumulator is created for every batch, empty ones included, so a map
+    # that never collected a row still finalizes to a zero-row result.
+    out = ["    {"]
+    if n_keys:
+        key_list = ", ".join(_c_str_literal(f"k{i}") for i in range(n_keys))
+        out.append(f"        const char* _keys[{n_keys}] = {{{key_list}}};")
+        keys_arg = "_keys"
+    else:
+        keys_arg = "NULL"
+    spec_rows = ", ".join("{" + ", ".join(s) + "}" for s in specs)
+    out += [
+        f"        const dftu_agg_col _specs[{len(specs)}] = {{{spec_rows}}};",
+        f"        dftu_agg* _a = _agg->agg_new(host->h, {_c_str_literal(attr)}, "
+        f"{keys_arg}, {n_keys}u, _specs, {len(specs)}u);",
+        f"        if (_a && _n_{attr} > 0) {{",
+        f"            dftu_series* _cols[{n_cols}];",
+        f"            const char* _cnames[{n_cols}];",
+    ]
+    if decl.is_product:
+        out.append(f"            uint8_t* _bm_{attr} = NULL;")
+    ci = 0
+    for cname, expr in cols:
+        if decl.is_product and cname.startswith("v"):
+            c = cname[1:]
+            out.append(f"            _bm_{attr} = dftu_jit_bitmap(_o{c}_{attr}, _n_{attr});")
+        out.append(f"            _cols[{ci}] = {expr[0]};")
+        out.append(f"            _cnames[{ci}] = {_c_str_literal(cname)};")
+        if decl.is_product and cname.startswith("v"):
+            out.append(f"            free(_bm_{attr});")
+            out.append(f"            _bm_{attr} = NULL;")
+        ci += 1
+    out += [
+        "            int _cok = 1;",
+        f"            for (int _ci = 0; _ci < {n_cols}; ++_ci)",
+        "                if (!_cols[_ci]) _cok = 0;",
+        "            if (_cok) {",
+        f"                dftu_dataframe* _df = dftu_dataframe_new(_cnames, _cols, {n_cols});",
+        "                if (_df) {",
+        "                    _agg->agg_accumulate(host->h, _a, _df);",
+        "                    dftu_dataframe_free(_df);",
+        "                }",
+        "            } else {",
+        f"                for (int _ci = 0; _ci < {n_cols}; ++_ci)",
+        "                    if (_cols[_ci]) dftu_series_free(_cols[_ci]);",
+        "            }",
+        "        }",
+        "    }",
+    ]
+    return out
+
+
+def _emit_frees(attr: str, decl: _MapDecl) -> List[str]:
+    out = [f"    free(_k{idx}_{attr});" for idx in range(len(decl.key_types))]
+    for c, m in enumerate(decl.values):
+        out.append(f"    free(_v{c}_{attr});")
+        if decl.is_product:
+            out.append(f"    free(_o{c}_{attr});")
+        if m.needs_by:
+            out.append(f"    free(_b{c}_{attr});")
+    return out
+
+
 def _emit(
-    name: str,
     maps: Dict[str, _MapDecl],
     body: List[str],
     needs: builtins.set[str],
-    funcs: builtins.set[str],
     plan_query: str | None,
     str_literals: List[str],
     arg_keys: List[str],
     arg_helpers: builtins.set[str],
-    raw: bool,
-    joins: List[Tuple[str, str, str, str]],
-    fused_groups: List[_FusedGroup] | None = None,
-    fused_of: Dict[str, Tuple[str, int, bool]] | None = None,
+    rows_per_event: Dict[str, int],
     op_defs: List[str] | None = None,
     ports: Dict[str, _Port] | None = None,
-    shared: Dict[str, _Shared] | None = None,
     resolve_flags: List[str] | None = None,
     resolve_body: List[str] | None = None,
     config_fields: "Dict[str, bool] | None" = None,
 ) -> str:
-    fused_groups = fused_groups or []
-    fused_of = fused_of or {}
     op_defs = op_defs or []
     ports = ports or {}
-    shared = shared or {}
     pub_ports = [(n, p) for n, p in ports.items() if p.role == "publish"]
     sub_ports = [(n, p) for n, p in ports.items() if p.role == "consume"]
-    shared_decls = builtins.list(shared.items())
     needs_expr = " | ".join(sorted(needs)) if needs else "0u"
-    used = builtins.set(funcs)
-    if joins:
-        used.add("map_declare_join")
-    if fused_groups:
-        used.add("map_new_fused")
-    for attr, decl in maps.items():
-        if attr in fused_of:
-            continue  # a fused member is created via map_new_fused, not here
-        if decl.nested is not None:
-            used.add("map_new_nested")
-        elif decl.argrow is not None:
-            used.add("map_new_argrow")
-        elif len(decl.values) == 1 and decl.values[0].dft == "DFTU_MONOID_SKETCH":
-            used.add("map_new_sketch")
-        else:
-            used.add("map_new_product" if decl.is_product else "map_new")
-    guard = " || ".join(["!map"] + [f"!map->{fn}" for fn in sorted(used)])
+    needs_str = any(
+        kt.dft == "DFTU_T_STR" for decl in maps.values() for kt in decl.key_types
+    ) or any(m.elem == "str" for decl in maps.values() for m in decl.values)
+    needs_bitmap = any(decl.is_product for decl in maps.values())
     plan_query_field = "plan_query" if plan_query is not None else "NULL"
     out: List[str] = [
         "#include <dftracer/utils/plugins/abi.h>",
         "#include <dftracer/utils/plugins/prims.h>",
+        "#include <dftracer/utils/dataframe/abi.h>",
         "",
         "#include <cstring>",
         "#include <stdint.h>",
@@ -3242,6 +2670,10 @@ def _emit(
     for method in ("arg_i64", "arg_f64", "arg_str"):
         if method in arg_helpers:
             out += _ARG_HELPER_DEFS[method]
+    if needs_str:
+        out += _STR_COL_HELPER
+    if needs_bitmap:
+        out += _BITMAP_HELPER
     for fn_src in op_defs:
         out += [fn_src, ""]
     for idx, _ in enumerate(str_literals):
@@ -3284,11 +2716,14 @@ def _emit(
         "",
         "static dftu_task* on_batch(void* slice, const dftu_batch* b,",
         "                          const dftu_host* host) {",
-        "    const dftu_ext_map* map =",
-        "        (const dftu_ext_map*)host->get_extension(host->h, DFTU_EXT_MAP);",
         "    (void)slice;",
-        f"    if ({guard}) return NULL;",
+        "    const dftu_ext_agg* _agg =",
+        "        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);",
     ]
+    if maps:
+        out.append("    if (!_agg || !_agg->agg_new || !_agg->agg_accumulate) return NULL;")
+    else:
+        out.append("    (void)_agg;")
     if str_literals:
         out.append("    if (!lits_resolved) {")
         for idx, lit in enumerate(str_literals):
@@ -3298,112 +2733,33 @@ def _emit(
         out.append("    }")
     if arg_keys:
         out.append("    if (!args_resolved) {")
-        for idx, name in enumerate(arg_keys):
-            blen = len(name.encode("utf-8"))
+        for idx, argname in enumerate(arg_keys):
+            blen = len(argname.encode("utf-8"))
             out.append(
-                f"        argkey_{idx} = host->intern(host->h, {_c_str_literal(name)}, {blen});"
+                f"        argkey_{idx} = host->intern(host->h, {_c_str_literal(argname)}, {blen});"
             )
         out.append("        args_resolved = 1;")
         out.append("    }")
-    for group in fused_groups:
-        cname = group["cname"]
-        kts = group["key_types"]
-        n = len(kts)
-        types = ", ".join(k.dft for k in kts)
-        names = ", ".join(f'"{m}"' for m in group["members"])
-        vals = ", ".join(maps[m].values[0].dft for m in group["members"])
-        vn = len(group["members"])
-        out.append(f"    static const dftu_type kt_{cname}[{n}] = {{{types}}};")
-        out.append(f"    static const char* on_{cname}[{vn}] = {{{names}}};")
-        out.append(f"    static const dftu_monoid_kind vt_{cname}[{vn}] = {{{vals}}};")
-        out.append(
-            f'    dftu_map* m_{cname} = map->map_new_fused(host->h, "{cname}", '
-            f"kt_{cname}, {n}, on_{cname}, vt_{cname}, {vn});"
-        )
-        out.append(f"    if (!m_{cname}) return NULL;")
-        if group.get("ordered"):
-            out.append("    if (map->map_set_ordered)")
-            out.append(f"        map->map_set_ordered(host->h, m_{cname}, 1);")
-    for map_name, decl in maps.items():
-        if map_name in fused_of:
-            continue  # created above via map_new_fused
-        types = ", ".join(k.dft for k in decl.key_types)
-        n = len(decl.key_types)
-        out.append(f"    static const dftu_type kt_{map_name}[{n}] = {{{types}}};")
-        if decl.nested is not None:
-            ikt = decl.nested.inner_key_types
-            ni = len(ikt)
-            itypes = ", ".join(k.dft for k in ikt)
-            out.append(f"    static const dftu_type ikt_{map_name}[{ni}] = {{{itypes}}};")
-            vn = len(decl.values)
-            vals = ", ".join(v.dft for v in decl.values)
-            out.append(f"    static const dftu_monoid_kind vt_{map_name}[{vn}] = {{{vals}}};")
-            out.append(
-                f'    dftu_map* m_{map_name} = map->map_new_nested(host->h, "{map_name}", '
-                f"kt_{map_name}, {n}, ikt_{map_name}, {ni}, vt_{map_name}, {vn});"
-            )
-            out.append(f"    if (!m_{map_name}) return NULL;")
-            continue
-        if decl.argrow is not None:
-            pt = decl.argrow.payload_types
-            pn = len(pt)
-            ptypes = ", ".join(t.dft for t in pt)
-            out.append(f"    static const dftu_type pt_{map_name}[{pn}] = {{{ptypes}}};")
-            is_max = 1 if decl.argrow.is_max else 0
-            out.append(
-                f'    dftu_map* m_{map_name} = map->map_new_argrow(host->h, "{map_name}", '
-                f"kt_{map_name}, {n}, {is_max}, pt_{map_name}, {pn});"
-            )
-            out.append(f"    if (!m_{map_name}) return NULL;")
-            continue
-        if len(decl.values) == 1 and isinstance(decl.values[0], Quantiles):
-            qs = decl.values[0].qs
-            nq = len(qs)
-            qvals = ", ".join(repr(q) for q in qs)
-            out.append(f"    static const double qs_{map_name}[{nq}] = {{{qvals}}};")
-            out.append(
-                f'    dftu_map* m_{map_name} = map->map_new_sketch(host->h, "{map_name}", '
-                f"kt_{map_name}, {n}, qs_{map_name}, {nq});"
-            )
-            out.append(f"    if (!m_{map_name}) return NULL;")
-            continue
-        if decl.is_product:
-            vn = len(decl.values)
-            vals = ", ".join(v.dft for v in decl.values)
-            out.append(f"    static const dftu_monoid_kind vt_{map_name}[{vn}] = {{{vals}}};")
-            out.append(
-                f'    dftu_map* m_{map_name} = map->map_new_product(host->h, "{map_name}", '
-                f"kt_{map_name}, {n}, vt_{map_name}, {vn});"
-            )
-        else:
-            out.append(
-                f'    dftu_map* m_{map_name} = map->map_new(host->h, "{map_name}", '
-                f"kt_{map_name}, {n}, {decl.values[0].dft});"
-            )
-        out.append(f"    if (!m_{map_name}) return NULL;")
-        if decl.ordered:
-            out.append("    if (map->map_set_ordered)")
-            out.append(f"        map->map_set_ordered(host->h, m_{map_name}, 1);")
-    for out_name, left_name, right_name, how_enum in joins:
-        out.append(
-            f'    map->map_declare_join(host->h, "{out_name}", "{left_name}", '
-            f'"{right_name}", {how_enum});'
-        )
-    if raw:
-        for map_name in maps:
-            out.append(f"    dftu_map* {map_name} = m_{map_name};")
-            out.append(f"    (void){map_name};")
+    out.append("    int _alloc_ok = 1;")
+    for attr, decl in maps.items():
+        out += _emit_buffers(attr, decl, builtins.max(1, rows_per_event.get(attr, 1)))
+    out.append("    if (_alloc_ok) {")
+    inner: List[str] = []
     if ports:
-        out += _emit_port_pre(pub_ports, sub_ports)
-    if shared_decls:
-        out += _emit_handles_pre(shared_decls)
-    out.append("    for (uint32_t i = 0; i < b->count; ++i) {")
-    out.append("        const dftu_event* e = &b->events[i];")
+        inner += _emit_port_pre(pub_ports, sub_ports)
+    inner.append("    for (uint32_t i = 0; i < b->count; ++i) {")
+    inner.append("        const dftu_event* e = &b->events[i];")
     for line in body:
-        out.append("        " + line)
-    out.append("    }")
+        inner.append("        " + line)
+    inner.append("    }")
     if ports:
-        out += _emit_port_flush(pub_ports)
+        inner += _emit_port_flush(pub_ports)
+    for attr, decl in maps.items():
+        inner += _emit_flush(attr, decl)
+    out += ["    " + ln for ln in inner]
+    out.append("    }")
+    for attr, decl in maps.items():
+        out += _emit_frees(attr, decl)
     out.extend(
         [
             "    return NULL;",
@@ -3415,14 +2771,9 @@ def _emit(
             "}",
             "",
             "static dftu_task* on_finalize(void* slice, const dftu_host* host) {",
-        ]
-    )
-    if shared_decls:
-        out += _emit_handles_finalize(shared_decls)
-    else:
-        out += ["    (void)slice;", "    (void)host;", "    return NULL;"]
-    out.extend(
-        [
+            "    (void)slice;",
+            "    (void)host;",
+            "    return NULL;",
             "}",
             "",
             "static void destroy_slice(void* slice) { free(slice); }",
@@ -3460,24 +2811,6 @@ def _emit(
     return "\n".join(out)
 
 
-_RAW_FUNCS = frozenset(
-    {
-        "map_add_u64",
-        "map_add_f64",
-        "map_add_u64_at",
-        "map_add_f64_at",
-        "map_add_ordered_at",
-        "map_add_nested_u64",
-        "map_add_nested_f64",
-        "map_add_argby_at",
-        "map_add_topk_at",
-        "map_add_approx_topk_at",
-        "map_add_sample_at",
-        "map_add_argrow",
-    }
-)
-
-
 def _resolve_needs(needs: Tuple[object, ...] | None) -> builtins.set[str]:
     if needs is None:
         return builtins.set()
@@ -3489,26 +2822,18 @@ def _resolve_needs(needs: Tuple[object, ...] | None) -> builtins.set[str]:
     return out
 
 
+# Row budget per event per accumulator for a raw each_event body; the emitted
+# buffers hold this many rows per scanned event and a raw body must not append
+# more (there is no AST to count its contributions from).
+_RAW_ROWS_PER_EVENT = 4
+
+
 def _raw_body(fn: Callable[..., object]) -> List[str]:
     argc = getattr(fn, "__code__").co_argcount
     result = fn(*([None] * argc))
     if not isinstance(result, str):
         raise JitError("@jit.each_event(raw=True) method must return a C++ body string")
     return textwrap.dedent(result).splitlines()
-
-
-def _resolve_joins(
-    join_decls: Dict[str, JoinDecl], maps: Dict[str, _MapDecl]
-) -> List[Tuple[str, str, str, str]]:
-    by_id = {id(decl): attr for attr, decl in maps.items()}
-    out: List[Tuple[str, str, str, str]] = []
-    for out_name, jd in join_decls.items():
-        left = by_id.get(id(jd.left))
-        right = by_id.get(id(jd.right))
-        if left is None or right is None:
-            raise JitError(f"jit.join {out_name} references a map not declared on this @jit.plugin")
-        out.append((out_name, left, right, _JOIN_TYPES[jd.how]))
-    return out
 
 
 def _referenced_ops(fn: Callable[..., object]) -> Dict[str, Op]:
@@ -3524,40 +2849,32 @@ def _referenced_ops(fn: Callable[..., object]) -> Dict[str, Op]:
 
 def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
     maps: Dict[str, _MapDecl] = {}
-    join_decls: Dict[str, JoinDecl] = {}
     ports: Dict[str, _Port] = {}
-    shared: Dict[str, _Shared] = {}
     configs: Dict[str, _Config] = {}
     each: List[_EachEvent] = []
     resolves: List[_OnResolve] = []
     for attr, val in vars(cls).items():
         if isinstance(val, _MapDecl):
             maps[attr] = val
-        elif isinstance(val, JoinDecl):
-            join_decls[attr] = val
         elif isinstance(val, _Port):
             ports[attr] = val
-        elif isinstance(val, _Shared):
-            shared[attr] = val
         elif isinstance(val, _Config):
             configs[attr] = val
         elif isinstance(val, _EachEvent):
             each.append(val)
         elif isinstance(val, _OnResolve):
             resolves.append(val)
-    if not maps and not ports and not shared:
+    if not maps and not ports:
         raise JitError(
-            "@jit.plugin needs at least one jit.map, jit.publish/jit.consume, or "
-            "jit.shared attribute"
+            "@jit.plugin needs at least one jit.map or jit.publish/jit.consume attribute"
         )
     for attr, decl in maps.items():
-        if any(isinstance(v, AggReduce) for v in decl.values):
+        if decl.is_product and any(m.elem == "str" for m in decl.values):
             raise JitError(
-                f"@jit.plugin map '{attr}' cannot use a @jit.vfold-only reduction "
-                "(jit.skew/kurt/sumsq/first/last/count_valid); these fold through "
-                "DFTU_EXT_AGG, available only in @jit.vfold"
+                f"@jit.plugin map '{attr}': a string-valued reduction "
+                "(jit.set/list/argmin/argmax/topk/sample with of=jit.str_) cannot be a "
+                "product component; declare it as its own jit.map"
             )
-    joins = _resolve_joins(join_decls, maps)
     if len(each) != 1:
         raise JitError("@jit.plugin needs exactly one @jit.each_event method")
     if len(resolves) > 1:
@@ -3574,137 +2891,63 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
     explicit_needs = _resolve_needs(needs)
     # {name: is_f64} for config fields, read into a body-visible static.
     config_f64 = {n: c.dft in ("DFTU_T_F64", "DFTU_T_F32") for n, c in configs.items()}
-    fused_groups: List[_FusedGroup] = []
-    fused_of: Dict[str, Tuple[str, int, bool]] = {}
     op_defs: List[str] = []
     if each[0].raw:
         body = _raw_body(each[0].fn)
         inferred_needs = explicit_needs
-        funcs = builtins.set(_RAW_FUNCS)
         str_literals: List[str] = []
         arg_keys: List[str] = []
         arg_helpers: builtins.set[str] = builtins.set()
+        # A raw body appends rows itself, so the row budget cannot be counted
+        # from the AST; RAW_ROWS_PER_EVENT is the contract it must respect.
+        rows_per_event = {attr: _RAW_ROWS_PER_EVENT for attr in maps}
     else:
-        # A map named by any join must keep its own table, so it cannot fuse.
-        no_fuse = builtins.set()
-        for _out, left, right, _how in joins:
-            no_fuse.update((_out, left, right))
         compiler = _Compiler(
             maps,
-            builtins.set(join_decls),
-            no_fuse,
             _referenced_ops(each[0].fn),
             ports=ports,
-            shared=shared,
             resolve_flags=builtins.set(resolve_flags),
             config_fields=config_f64,
         )
         body = compiler.lower(each[0].fn)
         inferred_needs = compiler.needs | explicit_needs
-        funcs = compiler.funcs
         str_literals = compiler.str_literals
         arg_keys = compiler.arg_keys
         arg_helpers = compiler.arg_helpers
-        fused_groups = compiler.fused_groups
-        fused_of = compiler.fused_of
         op_defs = compiler.op_defs
+        rows_per_event = compiler.rows_per_event
     source = _emit(
-        cls.__name__,
         maps,
         body,
         inferred_needs,
-        funcs,
         plan_query,
         str_literals,
         arg_keys,
         arg_helpers,
-        each[0].raw,
-        joins,
-        fused_groups,
-        fused_of,
+        rows_per_event,
         op_defs,
         ports,
-        shared,
         resolve_flags,
         resolve_body,
         config_f64,
     )
-    renames = {
-        attr: builtins.list(decl.value_names)
-        for attr, decl in maps.items()
-        if decl.value_names is not None and decl.nested is None
-    }
-    setattr(cls, "_jit_plugin", JitPlugin(cls.__name__, source, renames))
+    setattr(cls, "_jit_plugin", JitPlugin(cls.__name__, source, {}))
     return cls
 
 
 # ---- vfold: a per-batch fold on columns -----------------------------------
 
-# Reducer method -> engine reduce op; each composes as a single per-batch value
-# under its matching monoid (batch sums summed, batch maxes maxed, ...).
+# Reducer sugar accepted on a scalar accumulator; each must match the
+# accumulator's own reduction.
 _VFOLD_REDUCERS = {
-    "sum": ("DFTU_REDUCE_SUM", "SUM"),
-    "min": ("DFTU_REDUCE_MIN", "MIN"),
-    "max": ("DFTU_REDUCE_MAX", "MAX"),
+    "sum": "DFTU_AGG_SUM",
+    "min": "DFTU_AGG_MIN",
+    "max": "DFTU_AGG_MAX",
 }
 _VFOLD_TOP_FIELDS = frozenset({"name", "cat", "pid", "tid", "ts", "dur", "ph", "fhash", "hhash"})
-# Numeric top-level columns build_row_frame emits as flat UInt64, so a keyed
-# fold can read them directly as a uint64 buffer.
-_VFOLD_NUMERIC = frozenset({"pid", "tid", "ts", "dur"})
-# String top-level columns; a keyed fold groups by them and re-interns each
-# distinct value for a DFTU_T_STR map key.
-_VFOLD_STRING_FIELDS = frozenset({"name", "cat"})
-
-# Keyed monoid family -> engine aggregate op. A recognized family folds through
-# the DFTU_EXT_AGG accumulator (the engine's mergeable AggState, merged across
-# worker slices and finalized to a native frame); an uncovered family or a
-# constant-valued fold stays on the DFTU_EXT_MAP row-fold path.
-# Engine-monoid family (mon.dft.split("_")[2]) -> aggregate op, for the value
-# monoids that already exist on the map side. Reductions with no map monoid
-# (skew/kurt/sumsq/first/last/count_valid) come through jit.AggReduce instead.
-_VFOLD_AGG_OPS = {
-    "SUM": "DFTU_AGG_SUM",
-    "MIN": "DFTU_AGG_MIN",
-    "MAX": "DFTU_AGG_MAX",
-    "COUNTER": "DFTU_AGG_COUNT",
-    "MEAN": "DFTU_AGG_MEAN",
-    "VARIANCE": "DFTU_AGG_VAR",
-    "STDDEV": "DFTU_AGG_STD",
-    "SKETCH": "DFTU_AGG_PCT",
-    "SET": "DFTU_AGG_SET_UNION",
-    "ARGMAX": "DFTU_AGG_ARGMAX",
-}
-
-
-def _vfold_needs_by(mon: _Monoid) -> bool:
-    """True for a keyed reduction that reads a second (by) column: the reused
-    jit.argmax monoid and the occupancy AggReduce ops (busy/concurrency/
-    utilization/active)."""
-    if isinstance(mon, ArgMax):
-        return True
-    if isinstance(mon, AggReduce):
-        return mon.needs_by
-    return False
-
-
-def _vfold_agg_code(opd: Dict[str, object]) -> str | None:
-    """The DFTU_AGG_* op a keyed vfold reduction maps to, or None to keep it on
-    the map row-fold path. COUNT counts rows and needs no value column; the other
-    aggregates need one, so a constant-valued fold has no engine equivalent."""
-    if opd["kind"] != "keyed":
-        return None
-    mon = cast(_Monoid, opd["mon"])
-    if isinstance(mon, AggReduce):
-        code: str | None = mon.dft
-    else:
-        parts = mon.dft.split("_")
-        fam = parts[2] if len(parts) > 2 else ""
-        code = _VFOLD_AGG_OPS.get(fam)
-    if code is None:
-        return None
-    if code == "DFTU_AGG_COUNT":
-        return code
-    return code if opd["vfield"] is not None else None
+# Numeric top-level columns; an ordering (by) column must be one of these.
+_VFOLD_NUMERIC = frozenset({"pid", "tid", "ts", "dur", "ph"})
+_VFOLD_STRING_FIELDS = frozenset({"name", "cat", "fhash", "hhash"})
 
 
 def _vfold_df_field(node: ast.expr) -> str:
@@ -3718,6 +2961,25 @@ def _vfold_df_field(node: ast.expr) -> str:
     if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
         raise JitError('@jit.vfold: df subscript must be a string field name, df["dur"]')
     return key.value
+
+
+def _vfold_specs(opd: Dict[str, object]) -> List[Tuple[str, str, str, str, str]]:
+    """The (op, value, out, param, by) dftu_agg_col rows for one vfold op."""
+    mon = cast(_Monoid, opd["mon"])
+    vfield = opd["vfield"]
+    byfield = opd["byfield"]
+    value = _c_str_literal(cast(str, vfield)) if vfield is not None else "NULL"
+    by = _c_str_literal(cast(str, byfield)) if byfield is not None else "NULL"
+    if isinstance(mon, Quantiles):
+        specs = [("DFTU_AGG_COUNT", "NULL", _c_str_literal("count"), "0.0", "NULL")]
+        for q in mon.qs:
+            specs.append(
+                ("DFTU_AGG_PCT", value, _c_str_literal(_quantile_name(q)), repr(q), "NULL")
+            )
+        return specs
+    if vfield is None:
+        return [("DFTU_AGG_COUNT", "NULL", _c_str_literal("value"), "0.0", "NULL")]
+    return [(mon.dft, value, _c_str_literal("value"), repr(mon.param), by)]
 
 
 def _compile_vfold(
@@ -3741,7 +3003,8 @@ def _compile_vfold(
         if not (isinstance(stmt, ast.AugAssign) and isinstance(stmt.op, ast.Add)):
             raise JitError(shape)
         tgt = stmt.target
-        # keyed: self.<map>[df["key"]] += df["val"] | <int>
+        rhs = stmt.value
+        keyfields: List[str] = []
         if (
             isinstance(tgt, ast.Subscript)
             and isinstance(tgt.value, ast.Attribute)
@@ -3751,153 +3014,109 @@ def _compile_vfold(
             attr = tgt.value.attr
             if attr not in maps:
                 raise JitError(f"@jit.vfold: '{attr}' is not a declared jit.map")
-            keyfield = _vfold_df_field(_unwrap_index(tgt.slice))
-            keytype = maps[attr].key_types[0].dft
-            if keyfield in _VFOLD_STRING_FIELDS:
-                keycat = "str"
-                if keytype != "DFTU_T_STR":
-                    raise JitError(f"@jit.vfold: string key '{keyfield}' needs a jit.str_ map key")
-            elif keyfield in _VFOLD_NUMERIC:
-                keycat = "num"
-                if keytype == "DFTU_T_STR":
-                    raise JitError(f"@jit.vfold: numeric key '{keyfield}' needs an integer map key")
-            else:
+            decl = maps[attr]
+            sl = _unwrap_index(tgt.slice)
+            elts = builtins.list(sl.elts) if isinstance(sl, ast.Tuple) else [sl]
+            keyfields = [_vfold_df_field(k) for k in elts]
+            if len(keyfields) != len(decl.key_types):
                 raise JitError(
-                    f"@jit.vfold: key field '{keyfield}' must be numeric "
-                    "(pid/tid/ts/dur) or a string (name/cat)"
+                    f"@jit.vfold: '{attr}' takes {len(decl.key_types)} key columns, "
+                    f"got {len(keyfields)}"
                 )
-            mon = maps[attr].values[0]
-            needs_by = _vfold_needs_by(mon)
-            rhs = stmt.value
-            vfield: str | None = None
-            byfield: str | None = None
-            const: int | None = None
-            if needs_by:
-                # argmax/occupancy read a (value, by) column pair: value into
-                # dftu_agg_col.value, by into dftu_agg_col.by.
-                if not (isinstance(rhs, ast.Tuple) and len(rhs.elts) == 2):
+            for kt, kf in zip(decl.key_types, keyfields):
+                if kf not in _VFOLD_TOP_FIELDS:
+                    raise JitError(f"@jit.vfold: key column '{kf}' is not a scan column")
+                if (kf in _VFOLD_STRING_FIELDS) != (kt.dft == "DFTU_T_STR"):
                     raise JitError(
-                        f"@jit.vfold: '{attr}' needs a (value, by) column pair, "
-                        'e.g. self.m[df["pid"]] += df["ts"], df["dur"]'
+                        f"@jit.vfold: key column '{kf}' does not match the declared key type; "
+                        "a string column needs jit.str_, a numeric one an integer type"
                     )
-                vfield = _vfold_df_field(rhs.elts[0])
-                byfield = _vfold_df_field(rhs.elts[1])
-                for f in (vfield, byfield):
-                    if f not in _VFOLD_NUMERIC:
-                        raise JitError(
-                            f"@jit.vfold: '{attr}' (value, by) columns must be "
-                            "numeric (pid/tid/ts/dur)"
-                        )
-                fields.add(vfield)
-                fields.add(byfield)
-            elif isinstance(rhs, ast.Constant) and isinstance(rhs.value, int):
-                const = int(rhs.value)
-            elif isinstance(rhs, ast.Tuple):
-                raise JitError(f"@jit.vfold: '{attr}' takes a single value column, not a pair")
-            else:
-                vfield = _vfold_df_field(rhs)
-                if vfield not in _VFOLD_NUMERIC:
-                    raise JitError(
-                        f"@jit.vfold: value field '{vfield}' must be numeric (pid/tid/ts/dur)"
-                    )
-                fields.add(vfield)
-            fam = mon.dft.split("_")[2] if len(mon.dft.split("_")) > 2 else ""
-            # A counter ignores its added value, so `+= df[col]` would count
-            # rows, not sum the column - almost never what's meant.
-            if fam == "COUNTER" and const is None:
-                raise JitError(
-                    f"@jit.vfold: a jit.count() map ('{attr}') counts rows; "
-                    "write self.<map>[df[...]] += 1, not a column"
-                )
-            if keycat == "str" and (const is not None or fam not in ("SUM", "MIN", "MAX")):
-                raise JitError(
-                    f"@jit.vfold: a string key ('{keyfield}') supports only "
-                    "sum/min/max over a value column for now"
-                )
-            # A keyed quantile folds through DFTU_AGG_PCT, one output column, so
-            # it takes a single quantile over a value column.
-            if fam == "SKETCH" and (const is not None or len(cast(Quantiles, mon).qs) != 1):
-                raise JitError(
-                    f"@jit.vfold: a jit.quantiles map ('{attr}') supports exactly "
-                    "one quantile over a value column"
-                )
-            if isinstance(mon, AggReduce) and const is not None:
-                raise JitError(f"@jit.vfold: '{attr}' reduces a value column, not a constant")
-            fields.add(keyfield)
-            ops.append(
-                {
-                    "kind": "keyed",
-                    "attr": attr,
-                    "mon": mon,
-                    "keytype": keytype,
-                    "keycat": keycat,
-                    "keyfield": keyfield,
-                    "vfield": vfield,
-                    "byfield": byfield,
-                    "const": const,
-                }
-            )
-            continue
-        # scalar: self.<acc> += df["field"].<reducer>()
-        if not (
+            mon = decl.values[0]
+        elif (
             isinstance(tgt, ast.Attribute)
             and isinstance(tgt.value, ast.Name)
             and tgt.value.id == "self"
         ):
+            attr = tgt.attr
+            if attr not in accums:
+                raise JitError(f"@jit.vfold: '{attr}' is not a declared accumulator")
+            mon = accums[attr]
+        else:
             raise JitError(shape)
-        attr = tgt.attr
-        if attr not in accums:
-            raise JitError(f"@jit.vfold: '{attr}' is not a declared accumulator")
-        call = stmt.value
-        if not (
-            isinstance(call, ast.Call) and not call.args and isinstance(call.func, ast.Attribute)
-        ):
-            raise JitError('@jit.vfold: scalar value must be df["<field>"].<reducer>()')
-        reducer = call.func.attr
-        if reducer not in _VFOLD_REDUCERS:
-            raise JitError(f"@jit.vfold: unsupported reducer '.{reducer}()' (use sum/min/max)")
-        rop, family = _VFOLD_REDUCERS[reducer]
-        mon = accums[attr]
-        parts = mon.dft.split("_")  # DFTU_MONOID_SUM_F64 -> [...,'SUM','F64']
-        mon_family = parts[2] if len(parts) > 2 else ""
-        if mon_family != family:
+        vfield: str | None = None
+        byfield: str | None = None
+        if isinstance(rhs, ast.Call):
+            # Scalar sugar: df["f"].sum() / .min() / .max().
+            if not (not rhs.args and isinstance(rhs.func, ast.Attribute)):
+                raise JitError('@jit.vfold: scalar value must be df["<field>"].<reducer>()')
+            reducer = rhs.func.attr
+            if reducer not in _VFOLD_REDUCERS:
+                raise JitError(f"@jit.vfold: unsupported reducer '.{reducer}()' (use sum/min/max)")
+            if _VFOLD_REDUCERS[reducer] != mon.dft:
+                raise JitError(
+                    f"@jit.vfold: '.{reducer}()' does not match accumulator '{attr}' "
+                    f"(a jit.{reducer}() accumulator)"
+                )
+            vfield = _vfold_df_field(rhs.func.value)
+        elif mon.needs_by:
+            if not (isinstance(rhs, ast.Tuple) and len(rhs.elts) == 2):
+                raise JitError(
+                    f"@jit.vfold: '{attr}' needs a (value, by) column pair, "
+                    'e.g. self.m[df["pid"]] += df["ts"], df["dur"]'
+                )
+            vfield = _vfold_df_field(rhs.elts[0])
+            byfield = _vfold_df_field(rhs.elts[1])
+            if byfield not in _VFOLD_NUMERIC:
+                raise JitError(
+                    f"@jit.vfold: the by column '{byfield}' must be numeric (pid/tid/ts/dur)"
+                )
+        elif isinstance(rhs, ast.Constant) and isinstance(rhs.value, int):
+            if not isinstance(mon, Counter) or rhs.value != 1:
+                raise JitError(
+                    f"@jit.vfold: '{attr}' reduces a value column; only a jit.count() "
+                    "accumulator takes the constant 1"
+                )
+        elif isinstance(rhs, ast.Tuple):
+            raise JitError(f"@jit.vfold: '{attr}' takes a single value column, not a pair")
+        else:
+            vfield = _vfold_df_field(rhs)
+        if isinstance(mon, Counter) and vfield is not None:
             raise JitError(
-                f"@jit.vfold: '.{reducer}()' does not match accumulator '{attr}' "
-                f"(a jit.{reducer}() accumulator)"
+                f"@jit.vfold: a jit.count() accumulator ('{attr}') counts rows; "
+                "write += 1, not a column"
             )
-        field = _vfold_df_field(call.func.value)
-        if field not in _VFOLD_NUMERIC:
-            raise JitError(
-                f"@jit.vfold: scalar reducer field '{field}' must be numeric "
-                "(pid/tid/ts/dur); a reduce over a non-numeric column is 0"
-            )
-        ops.append({"kind": "scalar", "attr": attr, "mon": mon, "field": field, "rop": rop})
-        fields.add(field)
+        if vfield is not None:
+            if vfield not in _VFOLD_TOP_FIELDS:
+                raise JitError(f"@jit.vfold: column '{vfield}' is not a scan column")
+            want_str = mon.elem == "str"
+            if (vfield in _VFOLD_STRING_FIELDS) != want_str:
+                raise JitError(
+                    f"@jit.vfold: '{attr}' reduces a "
+                    f"{'string' if want_str else 'numeric'} column, but '{vfield}' is not one"
+                )
+            fields.add(vfield)
+        if byfield is not None:
+            fields.add(byfield)
+        fields.update(keyfields)
+        ops.append(
+            {
+                "attr": attr,
+                "mon": mon,
+                "keyfields": keyfields,
+                "vfield": vfield,
+                "byfield": byfield,
+            }
+        )
     if not ops:
         raise JitError("@jit.vfold: the @jit.each_batch body is empty")
     return ops, fields
 
 
 def _emit_vfold(
-    cls_name: str,
     ops: List[Dict[str, object]],
     needs_expr: str,
     plan_query: str | None,
 ) -> str:
-    agg_codes = [_vfold_agg_code(opd) for opd in ops]
-    map_ops = [opd for opd, code in zip(ops, agg_codes) if code is None]
-    need_map = bool(map_ops)
-    need_agg = any(code is not None for code in agg_codes)
-    guard_parts: List[str] = []
-    if need_map:
-        used = {"map_new"}
-        for opd in map_ops:
-            mon = cast(_Monoid, opd["mon"])
-            used.add("map_add_f64" if mon.dft in _F64_MONOIDS else "map_add_u64")
-        guard_parts += ["!map"] + [f"!map->{fn}" for fn in sorted(used)]
-    if need_agg:
-        guard_parts += ["!agg", "!agg->agg_new", "!agg->agg_accumulate"]
-    guard = " || ".join(guard_parts)
     plan_query_field = "plan_query" if plan_query is not None else "NULL"
     out: List[str] = [
         "#include <dftracer/utils/plugins/abi.h>",
@@ -3930,125 +3149,31 @@ def _emit_vfold(
         "                                   const dftu_dataframe* df,",
         "                                   const dftu_host* host) {",
         "    (void)slice;",
+        "    const dftu_ext_agg* agg =",
+        "        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);",
+        "    if (!agg || !agg->agg_new || !agg->agg_accumulate) return NULL;",
     ]
-    if need_map:
-        out += [
-            "    const dftu_ext_map* map =",
-            "        (const dftu_ext_map*)host->get_extension(host->h, DFTU_EXT_MAP);",
-        ]
-    if need_agg:
-        out += [
-            "    const dftu_ext_agg* agg =",
-            "        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);",
-        ]
-    out.append(f"    if ({guard}) return NULL;")
-    for opd, code in zip(ops, agg_codes):
+    for opd in ops:
         attr = cast(str, opd["attr"])
-        if code is not None:
-            # Keyed aggregate: fold the batch's key + value columns into the
-            # engine's DFTU_EXT_AGG accumulator; the host merges same-named
-            # accumulators across slices and finalizes to a native frame.
-            keyfield = cast(str, opd["keyfield"])
-            vfield = opd["vfield"]
-            byfield = opd.get("byfield")
-            mon = cast(_Monoid, opd["mon"])
-            value = _c_str_literal(cast(str, vfield)) if vfield is not None else "NULL"
-            by = _c_str_literal(cast(str, byfield)) if byfield is not None else "NULL"
-            if code == "DFTU_AGG_PCT":
-                param = repr(cast(Quantiles, mon).qs[0])
-            elif isinstance(mon, AggReduce):
-                param = repr(mon.param)  # occupancy cell tolerance (0 otherwise)
-            else:
-                param = "0.0"
-            out += [
-                "    {",
-                f"        const dftu_agg_col specs[1] = {{{{{code}, {value}, "
-                f"{_c_str_literal('value')}, {param}, {by}}}}};",
-                f"        const char* keys[1] = {{{_c_str_literal(keyfield)}}};",
-                f"        dftu_agg* a = agg->agg_new(host->h, {_c_str_literal(attr)}, "
-                "keys, 1, specs, 1);",
-                "        if (a) agg->agg_accumulate(host->h, a, df);",
-                "    }",
-            ]
-            continue
-        mon = cast(_Monoid, opd["mon"])
-        f64 = mon.dft in _F64_MONOIDS
-        add_fn = "map_add_f64" if f64 else "map_add_u64"
-        if opd["kind"] == "scalar":
-            field = cast(str, opd["field"])
-            rop = cast(str, opd["rop"])
-            if f64:
-                valexpr = (
-                    "s.kind == DFTU_SCALAR_TAG_F64 ? s.value.d : "
-                    "(s.kind == DFTU_SCALAR_TAG_U64 ? (double)s.value.u "
-                    ": (double)s.value.i)"
-                )
-            else:
-                valexpr = (
-                    "s.kind == DFTU_SCALAR_TAG_F64 ? (uint64_t)s.value.d : "
-                    "(s.kind == DFTU_SCALAR_TAG_U64 ? s.value.u "
-                    ": (uint64_t)s.value.i)"
-                )
-            # A scalar accumulator is a single-key map with a constant key 0 (the
-            # map machinery needs a key); the result is a one-row table.
-            out += [
-                "    {",
-                f"        dftu_series* col = dftu_dataframe_column(df, {_c_str_literal(field)});",
-                "        if (col) {",
-                f"            dftu_scalar s = dftu_series_reduce(col, {rop});",
-                "            const dftu_type kt[1] = {DFTU_T_I64};",
-                "            int64_t key[1] = {0};",
-                f"            dftu_map* m = map->map_new(host->h, {_c_str_literal(attr)}, kt, 1, {mon.dft});",
-                f"            map->{add_fn}(host->h, m, key, {valexpr});",
-                "            dftu_series_free(col);",
-                "        }",
-                "    }",
-            ]
-            continue
-        keyfield = cast(str, opd["keyfield"])
-        keytype = cast(str, opd["keytype"])
-        vfield = opd["vfield"]
-        read_val = vfield is not None
-        # Row-fold path: per-key over a constant value, or a monoid the engine's
-        # aggregator does not cover; fold row by row so the monoid accumulates
-        # per sample.
-        perrow = (
-            ("(double)vd[i]" if f64 else "(uint64_t)vd[i]")
-            if read_val
-            else (f"(double){opd['const']}" if f64 else f"(uint64_t){opd['const']}")
+        keyfields = cast(List[str], opd["keyfields"])
+        specs = _vfold_specs(opd)
+        spec_rows = ", ".join("{" + ", ".join(s) + "}" for s in specs)
+        out.append("    {")
+        out.append(
+            f"        const dftu_agg_col specs[{len(specs)}] = {{{spec_rows}}};",
         )
-        block = [
-            "    {",
-            f"        dftu_series* kc = dftu_dataframe_column(df, {_c_str_literal(keyfield)});",
+        if keyfields:
+            key_list = ", ".join(_c_str_literal(k) for k in keyfields)
+            out.append(f"        const char* keys[{len(keyfields)}] = {{{key_list}}};")
+            keys_arg = "keys"
+        else:
+            keys_arg = "NULL"
+        out += [
+            f"        dftu_agg* a = agg->agg_new(host->h, {_c_str_literal(attr)}, "
+            f"{keys_arg}, {len(keyfields)}u, specs, {len(specs)}u);",
+            "        if (a) agg->agg_accumulate(host->h, a, df);",
+            "    }",
         ]
-        if read_val:
-            block.append(
-                f"        dftu_series* vc = dftu_dataframe_column(df, {_c_str_literal(cast(str, vfield))});"
-            )
-        cond = "kc && vc" if read_val else "kc"
-        block += [
-            f"        if ({cond}) {{",
-            "            int64_t n = dftu_series_length(kc);",
-            "            const uint64_t* kd = (const uint64_t*)dftu_series_data(kc);",
-        ]
-        if read_val:
-            block.append("            const uint64_t* vd = (const uint64_t*)dftu_series_data(vc);")
-        block += [
-            f"            const dftu_type kt[1] = {{{keytype}}};",
-            f"            dftu_map* m = map->map_new(host->h, {_c_str_literal(attr)}, kt, 1, {mon.dft});",
-            ("            if (kd && vd) {" if read_val else "            if (kd) {"),
-            "                for (int64_t i = 0; i < n; i++) {",
-            "                    int64_t key[1];",
-            "                    key[0] = (int64_t)kd[i];",
-            f"                    map->{add_fn}(host->h, m, key, {perrow});",
-            "                }",
-            "            }",
-            "            dftu_series_free(kc);",
-        ]
-        if read_val:
-            block.append("            dftu_series_free(vc);")
-        block += ["        }", "    }"]
-        out += block
     out += [
         "    return NULL;",
         "}",
@@ -4100,14 +3225,12 @@ def _build_vfold(cls: type) -> type:
         elif isinstance(val, _EachBatch):
             batch.append(val)
     for attr, m in maps.items():
-        if m.is_product or m.nested is not None or m.argrow is not None or m.ordered:
+        if m.is_product:
             raise JitError(
-                f"@jit.vfold: '{attr}' must be a simple jit.map(key=<type>, value=<monoid>)"
+                f"@jit.vfold: '{attr}' must be a simple jit.map(key=<type>, value=<reduction>)"
             )
-        if len(m.key_types) != 1:
-            raise JitError(f"@jit.vfold: '{attr}' must have exactly one key")
-        if len(m.values) != 1:
-            raise JitError(f"@jit.vfold: '{attr}' must have exactly one value monoid")
+        if not m.key_types:
+            raise JitError(f"@jit.vfold: '{attr}' needs at least one key")
     if not accums and not maps:
         raise JitError("@jit.vfold needs an accumulator (jit.sum()/min()/max()) or a jit.map")
     if len(batch) != 1:
@@ -4117,7 +3240,7 @@ def _build_vfold(cls: type) -> type:
         raise JitError("@jit.vfold plan_query must be a query DSL string")
     ops, fields = _compile_vfold(batch[0].fn, accums, maps)
     needs_expr = "DFTU_NEED_ARGS" if any(f not in _VFOLD_TOP_FIELDS for f in fields) else "0u"
-    source = _emit_vfold(cls.__name__, ops, needs_expr, plan_query)
+    source = _emit_vfold(ops, needs_expr, plan_query)
     setattr(cls, "_jit_plugin", JitPlugin(cls.__name__, source, {}))
     return cls
 
@@ -4126,22 +3249,21 @@ def vfold(cls: type) -> type:
     """Author a vectorized fold: a per-batch fold whose body runs SIMD column
     ops on the batch and folds them into scalar accumulators or keyed maps.
 
-    Declare scalar accumulators as jit.sum()/min()/max() and/or keyed maps as
-    jit.map(key=<type>, value=<reduction>), plus one :func:`each_batch` method
-    whose body is a sequence of ``self.<acc> += df["f"].<reducer>()`` (reducer
-    matching the accumulator) and ``self.<map>[df["k"]] += df["v"]`` (numeric
-    key/value columns, or ``+= 1`` for a counter). A keyed reduction folds
-    through the engine's DFTU_EXT_AGG accumulator and crosses back as a native
-    DataFrame; its value may be jit.sum/min/max/count/mean/variance/stddev,
-    jit.quantiles((q,)) (one quantile), jit.set(of=jit.i64), jit.hist, or the
-    vfold-only jit.skew/kurt/sumsq/first/last/count_valid. A jit.argmax value
-    and the occupancy reductions (jit.busy/concurrency/utilization/active) read a
-    (value, by) column pair written ``self.<map>[df["k"]] += df["v"], df["by"]``
-    (argmax reports v at the row maximizing by; occupancy takes (ts, dur)). It
-    compiles to a native plugin
-    using the columnar on_batch seam, so each batch is folded in-scan; run it
-    through :class:`dftracer.utils.plugins.PluginHost` like any other jit
-    plugin."""
+    Declare scalar accumulators as a bare reduction (``jit.sum()``, ``jit.min()``,
+    ...) and keyed accumulators as ``jit.map(key=<types>, value=<reduction>)``,
+    plus one :func:`each_batch` method whose body is a sequence of
+    ``self.<acc> += df["f"]`` (or the ``df["f"].sum()/min()/max()`` sugar) and
+    ``self.<map>[df["k"]] += df["v"]`` (a multi-key map subscripts a tuple of
+    columns, and ``+= 1`` counts rows into a ``jit.count()``). A reduction that
+    reads a second column - argmin/argmax, top-k/bottom-k, ordered list, the
+    occupancy ops and the co-moments - takes a ``(value, by)`` pair written
+    ``self.<map>[df["k"]] += df["v"], df["by"]``.
+
+    Every accumulator folds through the engine's DFTU_EXT_AGG AggState: a keyed
+    map is one with key columns, a scalar accumulator one with none. The host
+    merges same-named accumulators across worker slices and finalizes each to a
+    native DataFrame; run it through
+    :class:`dftracer.utils.plugins.PluginHost` like any other jit plugin."""
     return _build_vfold(cls)
 
 

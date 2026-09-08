@@ -33,23 +33,18 @@ static void* make_slice(void* self) {{
     return calloc(1, 1);
 }}
 
-static dftu_task* on_batch(void* slice, const dftu_batch* b,
-                          const dftu_host* host) {{
-    const dftu_ext_map* map =
-        (const dftu_ext_map*)host->get_extension(host->h, DFTU_EXT_MAP);
-    static const dftu_type key_types[1] = {{DFTU_T_I64}};
-    dftu_map* m;
-    uint32_t i;
+static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
+                                   const dftu_host* host) {{
+    const dftu_ext_agg* agg =
+        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
+    static const char* keys[1] = {{"pid"}};
+    static const dftu_agg_col specs[1] = {{
+        {{DFTU_AGG_COUNT, NULL, "value", 0.0, NULL}}}};
+    dftu_agg* a;
     (void)slice;
-    if (!map || !map->map_new) return NULL;
-    m = map->map_new(host->h, "{name}", key_types, 1, DFTU_MONOID_COUNTER);
-    if (!m) return NULL;
-    for (i = 0; i < b->count; ++i) {{
-        const dftu_event* e = &b->events[i];
-        int64_t key[1];
-        key[0] = (int64_t)e->pid;
-        map->map_add_u64(host->h, m, key, 1);
-    }}
+    if (!agg || !agg->agg_new || !agg->agg_accumulate) return NULL;
+    a = agg->agg_new(host->h, "{name}", keys, 1, specs, 1);
+    if (a) agg->agg_accumulate(host->h, a, df);
     return NULL;
 }}
 
@@ -80,7 +75,7 @@ dftu_plugin* dftracer_plugin(const dftu_value* config) {{
     g_plugin.needs = needs;
     g_plugin.plan_query = NULL;
     g_plugin.make_slice = make_slice;
-    g_plugin.on_batch = on_batch;
+    g_plugin.on_batch_columns = on_batch_columns;
     g_plugin.merge = merge;
     g_plugin.on_finalize = on_finalize;
     g_plugin.destroy_slice = destroy_slice;
@@ -101,13 +96,9 @@ using namespace dftracer::utils::plugins;
 struct {cls} {{
     explicit {cls}(const Config&) {{}}
 
-    void step(const dftu_batch& b, Host host) {{
-        dftu_map* m = host.map_new("{name}", {{DFTU_T_I64}}, DFTU_MONOID_COUNTER);
-        if (!m) return;
-        for (std::uint32_t i = 0; i < b.count; ++i) {{
-            const dftu_event& e = b.events[i];
-            host.map_add_u64(m, {{static_cast<std::int64_t>(e.pid)}}, 1);
-        }}
+    void step(const dftu_dataframe* df, Host host) {{
+        Agg a = host.agg("{name}", {{"pid"}}, {{agg::count("value")}});
+        if (a) a.accumulate(df);
     }}
 
     void merge({cls}&) {{}}

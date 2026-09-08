@@ -40,17 +40,17 @@ That is 100 events for ``pid`` 2 (every third event) and 200 for ``pid`` 1.
 2. Author the plugin
 --------------------
 
-The state is the same in both languages: a map keyed by ``pid`` whose value is a
-count monoid, incremented once per event. The host runs a copy of the plugin per
-worker, merges the maps, and materializes the result - you never write reduce or
-threading code.
+The state is the same in both languages: an accumulator grouped by ``pid``
+counting the events in each group. The host runs a copy of the plugin per
+worker, merges the accumulators, and materializes the result - you never write
+reduce or threading code.
 
 .. tab-set::
 
    .. tab-item:: Python
 
       A JIT plugin is a class decorated with ``@jit.plugin``. It declares one or
-      more maps - a tuple key and a monoid value - and a single
+      more maps - a tuple key and an aggregate value - and a single
       ``@jit.each_event`` method that updates them per event. The key is a
       1-tuple ``(jit.i64,)`` because ``pid`` is one integer:
 
@@ -66,51 +66,54 @@ threading code.
              def step(self, e):
                  self.hits[(e.pid,)] += 1
 
-      The ``count()`` monoid is what lets the host merge per-worker copies for
-      you.
+      The ``count()`` aggregate is what lets the host merge per-worker copies
+      for you.
 
    .. tab-item:: C++
 
-      In C++ you write a *Slice*: a struct constructed from the config, with
-      ``step`` (per batch), ``merge`` (combine two slices), and ``finalize``.
-      ``make_plugin<Slice>`` fills in the ABI struct, and the ``dftracer_plugin``
-      factory exports it (the factory symbol the host looks for). Save this as
-      ``events_per_pid.cpp``:
+      An accumulator eats columns, so the C++ plugin takes each batch through
+      the vectorized seam ``on_batch_columns`` and folds the whole batch in one
+      call. Save this as ``events_per_pid.cpp``:
 
       .. code-block:: cpp
 
          #include <dftracer/utils/plugins/plugin.h>
 
-         #include <cstdint>
-
          using namespace dftracer::utils::plugins;
 
-         struct EventsPerPid {
-             explicit EventsPerPid(const Config&) {}
-
-             void step(const Batch& b, Host h) {
-                 auto hits = h.map("hits", Monoid::Counter, Key<std::int64_t>{});
-                 for (const Event& e : b)
-                     hits[e.pid()] += 1;
-             }
-
-             void merge(EventsPerPid&) {}  // host owns the map; nothing to merge
-             void finalize(Host) {}
-         };
-
-         extern "C" dftu_plugin* dftracer_plugin(const dftu_value* config) {
-             return make_plugin<EventsPerPid>(config);
+         static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
+                                            const dftu_host* host) {
+             (void)slice;
+             Host h(host);
+             const auto hits = h.agg("hits", {"pid"}, {agg::count("hits")});
+             if (hits) hits.accumulate(df);
+             return nullptr;
          }
 
-      ``Batch`` and ``Event`` are zero-copy views over the batch, so
-      ``for (const Event& e : b)`` iterates typed events with accessors like
-      ``e.pid()`` instead of indexing the raw C struct. ``h.map`` returns a
-      typed ``Map``: ``Key<std::int64_t>{}`` fixes the key schema (one integer
-      ``pid``) and ``Monoid::Counter`` the value, so you never spell a
-      ``DFTU_MONOID_*`` name or hand-encode the key. ``hits[e.pid()] += 1`` reads
-      like ``std::map`` but contributes to the merge: the host owns the map, so
-      ``merge`` is empty and per-worker copies are combined by the map service,
-      not by your code. ``plugin.h`` is header-only, so nothing links the
+         static dftu_plugin g_plugin;
+
+         extern "C" dftu_plugin* dftracer_plugin(const dftu_value* config) {
+             (void)config;
+             g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
+             g_plugin.needs = [](void*) -> std::uint32_t { return 0; };
+             g_plugin.make_slice = [](void*) -> void* { return &g_plugin; };
+             g_plugin.merge = [](void*, void*) {};
+             g_plugin.on_finalize = [](void*, const dftu_host*) -> dftu_task* {
+                 return nullptr;
+             };
+             g_plugin.destroy_slice = [](void*) {};
+             g_plugin.destroy = [](void*) {};
+             g_plugin.on_batch_columns = on_batch_columns;
+             return &g_plugin;
+         }
+
+      ``Host::agg`` names the accumulator, its key columns, and its aggregates;
+      the ``agg::`` factories take exactly the fields each op uses, so you never
+      spell a ``DFTU_AGG_*`` code or mis-fill a spec. ``agg_new`` is
+      get-or-create, so calling it every batch is the normal shape.
+      ``accumulate(df)`` folds the batch's ``pid`` column into the host-owned
+      state: ``merge`` stays empty and per-worker copies are combined by the
+      host, not by your code. ``plugin.h`` is header-only, so nothing links the
       library.
 
 3. Run it and read the result
@@ -121,8 +124,8 @@ threading code.
    .. tab-item:: Python
 
       ``PluginHost`` compiles the class to a cached ``.so``, loads it, and folds
-      it over one scan of your traces. ``run()`` wires up the map service and
-      returns the emitted results keyed by map name:
+      it over one scan of your traces. ``run()`` wires up the aggregation
+      service and returns the emitted results keyed by accumulator name:
 
       .. code-block:: python
 
@@ -137,8 +140,8 @@ threading code.
          print(table.to_pandas().sort_values("k0").reset_index(drop=True))
          print("scanned:", host.stats["events_scanned"])
 
-      Expected output. The key column is ``k0`` (the ``pid``) and the monoid
-      value column is ``value`` (the count):
+      Expected output. The key column is ``k0`` (the ``pid``) and the
+      aggregate column is ``value`` (the count):
 
       .. code-block:: text
 
@@ -152,7 +155,7 @@ threading code.
 
    .. tab-item:: C++
 
-      Compile the Slice to a shared library, then fold it over the trace with
+      Compile the plugin to a shared library, then fold it over the trace with
       the ``dftracer_run`` binary - no Python involved. Point ``-I`` at the
       installed headers:
 
@@ -169,10 +172,10 @@ threading code.
 
          Run: plugins=1 | Files: 1 | Chunks: scanned=1 skipped=0 | Events: matched=300 scanned=300
 
-      The 300 scanned events are the fold's input; the per-``pid`` map is merged
-      in-process by the host. Use ``-d <directory>`` in place of ``--files`` to
-      fold over a whole tree. To consume the merged map values programmatically
-      (as the Python tab does), drive the same ``.so`` through a ``PluginHost``;
+      The 300 scanned events are the fold's input; the per-``pid`` accumulator
+      is merged in-process by the host. Use ``-d <directory>`` in place of
+      ``--files`` to fold over a whole tree. To consume the merged values
+      programmatically (as the Python tab does), drive the same ``.so`` through a ``PluginHost``;
       see :doc:`../plugins`.
 
 What you learned
@@ -181,9 +184,8 @@ What you learned
 - A plugin is a **fold over the one fused scan**: see each event once, keep
   mergeable state.
 - Author it in Python with ``@jit.plugin`` + ``jit.map`` + ``@jit.each_event``,
-  or in C++ as a ``Slice`` with ``step`` / ``merge`` / ``finalize`` exported by
-  ``make_plugin`` and the ``dftracer_plugin`` factory - both compile to the same
-  ABI.
+  or in C++ against the ABI with an ``on_batch_columns`` seam and ``Host::agg``,
+  exported by the ``dftracer_plugin`` factory - both compile to the same ABI.
 - Run it in Python with ``PluginHost.load`` / ``run``, or compile
   the ``.so`` and fold it with ``dftracer_run --plugin``.
 

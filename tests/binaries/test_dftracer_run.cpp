@@ -286,7 +286,7 @@ TEST_SUITE("DFTracerRun") {
         MESSAGE("perbatch standalone: " << r.err);
     }
 
-    TEST_CASE("consumer reads producer's cross-worker-merged monoid handles") {
+    TEST_CASE("consumer reads producer's cross-worker-merged accumulator") {
         std::string run = env_or_probe("DFTRACER_RUN_PATH", "dftracer_run");
         std::string producer = env_or_probe(
             "DFTRACER_DUR_STATS_PRODUCER_PLUGIN_PATH", "dur_stats_producer.so");
@@ -306,9 +306,9 @@ TEST_SUITE("DFTracerRun") {
                                                producer, "--plugin", consumer});
         CHECK(r.exit_code == 0);
         CHECK(r.err.find("dur_stats_consumer: WIRED") != std::string::npos);
-        // The merged COUNTER equals the whole-scan event count only if every
-        // worker slice's handle was folded into one; a per-slice count could
-        // not reach it. The sketch max is the largest duration, so it is
+        // The merged count equals the whole-scan event count only if every
+        // worker slice's accumulator was folded into one; a per-slice count
+        // could not reach it. The max is the largest duration, so it is
         // positive.
         long count = first_capture(r.err, "count=([0-9]+)");
         CHECK(count == N);

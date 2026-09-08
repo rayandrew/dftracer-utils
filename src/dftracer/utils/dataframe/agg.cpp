@@ -56,10 +56,27 @@ std::size_t agg_approx_bytes(const AggState& st) {
     if (st.has_sketch)
         for (const DDSketch& sk : st.sketches)
             total += sk.bins().size() * 24 + 64;
-    if (st.has_argmax) {
-        total += st.argmax_by.size() * sizeof(double) + st.argmax_has.size();
-        for (const std::string& v : st.argmax_repr) total += v.size();
+    if (st.has_arg) {
+        total += st.arg_by.size() * sizeof(double) + st.arg_has.size();
+        for (const std::string& v : st.arg_repr) total += v.size();
     }
+    if (st.has_bitor) total += st.bitor_acc.size() * sizeof(std::uint64_t);
+    if (st.has_kmv)
+        for (const KmvMap& m : st.kmv)
+            for (const auto& [h, v] : m)
+                total += sizeof(std::uint64_t) + v.size() + 48;
+    if (st.has_lst)
+        for (const ListItems& items : st.lst)
+            for (const auto& [by, repr] : items)
+                total += sizeof(double) + repr.size() + sizeof(std::string);
+    if (st.has_ss)
+        for (const SpaceSavingMap& m : st.ss_counters)
+            for (const auto& [v, c] : m)
+                total += v.size() + sizeof(std::uint64_t) + 48;
+    if (st.has_co)
+        total += (st.co_n.size() + st.co_sx.size() + st.co_sy.size() +
+                  st.co_sxx.size() + st.co_syy.size() + st.co_sxy.size()) *
+                 sizeof(double);
     if (st.has_set)
         for (const std::set<std::string>& gset : st.sets)
             for (const std::string& v : gset) total += v.size() + 32;

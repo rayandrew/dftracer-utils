@@ -147,6 +147,20 @@ _AGG_CODE = {
     "argmax": 13,
     "sumsq": 14,
     "set_union": 15,
+    "argmin": 21,
+    "bit_or": 22,
+    "distinct": 23,
+    "list_sorted": 24,
+    "topk": 25,
+    "bottomk": 26,
+    "approx_topk": 27,
+    "sample": 28,
+    "corr": 29,
+    "covar_pop": 30,
+    "covar_samp": 31,
+    "regr_slope": 32,
+    "regr_intercept": 33,
+    "regr_r2": 34,
 }
 
 _NOT_PUSHABLE = (
@@ -296,6 +310,69 @@ class Expr:
         per group (an :class:`Agg`)."""
         return Agg("argmax", self, by=by)
 
+    def argmin(self, by: "Expr") -> "Agg":
+        """The String repr of this expression at the row minimizing ``by``,
+        per group. Several ``argmin``/``argmax`` aggregates naming the same
+        ``by`` all report the same winning row."""
+        return Agg("argmin", self, by=by)
+
+    def distinct(self, k: int = 0) -> "Agg":
+        """Approximate distinct count per group (a KMV sketch of ``k`` hashes,
+        1024 by default), exact below ``k`` distinct values."""
+        return Agg("distinct", self, param=float(k))
+
+    def list_sorted(self, by: "Expr") -> "Agg":
+        """This expression's reprs per group as a ``list<string>``, ordered by
+        ``by`` ascending with the repr breaking ties."""
+        return Agg("list_sorted", self, by=by)
+
+    def topk(self, by: "Expr", k: int = 0) -> "Agg":
+        """The reprs at the ``k`` largest ``by`` values per group (8 by
+        default), a ``list<string>`` in descending ``by`` order."""
+        return Agg("topk", self, param=float(k), by=by)
+
+    def bottomk(self, by: "Expr", k: int = 0) -> "Agg":
+        """The reprs at the ``k`` smallest ``by`` values per group (8 by
+        default), a ``list<string>`` in ascending ``by`` order."""
+        return Agg("bottomk", self, param=float(k), by=by)
+
+    def approx_topk(self, k: int = 0) -> "Agg":
+        """Approximate heavy hitters per group (SpaceSaving with ``k``
+        counters, 8 by default): a ``list<struct{value, count}>`` column by
+        descending count."""
+        return Agg("approx_topk", self, param=float(k))
+
+    def sample(self, k: int = 0) -> "Agg":
+        """A deterministic, mergeable bottom-``k``-by-hash sample of this
+        expression's distinct reprs per group (8 by default), a sorted
+        ``list<string>``."""
+        return Agg("sample", self, param=float(k))
+
+    def corr(self, by: "Expr") -> "Agg":
+        """Pearson correlation of this expression against ``by`` per group."""
+        return Agg("corr", self, by=by)
+
+    def covar_pop(self, by: "Expr") -> "Agg":
+        """Population covariance of this expression against ``by`` per group."""
+        return Agg("covar_pop", self, by=by)
+
+    def covar_samp(self, by: "Expr") -> "Agg":
+        """Sample covariance of this expression against ``by`` per group."""
+        return Agg("covar_samp", self, by=by)
+
+    def regr_slope(self, by: "Expr") -> "Agg":
+        """Least-squares slope of this expression on ``by`` per group."""
+        return Agg("regr_slope", self, by=by)
+
+    def regr_intercept(self, by: "Expr") -> "Agg":
+        """Least-squares intercept of this expression on ``by`` per group."""
+        return Agg("regr_intercept", self, by=by)
+
+    def regr_r2(self, by: "Expr") -> "Agg":
+        """Coefficient of determination of this expression on ``by`` per
+        group."""
+        return Agg("regr_r2", self, by=by)
+
     if TYPE_CHECKING:
         # Prims/unary math (dispatched via __getattr__) and aggs (installed by
         # setattr below), declared so consumers get precise types not Any.
@@ -330,6 +407,7 @@ class Expr:
         def last(self) -> "Agg": ...
         def sumsq(self) -> "Agg": ...
         def set_union(self) -> "Agg": ...
+        def bit_or(self) -> "Agg": ...
 
     # Runtime prim-method seam; hidden from the checker so unknown attributes
     # are type errors, not Any (the real methods are declared above).
@@ -845,6 +923,7 @@ for _op in (
     "last",
     "sumsq",
     "set_union",
+    "bit_or",
 ):
     setattr(Expr, _op, _make_agg_method(_op))
 

@@ -1,12 +1,9 @@
 #include <dftracer/utils/core/common/byte_view.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/constants.h>
-#include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/common/field_ref.h>
-#include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/common/hash/fnv1a.h>
 #include <dftracer/utils/core/common/logging.h>
-#include <dftracer/utils/core/common/memory_budget.h>
 #include <dftracer/utils/core/coro/when_all.h>
 #include <dftracer/utils/core/coro/when_any.h>
 #include <dftracer/utils/core/coro/yield.h>
@@ -17,16 +14,12 @@
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/fold_adapter/ext.h>
-#include <dftracer/utils/plugins/map_grouping_arrow.h>
-#include <dftracer/utils/plugins/map_join_arrow.h>
-#include <dftracer/utils/plugins/map_unnest_arrow.h>
 #include <dftracer/utils/plugins/utility_registry.h>
 #include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/fold_event.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/view.h>
-#include <dftracer/utils/utilities/common/serialization/binary_codec.h>
 #include <dftracer/utils/utilities/common/statistics/ddsketch.h>
 #include <dftracer/utils/utilities/fileio/compress/libdeflate_gzip.h>
 #include <dftracer/utils/utilities/fileio/parallel/merge.h>
@@ -43,21 +36,15 @@
 #include <dftracer/utils/utilities/common/arrow/ipc_writer.h>
 #endif
 
-#include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <new>
-#include <numeric>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
-#include <variant>
 #include <vector>
 
 namespace dftracer::utils::plugins {
@@ -559,10 +546,6 @@ void host_sketch_free(void*, ::dftu_sketch* s) {
     delete reinterpret_cast<SketchBox*>(s);
 }
 
-// 256 partitions (one hash byte), ClickHouse's default, so one oversized
-// partition is rare without recursive re-partition.
-constexpr std::uint32_t MAP_SPILL_PART_BITS = 8;
-
 void append_json_escaped(std::string& out, std::string_view s) {
     for (char c : s) {
         switch (c) {
@@ -920,11 +903,8 @@ const void* host_get_extension(void*, const char* ext_id) {
     if (std::strcmp(ext_id, DFTU_EXT_ARROW) == 0) return &g_arrow;
     if (std::strcmp(ext_id, DFTU_EXT_TRACE) == 0) return &g_trace;
     if (std::strcmp(ext_id, DFTU_EXT_PORTS) == 0) return &g_ports;
-    if (std::strcmp(ext_id, DFTU_EXT_HANDLES) == 0)
-        return detail::handles_ext_vtable();
     if (std::strcmp(ext_id, DFTU_EXT_RESULT) == 0)
         return detail::result_ext_vtable();
-    if (std::strcmp(ext_id, DFTU_EXT_MAP) == 0) return detail::map_ext_vtable();
     if (std::strcmp(ext_id, DFTU_EXT_AGG) == 0) return detail::agg_ext_vtable();
     if (std::strcmp(ext_id, DFTU_EXT_OPS) == 0) return detail::ops_ext_vtable();
     return nullptr;
@@ -1266,20 +1246,6 @@ PluginFold::PluginFold(const dftu_plugin* plugin,
     host_.intern = host_intern;
     host_.log = host_log;
 
-    // Spill is opt-in via env; unset keeps map_spill_enabled_ false. slice()
-    // re-runs this constructor, so each worker inherits the same config.
-    MapSpillEnv sp = read_map_spill_env();
-    if (sp.enabled) {
-        map_spill_enabled_ = true;
-        map_spill_share_ = sp.share;
-        map_spill_dir_root_ = sp.dir;
-        map_part_bits_ = MAP_SPILL_PART_BITS;
-    }
-    if (sp.stream) {
-        map_stream_enabled_ = true;
-        map_stream_chunk_rows_ = MAP_STREAM_CHUNK_ROWS;
-    }
-
     // An invalid filter is logged and left unset rather than aborting.
     const char* q =
         plugin_->plan_query ? plugin_->plan_query(plugin_->self) : nullptr;
@@ -1294,50 +1260,7 @@ PluginFold::PluginFold(const dftu_plugin* plugin,
 }
 
 PluginFold::~PluginFold() {
-    // An exceptional unwind that skipped the post-materialize cleanup still
-    // removes every spill dir this fold owns.
-    remove_spill_dirs();
     if (slice_) plugin_->destroy_slice(slice_);
-}
-
-void PluginFold::set_map_spill(std::size_t share_bytes,
-                               const std::string& dir) {
-    map_spill_enabled_ = share_bytes > 0;
-    map_spill_share_ = share_bytes;
-    if (!dir.empty()) map_spill_dir_root_ = dir;
-    if (map_spill_enabled_) map_part_bits_ = MAP_SPILL_PART_BITS;
-}
-
-void PluginFold::set_map_stream(bool enabled, std::size_t chunk_rows) {
-    map_stream_enabled_ = enabled;
-    map_stream_chunk_rows_ = chunk_rows ? chunk_rows : MAP_STREAM_CHUNK_ROWS;
-}
-
-const std::string& PluginFold::ensure_spill_dir() {
-    if (!map_spill_cur_dir_.empty()) return map_spill_cur_dir_;
-    static std::atomic<std::uint64_t> seq{0};
-    const std::string root = map_spill_dir_root_.empty()
-                                 ? fs::temp_directory_path().string()
-                                 : map_spill_dir_root_;
-    std::string dir = root + "/dftplugmap_" + std::to_string(seq.fetch_add(1)) +
-                      "_" +
-                      std::to_string(reinterpret_cast<std::uintptr_t>(this));
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    if (ec)
-        throw dftracer::utils::DFTUtilsException(
-            dftracer::utils::ErrorCode::IO,
-            "plugin map spill: cannot create spill dir " + dir);
-    map_spill_cur_dir_ = std::move(dir);
-    map_spill_dirs_.push_back(map_spill_cur_dir_);
-    return map_spill_cur_dir_;
-}
-
-void PluginFold::remove_spill_dirs() {
-    std::error_code ec;
-    for (const auto& d : map_spill_dirs_) fs::remove_all(d, ec);
-    map_spill_dirs_.clear();
-    map_spill_cur_dir_.clear();
 }
 
 ::dftu_query* PluginFold::compile_query(const char* src, std::uint32_t len) {
@@ -1558,76 +1481,6 @@ void PluginFold::merge(Fold& other) {
     if (!slice_) return;
     auto& o = static_cast<PluginFold&>(other);
     if (o.slice_) plugin_->merge(slice_, o.slice_);
-    // Merge named handles by key; fuse folds each worker slice into the master.
-    for (const auto& [key, idx] : o.handles_.index()) {
-        const MonoidAccumulator& src = o.handles_[idx];
-        MonoidAccumulator* dst = handles_.find(key);
-        if (!dst) dst = handles_.push(key, MonoidAccumulator(src.kind()));
-        dst->merge(src);
-    }
-    // Fold each named map's entries into this by key, merging a colliding key's
-    // monoid.
-    for (const auto& [key, idx] : o.maps_.index()) {
-        MapAccum& src = o.maps_[idx];
-        MapAccum* dst = maps_.find(key);
-        if (!dst) {
-            MapAccum m;
-            m.name = src.name;
-            m.key_n = src.key_n;
-            m.key_types = src.key_types;
-            m.value_kinds = src.value_kinds;
-            m.value_base_bytes = src.value_base_bytes;
-            m.nested_inner_n = src.nested_inner_n;
-            m.inner_key_types = src.inner_key_types;
-            m.payload_types = src.payload_types;
-            m.quantile_qs = src.quantile_qs;
-            m.fused_out_names = src.fused_out_names;
-            m.set_part_bits(src.part_bits);
-            dst = maps_.push(key, std::move(m));
-        }
-        dst->ordered = dst->ordered || src.ordered;
-        // dst carries src's part_bits, so src partition p folds into dst
-        // partition p.
-        for (const MapAccum::EntriesMap& part : src.parts) {
-            for (const auto& [k, mons] : part) {
-                bool inserted = false;
-                std::vector<MonoidAccumulator>& into = dst->touch(k, inserted);
-                for (std::size_t c = 0; c < mons.size() && c < into.size(); ++c)
-                    into[c].merge(mons[c]);
-                if (map_spill_enabled_) {
-                    const std::uint32_t p = dst->partition_of(k);
-                    std::size_t delta =
-                        inserted ? MapAccum::KEY_OVERHEAD_BYTES +
-                                       sizeof(std::int64_t) * dst->key_n +
-                                       dst->value_base_bytes
-                                 : 0;
-                    for (std::size_t c = 0;
-                         c < mons.size() && c < dst->value_kinds.size(); ++c)
-                        if (monoid_is_variable(dst->value_kinds[c]))
-                            delta += mons[c].state_bytes();
-                    dst->part_bytes[p] += delta;
-                    dst->footprint += delta;
-                }
-            }
-        }
-        // Adopt the worker's spilled runs so reload merges them at materialize;
-        // partition indices align via dst's part_bits.
-        if (dst->runs.size() == src.runs.size())
-            for (std::uint32_t p = 0; p < src.runs.size(); ++p)
-                for (auto& r : src.runs[p])
-                    dst->runs[p].push_back(std::move(r));
-        // Force a budget check now that a whole worker folded in.
-        note_and_maybe_spill(*dst, /*inserted=*/true);
-    }
-    for (const DeclaredJoin& j : o.joins_)
-        declare_join(j.out_name.c_str(), j.left_name.c_str(),
-                     j.right_name.c_str(), j.type);
-    // Adopt the worker's spill dirs so its destructor does not delete runs this
-    // fold still needs.
-    for (auto& d : o.map_spill_dirs_) map_spill_dirs_.push_back(std::move(d));
-    o.map_spill_dirs_.clear();
-    o.map_spill_cur_dir_.clear();
-    if (o.map_spill_failed_) map_spill_failed_ = true;
 
     // Fold each worker's aggregation accumulators into this master by name via
     // the engine's single merge path (agg_merge). An accumulator new to the
@@ -1645,16 +1498,10 @@ void PluginFold::merge(Fold& other) {
 }
 
 coro::CoroTask<bool> PluginFold::finalize(const CoverageSet&) {
-    // Publish this fold's merged handles before on_finalize so a consumer
-    // finalizing later in fold order can read them via result().
-    if (results_)
-        for (const auto& [key, idx] : handles_.index())
-            results_->values[key] = handles_[idx].to_value();
-    materialize_maps();
+    // Publish before on_finalize so a plugin finalizing later in fold order can
+    // read this one's merged accumulators via agg_result().
+    publish_aggs();
     materialize_aggs();
-    // Runs reloaded and emitted; drop the temp dirs (the destructor repeats
-    // this on an exceptional unwind).
-    remove_spill_dirs();
     if (slice_) {
         if (::dftu_task* t = plugin_->on_finalize(slice_, &host_))
             co_await *as_task(t);

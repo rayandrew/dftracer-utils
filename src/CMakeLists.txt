@@ -207,13 +207,9 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     # Plugins (C ABI fold adapter + dlopen host + config tree builder)
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/config.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/map.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/agg.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/result.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/ops.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_join.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_grouping.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/map_unnest.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/plugins.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/plugin_exports.cpp
 

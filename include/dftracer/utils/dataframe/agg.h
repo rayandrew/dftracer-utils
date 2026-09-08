@@ -51,14 +51,67 @@ enum class AggOp {
     /// Unlike Count (the group's row count) this reads the field's
     /// FieldStat::n, so it counts only the rows where the value column was
     /// present.
-    CountValid = 20
+    CountValid = 20,
+    /// The String repr of `value_col` at the row minimizing `by_col`. Specs
+    /// sharing a `by_col` resolve to the same winning row.
+    ArgMin = 21,
+    /// Bitwise OR of `value_col` read as u64, a Uint64 column.
+    BitOr = 22,
+    /// Approximate distinct count of `value_col` (KMV sketch, `param` = k), an
+    /// Int64 column.
+    Distinct = 23,
+    /// String reprs of `value_col` ordered by `by_col` ascending, a
+    /// list<string> column.
+    ListSorted = 24,
+    /// String reprs of `value_col` at the `param` (k) largest `by_col` values,
+    /// a list<string> column in descending `by` order.
+    TopK = 25,
+    /// String reprs of `value_col` at the `param` (k) smallest `by_col`
+    /// values, a list<string> column in ascending `by` order.
+    BottomK = 26,
+    /// Approximate heavy hitters of `value_col` (SpaceSaving, `param` =
+    /// counters), a list<struct{value, count}> column by descending count.
+    ApproxTopK = 27,
+    /// Deterministic bottom-k-by-hash sample of the distinct reprs of
+    /// `value_col` (`param` = k), a sorted list<string> column.
+    Sample = 28,
+    /// Pearson correlation of (x = `by_col`, y = `value_col`), Float64.
+    Corr = 29,
+    /// Population covariance of (x = `by_col`, y = `value_col`), Float64.
+    CovarPop = 30,
+    /// Sample covariance of (x = `by_col`, y = `value_col`), Float64.
+    CovarSamp = 31,
+    /// Least-squares slope of y = `value_col` on x = `by_col`, Float64.
+    RegrSlope = 32,
+    /// Least-squares intercept of y = `value_col` on x = `by_col`, Float64.
+    RegrIntercept = 33,
+    /// Coefficient of determination of y = `value_col` on x = `by_col`,
+    /// Float64.
+    RegrR2 = 34
 };
 
-/// Occupancy ops take a second (dur) input through `by_col`, like ArgMax.
+/// Ops taking a second input through `by_col`: the extremum ArgMax/ArgMin
+/// maximize/minimize, the ordered list/top-k ops order by, the co-moment ops
+/// read as x, and occupancy reads as dur.
 inline bool agg_uses_by_col(AggOp op) {
-    return op == AggOp::ArgMax || op == AggOp::Busy ||
-           op == AggOp::Concurrency || op == AggOp::Utilization ||
-           op == AggOp::Active;
+    return op == AggOp::ArgMax || op == AggOp::ArgMin ||
+           op == AggOp::ListSorted || op == AggOp::TopK ||
+           op == AggOp::BottomK || op == AggOp::Corr || op == AggOp::CovarPop ||
+           op == AggOp::CovarSamp || op == AggOp::RegrSlope ||
+           op == AggOp::RegrIntercept || op == AggOp::RegrR2 ||
+           op == AggOp::Busy || op == AggOp::Concurrency ||
+           op == AggOp::Utilization || op == AggOp::Active;
+}
+
+/// Ops reading `value_col` as a String repr rather than as a number: their
+/// value must bind a raw input column of any type, so a caller lowering an
+/// expression aggregate has to bypass the numeric evaluator for them.
+inline bool agg_uses_raw_value(AggOp op) {
+    return op == AggOp::ArgMax || op == AggOp::ArgMin ||
+           op == AggOp::SetUnion || op == AggOp::Distinct ||
+           op == AggOp::ListSorted || op == AggOp::TopK ||
+           op == AggOp::BottomK || op == AggOp::ApproxTopK ||
+           op == AggOp::Sample;
 }
 
 /// One aggregate: `op` over the value column at index `value_col` in the values
@@ -67,10 +120,10 @@ struct AggSpec {
     AggOp op;
     std::int32_t value_col = -1;
     std::string out;
-    double param = 0.0;  ///< Pct: quantile q in [0, 1]; occupancy: occ_cell_us
-    std::int32_t by_col = -1;  ///< ArgMax: the column maximized (value_col is
-                               ///< the represented field); occupancy: dur
-                               ///< (value_col is ts); unused otherwise
+    double param = 0.0;  ///< Pct: quantile q in [0, 1]; occupancy: occ_cell_us;
+                         ///< Distinct/TopK/BottomK/ApproxTopK/Sample: k
+    std::int32_t by_col = -1;  ///< the second input for the ops
+                               ///< agg_uses_by_col() names; unused otherwise
 };
 
 /// One reduction applied to every auto-discovered dyn (per-argument) column.

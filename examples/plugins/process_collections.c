@@ -1,12 +1,14 @@
-/* Example dftracer-utils plugin in pure C: the co-moment aggregates, which
- * read `by` as x and `value` as y and stay exactly mergeable across workers.
- * Keyed by {pid}, it regresses dur on ts (slope, intercept, R2, Pearson
- * correlation) and adds the shape of dur alone (skewness, excess kurtosis).
- * The finalized dataframe is [pid, slope, intercept, r2, corr, dur_skew,
- * dur_kurt], returned from run() under "process_regr_stats".
+/* Example dftracer-utils plugin in pure C: the set-valued and list-valued
+ * aggregates, all in one accumulator keyed by {pid}. SET_UNION gives the
+ * distinct event names a process ran, DISTINCT their approximate cardinality
+ * (a KMV sketch, `param` = k) and LIST_SORTED the whole name sequence ordered
+ * by the `by` column ts. The host merges the accumulator across workers and
+ * finalizes it to [pid, names, n_names, name_seq], where names is a joined
+ * string and name_seq a list<string> column, returned from run() under
+ * "process_collections".
  *
  * Build: cc -std=c99 -shared -fPIC -I<repo>/include \
- *           -o process_regr_stats.so process_regr_stats.c
+ *           -o process_collections.so process_collections.c
  */
 
 #include <dftracer/utils/plugins/abi.h>
@@ -28,17 +30,14 @@ static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
     const dftu_ext_agg* agg =
         (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
     static const char* const keys[1] = {"pid"};
-    static const dftu_agg_col specs[6] = {
-        {DFTU_AGG_REGR_SLOPE, "dur", "slope", 0.0, "ts"},
-        {DFTU_AGG_REGR_INTERCEPT, "dur", "intercept", 0.0, "ts"},
-        {DFTU_AGG_REGR_R2, "dur", "r2", 0.0, "ts"},
-        {DFTU_AGG_CORR, "dur", "corr", 0.0, "ts"},
-        {DFTU_AGG_SKEW, "dur", "dur_skew", 0.0, NULL},
-        {DFTU_AGG_KURT, "dur", "dur_kurt", 0.0, NULL}};
+    static const dftu_agg_col specs[3] = {
+        {DFTU_AGG_SET_UNION, "name", "names", 0.0, NULL},
+        {DFTU_AGG_DISTINCT, "name", "n_names", 1024.0, NULL},
+        {DFTU_AGG_LIST_SORTED, "name", "name_seq", 0.0, "ts"}};
     dftu_agg* a;
     (void)slice;
     if (!agg || !agg->agg_new) return NULL;
-    a = agg->agg_new(host->h, "process_regr_stats", keys, 1, specs, 6);
+    a = agg->agg_new(host->h, "process_collections", keys, 1, specs, 3);
     if (a) agg->agg_accumulate(host->h, a, df);
     return NULL;
 }

@@ -8,13 +8,17 @@
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/dataframe/sketch.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // Private definition of the AggState partial group state, shared across the
@@ -25,6 +29,82 @@ namespace dftracer::utils::dataframe {
 
 FieldStatDomain col_domain(TypeId t);
 std::uint64_t read_bits(const Series& c, std::int64_t i, FieldStatDomain d);
+
+/// Default sketch width when AggSpec::param does not set one.
+inline constexpr std::size_t AGG_DISTINCT_DEFAULT_K = 1024;
+inline constexpr std::size_t AGG_LIST_DEFAULT_K = 8;
+
+inline std::size_t agg_param_k(double param, std::size_t fallback) {
+    return param > 0.0 ? static_cast<std::size_t>(param) : fallback;
+}
+
+/// Which extremum an ArgMax/ArgMin slot tracks over its `by` column.
+enum class ArgDir { Min = 0, Max = 1 };
+
+/// A bounded ordered-list slot's readout order: ascending `by` (Sorted,
+/// Bottom) or descending `by` (Top), the repr breaking ties either way.
+enum class ListKind { Sorted = 0, Top = 1, Bottom = 2 };
+
+using ListItems = std::vector<std::pair<double, std::string>>;
+
+inline bool list_item_less(ListKind kind,
+                           const std::pair<double, std::string>& a,
+                           const std::pair<double, std::string>& b) {
+    if (a.first != b.first)
+        return kind == ListKind::Top ? a.first > b.first : a.first < b.first;
+    return a.second < b.second;
+}
+
+/// Sort into readout order and, when `k > 0`, drop everything past k. Which
+/// element is dropped is a pure function of the contents, so a bounded slot
+/// merges order-independently.
+inline void list_bound(ListItems& v, ListKind kind, std::size_t k) {
+    std::sort(v.begin(), v.end(),
+              [kind](const std::pair<double, std::string>& a,
+                     const std::pair<double, std::string>& b) {
+                  return list_item_less(kind, a, b);
+              });
+    if (k > 0 && v.size() > k) v.resize(k);
+}
+
+/// The k smallest element hashes seen, each carrying its repr (KMV / bottom-k
+/// min-hash). Shared by Distinct (the estimate) and Sample (the reprs).
+using KmvMap = std::map<std::uint64_t, std::string>;
+
+inline void kmv_trim(KmvMap& m, std::size_t k) {
+    while (m.size() > k) m.erase(std::prev(m.end()));
+}
+
+/// SpaceSaving counters: at most k (value -> count) pairs.
+using SpaceSavingMap = std::map<std::string, std::uint64_t>;
+
+/// Offer `count` occurrences of `value` to a SpaceSaving summary: bump an
+/// existing counter, take a free one, else evict the smallest counter and
+/// inherit its count. std::map orders by value, so the evicted minimum is the
+/// lexicographically smallest of the tied minima and the summary stays a pure
+/// function of the multiset of offers.
+///
+/// Metwally, Agrawal, El Abbadi, "Efficient Computation of Frequent and Top-k
+/// Elements in Data Streams", ICDT 2005.
+inline void space_saving_offer(SpaceSavingMap& m, std::size_t k,
+                               const std::string& value, std::uint64_t count) {
+    if (k == 0) return;
+    auto it = m.find(value);
+    if (it != m.end()) {
+        it->second += count;
+        return;
+    }
+    if (m.size() < k) {
+        m.emplace(value, count);
+        return;
+    }
+    auto min_it = m.begin();
+    for (auto i = m.begin(); i != m.end(); ++i)
+        if (i->second < min_it->second) min_it = i;
+    const std::uint64_t inherited = min_it->second;
+    m.erase(min_it);
+    m.emplace(value, inherited + count);
+}
 
 // Groups fold by distinct value column, not by spec: sum(dur), mean(dur) and
 // var(dur) share one FieldStat per group (accumulated once). Count is
@@ -76,18 +156,78 @@ class AggState {
     std::vector<int> field_sketch;
     std::vector<DDSketch> sketches;
 
-    // ArgMax: one slot per ArgMax spec (no field-level dedup, mirroring the
-    // View's AggSchema - a slot tracks the max `by_col` seen and the repr of
-    // `value_col` at that row). `argmax_by_col`/`argmax_val_col` are raw
-    // indices into the `values` array passed to accumulate.
-    bool has_argmax = false;
-    std::size_t n_argmax = 0;
-    std::vector<int> spec_argmax;   // spec -> argmax slot, or -1
-    std::vector<std::int32_t> argmax_by_col;
-    std::vector<std::int32_t> argmax_val_col;
-    std::vector<double> argmax_by;  // groups * n_argmax
-    std::vector<char> argmax_has;   // groups * n_argmax
-    std::vector<std::string> argmax_repr;
+    // ArgMax/ArgMin: a slot per distinct (by_col, direction) pair holds the
+    // extreme `by` seen, and every spec bound to that slot keeps its own repr
+    // of its own `value_col` at that same row. Sharing the slot is what makes N
+    // specs naming one `by` column report one whole winning row. A tie on `by`
+    // is broken on the repr of the lowest-indexed spec bound to the slot and
+    // then adopted for the whole row, so the result is order-independent under
+    // parallel merge. `arg_by_col`/`arg_val_col` are raw indices into the
+    // `values` array passed to accumulate.
+    bool has_arg = false;
+    std::size_t n_arg = 0;                         // (by_col, direction) slots
+    std::size_t n_arg_repr = 0;                    // ArgMax/ArgMin specs
+    std::vector<int> spec_arg;                     // spec -> slot, or -1
+    std::vector<int> spec_arg_repr;                // spec -> repr index, or -1
+    std::vector<std::int32_t> arg_by_col;          // slot -> by_col
+    std::vector<ArgDir> arg_dir;                   // slot -> direction
+    std::vector<std::vector<int>> arg_slot_reprs;  // slot -> reprs, ascending
+    std::vector<std::int32_t> arg_val_col;         // repr -> value_col
+    std::vector<double> arg_by;                    // groups * n_arg
+    std::vector<char> arg_has;                     // groups * n_arg
+    std::vector<std::string> arg_repr;             // groups * n_arg_repr
+
+    // BitOr: one slot per distinct value column; the accumulator is the u64 OR
+    // (identity 0), so merge is an OR.
+    bool has_bitor = false;
+    std::size_t n_bitor = 0;
+    std::vector<int> spec_bitor;           // spec -> slot, or -1
+    std::vector<std::int32_t> bitor_val_col;
+    std::vector<std::uint64_t> bitor_acc;  // groups * n_bitor
+
+    // Distinct + Sample: one KMV slot per distinct (value column, k) pair,
+    // holding the k smallest element hashes with their reprs. Merge is a
+    // union re-trimmed to k, so the sketch is order-independent.
+    bool has_kmv = false;
+    std::size_t n_kmv = 0;
+    std::vector<int> spec_kmv;  // spec -> slot, or -1
+    std::vector<std::int32_t> kmv_val_col;
+    std::vector<std::size_t> kmv_k;
+    std::vector<KmvMap> kmv;    // groups * n_kmv
+
+    // ListSorted + TopK + BottomK: one slot per distinct (value column, by
+    // column, kind, k); `lst_k[slot] == 0` is the unbounded ListSorted.
+    bool has_lst = false;
+    std::size_t n_lst = 0;
+    std::vector<int> spec_lst;  // spec -> slot, or -1
+    std::vector<std::int32_t> lst_val_col;
+    std::vector<std::int32_t> lst_by_col;
+    std::vector<ListKind> lst_kind;
+    std::vector<std::size_t> lst_k;
+    std::vector<ListItems> lst;  // groups * n_lst
+
+    // ApproxTopK: one SpaceSaving summary per distinct (value column, k).
+    bool has_ss = false;
+    std::size_t n_ss = 0;
+    std::vector<int> spec_ss;                 // spec -> slot, or -1
+    std::vector<std::int32_t> ss_val_col;
+    std::vector<std::size_t> ss_k;
+    std::vector<SpaceSavingMap> ss_counters;  // groups * n_ss
+
+    // Co-moments (Corr/CovarPop/CovarSamp/RegrSlope/RegrIntercept/RegrR2): one
+    // slot per distinct (value column, by column) pair over x = by, y = value.
+    // The six raw power sums are additive, so merge is a component-wise add.
+    bool has_co = false;
+    std::size_t n_co = 0;
+    std::vector<int> spec_co;  // spec -> slot, or -1
+    std::vector<std::int32_t> co_val_col;
+    std::vector<std::int32_t> co_by_col;
+    std::vector<double> co_n;  // each groups * n_co
+    std::vector<double> co_sx;
+    std::vector<double> co_sy;
+    std::vector<double> co_sxx;
+    std::vector<double> co_syy;
+    std::vector<double> co_sxy;
 
     // SetUnion: one slot per SetUnion spec (no field-level dedup, mirroring the
     // View's AggSchema). `set_val_col` is a raw index into `values`.
@@ -140,8 +280,9 @@ class AggState {
         std::unordered_map<std::int32_t, int> seen;
         for (std::size_t s = 0; s < specs.size(); ++s) {
             const AggSpec& sp = specs[s];
-            if (sp.op == AggOp::Count || sp.op == AggOp::SetUnion ||
-                agg_uses_by_col(sp.op) || sp.value_col < 0)
+            if (sp.op == AggOp::Count || sp.op == AggOp::BitOr ||
+                agg_uses_raw_value(sp.op) || agg_uses_by_col(sp.op) ||
+                sp.value_col < 0)
                 continue;
             auto it = seen.find(sp.value_col);
             if (it == seen.end()) {
@@ -177,17 +318,168 @@ class AggState {
         }
         has_sketch = n_sketch > 0;
 
-        spec_argmax.assign(specs.size(), -1);
-        argmax_by_col.clear();
-        argmax_val_col.clear();
-        n_argmax = 0;
+        spec_arg.assign(specs.size(), -1);
+        spec_arg_repr.assign(specs.size(), -1);
+        arg_by_col.clear();
+        arg_dir.clear();
+        arg_slot_reprs.clear();
+        arg_val_col.clear();
+        n_arg = 0;
+        n_arg_repr = 0;
         for (std::size_t s = 0; s < specs.size(); ++s) {
-            if (specs[s].op != AggOp::ArgMax) continue;
-            spec_argmax[s] = static_cast<int>(n_argmax++);
-            argmax_by_col.push_back(specs[s].by_col);
-            argmax_val_col.push_back(specs[s].value_col);
+            const AggSpec& sp = specs[s];
+            if (sp.op != AggOp::ArgMax && sp.op != AggOp::ArgMin) continue;
+            const ArgDir dir =
+                sp.op == AggOp::ArgMax ? ArgDir::Max : ArgDir::Min;
+            int slot = -1;
+            for (std::size_t k = 0; k < n_arg; ++k)
+                if (arg_by_col[k] == sp.by_col && arg_dir[k] == dir) {
+                    slot = static_cast<int>(k);
+                    break;
+                }
+            if (slot < 0) {
+                slot = static_cast<int>(n_arg++);
+                arg_by_col.push_back(sp.by_col);
+                arg_dir.push_back(dir);
+                arg_slot_reprs.emplace_back();
+            }
+            const int ri = static_cast<int>(n_arg_repr++);
+            spec_arg[s] = slot;
+            spec_arg_repr[s] = ri;
+            arg_val_col.push_back(sp.value_col);
+            arg_slot_reprs[static_cast<std::size_t>(slot)].push_back(ri);
         }
-        has_argmax = n_argmax > 0;
+        has_arg = n_arg > 0;
+
+        spec_bitor.assign(specs.size(), -1);
+        bitor_val_col.clear();
+        n_bitor = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            if (specs[s].op != AggOp::BitOr) continue;
+            int slot = -1;
+            for (std::size_t k = 0; k < n_bitor; ++k)
+                if (bitor_val_col[k] == specs[s].value_col) {
+                    slot = static_cast<int>(k);
+                    break;
+                }
+            if (slot < 0) {
+                slot = static_cast<int>(n_bitor++);
+                bitor_val_col.push_back(specs[s].value_col);
+            }
+            spec_bitor[s] = slot;
+        }
+        has_bitor = n_bitor > 0;
+
+        spec_kmv.assign(specs.size(), -1);
+        kmv_val_col.clear();
+        kmv_k.clear();
+        n_kmv = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            const AggSpec& sp = specs[s];
+            if (sp.op != AggOp::Distinct && sp.op != AggOp::Sample) continue;
+            const std::size_t k = agg_param_k(
+                sp.param, sp.op == AggOp::Distinct ? AGG_DISTINCT_DEFAULT_K
+                                                   : AGG_LIST_DEFAULT_K);
+            int slot = -1;
+            for (std::size_t j = 0; j < n_kmv; ++j)
+                if (kmv_val_col[j] == sp.value_col && kmv_k[j] == k) {
+                    slot = static_cast<int>(j);
+                    break;
+                }
+            if (slot < 0) {
+                slot = static_cast<int>(n_kmv++);
+                kmv_val_col.push_back(sp.value_col);
+                kmv_k.push_back(k);
+            }
+            spec_kmv[s] = slot;
+        }
+        has_kmv = n_kmv > 0;
+
+        spec_lst.assign(specs.size(), -1);
+        lst_val_col.clear();
+        lst_by_col.clear();
+        lst_kind.clear();
+        lst_k.clear();
+        n_lst = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            const AggSpec& sp = specs[s];
+            if (sp.op != AggOp::ListSorted && sp.op != AggOp::TopK &&
+                sp.op != AggOp::BottomK)
+                continue;
+            const ListKind kind = sp.op == AggOp::TopK      ? ListKind::Top
+                                  : sp.op == AggOp::BottomK ? ListKind::Bottom
+                                                            : ListKind::Sorted;
+            const std::size_t k =
+                sp.op == AggOp::ListSorted
+                    ? 0
+                    : agg_param_k(sp.param, AGG_LIST_DEFAULT_K);
+            int slot = -1;
+            for (std::size_t j = 0; j < n_lst; ++j)
+                if (lst_val_col[j] == sp.value_col &&
+                    lst_by_col[j] == sp.by_col && lst_kind[j] == kind &&
+                    lst_k[j] == k) {
+                    slot = static_cast<int>(j);
+                    break;
+                }
+            if (slot < 0) {
+                slot = static_cast<int>(n_lst++);
+                lst_val_col.push_back(sp.value_col);
+                lst_by_col.push_back(sp.by_col);
+                lst_kind.push_back(kind);
+                lst_k.push_back(k);
+            }
+            spec_lst[s] = slot;
+        }
+        has_lst = n_lst > 0;
+
+        spec_ss.assign(specs.size(), -1);
+        ss_val_col.clear();
+        ss_k.clear();
+        n_ss = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            const AggSpec& sp = specs[s];
+            if (sp.op != AggOp::ApproxTopK) continue;
+            const std::size_t k = agg_param_k(sp.param, AGG_LIST_DEFAULT_K);
+            int slot = -1;
+            for (std::size_t j = 0; j < n_ss; ++j)
+                if (ss_val_col[j] == sp.value_col && ss_k[j] == k) {
+                    slot = static_cast<int>(j);
+                    break;
+                }
+            if (slot < 0) {
+                slot = static_cast<int>(n_ss++);
+                ss_val_col.push_back(sp.value_col);
+                ss_k.push_back(k);
+            }
+            spec_ss[s] = slot;
+        }
+        has_ss = n_ss > 0;
+
+        spec_co.assign(specs.size(), -1);
+        co_val_col.clear();
+        co_by_col.clear();
+        n_co = 0;
+        for (std::size_t s = 0; s < specs.size(); ++s) {
+            const AggSpec& sp = specs[s];
+            if (sp.op != AggOp::Corr && sp.op != AggOp::CovarPop &&
+                sp.op != AggOp::CovarSamp && sp.op != AggOp::RegrSlope &&
+                sp.op != AggOp::RegrIntercept && sp.op != AggOp::RegrR2)
+                continue;
+            int slot = -1;
+            for (std::size_t j = 0; j < n_co; ++j)
+                if (co_val_col[j] == sp.value_col &&
+                    co_by_col[j] == sp.by_col) {
+                    slot = static_cast<int>(j);
+                    break;
+                }
+            if (slot < 0) {
+                slot = static_cast<int>(n_co++);
+                co_val_col.push_back(sp.value_col);
+                co_by_col.push_back(sp.by_col);
+            }
+            spec_co[s] = slot;
+        }
+        has_co = n_co > 0;
 
         spec_set.assign(specs.size(), -1);
         set_val_col.clear();
@@ -245,10 +537,22 @@ class AggState {
             fl_last_idx.resize(fl_last_idx.size() + nf, -1);
         }
         if (has_sketch) sketches.resize(sketches.size() + n_sketch);
-        if (has_argmax) {
-            argmax_by.resize(argmax_by.size() + n_argmax, 0.0);
-            argmax_has.resize(argmax_has.size() + n_argmax, 0);
-            argmax_repr.resize(argmax_repr.size() + n_argmax);
+        if (has_arg) {
+            arg_by.resize(arg_by.size() + n_arg, 0.0);
+            arg_has.resize(arg_has.size() + n_arg, 0);
+            arg_repr.resize(arg_repr.size() + n_arg_repr);
+        }
+        if (has_bitor) bitor_acc.resize(bitor_acc.size() + n_bitor, 0);
+        if (has_kmv) kmv.resize(kmv.size() + n_kmv);
+        if (has_lst) lst.resize(lst.size() + n_lst);
+        if (has_ss) ss_counters.resize(ss_counters.size() + n_ss);
+        if (has_co) {
+            co_n.resize(co_n.size() + n_co, 0.0);
+            co_sx.resize(co_sx.size() + n_co, 0.0);
+            co_sy.resize(co_sy.size() + n_co, 0.0);
+            co_sxx.resize(co_sxx.size() + n_co, 0.0);
+            co_syy.resize(co_syy.size() + n_co, 0.0);
+            co_sxy.resize(co_sxy.size() + n_co, 0.0);
         }
         if (has_set) sets.resize(sets.size() + n_set);
         if (has_occ) {
@@ -378,17 +682,71 @@ class AggState {
             for (std::size_t sk = 0; sk < n_sketch; ++sk)
                 sketches[ds + sk].merge(other.sketches[ss + sk]);
         }
-        if (has_argmax) {
-            const std::size_t da = static_cast<std::size_t>(g) * n_argmax;
-            const std::size_t sa = static_cast<std::size_t>(j) * n_argmax;
-            for (std::size_t slot = 0; slot < n_argmax; ++slot) {
-                if (!other.argmax_has[sa + slot]) continue;
-                if (!argmax_has[da + slot] ||
-                    other.argmax_by[sa + slot] > argmax_by[da + slot]) {
-                    argmax_by[da + slot] = other.argmax_by[sa + slot];
-                    argmax_has[da + slot] = 1;
-                    argmax_repr[da + slot] = other.argmax_repr[sa + slot];
-                }
+        if (has_arg) {
+            const std::size_t da = static_cast<std::size_t>(g) * n_arg;
+            const std::size_t sa = static_cast<std::size_t>(j) * n_arg;
+            const std::size_t dr = static_cast<std::size_t>(g) * n_arg_repr;
+            const std::size_t sr = static_cast<std::size_t>(j) * n_arg_repr;
+            for (std::size_t slot = 0; slot < n_arg; ++slot) {
+                if (!other.arg_has[sa + slot]) continue;
+                const std::vector<int>& reprs = arg_slot_reprs[slot];
+                const bool adopt =
+                    !arg_has[da + slot] ||
+                    (arg_dir[slot] == ArgDir::Max
+                         ? other.arg_by[sa + slot] > arg_by[da + slot]
+                         : other.arg_by[sa + slot] < arg_by[da + slot]);
+                if (!adopt) continue;
+                arg_by[da + slot] = other.arg_by[sa + slot];
+                arg_has[da + slot] = 1;
+                for (int ri : reprs)
+                    arg_repr[dr + static_cast<std::size_t>(ri)] =
+                        other.arg_repr[sr + static_cast<std::size_t>(ri)];
+            }
+        }
+        if (has_bitor) {
+            const std::size_t dbo = static_cast<std::size_t>(g) * n_bitor;
+            const std::size_t sbo = static_cast<std::size_t>(j) * n_bitor;
+            for (std::size_t slot = 0; slot < n_bitor; ++slot)
+                bitor_acc[dbo + slot] |= other.bitor_acc[sbo + slot];
+        }
+        if (has_kmv) {
+            const std::size_t dk = static_cast<std::size_t>(g) * n_kmv;
+            const std::size_t sk2 = static_cast<std::size_t>(j) * n_kmv;
+            for (std::size_t slot = 0; slot < n_kmv; ++slot) {
+                KmvMap& dst = kmv[dk + slot];
+                for (const auto& [h, v] : other.kmv[sk2 + slot])
+                    dst.emplace(h, v);
+                kmv_trim(dst, kmv_k[slot]);
+            }
+        }
+        if (has_lst) {
+            const std::size_t dl = static_cast<std::size_t>(g) * n_lst;
+            const std::size_t sl2 = static_cast<std::size_t>(j) * n_lst;
+            for (std::size_t slot = 0; slot < n_lst; ++slot) {
+                ListItems& dst = lst[dl + slot];
+                const ListItems& src = other.lst[sl2 + slot];
+                dst.insert(dst.end(), src.begin(), src.end());
+                list_bound(dst, lst_kind[slot], lst_k[slot]);
+            }
+        }
+        if (has_ss) {
+            const std::size_t dss = static_cast<std::size_t>(g) * n_ss;
+            const std::size_t sss = static_cast<std::size_t>(j) * n_ss;
+            for (std::size_t slot = 0; slot < n_ss; ++slot)
+                for (const auto& [v, c] : other.ss_counters[sss + slot])
+                    space_saving_offer(ss_counters[dss + slot], ss_k[slot], v,
+                                       c);
+        }
+        if (has_co) {
+            const std::size_t dc = static_cast<std::size_t>(g) * n_co;
+            const std::size_t sc = static_cast<std::size_t>(j) * n_co;
+            for (std::size_t slot = 0; slot < n_co; ++slot) {
+                co_n[dc + slot] += other.co_n[sc + slot];
+                co_sx[dc + slot] += other.co_sx[sc + slot];
+                co_sy[dc + slot] += other.co_sy[sc + slot];
+                co_sxx[dc + slot] += other.co_sxx[sc + slot];
+                co_syy[dc + slot] += other.co_syy[sc + slot];
+                co_sxy[dc + slot] += other.co_sxy[sc + slot];
             }
         }
         if (has_set) {
@@ -435,11 +793,41 @@ class AggState {
         has_sketch = other.has_sketch;
         n_sketch = other.n_sketch;
         field_sketch = other.field_sketch;
-        has_argmax = other.has_argmax;
-        n_argmax = other.n_argmax;
-        spec_argmax = other.spec_argmax;
-        argmax_by_col = other.argmax_by_col;
-        argmax_val_col = other.argmax_val_col;
+        has_arg = other.has_arg;
+        n_arg = other.n_arg;
+        n_arg_repr = other.n_arg_repr;
+        spec_arg = other.spec_arg;
+        spec_arg_repr = other.spec_arg_repr;
+        arg_by_col = other.arg_by_col;
+        arg_dir = other.arg_dir;
+        arg_slot_reprs = other.arg_slot_reprs;
+        arg_val_col = other.arg_val_col;
+        has_bitor = other.has_bitor;
+        n_bitor = other.n_bitor;
+        spec_bitor = other.spec_bitor;
+        bitor_val_col = other.bitor_val_col;
+        has_kmv = other.has_kmv;
+        n_kmv = other.n_kmv;
+        spec_kmv = other.spec_kmv;
+        kmv_val_col = other.kmv_val_col;
+        kmv_k = other.kmv_k;
+        has_lst = other.has_lst;
+        n_lst = other.n_lst;
+        spec_lst = other.spec_lst;
+        lst_val_col = other.lst_val_col;
+        lst_by_col = other.lst_by_col;
+        lst_kind = other.lst_kind;
+        lst_k = other.lst_k;
+        has_ss = other.has_ss;
+        n_ss = other.n_ss;
+        spec_ss = other.spec_ss;
+        ss_val_col = other.ss_val_col;
+        ss_k = other.ss_k;
+        has_co = other.has_co;
+        n_co = other.n_co;
+        spec_co = other.spec_co;
+        co_val_col = other.co_val_col;
+        co_by_col = other.co_by_col;
         has_set = other.has_set;
         n_set = other.n_set;
         spec_set = other.spec_set;

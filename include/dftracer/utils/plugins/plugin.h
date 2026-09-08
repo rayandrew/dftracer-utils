@@ -5,10 +5,9 @@
    and expose it with make_plugin<Slice>(). */
 
 /* Umbrella over the plugin author SDK sub-headers. Include order is dependency
-   order: async and types first, then the columnar map DSL (whose Host inline
-   methods return Map<...>/NestedMap<...>), then the registration glue and the
-   plugin-entry macro. Each sub-header is self-contained, so the guard below
-   only keeps this file's order readable as the layering. */
+   order: async and types first, then the Host facade, then the registration
+   glue and the plugin-entry macro. Each sub-header is self-contained, so the
+   guard below only keeps this file's order readable as the layering. */
 // clang-format off
 #include <dftracer/utils/plugins/plugin/async.h>
 #include <dftracer/utils/plugins/plugin/types.h>

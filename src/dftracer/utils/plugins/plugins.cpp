@@ -431,7 +431,7 @@ coro::CoroTask<Result<PluginRun>> Plugins::run(const View& view) const {
     dftracer::utils::StringIntern intern;
     PluginRun out;
     // One registry for the whole scan; every plugin's finalize publishes its
-    // merged handles here and consumers read them by cap id.
+    // merged accumulators here and later plugins read them by name.
     SharedResultRegistry shared;
     std::vector<std::unique_ptr<PluginFold>> owned;
     owned.reserve(impl_->plugins.size());

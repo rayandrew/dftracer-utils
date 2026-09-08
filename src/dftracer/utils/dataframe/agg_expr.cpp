@@ -87,17 +87,17 @@ DataFrame group_agg_expr(const std::vector<Expr>& keys,
         value_col.emplace(np, idx);
         return idx;
     };
-    // ArgMax's represented field and SetUnion's field are String-typed in the
-    // common case; the numeric expr evaluator cannot produce a String column,
-    // so a bare column reference bypasses it and shares the input column
-    // directly (mirroring the key's dodge below). Only a bare ref is
-    // supported for these two - a computed expression is not.
+    // The ops agg_uses_raw_value() names read their value as a String repr, so
+    // it is String-typed in the common case; the numeric expr evaluator cannot
+    // produce a String column, so a bare column reference bypasses it and
+    // shares the input column directly (mirroring the key's dodge below). Only
+    // a bare ref is supported for them - a computed expression is not.
     std::vector<std::int32_t> raw_cols;  // input column indices
     auto raw_col = [&](const Expr& e) -> std::int32_t {
         const std::int32_t ci = expr_col_index(e);
         if (ci < 0)
             throw std::invalid_argument(
-                "group_agg_expr: ArgMax/SetUnion value must be a bare column "
+                "group_agg_expr: this aggregate's value must be a bare column "
                 "reference");
         raw_cols.push_back(ci);
         return static_cast<std::int32_t>(raw_cols.size() - 1);
@@ -111,13 +111,13 @@ DataFrame group_agg_expr(const std::vector<Expr>& keys,
         cs.param = sp.param;
         if (sp.op == AggOp::Count || !sp.value.valid()) {
             cs.value_col = -1;
-        } else if (sp.op == AggOp::ArgMax || sp.op == AggOp::SetUnion) {
+        } else if (agg_uses_raw_value(sp.op)) {
             cs.value_col = raw_col(sp.value);
         } else {
             cs.value_col = dedup(sp.value);
         }
-        // ArgMax and occupancy read a second column via by_col; leaving it -1
-        // would index values[SIZE_MAX] at accumulate.
+        // The agg_uses_by_col() ops read a second column via by_col; leaving
+        // it -1 would index values[SIZE_MAX] at accumulate.
         if (agg_uses_by_col(sp.op)) {
             if (!sp.by.valid())
                 throw std::invalid_argument(
@@ -152,8 +152,7 @@ DataFrame group_agg_expr(const std::vector<Expr>& keys,
     // value_cols outputs once both column counts are known.
     const std::int32_t raw_base = static_cast<std::int32_t>(value_cols.size());
     for (AggSpec& cs : col_specs)
-        if (cs.op == AggOp::ArgMax || cs.op == AggOp::SetUnion)
-            cs.value_col += raw_base;
+        if (agg_uses_raw_value(cs.op)) cs.value_col += raw_base;
 
     std::vector<const Series*> values;
     values.reserve(value_cols.size() + raw_cols.size());

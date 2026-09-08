@@ -19,7 +19,7 @@ There are two co-equal ways to author one:
 - **The C++ SDK** (``<dftracer/utils/plugins/plugin.h>``, namespace
   ``dftracer::utils::plugins``): a plain ``Slice`` struct with ``step`` / ``merge`` /
   ``finalize`` methods, registered with ``make_plugin<Slice>()``. Typed
-  ``Batch`` / ``Event`` views, host-owned ``Map`` accumulators, and an RAII
+  ``Batch`` / ``Event`` views, host-owned ``Agg`` accumulators, and an RAII
   ``Host`` read like ordinary C++.
 - **The raw C ABI** (``<dftracer/utils/plugins/abi.h>``): a small set of C
   structs you fill by hand. This is the stable boundary the SDK compiles down
@@ -40,13 +40,13 @@ Overview
 - **A plugin is a Fold**: it sees each batch of parsed events and folds them
   into its own state. There is no per-event callback overhead and no threading
   code - the host runs one fold slice per worker and merges the results.
-- **State is host-owned where it can be**: a mergeable ``Map`` (or ``Handle``)
-  is owned and merged by the host, so parallelism and the final Arrow
-  materialization are free and ``merge`` stays empty.
+- **State is host-owned where it can be**: a mergeable aggregation accumulator
+  is owned and merged by the host, so parallelism and the final materialization
+  are free and ``merge`` stays empty.
 - **Strings cross as interned ids**: an ``Event``'s string fields are
   ``dftu_str`` ids, resolved to bytes on demand through the ``Host``, so nothing
-  is copied on the hot path and a map key stores the id, not the label.
-- **Services are optional extension groups**: maps, async I/O, the query DSL,
+  is copied on the hot path.
+- **Services are optional extension groups**: aggregation, async I/O, the query DSL,
   Arrow, writers, sketches, and inter-plugin channels are fetched by id; a
   missing group degrades gracefully to a null/no-op.
 
@@ -418,196 +418,146 @@ above. An ``Arg`` carries an interned ``key_id()`` and a value selected by
              return NULL;
          }
 
-6. Mergeable maps (DFTU_EXT_MAP)
---------------------------------
+6. Mergeable aggregation (DFTU_EXT_AGG)
+---------------------------------------
 
-A host-owned map is the usual way a plugin accumulates a result: a fixed tuple
-key mapping to a monoid value. The host merges same-named maps across all worker
-slices and materializes each at finalize to an Arrow table (key columns, then
-one value column per component), returned under the map name. Because the map is
-write-only and host-merged, ``merge`` stays empty and there is nothing to free.
+A host-owned accumulator is the usual way a plugin accumulates a result. It
+wraps the dataframe engine's ``AggState``: you name the key columns to group by
+and the aggregates to compute, then fold whole column batches into it. The host
+merges same-named accumulators across all worker slices and finalizes each at
+scan end to a dataframe (the key columns, then one column per aggregate),
+returned under the accumulator name. Because the accumulator is write-only and
+host-merged, ``merge`` stays empty and there is nothing to free.
 
-Keys are fixed-width integers (``I8``..``I64``, ``U8``..``U64``), ``F32`` / F64
-(bit-cast into the key slot), or ``STR`` (an interned id). In the SDK the key
-schema is a ``Key<Ts...>`` tag: an arithmetic type maps to its column type, a
-string-like type or ``Interned`` maps to a STR column. ``Interned`` carries an
-already-interned id (``e.name_id()``, ``e.fhash_id()``) as a STR key without
-re-interning its bytes.
+This is the one accumulator surface: a keyed map is an accumulator **with** key
+columns, and a scalar handle is one with **zero** key columns.
 
-**Monoids.** The value is one ``Monoid`` (SDK ``enum class``) or
-``dftu_monoid_kind`` (C). The full vocabulary (``abi.h``):
+**The seam.** The accumulator eats columns, so it is fed from the vectorized
+fold seam ``dftu_plugin::on_batch_columns``, which hands each batch across as a
+``dftu_dataframe`` instead of calling ``on_batch`` per event. A plugin sets
+either ``on_batch`` or ``on_batch_columns``, never both. The batch carries
+``name``, ``cat``, ``pid``, ``tid``, ``ts``, ``dur``, ``ph``, ``fhash`` /
+``hhash`` when any event has one, and one ``args.<key>`` column per arg key
+present.
 
-- Scalars fed with an integer add: ``Counter`` (u64 sum), ``Min_U64`` /
-  ``Max_U64``, ``Bool_And`` / ``Bool_Or``, ``Bitset_Or``, ``Distinct`` (approx
-  distinct count), and the typed ``Min_*`` / ``Max_*`` (``I8``..``I64``,
-  ``U8``..``U32``).
-- Scalars fed with a floating add: ``Sum_F64``, ``Min_F64`` / ``Max_F64``,
-  ``Min_F32`` / ``Max_F32``, and the moment stats ``Mean``, ``Variance``,
-  ``Stddev``, ``Skewness``, ``Kurtosis``.
-- Two-variable co-moments fed with ``(x, y)``: ``Corr``, ``Covar_Pop`` /
-  ``Covar_Samp``, ``Regr_Slope`` / ``Regr_Intercept`` / ``Regr_R2``.
-- Collections: ``Set_Str`` / ``List_Str`` / ``Set_I64`` / ``List_I64``.
-- Arg-by (min-by/max-by keeping a payload): ``ArgMin_I64`` / ``ArgMax_I64`` /
-  ``ArgMin_Str`` / ``ArgMax_Str``, and the whole-row ``ArgMin_Row`` /
-  ``ArgMax_Row`` (via ``map_new_argrow``).
-- Bounded / approximate: ``TopK_I64`` / ``TopK_Str`` / ``BottomK_I64`` /
-  ``BottomK_Str``, ``Approx_TopK_I64`` / ``Approx_TopK_Str`` (heavy hitters),
-  ``Sample_I64`` / ``Sample_Str`` (bottom-k-by-hash sample).
-- ``Sketch`` (DDSketch quantiles) has no scalar result, so it is created only
-  via a sketch map (below), never as a plain ``map_new`` value.
+**The spec.** One aggregate is a ``dftu_agg_col``: an op code (a ``DFTU_AGG_*``
+value of ``dftu_agg_op``), the ``value`` column read in each batch (NULL for
+``DFTU_AGG_COUNT``, the group row count), the ``out`` result column name, a
+scalar ``param``, and a second input column ``by``. ``param`` carries the
+quantile for ``PCT``, k for ``TOPK`` / ``BOTTOMK`` / ``APPROX_TOPK`` /
+``SAMPLE`` / ``DISTINCT``, and the endpoint-snap tolerance for the occupancy
+ops. ``by`` carries the ordering column for ``ARGMAX`` / ``ARGMIN`` /
+``LIST_SORTED`` / ``TOPK`` / ``BOTTOMK``, x for the co-moment ops, and dur for
+the occupancy ops.
 
-Out-of-core spilling for a very large map is handled transparently by the host;
-there is no plugin-facing spill call in the ABI.
+**The op table** (``dftracer/utils/dataframe/agg_op_codes.h``):
 
-Simple keyed counter
-~~~~~~~~~~~~~~~~~~~~~~
+- Counting: ``COUNT`` (group rows), ``COUNT_VALID`` (non-null values of the
+  value column), ``DISTINCT`` (approximate distinct count, a KMV sketch).
+- Numeric: ``SUM``, ``SUMSQ``, ``MIN``, ``MAX``, ``MEAN``, ``VAR``, ``STD``,
+  ``SKEW``, ``KURT``, ``BIT_OR``.
+- Positional: ``FIRST``, ``LAST``, ``ARGMAX`` / ``ARGMIN`` (the value at the
+  row maximizing / minimizing ``by``).
+- Distributional: ``PCT`` (a mergeable DDSketch quantile), ``HIST`` (the whole
+  DDSketch histogram as a ``list<struct{lo, hi, count}>`` column).
+- Collections: ``SET_UNION`` (distinct values, sorted and joined),
+  ``LIST_SORTED`` (a ``list<string>`` ordered by ``by``), ``TOPK`` /
+  ``BOTTOMK`` (bounded ``list<string>``), ``APPROX_TOPK`` (heavy hitters, a
+  ``list<struct{value, count}>``), ``SAMPLE`` (a deterministic
+  bottom-k-by-hash ``list<string>``).
+- Co-moments over ``(x = by, y = value)``: ``CORR``, ``COVAR_POP`` /
+  ``COVAR_SAMP``, ``REGR_SLOPE`` / ``REGR_INTERCEPT`` / ``REGR_R2``.
+- Occupancy over ``(ts = value, dur = by)``: ``BUSY`` (interval-union length),
+  ``CONCURRENCY``, ``UTILIZATION``, ``ACTIVE`` (peak overlap depth).
 
-Count events per ``(pid, event-name)``:
+Keyed accumulator
+~~~~~~~~~~~~~~~~~
+
+Count events and total their duration per ``(pid, event-name)``:
 
 .. tab-set::
 
    .. tab-item:: C++ (SDK)
 
-      ``counter_map(name, Key<...>)`` is shorthand for
-      ``map(name, Monoid::Counter, Key<...>)`` (``sum_map`` maps to
-      ``Sum_F64``). ``edges[key] += n`` contributes at a key; a single-column
-      key can be subscripted bare, a multi-column key as a ``std::tuple``.
+      ``Host::agg`` takes the name, the key column names and the aggregates,
+      and returns a non-owning ``Agg``; the ``agg::`` factories build each
+      ``AggCol`` with exactly the fields its op uses, so a bad combination does
+      not compile.
 
       .. code-block:: cpp
 
-         void step(const Batch& b, Host h) {
-             auto edges = h.counter_map("name_edges",
-                                        Key<std::uint64_t, Interned>{});
-             for (const Event& e : b) {
-                 if (!e.has_name()) continue;
-                 edges[std::tuple{e.pid(), interned(e.name_id())}] += 1;
-             }
+         static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
+                                            const dftu_host* host) {
+             (void)slice;
+             Host h(host);
+             const auto edges = h.agg("name_edges", {"pid", "name"},
+                                      {agg::count("edges"),
+                                       agg::sum("dur", "dur_sum")});
+             if (edges) edges.accumulate(df);
+             return nullptr;
          }
 
    .. tab-item:: C (raw ABI)
 
-      Fetch ``DFTU_EXT_MAP``, ``map_new`` with a key-type array and a monoid,
-      then ``map_add_u64`` / ``map_add_f64`` at an ``int64`` key array (STR
-      slots carry the interned id).
+      Fetch ``DFTU_EXT_AGG``, ``agg_new`` with the key names and the spec
+      array, then ``agg_accumulate`` the batch. ``agg_new`` is get-or-create,
+      so calling it every batch is the normal shape.
 
       .. code-block:: c
 
-         static dftu_task* on_batch(void* slice, const dftu_batch* b,
-                                   const dftu_host* host) {
+         static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
+                                            const dftu_host* host) {
              (void)slice;
-             const dftu_ext_map* map =
-                 (const dftu_ext_map*)host->get_extension(host->h, DFTU_EXT_MAP);
-             if (!map || !map->map_new) return NULL;
-             static const dftu_type kt[2] = {DFTU_T_U64, DFTU_T_STR};
-             dftu_map* m = map->map_new(host->h, "name_edges", kt, 2,
-                                       DFTU_MONOID_COUNTER);
-             if (!m) return NULL;
-             for (uint32_t i = 0; i < b->count; ++i) {
-                 const dftu_event* e = &b->events[i];
-                 if (e->name == DFTU_STR_NONE) continue;
-                 int64_t key[2] = {(int64_t)e->pid, (int64_t)e->name};
-                 map->map_add_u64(host->h, m, key, 1);
-             }
+             const dftu_ext_agg* agg =
+                 (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
+             static const char* const keys[2] = {"pid", "name"};
+             static const dftu_agg_col specs[2] = {
+                 {DFTU_AGG_COUNT, NULL, "edges", 0.0, NULL},
+                 {DFTU_AGG_SUM, "dur", "dur_sum", 0.0, NULL}};
+             dftu_agg* a;
+             if (!agg || !agg->agg_new) return NULL;
+             a = agg->agg_new(host->h, "name_edges", keys, 2, specs, 2);
+             if (a) agg->agg_accumulate(host->h, a, df);
              return NULL;
          }
 
-The SDK ``Map`` also exposes ``.add`` / ``.add_at`` (a value component),
-``.add_xy`` (co-moments), ``.add_argby`` (arg-by), ``.add_topk`` /
-``.add_approx_topk`` / ``.add_sample``, ``.add_ordered`` (list monoids), and
-``.set_ordered(true)`` (materialize sorted by key); each mirrors a
-``map_add_*_at`` C call. The k for a bounded / approximate monoid is passed on
-every add (constant per component).
+A batch missing any referenced key or value column is skipped whole rather than
+folded under a partial key.
 
-Product maps
-~~~~~~~~~~~~~
+Scalar accumulator
+~~~~~~~~~~~~~~~~~~
 
-A product value is a tuple of monoids, one value column per component. Component
-0 takes the bare add / ``+=``; other components take ``_at`` adds.
+Pass zero key columns and the whole scan is one group, which is the AggState
+form of a scalar handle:
 
-.. tab-set::
+.. code-block:: c
 
-   .. tab-item:: C++ (SDK)
+   static const dftu_agg_col specs[3] = {
+       {DFTU_AGG_COUNT, NULL, "count", 0.0, NULL},
+       {DFTU_AGG_PCT, "dur", "p50", 0.5, NULL},
+       {DFTU_AGG_MAX, "dur", "max", 0.0, NULL}};
+   dftu_agg* a = agg->agg_new(host->h, "com.example.dur_stats", NULL, 0, specs, 3);
 
-      .. code-block:: cpp
+Reading another plugin's result
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-         void step(const Batch& b, Host h) {
-             auto stats = h.product_map("per_pid",
-                                        {Monoid::Counter, Monoid::Sum_F64},
-                                        Key<std::uint64_t>{});
-             for (const Event& e : b) {
-                 stats[e.pid()] += 1;                        // component 0
-                 stats.add_at(e.pid(), 1, double(e.dur()));  // component 1
-             }
-         }
+``agg_result(name)`` returns the cross-worker-merged, finalized result of any
+plugin's accumulator as a new owned dataframe (free it with
+``dftu_dataframe_free``; the SDK's ``Host::agg_result`` returns an
+``OwnedDataFrame`` that does it for you). Call it at ``on_finalize``, and
+register the producing plugin first: an accumulator whose fold has not
+finalized reads back NULL.
 
-   .. tab-item:: C (raw ABI)
+.. code-block:: c
 
-      .. code-block:: c
+   dftu_dataframe* res = agg->agg_result(host->h, "com.example.dur_stats");
+   if (res) { /* read columns, then: */ dftu_dataframe_free(res); }
 
-         static const dftu_monoid_kind vals[2] =
-             {DFTU_MONOID_COUNTER, DFTU_MONOID_SUM_F64};
-         dftu_map* m = map->map_new_product(host->h, "per_pid", kt, 1, vals, 2);
-         int64_t key[1] = {(int64_t)e->pid};
-         map->map_add_u64_at(host->h, m, key, 0, 1);
-         map->map_add_f64_at(host->h, m, key, 1, (double)e->dur);
+Reading the columns of that frame needs the dataframe C ABI
+(``dftracer/utils/dataframe/abi.h``), the one part of the plugin surface that
+links the engine rather than headers alone. ``examples/plugins/dur_stats_producer.c``
+and ``dur_stats_consumer.c`` are the pair end to end.
 
-Nested maps
-~~~~~~~~~~~
-
-A nested map keeps an inner map per outer key, materialized as one
-``list<struct>`` row per outer key.
-
-.. tab-set::
-
-   .. tab-item:: C++ (SDK)
-
-      ``nested_map`` takes an outer ``Key`` and an inner ``Key`` tag; ``add``
-      contributes to a value component at ``(outer, inner)``.
-
-      .. code-block:: cpp
-
-         auto nm = h.nested_map("pid_names", {Monoid::Counter},
-                                Key<std::uint64_t>{}, Key<Interned>{});
-         nm.add(std::tuple{e.pid()}, std::tuple{interned(e.name_id())}, 1u);
-
-   .. tab-item:: C (raw ABI)
-
-      .. code-block:: c
-
-         dftu_map* m = map->map_new_nested(host->h, "pid_names",
-                                          okt, 1, ikt, 1, vals, 1);
-         int64_t ok[1] = {(int64_t)e->pid};
-         int64_t ik[1] = {(int64_t)e->name};
-         map->map_add_nested_u64(host->h, m, ok, ik, 0, 1);
-
-Joins
-~~~~~
-
-Declare a join to run at finalize on the merged master maps: it joins two named
-maps on their shared key tuple and emits the result as an additional named map.
-``JoinType`` (SDK) / ``dftu_join_type`` (C) is ``Inner`` / ``Left`` / ``Right``
-/ ``Full``.
-
-.. tab-set::
-
-   .. tab-item:: C++ (SDK)
-
-      .. code-block:: cpp
-
-         h.map_declare_join("joined", "left_map", "right_map", JoinType::Inner);
-
-   .. tab-item:: C (raw ABI)
-
-      .. code-block:: c
-
-         map->map_declare_join(host->h, "joined", "left_map", "right_map",
-                               DFTU_JOIN_INNER);
-
-The SDK also wraps the specialized constructors on ``Host``:
-``map_new_argrow`` / ``map_add_argrow`` (whole-row arg-by),
-``map_new_sketch`` (a per-key DDSketch quantile table over requested quantiles),
-and ``map_new_fused`` / ``map_add_row`` (several same-key maps sharing one hash
-lookup). Each mirrors the matching ``dftu_ext_map`` call.
 
 7. Quantile sketches (DFTU_EXT_SKETCH)
 --------------------------------------
@@ -655,8 +605,9 @@ across slices.
          dftu_quantiles q = sk->sketch_result(host->h, s);
          sk->sketch_free(host->h, s);   /* plugin owns it */
 
-For a per-key quantile table instead of one global sketch, use a sketch map
-(``Host::map_new_sketch`` / ``map_new_sketch``) from section 6.
+For a per-key quantile table instead of one global sketch, use an accumulator
+with key columns and a ``DFTU_AGG_PCT`` (or ``DFTU_AGG_HIST``) aggregate from
+section 6.
 
 8. Inter-plugin communication
 -----------------------------
@@ -705,10 +656,9 @@ order (``--plugin`` / registration order).
          uint32_t len = 0;
          const void* got = p->consume(host->h, key, &len); /* consumer */
 
-**Cross-worker handles (DFTU_EXT_HANDLES)** are a named monoid accumulator the
-host merges across every worker slice: contribute during ``on_batch``, read the
-merged value at ``finalize``. ``MonoidValue`` selects ``as_u64()`` /
-``as_f64()`` / ``as_quantiles()`` by ``kind()``.
+**Cross-worker accumulators (DFTU_EXT_AGG)** are the whole-scan channel: a
+producer accumulates into a named accumulator (section 6) and any plugin reads
+the cross-worker-merged, finalized result by that name at ``on_finalize``.
 
 .. tab-set::
 
@@ -716,31 +666,29 @@ merged value at ``finalize``. ``MonoidValue`` selects ``as_u64()`` /
 
       .. code-block:: cpp
 
-         struct Total {
-             Handle h_;
-             explicit Total(const Config&) {}
-             void step(const Batch& b, Host h) {
-                 if (!h_) h_ = h.handle("com.example.total", Monoid::Counter);
-                 h_.add(std::uint64_t(b.size()));
-             }
-             void merge(Total&) {}
-             void finalize(Host) {
-                 if (auto v = h_.result()) { /* v->as_u64() */ }
-             }
-         };
+         // producer, in on_batch_columns:
+         Host h(host);
+         const auto a = h.agg("com.example.total", {}, {agg::count("count")});
+         if (a) a.accumulate(df);
+
+         // consumer, in on_finalize:
+         const OwnedDataFrame res = h.agg_result("com.example.total");
+         if (res.handle) { /* read the "count" column */ }
 
    .. tab-item:: C (raw ABI)
 
       .. code-block:: c
 
-         const dftu_ext_handles* H =
-             (const dftu_ext_handles*)host->get_extension(host->h,
-                                                         DFTU_EXT_HANDLES);
-         dftu_handle* hd = H->shared_get(host->h, "com.example.total",
-                                        DFTU_MONOID_COUNTER);
-         H->add_u64(host->h, hd, b->count);        /* during on_batch */
-         dftu_monoid_value out;                     /* at on_finalize */
-         if (H->result(host->h, "com.example.total", &out) == 0) { /* out.as.u64 */ }
+         const dftu_ext_agg* agg =
+             (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
+         static const dftu_agg_col specs[1] =
+             {{DFTU_AGG_COUNT, NULL, "count", 0.0, NULL}};
+         /* during on_batch_columns */
+         dftu_agg* a = agg->agg_new(host->h, "com.example.total", NULL, 0, specs, 1);
+         agg->agg_accumulate(host->h, a, df);
+         /* at on_finalize, in a plugin registered after the producer */
+         dftu_dataframe* res = agg->agg_result(host->h, "com.example.total");
+         if (res) dftu_dataframe_free(res);
 
 **Named results (DFTU_EXT_RESULT)** emit an opaque blob or a user-schema Arrow
 array under a name; both surface from ``Plugins::run`` keyed by that name.
@@ -1033,10 +981,10 @@ output (``writer_create`` / ``writer_open`` / ``writer_chunk`` / ``writer_close`
 13. Getting results back
 ------------------------
 
-Each host-owned map is materialized at finalize to an Arrow table keyed by the
-map's name, with the key columns first and one value column per component;
-interned key ids are resolved to their labels once, so a STR key column is a
-real ``string``. Named results (section 8) surface the same way, keyed by their
+Each host-owned accumulator is finalized at scan end to a table keyed by the
+accumulator's name, with the key columns first and one column per aggregate;
+interned string ids are resolved to their labels once, so a string key column is
+a real ``string``. Named results (section 8) surface the same way, keyed by their
 emit name.
 
 **From Python**, load one or more plugins and run them over a single fused scan;
@@ -1049,7 +997,7 @@ each result comes back as a ``pyarrow.Table``:
    host = PluginHost()
    host.load("./name_edges.so")          # a compiled .so, or a @jit.plugin class
    results = host.run("./traces")        # a directory or list of .pfw.gz traces
-   table = results["name_edges"]         # pyarrow.Table[pid, name, value]
+   table = results["name_edges"]         # pyarrow.Table[pid, name, edges, dur_sum]
    df = table.to_pandas()
 
 The output tables cross to NumPy or pandas cheaply (zero-copy where the dtype
@@ -1058,11 +1006,11 @@ and do NumPy / pandas analysis on the (much smaller) result tables:
 
 .. code-block:: python
 
-   values = table.column("value").to_numpy(zero_copy_only=False)   # np.ndarray
+   values = table.column("edges").to_numpy(zero_copy_only=False)   # np.ndarray
 
 **From the command line**, ``dftracer_run`` folds every ``--plugin`` over one
-shared, index-pruned scan and reports the scan on stderr (it does not print map
-contents - read those through ``PluginHost``):
+shared, index-pruned scan and reports the scan on stderr (it does not print
+result tables - read those through ``PluginHost``):
 
 .. code-block:: bash
 
@@ -1086,18 +1034,14 @@ that covers it:
    * - C++ SDK accessor
      - Extension group
      - Covered in
-   * - ``Host::map`` / ``counter_map`` / ``sum_map`` / ``product_map`` /
-       ``nested_map`` (typed ``Map`` / ``NestedMap``)
-     - ``DFTU_EXT_MAP``
-     - `6. Mergeable maps (DFTU_EXT_MAP)`_
+   * - ``Host::agg`` / ``agg_result`` (``Agg``, the ``agg::`` col factories)
+     - ``DFTU_EXT_AGG``
+     - `6. Mergeable aggregation (DFTU_EXT_AGG)`_
    * - ``Host::make_sketch`` (RAII ``Sketch``)
      - ``DFTU_EXT_SKETCH``
      - `7. Quantile sketches (DFTU_EXT_SKETCH)`_
    * - ``Host::publish_port`` / ``consume_port`` (``OutPort`` / ``InPort``)
      - ``DFTU_EXT_PORTS``
-     - `8. Inter-plugin communication`_
-   * - ``Host::handle`` (``Handle``, ``MonoidValue``)
-     - ``DFTU_EXT_HANDLES``
      - `8. Inter-plugin communication`_
    * - ``Host::emit_result`` / ``emit_result_arrow``
      - ``DFTU_EXT_RESULT``

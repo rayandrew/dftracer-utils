@@ -20,15 +20,13 @@ Overview
   attributes (the aggregations it maintains) and a single ``@jit.each_event``
   method (what to do per event).
 - **Typed keys and rich values**: a map's key is a tuple of typed fields
-  (``jit.i64``, ``jit.str_``, ``jit.bytes``) and its value is a monoid. The
+  (``jit.i64``, ``jit.str_``, ``jit.bytes``) and its value is an aggregate. The
   vocabulary is broad: ``count``, ``sum``, ``min`` / ``max``, ``mean``,
   ``variance`` / ``stddev``, ``quantiles`` (DDSketch percentiles), ``argmin`` /
-  ``argmax`` (and ``argmin_row`` / ``argmax_row``), ``topk`` / ``bottomk`` /
-  ``approx_topk``, ``sample``, ``distinct``, ``set``, ``list``, and ``record``
-  (a struct of several monoids).
-- **Nested maps and joins**: ``jit.nested`` gives a map whose value is itself a
-  keyed map, and ``jit.join`` declares an equi-join of two of the plugin's maps
-  on their shared key, run at finalize.
+  ``argmax``, ``topk`` / ``bottomk`` / ``approx_topk``, ``sample``,
+  ``distinct``, ``set``, ``list``, and ``record`` (several aggregates on one
+  key). A ``jit.map`` lowers to a host aggregation accumulator keyed by its key
+  columns - the same ``DFTU_EXT_AGG`` surface a C plugin uses.
 - **Statically checked**: the structured ``each_event`` body is a deliberately
   small subset (an optional ``if`` guard around one map update); anything outside
   it raises ``JitError`` at decoration time - never a silent miscompile - and
@@ -37,7 +35,7 @@ Overview
 - **Compiled once, computed once**: a subexpression used by more than one map in
   the same block - a hash key like ``jit.fastrange(jit.mix64(e.hhash), 256)``
   fed to several maps - is hoisted to a local and evaluated a single time per
-  event (nested shares fold too), never re-run per map. The hoist stays inside
+  event, never re-run per map. The hoist stays inside
   its ``if`` guard, so a guarded expression keeps its execution condition.
 - **One lookup per key**: several plain maps always subscripted at the same key
   (``self.n[(e.pid,)] += 1``; ``self.tot[(e.pid,)] += e.dur``; ...) are coalesced
@@ -113,7 +111,7 @@ path, not a plugin.
 Richer aggregations
 -------------------
 
-The value is any monoid, and a plugin can keep several maps. This one, per
+The value is any aggregate, and a plugin can keep several maps. This one, per
 category, keeps the event count, the total and mean duration, the slowest event
 name, and an approximate top-k of event names - in one pass:
 
@@ -130,24 +128,20 @@ name, and an approximate top-k of event names - in one pass:
 
        @jit.each_event
        def step(self, e):
-           self.n[(e.cat,)]     += 1               # additive monoids use +=
+           self.n[(e.cat,)]     += 1               # additive aggregates use +=
            self.total[(e.cat,)] += e.dur           # (an arithmetic expr is fine)
            self.avg[(e.cat,)].observe(e.dur)       # others observe a value
            self.slow[(e.cat,)].observe(e.dur)
            self.worst[(e.cat,)].observe(e.name, by=e.dur)   # name at the max dur
            self.hot[(e.cat,)].observe(e.name)               # frequent event names
 
-Two contribution shapes cover the vocabulary: additive monoids (``count``,
-``sum``) take ``+= <expr>``, and every other monoid takes ``.observe(x)`` -
-with a ``by=`` keyword for the argument-style monoids (``argmin`` / ``argmax`` /
-``topk`` / ``bottomk`` / ``argmin_row`` / ``argmax_row``) that keep a payload at
-the extreme of a score. A single key can carry several monoids at once with a
-``record``: ``value=dict(n=jit.count(), dur=jit.sum())`` then
-``self.m[(k,)].n += 1`` / ``self.m[(k,)].dur += e.dur``.
-
-``jit.nested`` gives a map whose value is itself a keyed map, and ``jit.join``
-declares an equi-join of two of the plugin's maps on their shared key, run for
-you at finalize.
+Two contribution shapes cover the vocabulary: additive aggregates (``count``,
+``sum``) take ``+= <expr>``, and every other aggregate takes ``.observe(x)`` -
+with a ``by=`` keyword for the argument-style aggregates (``argmin`` /
+``argmax`` / ``topk`` / ``bottomk``) that keep a payload at the extreme of a
+score. A single key can carry several aggregates at once with a ``record``:
+``value=dict(n=jit.count(), dur=jit.sum())`` then ``self.m[(k,)].n += 1`` /
+``self.m[(k,)].dur += e.dur``.
 
 Percentiles
 -----------
@@ -169,9 +163,7 @@ Pass the quantiles you want; each becomes a result column:
 The map materializes to a ``count`` column plus one f64 column per quantile,
 named ``p50``, ``p90``, ``p99`` (a non-integer like ``0.999`` becomes
 ``p99_9``). The estimates are approximate - DDSketch holds ~1% relative error -
-which is what makes them mergeable and O(1) in memory. ``jit.quantiles`` is
-top-level only: like ``argmin_row`` it cannot be a ``record`` / product /
-nested component.
+which is what makes them mergeable and O(1) in memory.
 
 Numeric primitives
 ------------------
@@ -308,36 +300,6 @@ plugins use; it cannot run arbitrary Python or call other host services, so for
 logic beyond flag-setting author the plugin in C or C++ (see
 :doc:`guides/plugins/inter-plugin-comms`).
 
-Cross-worker shared values
---------------------------
-
-Ports are batch-scoped. To accumulate one value across the **whole scan and
-every worker thread**, declare a ``jit.shared`` handle: the host merges each
-worker's contribution and, at finalize, emits the merged result under the
-attribute name (readable from ``PluginHost.run()``). This is the JIT surface
-over the same ``DFTU_EXT_HANDLES`` / ``DFTU_EXT_RESULT`` machinery the C++
-``Host::handle`` API uses.
-
-.. code-block:: python
-
-   @jit.plugin
-   class Totals:
-       total_dur = jit.shared("com.example.dur_total", jit.sum())    # f64
-       n_events  = jit.shared("com.example.n", jit.count())          # u64
-       max_dur   = jit.shared("com.example.maxdur", jit.max())       # u64
-
-       @jit.each_event
-       def step(self, e):
-           self.total_dur += e.dur     # += for the additive kinds (count/sum)
-           self.n_events.add(1)        # .add(expr) works for every kind
-           self.max_dur.add(e.dur)
-
-Use ``.add(expr)`` for any kind, or ``+=`` for the additive ``count`` / ``sum``
-kinds. Supported handle monoids are the scalar reducers: ``count``, ``sum``,
-``min`` / ``max`` (and ``distinct``). Non-scalar kinds (a quantile sketch)
-raise ``JitError`` - use a ``jit.map`` value for those. The merged results come
-back as one scalar per handle.
-
 Raw bodies: the full ABI without leaving JIT
 --------------------------------------------
 
@@ -345,25 +307,10 @@ The structured subset covers the common counting and aggregation shapes safely.
 For anything it cannot express, ``@jit.each_event(raw=True)`` makes the method
 return a C/C++ string that is spliced verbatim into the per-event loop - so the
 per-event body has the full :doc:`plugins` ABI, while you keep the JIT
-framework: the typed ``jit.map`` declarations, the monoid vocabulary above, and
-the compile / cache / load machinery. In scope inside a raw body are ``host``
-(the ``dftu_host``), ``e`` / ``b`` / ``i`` (the current event, batch, and index),
-and each declared map by its attribute name.
-
-.. code-block:: python
-
-   @jit.plugin
-   class Custom:
-       hist = jit.map(key=(jit.i64,), value=jit.count())
-
-       @jit.each_event(raw=True)
-       def step(self):
-           return r'''
-             if (e->dur > 0) {
-                 int64_t bucket[1] = { dftu_ilog2_u64(e->dur) };  /* log2 buckets */
-                 map->map_add_u64(host->h, hist, bucket, 1);
-             }
-           '''
+framework: the typed ``jit.map`` declarations, the aggregate vocabulary above,
+and the compile / cache / load machinery. In scope inside a raw body are
+``host`` (the ``dftu_host``) and ``e`` / ``b`` / ``i`` (the current event,
+batch, and index).
 
 So JIT covers everything the C ABI can: the structured subset for the common
 case, a raw body for the rest - both compiled to one native plugin. A body that

@@ -154,8 +154,7 @@ def test_vfold_keyed_count_per_pid(tmp_path):
 
 @_needs_cxx
 def test_vfold_keyed_pct_per_pid(tmp_path):
-    # A per-key percentile the legacy DFTU_EXT_MAP group_by path could not
-    # express; it reaches vfold through DFTU_EXT_AGG's DDSketch quantile.
+    # A per-key percentile through DFTU_EXT_AGG's DDSketch quantile.
     @jit.vfold
     class Median:
         p50 = jit.map(key=jit.i64, value=jit.quantiles((0.5,)))
@@ -169,7 +168,13 @@ def test_vfold_keyed_pct_per_pid(tmp_path):
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
     host = PluginHost()
     host.load(Median)
-    got = _keyed(host.run(str(tmp_path)), "p50", "pid")
+    # A quantile accumulator names its columns after the levels it holds (plus
+    # the group count), like the multi-quantile case.
+    pdf = host.run(str(tmp_path))["p50"].to_pandas()
+    assert list(pdf.columns) == ["pid", "count", "p50"]
+    got = dict(zip(pdf["pid"].tolist(), pdf["p50"].tolist()))
+    counts = dict(zip(pdf["pid"].tolist(), pdf["count"].tolist()))
+    assert counts == {1: 5, 2: 3}
     assert got[1] == pytest.approx(30.0, rel=0.05)  # median of pid1
     assert got[2] == pytest.approx(200.0, rel=0.05)  # median of pid2
 
@@ -309,7 +314,7 @@ def test_vfold_keyed_argmax(tmp_path):
     # key. Here: the dur of the latest (max ts) event per pid.
     @jit.vfold
     class Peak:
-        latest = jit.map(key=jit.i64, value=jit.argmax())
+        latest = jit.map(key=jit.i64, value=jit.argmax(of=jit.i64))
 
         @jit.each_batch
         def step(self, df):
@@ -356,6 +361,71 @@ def test_vfold_keyed_occupancy(tmp_path):
     assert busy[2] == 100.0
     assert active[1] == 2.0
     assert active[2] == 1.0
+
+
+@_needs_cxx
+def test_vfold_multi_key_groups_by_both_columns(tmp_path):
+    @jit.vfold
+    class Both:
+        dur = jit.map(key=(jit.i64, jit.str_), value=jit.sum())
+
+        @jit.each_batch
+        def step(self, df):
+            self.dur[(df["pid"], df["name"])] += df["dur"]
+
+    rows = [(1, "read", 10), (1, "write", 100), (2, "read", 20), (1, "read", 5)]
+    with gzip.open(str(tmp_path / "t.pfw.gz"), "wt", encoding="utf-8") as f:
+        for i, (pid, nm, d) in enumerate(rows):
+            f.write(
+                f'{{"name":"{nm}","cat":"POSIX","pid":{pid},"tid":1,'
+                f'"ts":{1000 + i},"dur":{d},"ph":"X","args":{{}}}}\n'
+            )
+
+    host = PluginHost()
+    host.load(Both)
+    pdf = host.run(str(tmp_path))["dur"].to_pandas()
+    got = {(p, n): v for p, n, v in zip(pdf["pid"], pdf["name"], pdf["value"])}
+    assert got == {(1, "read"): 15.0, (1, "write"): 100.0, (2, "read"): 20.0}
+
+
+@_needs_cxx
+def test_vfold_keyed_multi_quantile(tmp_path):
+    @jit.vfold
+    class Lat:
+        q = jit.map(key=jit.i64, value=jit.quantiles((0.5, 0.9)))
+
+        @jit.each_batch
+        def step(self, df):
+            self.q[df["pid"]] += df["dur"]
+
+    durs = list(range(1, 101))
+    _write_trace(str(tmp_path / "t.pfw.gz"), durs, [1] * 100)
+    host = PluginHost()
+    host.load(Lat)
+    pdf = host.run(str(tmp_path))["q"].to_pandas()
+    assert list(pdf.columns) == ["pid", "count", "p50", "p90"]
+    assert int(pdf["count"][0]) == 100
+    assert pdf["p50"][0] == pytest.approx(50.0, rel=0.05)
+    assert pdf["p90"][0] == pytest.approx(90.0, rel=0.05)
+
+
+@_needs_cxx
+def test_vfold_keyed_regr_slope(tmp_path):
+    # dur = 2 * (ts - 1000): a perfect line, so the least-squares slope is 2.
+    @jit.vfold
+    class Fit:
+        slope = jit.map(key=jit.i64, value=jit.regr_slope())
+
+        @jit.each_batch
+        def step(self, df):
+            self.slope[df["pid"]] += df["dur"], df["ts"]
+
+    durs = [2 * i for i in range(10)]
+    _write_trace(str(tmp_path / "t.pfw.gz"), durs, [1] * 10)
+    host = PluginHost()
+    host.load(Fit)
+    got = _keyed(host.run(str(tmp_path)), "slope", "pid")
+    assert got[1] == pytest.approx(2.0, rel=1e-6)
 
 
 class TestAuthoring:
@@ -454,8 +524,8 @@ class TestAuthoring:
                 def step(self, df):
                     self.s[df["pid"]] += df["ts"], df["dur"]  # sum takes one column
 
-    def test_plugin_rejects_vfold_reduction(self):
-        with pytest.raises(jit.JitError):
+    def test_aug_rejected_on_a_non_additive_reduction(self):
+        with pytest.raises(jit.JitError, match="non-additive"):
 
             @jit.plugin
             class Bad4:
@@ -463,4 +533,15 @@ class TestAuthoring:
 
                 @jit.each_event
                 def step(self, e):
-                    self.m[e.pid] += e.dur  # vfold-only reduction in a plugin
+                    self.m[e.pid] += e.dur  # sumsq takes .observe(v), not +=
+
+    def test_keyed_value_column_must_match_the_reduction(self):
+        with pytest.raises(jit.JitError, match="numeric column"):
+
+            @jit.vfold
+            class BadCol:
+                m = jit.map(key=jit.i64, value=jit.sum())
+
+                @jit.each_batch
+                def step(self, df):
+                    self.m[df["pid"]] += df["name"]  # sum over a string column

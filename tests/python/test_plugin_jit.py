@@ -522,18 +522,18 @@ def test_jit_cse_shares_a_value_expression():
     assert _body(V).count("e->dur * e->dur") == 1
 
 
-def test_jit_cse_shares_nested_outer_and_inner_keys():
+def test_jit_cse_shares_multikey_components():
     @jit.plugin
     class N:
         m = jit.map(
-            key=(jit.i64,),
-            value=jit.nested(key=(jit.i64,), value=dict(cnt=jit.count(), dur=jit.sum())),
+            key=(jit.i64, jit.i64),
+            value=dict(cnt=jit.count(), dur=jit.sum()),
         )
 
         @jit.each_event
         def step(self, e):
-            self.m[(jit.mix64(e.pid),)][(jit.ilog2(e.dur),)].cnt += 1
-            self.m[(jit.mix64(e.pid),)][(jit.ilog2(e.dur),)].dur += e.dur
+            self.m[(jit.mix64(e.pid), jit.ilog2(e.dur))].cnt += 1
+            self.m[(jit.mix64(e.pid), jit.ilog2(e.dur))].dur += e.dur
 
     b = _body(N)
     assert b.count("dftu_mix64(") == 1
@@ -625,7 +625,7 @@ def test_jit_cse_result_matches_unfused(tmp_path):
     assert counts == exp
 
 
-def test_jit_fusion_coalesces_same_key_maps():
+def test_jit_each_map_gets_its_own_accumulator():
     @jit.plugin
     class Stats:
         n = jit.map(key=(jit.i64,), value=jit.count())
@@ -640,13 +640,15 @@ def test_jit_fusion_coalesces_same_key_maps():
 
     src = Stats._jit_plugin.source
     b = _body(Stats)
-    # Three same-key maps share one fused product and one lookup per event.
-    assert src.count("map_new_fused(") == 1
-    assert b.count("map_add_row(") == 1
-    assert b.count("map_add_u64(") == 0 and b.count("map_add_f64(") == 0
+    # Each declared map is its own named DFTU_EXT_AGG accumulator, fed by its own
+    # per-batch row buffer.
+    for name, op in (("n", "DFTU_AGG_SUM"), ("tot", "DFTU_AGG_SUM"), ("avg", "DFTU_AGG_MEAN")):
+        assert f'agg_new(host->h, "{name}"' in src
+        assert f"{{{op}, " in src
+        assert f"_n_{name}++" in b
 
 
-def test_jit_fusion_skips_different_keys():
+def test_jit_different_keys_stay_separate():
     @jit.plugin
     class NoFuse:
         by_pid = jit.map(key=(jit.i64,), value=jit.count())
@@ -657,14 +659,13 @@ def test_jit_fusion_skips_different_keys():
             self.by_pid[(e.pid,)] += 1
             self.by_tid[(e.tid,)] += 1
 
-    src = NoFuse._jit_plugin.source
-    # Different keys cannot share a lookup, so no fusion.
-    assert "map_new_fused(" not in src
-    assert _body(NoFuse).count("map_add_u64(") == 2
+    b = _body(NoFuse)
+    assert "_k0_by_pid[_r] = (int64_t)(e->pid);" in b
+    assert "_k0_by_tid[_r] = (int64_t)(e->tid);" in b
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_fusion_result_matches_unfused(tmp_path):
+def test_jit_same_key_maps_match_separately_computed(tmp_path):
     @jit.plugin
     class Stats:
         n = jit.map(key=(jit.i64,), value=jit.count())
@@ -681,7 +682,7 @@ def test_jit_fusion_result_matches_unfused(tmp_path):
     host.load(Stats)
     results = host.run(str(tmp_path))
 
-    # The fused maps still surface as the two separate declared tables.
+    # Two same-key maps surface as the two separate declared tables.
     ncount = dict(
         zip(
             pa.table(results["n"]).column("k0").to_pylist(),
@@ -743,10 +744,10 @@ def test_jit_raw_body_reproduces_name_edges(tmp_path):
         def step(self):
             return """
             if (e->fhash == DFTU_STR_NONE) continue;
-            int64_t key[2];
-            key[0] = (int64_t)e->pid;
-            key[1] = (int64_t)e->name;
-            map->map_add_u64(host->h, edges, key, 1);
+            uint32_t _r = _n_edges++;
+            _k0_edges[_r] = (int64_t)e->pid;
+            _k1_edges[_r] = e->name;
+            _v0_edges[_r] = 1;
             """
 
     n = 60
@@ -785,7 +786,7 @@ def test_jit_non_raw_return_still_rejects():
 
             @jit.each_event
             def step(self, e):
-                return "map->map_add_u64(host->h, edges, key, 1);"
+                return "_v0_edges[_n_edges++] = 1;"
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
@@ -835,6 +836,18 @@ def _kv(tbl, value_col="value"):
     keys = tbl.column("k0").to_pylist()
     vals = tbl.column(value_col).to_numpy(zero_copy_only=False)
     return {k: v for k, v in zip(keys, vals)}
+
+
+# A set-union aggregate finalizes to one String cell per group: the distinct
+# reprs, sorted, joined by this separator.
+_SET_SEP = "\x1e"
+
+
+def _sets(tbl):
+    return {
+        k: v.split(_SET_SEP)
+        for k, v in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist())
+    }
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
@@ -1003,15 +1016,11 @@ def test_jit_set_collects_distinct_names_per_pid(tmp_path):
 
     tbl = pa.table(results["files"])
     assert tbl.column_names == ["k0", "value"]
-    vtype = tbl.schema.field("value").type
-    assert pa.types.is_list(vtype)
-    assert pa.types.is_string(vtype.value_type)
+    assert pa.types.is_string(tbl.schema.field("value").type)
 
-    by_pid = {
-        k: set(v) for k, v in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist())
-    }
-    assert by_pid[1] == set(names)
-    assert by_pid[2] == set(names)
+    by_pid = _sets(tbl)
+    assert by_pid[1] == sorted(names)
+    assert by_pid[2] == sorted(names)
 
 
 def _write_seq_trace(path: str, events) -> None:
@@ -1226,13 +1235,12 @@ def test_jit_set_i64_collects_distinct_durs_sorted(tmp_path):
 
     tbl = pa.table(results["durs"])
     assert tbl.column_names == ["k0", "value"]
-    vtype = tbl.schema.field("value").type
-    assert pa.types.is_list(vtype)
-    assert pa.types.is_integer(vtype.value_type)
+    assert pa.types.is_string(tbl.schema.field("value").type)
 
-    by_pid = {k: v for k, v in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist())}
-    assert by_pid[1] == [5, 8, 20]
-    assert by_pid[2] == [3, 7]
+    # The distinct durs as reprs, sorted as strings.
+    by_pid = _sets(tbl)
+    assert by_pid[1] == ["20", "5", "8"]
+    assert by_pid[2] == ["3", "7"]
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
@@ -1263,11 +1271,11 @@ def test_jit_list_i64_collects_ts_ordered_durs(tmp_path):
     assert tbl.column_names == ["k0", "value"]
     vtype = tbl.schema.field("value").type
     assert pa.types.is_list(vtype)
-    assert pa.types.is_integer(vtype.value_type)
+    assert pa.types.is_string(vtype.value_type)
 
     by_pid = {k: v for k, v in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist())}
-    assert by_pid[1] == [20, 5, 20, 8]
-    assert by_pid[2] == [3, 7]
+    assert by_pid[1] == ["20", "5", "20", "8"]
+    assert by_pid[2] == ["3", "7"]
 
 
 def test_jit_rejects_str_field_into_i64_set():
@@ -1304,10 +1312,10 @@ def _write_pid_tid_trace(path: str, rows) -> None:
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_ordered_map_sorts_rows_by_key(tmp_path):
+def test_jit_multikey_counts_group_by_both_columns(tmp_path):
     @jit.plugin
     class Two:
-        asc = jit.map(key=(jit.i64, jit.i64), value=jit.count(), ordered=True)
+        asc = jit.map(key=(jit.i64, jit.i64), value=jit.count())
         plain = jit.map(key=(jit.i64, jit.i64), value=jit.count())
 
         @jit.each_event
@@ -1331,15 +1339,14 @@ def test_jit_ordered_map_sorts_rows_by_key(tmp_path):
     plain_keys = list(zip(plain.column("k0").to_pylist(), plain.column("k1").to_pylist()))
     plain_vals = dict(zip(plain_keys, plain.column("value").to_pylist()))
 
-    # The ordered map's rows are sorted ascending by (k0, k1) by the engine.
-    assert asc_keys == sorted(asc_keys)
-    # Same content either way: only the row order differs.
+    # Both maps group the same (pid, tid) pairs to the same counts.
     assert asc_vals == plain_vals
-    assert sorted(plain_keys) == asc_keys
+    assert sorted(plain_keys) == sorted(asc_keys)
+    assert asc_vals == {(3, 7): 2, (1, 2): 2, (3, 1): 1, (1, 9): 1, (2, 5): 2}
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_typed_integer_key_columns(tmp_path):
+def test_jit_integer_key_columns(tmp_path):
     @jit.plugin
     class Typed:
         m = jit.map(key=(jit.u16, jit.i32), value=jit.count())
@@ -1357,8 +1364,8 @@ def test_jit_typed_integer_key_columns(tmp_path):
 
     tbl = pa.table(results["m"])
     assert tbl.column_names == ["k0", "k1", "value"]
-    assert pa.types.is_uint16(tbl.schema.field("k0").type)
-    assert pa.types.is_int32(tbl.schema.field("k1").type)
+    assert pa.types.is_int64(tbl.schema.field("k0").type)
+    assert pa.types.is_int64(tbl.schema.field("k1").type)
 
     kv = {
         (k0, k1): v
@@ -1400,7 +1407,7 @@ def test_jit_f64_key_column(tmp_path):
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_typed_min_max_value_columns(tmp_path):
+def test_jit_min_max_value_columns(tmp_path):
     @jit.plugin
     class Vals:
         mn = jit.map(key=(jit.i64,), value=jit.min(of=jit.i32))
@@ -1413,8 +1420,8 @@ def test_jit_typed_min_max_value_columns(tmp_path):
             self.mx[(e.pid,)].observe(e.dur)
             self.mf[(e.pid,)].observe(e.dur * 0.5)
 
-    # dur-8 spans a negative i32 min (3-8=-5); dur holds a u32 max above
-    # INT32_MAX; dur*0.5 a float32 min of 1.5.
+    # dur-8 spans a negative min (3-8=-5); dur holds a max above INT32_MAX;
+    # dur*0.5 a float min of 1.5.
     events = [(1, 3, 10), (1, 11, 20), (1, 4000000000, 30)]
     _write_dur_trace(str(tmp_path / "trace.pfw.gz"), events)
 
@@ -1423,15 +1430,15 @@ def test_jit_typed_min_max_value_columns(tmp_path):
     results = host.run(str(tmp_path))
 
     mn = pa.table(results["mn"])
-    assert pa.types.is_int32(mn.schema.field("value").type)
+    assert pa.types.is_integer(mn.schema.field("value").type)
     assert mn.column("value").to_pylist() == [-5]
 
     mx = pa.table(results["mx"])
-    assert pa.types.is_uint32(mx.schema.field("value").type)
+    assert pa.types.is_integer(mx.schema.field("value").type)
     assert mx.column("value").to_pylist() == [4000000000]
 
     mf = pa.table(results["mf"])
-    assert pa.types.is_float32(mf.schema.field("value").type)
+    assert pa.types.is_floating(mf.schema.field("value").type)
     assert mf.column("value").to_pylist() == [1.5]
 
 
@@ -1558,14 +1565,10 @@ def test_jit_arg_str_set_element(tmp_path):
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["tags"])
-    vtype = tbl.schema.field("value").type
-    assert pa.types.is_list(vtype)
-    assert pa.types.is_string(vtype.value_type)
-    by_pid = {
-        k: set(v) for k, v in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist())
-    }
-    assert by_pid[1] == set(tags)
-    assert by_pid[2] == set(tags)
+    assert pa.types.is_string(tbl.schema.field("value").type)
+    by_pid = _sets(tbl)
+    assert by_pid[1] == sorted(tags)
+    assert by_pid[2] == sorted(tags)
 
 
 def test_jit_rejects_non_literal_arg_name():
@@ -1604,28 +1607,28 @@ def test_jit_rejects_arg_f64_into_counter():
                 self.m[(e.pid,)] += e.arg_f64("bw")
 
 
-def _nested_entries(tbl):
-    """{outer_key: {inner_key: entry_dict}} for a nested list<struct> result."""
+def _two_key_entries(tbl, value="value"):
+    """{k0: {k1: value}} for a flat two-key result table."""
     out: dict = {}
-    for k0, entries in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist()):
-        inner = {}
-        for entry in entries:
-            fname = builtins.next(v for v in entry.values() if isinstance(v, str))
-            inner[fname] = entry
-        out[k0] = inner
+    for k0, k1, v in zip(
+        tbl.column("k0").to_pylist(),
+        tbl.column("k1").to_pylist(),
+        tbl.column(value).to_pylist(),
+    ):
+        out.setdefault(k0, {})[k1] = v
     return out
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_nested_counter_per_pid_file(tmp_path):
+def test_jit_two_key_counter_per_pid_file(tmp_path):
     @jit.plugin
     class PidFileCounts:
-        m = jit.map(key=(jit.i64,), value=jit.nested(key=(jit.str_,), value=jit.count()))
+        m = jit.map(key=(jit.i64, jit.str_), value=jit.count())
 
         @jit.each_event
         def step(self, e):
             if e.fhash != jit.NONE:
-                self.m[(e.pid,)][(e.fhash,)] += 1
+                self.m[(e.pid, e.fhash)] += 1
 
     n = 60
     pids = [1, 2]
@@ -1637,15 +1640,12 @@ def test_jit_nested_counter_per_pid_file(tmp_path):
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["m"])
-    assert tbl.column_names == ["k0", "value"]
-    vtype = tbl.schema.field("value").type
-    assert pa.types.is_list(vtype)
-    assert pa.types.is_struct(vtype.value_type)
-    assert [f.name for f in vtype.value_type] == ["ik0", "value"]
-    assert pa.types.is_string(vtype.value_type.field("ik0").type)
-    assert pa.types.is_int64(vtype.value_type.field("value").type)
+    assert tbl.column_names == ["k0", "k1", "value"]
+    assert pa.types.is_int64(tbl.schema.field("k0").type)
+    assert pa.types.is_string(tbl.schema.field("k1").type)
+    assert pa.types.is_int64(tbl.schema.field("value").type)
 
-    # One row per pid; each carries every file it touched with its own count.
+    # One row per (pid, file), each with its own count.
     expected: dict = {}
     for i in range(n):
         pid = pids[i % len(pids)]
@@ -1653,31 +1653,25 @@ def test_jit_nested_counter_per_pid_file(tmp_path):
         expected.setdefault(pid, {})
         expected[pid][f] = expected[pid].get(f, 0) + 1
 
-    by_pid = _nested_entries(tbl)
-    assert builtins.set(by_pid) == builtins.set(expected)
-    total = 0
-    for pid, inner in by_pid.items():
-        assert builtins.set(inner) == builtins.set(expected[pid])
-        for fname, entry in inner.items():
-            assert entry["value"] == expected[pid][fname]
-            total += entry["value"]
-    assert total == n
+    by_pid = _two_key_entries(tbl)
+    assert by_pid == expected
+    assert builtins.sum(v for inner in by_pid.values() for v in inner.values()) == n
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_nested_product_count_and_sum(tmp_path):
+def test_jit_two_key_product_count_and_sum(tmp_path):
     @jit.plugin
     class PidFileStats:
         m = jit.map(
-            key=(jit.i64,),
-            value=jit.nested(key=(jit.str_,), value=dict(cnt=jit.count(), dur=jit.sum())),
+            key=(jit.i64, jit.str_),
+            value=dict(cnt=jit.count(), dur=jit.sum()),
         )
 
         @jit.each_event
         def step(self, e):
             if e.fhash != jit.NONE:
-                self.m[(e.pid,)][(e.fhash,)].cnt += 1
-                self.m[(e.pid,)][(e.fhash,)].dur += e.dur
+                self.m[(e.pid, e.fhash)].cnt += 1
+                self.m[(e.pid, e.fhash)].dur += e.dur
 
     n = 60
     pids = [1, 2]
@@ -1689,11 +1683,9 @@ def test_jit_nested_product_count_and_sum(tmp_path):
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["m"])
-    assert tbl.column_names == ["k0", "value"]
-    st = tbl.schema.field("value").type.value_type
-    assert [f.name for f in st] == ["ik0", "v0", "v1"]
-    assert pa.types.is_int64(st.field("v0").type)
-    assert pa.types.is_float64(st.field("v1").type)
+    assert tbl.column_names == ["k0", "k1", "cnt", "dur"]
+    assert pa.types.is_int64(tbl.schema.field("cnt").type)
+    assert pa.types.is_float64(tbl.schema.field("dur").type)
 
     exp_cnt: dict = {}
     exp_dur: dict = {}
@@ -1703,34 +1695,39 @@ def test_jit_nested_product_count_and_sum(tmp_path):
         exp_cnt[(pid, f)] = exp_cnt.get((pid, f), 0) + 1
         exp_dur[(pid, f)] = exp_dur.get((pid, f), 0.0) + (10 + i)
 
-    by_pid = _nested_entries(tbl)
-    tot_cnt = 0
-    tot_dur = 0.0
-    for pid, inner in by_pid.items():
-        for fname, entry in inner.items():
-            assert entry["v0"] == exp_cnt[(pid, fname)]
-            assert entry["v1"] == exp_dur[(pid, fname)]
-            tot_cnt += entry["v0"]
-            tot_dur += entry["v1"]
-    assert tot_cnt == n
-    assert tot_dur == float(sum(10 + i for i in range(n)))
+    got_cnt = _two_key_entries(tbl, "cnt")
+    got_dur = _two_key_entries(tbl, "dur")
+    for (pid, fname), want in exp_cnt.items():
+        assert got_cnt[pid][fname] == want
+        assert got_dur[pid][fname] == exp_dur[(pid, fname)]
+    assert builtins.sum(v for i in got_cnt.values() for v in i.values()) == n
+    assert builtins.sum(v for i in got_dur.values() for v in i.values()) == float(
+        builtins.sum(10 + i for i in range(n))
+    )
 
 
-def test_jit_rejects_single_subscript_on_nested():
-    with pytest.raises(jit.JitError, match="needs .outer..inner."):
+def test_jit_rejects_component_on_single_value_map():
+    with pytest.raises(jit.JitError, match="with a component"):
 
         @jit.plugin
         class Bad:
-            m = jit.map(key=(jit.i64,), value=jit.nested(key=(jit.i64,), value=jit.count()))
+            m = jit.map(key=(jit.i64,), value=jit.count())
 
             @jit.each_event
             def step(self, e):
-                self.m[(e.pid,)] += 1
+                self.m[(e.pid,)].cnt += 1
 
 
-def test_jit_rejects_collection_in_nested_value():
-    with pytest.raises(jit.JitError, match="set/list collection"):
-        jit.nested(key=(jit.i64,), value=jit.set())
+def test_jit_rejects_string_collection_as_product_component():
+    with pytest.raises(jit.JitError, match="cannot be a product component"):
+
+        @jit.plugin
+        class Bad:
+            m = jit.map(key=(jit.i64,), value=dict(cnt=jit.count(), names=jit.set()))
+
+            @jit.each_event
+            def step(self, e):
+                self.m[(e.pid,)].cnt += 1
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
@@ -1783,8 +1780,9 @@ def test_jit_bare_single_key_matches_tuple_form(tmp_path):
             self.m[(e.pid,)] += 1
 
     # Bare key normalizes to the identical 1-tuple decl the compiler reads.
-    assert "kt_m[1]" in Bare._jit_plugin.source
-    assert "DFTU_T_I64" in Bare._jit_plugin.source
+    assert Bare._jit_plugin.source == Tupled._jit_plugin.source
+    assert 'const char* _keys[1] = {"k0"};' in Bare._jit_plugin.source
+    assert "DFTU_TYPE_INT64, _k0_m" in Bare._jit_plugin.source
 
     n = 60
     pids = [1, 2]
@@ -1815,37 +1813,17 @@ def test_jit_rejects_bare_subscript_on_multikey():
                 self.m[e.pid] += 1
 
 
-def test_jit_bytes_key_declares_but_rejects_each_event_source():
-    @jit.plugin(needs=(jit.NEED_FHASH,))
-    class RawBytes:
-        m = jit.map(key=jit.bytes, value=jit.count())
-
-        @jit.each_event(raw=True)
-        def step(self):
-            return ""
-
-    # The bare bytes marker normalizes and emits a DFTU_T_BYTES-keyed decl.
-    src = RawBytes._jit_plugin.source
-    assert "DFTU_T_BYTES" in src
-    assert "kt_m[1]" in src
-
-    # A non-raw each_event has no honest per-event bytes source, so it is rejected.
-    with pytest.raises(jit.JitError, match="bytes key"):
-
-        @jit.plugin
-        class BadBytes:
-            m = jit.map(key=jit.bytes, value=jit.count())
-
-            @jit.each_event
-            def step(self, e):
-                self.m[e.pid] += 1
+def test_jit_rejects_bytes_map_key():
+    # A key becomes a grouping column, and there is no bytes column form.
+    with pytest.raises(jit.JitError, match="bytes map key"):
+        jit.map(key=jit.bytes, value=jit.count())
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_ordered_str_key_map_sorts_by_label(tmp_path):
+def test_jit_str_key_map_groups_by_label(tmp_path):
     @jit.plugin
     class ByName:
-        by_name = jit.map(key=(jit.str_,), value=jit.count(), ordered=True)
+        by_name = jit.map(key=(jit.str_,), value=jit.count())
 
         @jit.each_event
         def step(self, e):
@@ -1863,8 +1841,8 @@ def test_jit_ordered_str_key_map_sorts_by_label(tmp_path):
     keys = tbl.column("k0").to_pylist()
     vals = tbl.column("value").to_pylist()
 
-    # STR key rows come out sorted by resolved label (alphabetical).
-    assert keys == ["apple", "banana", "cat"]
+    # A STR key materializes as its resolved label, one row per distinct name.
+    assert sorted(keys) == ["apple", "banana", "cat"]
     assert dict(zip(keys, vals)) == {"apple": 2, "banana": 1, "cat": 3}
 
 
@@ -2001,9 +1979,10 @@ def test_jit_argmax_i64_payload(tmp_path):
     results = host.run(str(tmp_path))
 
     tbl = pa.table(results["tid_at_max"])
-    assert pa.types.is_int64(tbl.schema.field("value").type)
-    got = {k: int(v) for k, v in _kv(tbl).items()}
-    assert got == {1: 8, 2: 5}
+    # argmax reports the String repr of the payload whatever its column type.
+    assert pa.types.is_string(tbl.schema.field("value").type)
+    got = dict(zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist()))
+    assert got == {1: "8", 2: "5"}
 
 
 def test_jit_rejects_argby_observe_without_by():
@@ -2042,9 +2021,16 @@ def test_jit_rejects_str_payload_into_i64_argmax():
                 self.m[(e.pid,)].observe(e.name, by=e.dur)
 
 
-def test_jit_rejects_argby_in_nested():
-    with pytest.raises(jit.JitError, match="nested argby"):
-        jit.nested(key=(jit.str_,), value=jit.argmax(of=jit.str_))
+def test_jit_rejects_str_argmax_as_product_component():
+    with pytest.raises(jit.JitError, match="cannot be a product component"):
+
+        @jit.plugin
+        class Bad:
+            m = jit.map(key=(jit.i64,), value=dict(cnt=jit.count(), who=jit.argmax(of=jit.str_)))
+
+            @jit.each_event
+            def step(self, e):
+                self.m[(e.pid,)].cnt += 1
 
 
 def _write_row_trace(path: str, rows) -> None:
@@ -2100,13 +2086,13 @@ def test_jit_topk_keeps_extreme_payloads_in_order(tmp_path):
     assert hot_by_pid[2] == ["y", "x"]
 
     low = pa.table(results["low"])
-    assert pa.types.is_integer(low.schema.field("value").type.value_type)
+    assert pa.types.is_string(low.schema.field("value").type.value_type)
     low_by_pid = {
         k: v for k, v in zip(low.column("k0").to_pylist(), low.column("value").to_pylist())
     }
-    # Bottom 2 dur payloads, smallest first.
-    assert low_by_pid[1] == [50, 100]
-    assert low_by_pid[2] == [40, 70]
+    # Bottom 2 dur payloads (String reprs), smallest `by` first.
+    assert low_by_pid[1] == ["50", "100"]
+    assert low_by_pid[2] == ["40", "70"]
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
@@ -2158,10 +2144,11 @@ def test_jit_sample_keeps_items_from_input(tmp_path):
     host.load(Samp)
     results = host.run(str(tmp_path))
 
-    ts_by_pid = {1: {1000, 1001, 1002, 1003}, 2: {2000, 2001}}
+    # The sample keeps String reprs of the distinct values.
+    ts_by_pid = {1: {"1000", "1001", "1002", "1003"}, 2: {"2000", "2001"}}
 
     tbl = pa.table(results["samp"])
-    assert pa.types.is_integer(tbl.schema.field("value").type.value_type)
+    assert pa.types.is_string(tbl.schema.field("value").type.value_type)
     by_pid = {k: v for k, v in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist())}
     # k >= distinct: the full distinct set, sorted.
     assert by_pid[1] == sorted(ts_by_pid[1])
@@ -2177,15 +2164,19 @@ def test_jit_sample_keeps_items_from_input(tmp_path):
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_argmax_row_keeps_whole_winning_row(tmp_path):
+def test_jit_argmax_keeps_each_winning_field(tmp_path):
     @jit.plugin(needs=(jit.NEED_FHASH,))
     class Slow:
-        slow = jit.map(key=jit.i64, value=jit.argmax_row(of=(jit.str_, jit.i64, jit.i64)))
+        who = jit.map(key=jit.i64, value=jit.argmax(of=jit.str_))
+        tid = jit.map(key=jit.i64, value=jit.argmax(of=jit.i64))
+        ts = jit.map(key=jit.i64, value=jit.argmax(of=jit.i64))
 
         @jit.each_event
         def step(self, e):
             if e.fhash != jit.NONE:
-                self.slow[e.pid].observe((e.fhash, e.tid, e.ts), by=e.dur)
+                self.who[e.pid].observe(e.fhash, by=e.dur)
+                self.tid[e.pid].observe(e.tid, by=e.dur)
+                self.ts[e.pid].observe(e.ts, by=e.dur)
 
     _write_row_trace(str(tmp_path / "trace.pfw.gz"), _ROWS)
 
@@ -2193,24 +2184,17 @@ def test_jit_argmax_row_keeps_whole_winning_row(tmp_path):
     host.load(Slow)
     results = host.run(str(tmp_path))
 
-    tbl = pa.table(results["slow"])
-    assert tbl.column_names == ["k0", "p0", "p1", "p2"]
-    assert pa.types.is_string(tbl.schema.field("p0").type)
-    assert pa.types.is_int64(tbl.schema.field("p1").type)
-    assert pa.types.is_int64(tbl.schema.field("p2").type)
+    def col(name):
+        tbl = pa.table(results[name])
+        assert tbl.column_names == ["k0", "value"]
+        return dict(zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist()))
 
-    row = {
-        k: (p0, p1, p2)
-        for k, p0, p1, p2 in zip(
-            tbl.column("k0").to_pylist(),
-            tbl.column("p0").to_pylist(),
-            tbl.column("p1").to_pylist(),
-            tbl.column("p2").to_pylist(),
-        )
-    }
-    # Row-consistent: the whole (fhash, tid, ts) at the max dur.
-    assert row[1] == ("b", 8, 1001)
-    assert row[2] == ("y", 6, 2001)
+    who, tid, ts = col("who"), col("tid"), col("ts")
+    for name in ("who", "tid", "ts"):
+        assert pa.types.is_string(pa.table(results[name]).schema.field("value").type)
+    # The (fhash, tid, ts) at the max dur, per pid, as String reprs.
+    assert (who[1], tid[1], ts[1]) == ("b", "8", "1001")
+    assert (who[2], tid[2], ts[2]) == ("y", "6", "2001")
 
 
 def test_jit_rejects_topk_observe_without_by():
@@ -2261,47 +2245,6 @@ def test_jit_rejects_sample_str_into_i64():
                 self.m[e.pid].observe(e.name)
 
 
-def test_jit_rejects_argrow_observe_without_tuple():
-    with pytest.raises(jit.JitError, match="must be a tuple"):
-
-        @jit.plugin
-        class Bad:
-            m = jit.map(key=jit.i64, value=jit.argmax_row(of=(jit.str_,)))
-
-            @jit.each_event
-            def step(self, e):
-                self.m[e.pid].observe(e.fhash, by=e.dur)
-
-
-def test_jit_rejects_argrow_observe_without_by():
-    with pytest.raises(jit.JitError, match="requires by="):
-
-        @jit.plugin
-        class Bad:
-            m = jit.map(key=jit.i64, value=jit.argmax_row(of=(jit.str_, jit.i64)))
-
-            @jit.each_event
-            def step(self, e):
-                self.m[e.pid].observe((e.fhash, e.tid))
-
-
-def test_jit_rejects_argrow_wrong_payload_arity():
-    with pytest.raises(jit.JitError, match="payload takes 2 components"):
-
-        @jit.plugin
-        class Bad:
-            m = jit.map(key=jit.i64, value=jit.argmax_row(of=(jit.str_, jit.i64)))
-
-            @jit.each_event
-            def step(self, e):
-                self.m[e.pid].observe((e.fhash,), by=e.dur)
-
-
-def test_jit_rejects_argrow_bad_of_type():
-    with pytest.raises(jit.JitError, match="non-empty tuple"):
-        jit.argmax_row(of=jit.str_)
-
-
 def _write_join_trace(path: str, rows) -> None:
     with gzip.open(path, "wt", encoding="utf-8") as f:
         for i, (pid, cat, dur) in enumerate(rows):
@@ -2311,8 +2254,8 @@ def _write_join_trace(path: str, rows) -> None:
             )
 
 
-# pid 1 is always POSIX (present in both maps); pid 2 is never POSIX, so it lands
-# in counts but not durs: a left join keeps it with a null right value.
+# pid 1 is always POSIX (present in both accumulators); pid 2 is never POSIX, so
+# it lands in counts but not in durs.
 _JOIN_ROWS = [
     (1, "POSIX", 10),
     (1, "POSIX", 20),
@@ -2323,12 +2266,13 @@ _JOIN_ROWS = [
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_join_left_null_pads_unmatched(tmp_path):
+def test_jit_guarded_accumulator_keys_are_independent(tmp_path):
+    # Two accumulators over the same key: one unconditional, one guarded. This is
+    # the AggState form of what the deleted map-to-map join computed.
     @jit.plugin
-    class PidJoin:
+    class PidStats:
         counts = jit.map(key=jit.i64, value=jit.count())
         durs = jit.map(key=jit.i64, value=jit.sum())
-        joined = jit.join(counts, durs, how="left")
 
         @jit.each_event
         def step(self, e):
@@ -2336,102 +2280,15 @@ def test_jit_join_left_null_pads_unmatched(tmp_path):
             if e.cat == "POSIX":
                 self.durs[e.pid] += e.dur
 
-    # The declaration lowers to a map_declare_join alongside the two map_new calls.
-    src = PidJoin._jit_plugin.source
-    assert 'map->map_declare_join(host->h, "joined", "counts", "durs", DFTU_JOIN_LEFT);' in src
-
     _write_join_trace(str(tmp_path / "trace.pfw.gz"), _JOIN_ROWS)
 
     host = PluginHost()
-    host.load(PidJoin)
+    host.load(PidStats)
     results = host.run(str(tmp_path))
 
-    # Input maps still surface additively.
-    assert "counts" in results
-    assert "durs" in results
-    assert "joined" in results
     assert _kv(pa.table(results["counts"])) == {1: 2, 2: 3}
-
-    tbl = pa.table(results["joined"])
-    assert tbl.column_names == ["k0", "l_value", "r_value"]
-    rows = {
-        k0: (lv, rv)
-        for k0, lv, rv in zip(
-            tbl.column("k0").to_pylist(),
-            tbl.column("l_value").to_pylist(),
-            tbl.column("r_value").to_pylist(),
-        )
-    }
-    assert set(rows) == {1, 2}
-    assert rows[1] == (2, 30.0)
-    # pid 2 matched no right row: left join null-pads the right value.
-    assert rows[2][0] == 3
-    assert rows[2][1] is None
-
-
-@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_join_inner_keeps_only_matched(tmp_path):
-    @jit.plugin
-    class PidJoin:
-        counts = jit.map(key=jit.i64, value=jit.count())
-        durs = jit.map(key=jit.i64, value=jit.sum())
-        joined = jit.join(counts, durs)
-
-        @jit.each_event
-        def step(self, e):
-            self.counts[e.pid] += 1
-            if e.cat == "POSIX":
-                self.durs[e.pid] += e.dur
-
-    assert 'map->map_declare_join(host->h, "joined", "counts", "durs", DFTU_JOIN_INNER);' in (
-        PidJoin._jit_plugin.source
-    )
-
-    _write_join_trace(str(tmp_path / "trace.pfw.gz"), _JOIN_ROWS)
-
-    host = PluginHost()
-    host.load(PidJoin)
-    results = host.run(str(tmp_path))
-
-    tbl = pa.table(results["joined"])
-    rows = {
-        k0: (lv, rv)
-        for k0, lv, rv in zip(
-            tbl.column("k0").to_pylist(),
-            tbl.column("l_value").to_pylist(),
-            tbl.column("r_value").to_pylist(),
-        )
-    }
-    # Only pid 1 is present in both maps.
-    assert set(rows) == {1}
-    assert rows[1] == (2, 30.0)
-
-
-def test_jit_join_rejects_bad_how():
-    with pytest.raises(jit.JitError, match="inner / left / right / full"):
-        a = jit.map(key=jit.i64, value=jit.count())
-        b = jit.map(key=jit.i64, value=jit.sum())
-        jit.join(a, b, how="outer")
-
-
-def test_jit_join_rejects_non_map_operand():
-    with pytest.raises(jit.JitError, match="jit.map declarations"):
-        a = jit.map(key=jit.i64, value=jit.count())
-        jit.join(a, 123)
-
-
-def test_jit_rejects_observe_on_join_result():
-    with pytest.raises(jit.JitError, match="jit.join result"):
-
-        @jit.plugin
-        class Bad:
-            counts = jit.map(key=jit.i64, value=jit.count())
-            durs = jit.map(key=jit.i64, value=jit.sum())
-            joined = jit.join(counts, durs)
-
-            @jit.each_event
-            def step(self, e):
-                self.joined[e.pid] += 1
+    # Only pid 1 ever fed the guarded accumulator, so pid 2 has no row there.
+    assert _kv(pa.table(results["durs"])) == {1: 30.0}
 
 
 @jit.plugin

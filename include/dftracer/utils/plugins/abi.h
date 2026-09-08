@@ -251,9 +251,7 @@ typedef struct dftu_io {
 #define DFTU_EXT_TRACE "dftu.ext.trace@1"
 #define DFTU_EXT_COMMS "dftu.ext.comms@1"
 #define DFTU_EXT_PORTS "dftu.ext.ports@1"
-#define DFTU_EXT_HANDLES "dftu.ext.handles@1"
 #define DFTU_EXT_RESULT "dftu.ext.result@1"
-#define DFTU_EXT_MAP "dftu.ext.map@1"
 #define DFTU_EXT_AGG "dftu.ext.agg@1"
 #define DFTU_EXT_OPS "dftu.ext.ops@1"
 
@@ -638,143 +636,6 @@ typedef struct dftu_ext_ports {
     const void* (*consume)(void* h, uint64_t key, uint32_t* out_len);
 } dftu_ext_ports;
 
-/** Cross-worker mergeable handles: a fixed monoid vocabulary the host merges
-   across every worker slice of a plugin. Each named handle accumulates during
-   the scan and is read at finalize. */
-typedef enum {
-    DFTU_MONOID_COUNTER = 0, /**< u64 sum */
-    DFTU_MONOID_SUM_F64,     /**< double sum */
-    DFTU_MONOID_MIN_F64,     /**< double min */
-    DFTU_MONOID_MAX_F64,     /**< double max */
-    DFTU_MONOID_SKETCH,      /**< DDSketch quantiles */
-    /** Appended after SKETCH; never renumber. These take add_u64 and yield u64.
-     */
-    DFTU_MONOID_MIN_U64,   /**< u64 min */
-    DFTU_MONOID_MAX_U64,   /**< u64 max */
-    DFTU_MONOID_BOOL_AND,  /**< logical AND; nonzero add is true, result 0/1 */
-    DFTU_MONOID_BOOL_OR,   /**< logical OR; nonzero add is true, result 0/1 */
-    DFTU_MONOID_BITSET_OR, /**< u64 bitwise OR */
-    DFTU_MONOID_DISTINCT,  /**< approx distinct count of added values (u64) */
-    /** Collects the distinct interned-string ids added via add_u64; has no
-       scalar result, materializes to a list<string> column (ids resolved to
-       labels). */
-    DFTU_MONOID_SET_STR,
-    /** Ordered list of interned strings, sorted by a caller order key;
-       materializes to a list<string> column. */
-    DFTU_MONOID_LIST_STR,
-    /** Unordered distinct set of raw int64 values added via add_u64;
-       materializes to a list<int64> column, sorted ascending. */
-    DFTU_MONOID_SET_I64,
-    /** Ordered list of raw int64 values, sorted by a caller order key;
-       materializes to a list<int64> column. */
-    DFTU_MONOID_LIST_I64,
-    /** Typed min/max; materializes at the element width (signed/unsigned via
-       add_u64 as int64/uint64 bits, float via add_f64). Appended, never
-       renumbered. */
-    DFTU_MONOID_MIN_I8,
-    DFTU_MONOID_MIN_I16,
-    DFTU_MONOID_MIN_I32,
-    DFTU_MONOID_MIN_I64,
-    DFTU_MONOID_MIN_U8,
-    DFTU_MONOID_MIN_U16,
-    DFTU_MONOID_MIN_U32,
-    DFTU_MONOID_MIN_F32,
-    DFTU_MONOID_MAX_I8,
-    DFTU_MONOID_MAX_I16,
-    DFTU_MONOID_MAX_I32,
-    DFTU_MONOID_MAX_I64,
-    DFTU_MONOID_MAX_U8,
-    DFTU_MONOID_MAX_U16,
-    DFTU_MONOID_MAX_U32,
-    DFTU_MONOID_MAX_F32,
-    /** Argmin/argmax (min-by/max-by): keep `payload` from the contribution
-       whose f64 `by` is extreme, fed via map_add_argby_at. Equal `by` keeps the
-       smaller payload id. */
-    DFTU_MONOID_ARGMIN_I64, /**< payload materializes as an int64 column */
-    DFTU_MONOID_ARGMAX_I64,
-    DFTU_MONOID_ARGMIN_STR, /**< payload is an interned id, resolved at
-                             * materialize
-                             */
-    DFTU_MONOID_ARGMAX_STR,
-    /** Moment stats fed via map_add_f64_at, each one double column.
-       VARIANCE/STDDEV are the sample (n-1) statistics, 0 for n<2. */
-    DFTU_MONOID_MEAN,
-    DFTU_MONOID_VARIANCE,
-    DFTU_MONOID_STDDEV,
-    /** Bounded top-k / bottom-k: keep the k payloads at the k largest (TOPK) or
-       smallest (BOTTOMK) f64 `by` keys, fed via map_add_topk_at. Payloads emit
-       in `by` order, payload id breaking ties; _I64 -> list<int64>, _STR ->
-       list<string>. */
-    DFTU_MONOID_TOPK_I64,
-    DFTU_MONOID_TOPK_STR,
-    DFTU_MONOID_BOTTOMK_I64,
-    DFTU_MONOID_BOTTOMK_STR,
-    /** Approximate heavy-hitters (SpaceSaving): the k most frequent values with
-       approximate counts, in at most k counters, fed via
-       map_add_approx_topk_at. Materializes to list<struct<value, count>>
-       ordered by count descending, value id breaking ties. */
-    DFTU_MONOID_APPROX_TOPK_I64,
-    DFTU_MONOID_APPROX_TOPK_STR,
-    /** Deterministic mergeable sample: keep the k items with the smallest
-       hash(item) (bottom-k / KMV), not a reservoir. Samples DISTINCT items
-       uniformly; a unique per-row value makes it a uniform row sample, fed via
-       map_add_sample_at. Materializes to a list column (list<int64> or
-       list<string>) sorted by item. */
-    DFTU_MONOID_SAMPLE_I64,
-    DFTU_MONOID_SAMPLE_STR,
-    /** Argmin-row / argmax-row (full-row min-by/max-by, DISTINCT ON): keep the
-       whole payload ROW from the contribution whose f64 `by` is extreme.
-       Created only via map_new_argrow and fed via map_add_argrow; a `by` tie
-       keeps the lexicographically smaller row. Materializes to payload_n typed
-       columns. */
-    DFTU_MONOID_ARGMIN_ROW,
-    DFTU_MONOID_ARGMAX_ROW,
-    /** Higher moments fed via map_add_f64_at, each one double column.
-       Population skewness, 0 for n<3; population excess kurtosis, 0 for n<4;
-       both 0 when the variance is 0. */
-    DFTU_MONOID_SKEWNESS,
-    DFTU_MONOID_KURTOSIS,
-    /** Two-variable co-moment stats fed via map_add_xy_at (x independent, y
-       dependent), each one double column: COVAR_POP/COVAR_SAMP (over n / n-1),
-       CORR, and the OLS fit of y on x (REGR_SLOPE, REGR_INTERCEPT, REGR_R2). 0
-       for n<2 or a zero-variance denominator. */
-    DFTU_MONOID_CORR,
-    DFTU_MONOID_COVAR_POP,
-    DFTU_MONOID_COVAR_SAMP,
-    DFTU_MONOID_REGR_SLOPE,
-    DFTU_MONOID_REGR_INTERCEPT,
-    DFTU_MONOID_REGR_R2
-} dftu_monoid_kind;
-
-typedef struct dftu_handle
-    dftu_handle; /**< host-owned per-plugin named handle */
-
-typedef struct {
-    dftu_monoid_kind kind;
-    union {
-        uint64_t u64;
-        double f64;
-        dftu_quantiles quant;
-    } as;
-} dftu_monoid_value;
-
-/** Fetched via dftu_host::get_extension(DFTU_EXT_HANDLES). */
-typedef struct dftu_ext_handles {
-    /** Get-or-create a named per-plugin handle of `kind`; call during on_batch.
-       The host merges same-named handles across worker slices automatically. An
-       existing handle of a different kind is returned unchanged. */
-    dftu_handle* (*shared_get)(void* h, const char* cap_id,
-                               dftu_monoid_kind kind);
-    /** COUNTER/MIN_U64/MAX_U64/BOOL_AND/BOOL_OR/BITSET_OR/DISTINCT. */
-    void (*add_u64)(void* h, dftu_handle* hd, uint64_t v);
-    /** SUM/MIN/MAX (w ignored) or SKETCH (w is the sample weight). */
-    void (*add_f64)(void* h, dftu_handle* hd, double v, double w);
-    /** Read the cross-worker-merged result by cap id; call at on_finalize. 0
-       and fills *out, or -1 if no plugin produced that handle. The producer
-       must finalize before the consumer, i.e. be registered first. */
-    int (*result)(void* h, const char* cap_id, dftu_monoid_value* out);
-} dftu_ext_handles;
-
 /** Named result channel, fetched via dftu_host::get_extension(DFTU_EXT_RESULT).
    The host moves opaque bytes / user-schema Arrow and never interprets them;
    Plugins::run returns the collected results to the caller keyed by name. */
@@ -806,198 +667,14 @@ typedef struct dftu_ext_result {
     int (*emit_lazyframe)(void* h, const char* name, dftu_lazyframe* lf);
 } dftu_ext_result;
 
-/** Join kind for map_declare_join; the host maps this to its internal enum. */
-typedef enum {
-    DFTU_JOIN_INNER = 0,
-    DFTU_JOIN_LEFT,
-    DFTU_JOIN_RIGHT,
-    DFTU_JOIN_FULL
-} dftu_join_type;
-
-/** Host-owned per-plugin mergeable map, fetched via
-   dftu_host::get_extension(DFTU_EXT_MAP). Keys are a fixed tuple of fixed-width
-   integer (I8..I64, U8..U64), STR, or BYTES components, each passed in an int64
-   key slot (integers by value/bit pattern, STR/BYTES as a dftu_str id). The
-   value is one scalar monoid or a product of them. The host merges same-named
-   maps across worker slices and materializes each at finalize to an Arrow table
-   [key columns, then one value column per component], returned to run() under
-   `name`. */
-typedef struct dftu_map dftu_map;
-
-/** Opaque iterator over a finalized map's merged entries; see map_iter_new. */
-typedef struct dftu_map_cursor dftu_map_cursor;
-
-/** One component contribution for map_add_row: apply `value` to component
-   `comp`, as an f64 add when `is_f64` is nonzero, else a u64 add. */
-typedef struct {
-    uint32_t comp;
-    uint32_t is_f64;
-    union {
-        uint64_t u;
-        double f;
-    } value;
-} dftu_row_val;
-
-typedef struct dftu_ext_map {
-    /** Get-or-create a named map; NULL if any key type is not a fixed-width
-       integer (I8..I64, U8..U64) or STR, or the value monoid has no scalar
-       result (SKETCH). key_types/key_n fix the schema. */
-    dftu_map* (*map_new)(void* h, const char* name, const dftu_type* key_types,
-                         uint32_t key_n, dftu_monoid_kind value);
-    /** Add a contribution at `key` (key_n int64s); routed to the value monoid.
-     */
-    void (*map_add_u64)(void* h, dftu_map* m, const int64_t* key, uint64_t v);
-    void (*map_add_f64)(void* h, dftu_map* m, const int64_t* key, double v);
-    /** Get-or-create a map whose value is a product of value_n monoids ->
-       value_n value columns. */
-    dftu_map* (*map_new_product)(void* h, const char* name,
-                                 const dftu_type* key_types, uint32_t key_n,
-                                 const dftu_monoid_kind* values,
-                                 uint32_t value_n);
-    /** Add to value component `comp` (0-based); map_add_u64/map_add_f64 target
-       component 0. */
-    void (*map_add_u64_at)(void* h, dftu_map* m, const int64_t* key,
-                           uint32_t comp, uint64_t v);
-    void (*map_add_f64_at)(void* h, dftu_map* m, const int64_t* key,
-                           uint32_t comp, double v);
-    /** Append (order_key, element id) to an ordered-list value component; the
-       list materializes sorted by order_key, element id breaking ties. */
-    void (*map_add_ordered_at)(void* h, dftu_map* m, const int64_t* key,
-                               uint32_t comp, int64_t order_key,
-                               uint64_t element);
-    /** Materialize result rows sorted by key (default is unordered hash order).
-     */
-    void (*map_set_ordered)(void* h, dftu_map* m, int ordered);
-    /** Get-or-create a nested-preserved map: the value at each outer key is
-       itself a map (inner keys -> value monoids). Materializes to one row per
-       outer key: the outer key columns, then a nested "value" column of
-       list<struct<inner_keys.., values..>>. NULL if any key type is unsupported
-       or a value monoid is not a materializable scalar/product (collections,
-       ordered, and SKETCH rejected). */
-    dftu_map* (*map_new_nested)(
-        void* h, const char* name, const dftu_type* outer_key_types,
-        uint32_t outer_key_n, const dftu_type* inner_key_types,
-        uint32_t inner_key_n, const dftu_monoid_kind* values, uint32_t value_n);
-    /** Add a contribution to value component `comp` at (outer_key, inner_key);
-       outer_key is outer_key_n int64s, inner_key is inner_key_n int64s. */
-    void (*map_add_nested_u64)(void* h, dftu_map* m, const int64_t* outer_key,
-                               const int64_t* inner_key, uint32_t comp,
-                               uint64_t v);
-    void (*map_add_nested_f64)(void* h, dftu_map* m, const int64_t* outer_key,
-                               const int64_t* inner_key, uint32_t comp,
-                               double v);
-    /** Contribute (by, payload) to an ARGMIN/ARGMAX value component `comp`;
-       kind decides min vs max, _I64/_STR decides payload materialization. Equal
-       `by` keeps the smaller payload. */
-    void (*map_add_argby_at)(void* h, dftu_map* m, const int64_t* key,
-                             uint32_t comp, double by, int64_t payload);
-    /** Contribute (by, payload) to a bounded TOPK/BOTTOMK value component
-       `comp`, keeping the k payloads at the k extreme `by` keys. k is passed on
-       every add (constant per component). Payloads emit in `by` order, smaller
-       payload id breaking ties. */
-    void (*map_add_topk_at)(void* h, dftu_map* m, const int64_t* key,
-                            uint32_t comp, uint32_t k, double by,
-                            int64_t payload);
-    /** Observe `value` for an APPROX_TOPK heavy-hitters component `comp`
-       (SpaceSaving); k is the counter capacity, passed on every add.
-       Materializes to list<struct<value, count>> ordered by count descending,
-       value id breaking ties. */
-    void (*map_add_approx_topk_at)(void* h, dftu_map* m, const int64_t* key,
-                                   uint32_t comp, uint32_t k, int64_t value);
-    /** Observe `item` for a bottom-k-by-hash SAMPLE component `comp`; k is the
-       sample size, passed on every add. Samples DISTINCT items; a unique
-       per-row item makes it a uniform row sample. Materializes to a list column
-       sorted by item. */
-    void (*map_add_sample_at)(void* h, dftu_map* m, const int64_t* key,
-                              uint32_t comp, uint32_t k, int64_t item);
-    /** Get-or-create a map whose single value is an ARGMIN_ROW (is_max==0) /
-       ARGMAX_ROW (is_max!=0) over a payload row of payload_n typed columns.
-       NULL if any key or payload type is unsupported (only I8..I64, U8..U64,
-       STR, BYTES). The value is created only here, never as a component. */
-    dftu_map* (*map_new_argrow)(void* h, const char* name,
-                                const dftu_type* key_types, uint32_t key_n,
-                                int is_max, const dftu_type* payload_types,
-                                uint32_t payload_n);
-    /** Contribute (by, payload-row) at `key`; keeps the whole payload row at
-       the extreme `by`. payload is payload_n int64 slots encoded like key
-       slots. A `by` tie keeps the lexicographically smaller row. */
-    void (*map_add_argrow)(void* h, dftu_map* m, const int64_t* key, double by,
-                           const int64_t* payload, uint32_t payload_n);
-    /** Declare a join run at finalize on the merged master maps: join left_name
-       and right_name on their shared key tuple, emitting map out_name. By name
-       because per-slice dftu_map* handles do not survive the merge. */
-    void (*map_declare_join)(void* h, const char* out_name,
-                             const char* left_name, const char* right_name,
-                             dftu_join_type type);
-    /** Contribute (x, y) to a two-variable co-moment value component `comp` (a
-       CORR, COVAR, or REGR monoid); x is the independent variable, y the
-       dependent. */
-    void (*map_add_xy_at)(void* h, dftu_map* m, const int64_t* key,
-                          uint32_t comp, double x, double y);
-    /** Get-or-create a map whose single value is a DDSketch quantile estimator.
-       Values are fed via map_add_f64 (weight 1). Materializes to a `count`
-       int64 column followed by one f64 column per requested quantile in `qs`
-       (each in [0,1]), named p<q*100> (p50, p90, p99, ..). NULL if any key type
-       is unsupported or nq is 0. The value is created only here, never as a
-       component. Appended to this struct after map_add_xy_at; a host that
-       predates it leaves the slot NULL. */
-    dftu_map* (*map_new_sketch)(void* h, const char* name,
-                                const dftu_type* key_types, uint32_t key_n,
-                                const double* qs, uint32_t nq);
-    /** Get-or-create a fused map: one physical product keyed by `key_types`,
-       whose `value_n` scalar components each materialize as a SEPARATE named
-       result table (`out_names[i]`, key columns + a `value` column), never as a
-       single product table. Lets several same-key maps share one hash lookup
-       via map_add_row while staying invisible to the caller. Components must be
-       scalar monoids fed by u64/f64 adds (count, sum, min/max, mean, variance,
-       distinct, bool, bitset); collections, arg-by, arg-row, and SKETCH are
-       rejected. NULL if any key/value type is unsupported. Appended after
-       map_new_sketch; a host that predates it leaves the slot NULL. */
-    dftu_map* (*map_new_fused)(void* h, const char* name,
-                               const dftu_type* key_types, uint32_t key_n,
-                               const char* const* out_names,
-                               const dftu_monoid_kind* values,
-                               uint32_t value_n);
-    /** Add a whole row at `key` with ONE hash lookup: apply each of `n`
-       contributions to its component. A dftu_row_val is {comp, is_f64, value};
-       is_f64 picks map_add_f64 vs map_add_u64 semantics on that component.
-       Intended for a map_new_fused map but valid on any product map. */
-    void (*map_add_row)(void* h, dftu_map* m, const int64_t* key,
-                        const dftu_row_val* vals, uint32_t n);
-    /** Finalize-only reads over a merged map. Sound only once the map is fully
-       merged, i.e. inside on_finalize; the default in-memory materialize
-       leaves entries intact, but the opt-in streaming/spill materialize path
-       drains the map as it emits, so a streamed map reads back empty here -
-       do not try to re-read emitted frames. Appended after map_add_row; a
-       host that predates it leaves these slots NULL. */
-    /** Number of merged entries (0 if empty or drained by streaming). */
-    uint64_t (*map_size)(void* h, dftu_map* m);
-    /** Look up one value component at `key` (key_n int64s); 1 and fills *out
-       if found, 0 if not. `comp` is 0-based, as in map_add_*_at. */
-    int (*map_get)(void* h, dftu_map* m, const int64_t* key, uint32_t key_n,
-                   uint32_t comp, dftu_monoid_value* out);
-    /** Create an iterator over the map's merged entries; free with
-       map_iter_free. */
-    dftu_map_cursor* (*map_iter_new)(void* h, dftu_map* m);
-    /** Advance and fill the next entry: up to key_cap key ints (key_n_out set
-       to the true key arity) and up to val_cap value components (val_n_out
-       set to the true component count). 1 if an entry was written, 0 at end.
-     */
-    int (*map_iter_next)(dftu_map_cursor* cur, int64_t* key_out,
-                         uint32_t key_cap, uint32_t* key_n_out,
-                         dftu_monoid_value* vals_out, uint32_t val_cap,
-                         uint32_t* val_n_out);
-    void (*map_iter_free)(dftu_map_cursor* cur);
-} dftu_ext_map;
-
-/** Host-owned per-plugin cross-batch aggregation accumulator, fetched via
-   dftu_host::get_extension(DFTU_EXT_AGG). Unlike dftu_ext_map (a monoid map the
-   plugin folds into by hand), this wraps the dataframe engine's mergeable
-   AggState directly, so a fold gets the engine's full op vocab (Pct, Hist,
-   SetUnion, ArgMax, ...), out-of-core spill, and the single merge path the
-   Views use. The host merges same-named accumulators across worker slices and
-   finalizes each at scan end to a native dataframe (the key columns, then one
-   column per aggregate), returned to run() under `name`. */
+/** Host-owned cross-batch aggregation accumulator, fetched via
+   dftu_host::get_extension(DFTU_EXT_AGG). This is the ONE accumulator a plugin
+   gets: it wraps the dataframe engine's mergeable AggState, so a keyed map is
+   an accumulator with key columns, a scalar handle is one with zero key
+   columns, and the reduction vocabulary is the engine's agg op table. The host
+   merges same-named accumulators across worker slices and finalizes each at
+   scan end to a native dataframe (the key columns, then one column per
+   aggregate), returned to run() under `name`. */
 typedef struct dftu_agg dftu_agg;
 
 /** One aggregate for a dftu_ext_agg accumulator. `op` is a DFTU_AGG_* code (the
@@ -1005,9 +682,11 @@ typedef struct dftu_agg dftu_agg;
    code outside the DFTU_AGG_* range makes agg_new return NULL. `value` names
    the value column in each accumulated batch dataframe (NULL for
    DFTU_AGG_COUNT, the group row count); `out` names the result column; `param`
-   is the quantile in [0,1] for DFTU_AGG_PCT (0 otherwise); `by` names the
-   column maximized for DFTU_AGG_ARGMAX (NULL otherwise). All names are borrowed
-   for the agg_new call only. */
+   is the op's scalar parameter (a quantile in [0,1] for DFTU_AGG_PCT, k for
+   DFTU_AGG_TOPK and friends, 0 otherwise); `by` names the op's second input
+   column (the ordering column for DFTU_AGG_ARGMAX/ARGMIN/TOPK, the dur column
+   for the occupancy ops, x for the co-moment ops; NULL when the op takes one
+   input). All names are borrowed for the agg_new call only. */
 typedef struct dftu_agg_col {
     int32_t op;
     const char* value;
@@ -1031,6 +710,12 @@ typedef struct dftu_ext_agg {
        missing any referenced column is skipped. Serial per accumulator; one
        slice's accumulator is touched by one thread. */
     void (*agg_accumulate)(void* h, dftu_agg* a, const dftu_dataframe* df);
+    /** The cross-worker-merged, finalized result of the accumulator named
+       `name` - any plugin's, which is how one plugin reads another's whole-scan
+       aggregate. Call at on_finalize; the producer must finalize first, i.e. be
+       registered first. Returns a NEW owned dataframe the caller frees with
+       dftu_dataframe_free, or NULL if no plugin produced that name. */
+    dftu_dataframe* (*agg_result)(void* h, const char* name);
 } dftu_ext_agg;
 
 /** Host-service group exposing the dataframe engine's op registry, fetched via

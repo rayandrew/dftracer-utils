@@ -26,7 +26,33 @@ void host_agg_accumulate(void* h, ::dftu_agg* a, const ::dftu_dataframe* df) {
     static_cast<PluginFold*>(h)->agg_accumulate(a, df);
 }
 
-const dftu_ext_agg g_agg = {host_agg_new, host_agg_accumulate};
+::dftu_dataframe* host_agg_result(void* h, const char* name) {
+    return static_cast<PluginFold*>(h)->agg_result(name);
+}
+
+const dftu_ext_agg g_agg = {host_agg_new, host_agg_accumulate, host_agg_result};
+
+// Finalize `acc` and move its columns into a dftu_dataframe handle (the
+// engine's own ABI boundary type) so the result crosses as our DataFrame, no
+// Arrow round-trip. agg_finalize reads the state, so this may run more than
+// once for the same accumulator. Null if it has no state or finalize throws.
+::dftu_dataframe* finalize_to_frame(const AggAccum& acc) {
+    if (!acc.state) return nullptr;
+    try {
+        dataframe::DataFrame out =
+            dataframe::agg_finalize(*acc.state, acc.key_names);
+        std::vector<dftu_series*> handles;
+        handles.reserve(out.columns.size());
+        for (dataframe::Series& c : out.columns) handles.push_back(c.release());
+        std::vector<const char*> names;
+        names.reserve(out.names.size());
+        for (const std::string& n : out.names) names.push_back(n.c_str());
+        return dftu_dataframe_new(names.data(), handles.data(),
+                                  static_cast<std::int32_t>(handles.size()));
+    } catch (...) {
+        return nullptr;
+    }
+}
 
 }  // namespace
 
@@ -53,8 +79,7 @@ const void* detail::agg_ext_vtable() { return &g_agg; }
     std::vector<dataframe::AggSpec> aspecs;
     aspecs.reserve(spec_n);
     for (std::uint32_t i = 0; i < spec_n; ++i) {
-        if (specs[i].op < DFTU_AGG_COUNT ||
-            specs[i].op > DFTU_AGG_COUNT_VALID) {
+        if (specs[i].op < DFTU_AGG_COUNT || specs[i].op > DFTU_AGG_REGR_R2) {
             DFTRACER_UTILS_LOG_ERROR(
                 "Plugin agg '%s' aggregate %u has an out-of-range op code %d",
                 name, i, specs[i].op);
@@ -120,36 +145,40 @@ void PluginFold::agg_accumulate(::dftu_agg* a, const ::dftu_dataframe* df) {
     }
 
     try {
-        dataframe::agg_accumulate(*acc.state, keys, values);
+        // Pass the row count explicitly: a zero-key accumulator (the scalar
+        // case) has no key column for the engine to size the batch from.
+        dataframe::agg_accumulate(*acc.state, keys, values, 0,
+                                  dftu_dataframe_num_rows(df));
     } catch (...) {
         DFTRACER_UTILS_LOG_ERROR("Plugin agg '%s' accumulate failed",
                                  acc.name.c_str());
     }
 }
 
+// Cross-plugin reads see only what a plugin that already finalized published,
+// which is the registration-order rule: an unpublished name reads back null
+// rather than this fold's own partial state.
+::dftu_dataframe* PluginFold::agg_result(const char* name) const {
+    if (!name || !results_) return nullptr;
+    auto it = results_->aggs.find(dftracer::utils::hash::fnv1a_hash(name));
+    if (it == results_->aggs.end() || !it->second) return nullptr;
+    return finalize_to_frame(*it->second);
+}
+
+void PluginFold::publish_aggs() {
+    if (!results_) return;
+    for (const auto& [key, idx] : aggs_.index()) {
+        std::unique_ptr<AggAccum>& acc = aggs_[idx];
+        if (acc && acc->state) results_->aggs[key] = acc.get();
+    }
+}
+
 void PluginFold::materialize_aggs() {
     if (!named_results_) return;
     for (std::unique_ptr<AggAccum>& acc : aggs_) {
-        if (!acc || !acc->state) continue;
-        try {
-            dataframe::DataFrame out =
-                dataframe::agg_finalize(*acc->state, acc->key_names);
-            // Move the columns into a dftu_dataframe handle (the engine's own
-            // ABI boundary type) so the result crosses as our DataFrame, no
-            // Arrow round-trip.
-            std::vector<dftu_series*> handles;
-            handles.reserve(out.columns.size());
-            std::vector<const char*> names;
-            names.reserve(out.names.size());
-            for (dataframe::Series& c : out.columns)
-                handles.push_back(c.release());
-            for (const std::string& n : out.names) names.push_back(n.c_str());
-            dftu_dataframe* h =
-                dftu_dataframe_new(names.data(), handles.data(),
-                                   static_cast<std::int32_t>(handles.size()));
-            if (h) named_results_->emit_frame(acc->name.c_str(), h);
-        } catch (...) {
-        }
+        if (!acc) continue;
+        if (::dftu_dataframe* h = finalize_to_frame(*acc))
+            named_results_->emit_frame(acc->name.c_str(), h);
     }
 }
 

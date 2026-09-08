@@ -50,7 +50,24 @@ enum class Agg {
     Concurrency,  ///< occupancy: sum(dur) / busy
     Utilization,  ///< occupancy: busy / makespan
     Active,       ///< occupancy: peak overlap depth
-    CountValid    ///< count of present (non-null) values in `column`, Int64
+    CountValid,   ///< count of present (non-null) values in `column`, Int64
+    ArgMin,       ///< `column`'s repr at the row minimizing `by`
+    BitOr,        ///< bitwise OR of `column` read as u64, Uint64
+    Distinct,  ///< approximate distinct count of `column` (`param` = k), Int64
+    ListSorted,  ///< `column`'s reprs ordered by `by` ascending, list<string>
+    TopK,  ///< `column`'s reprs at the `param` (k) largest `by`, list<string>
+    BottomK,     ///< `column`'s reprs at the `param` (k) smallest `by`,
+                 ///< list<string>
+    ApproxTopK,  ///< heavy hitters of `column` (`param` counters),
+                 ///< list<struct{value, count}>
+    Sample,      ///< bottom-k-by-hash sample of `column`'s distinct reprs
+                 ///< (`param` = k), list<string>
+    Corr,        ///< correlation of (x = `by`, y = `column`), Float64
+    CovarPop,    ///< population covariance of (x = `by`, y = `column`), Float64
+    CovarSamp,   ///< sample covariance of (x = `by`, y = `column`), Float64
+    RegrSlope,   ///< least-squares slope of `column` on `by`, Float64
+    RegrIntercept,  ///< least-squares intercept of `column` on `by`, Float64
+    RegrR2  ///< coefficient of determination of `column` on `by`, Float64
 };
 
 /// Canonical lowercase name of `agg` (the string the C ABI accepts).
@@ -73,13 +90,13 @@ struct GroupAgg {
     Agg op = Agg::Count;
     std::string column;
     std::string out;
-    double param = 0.0;  ///< Pct: quantile q in [0, 1]; occupancy: occ_cell_us
-    std::string
-        by{};     ///< ArgMax: the column maximized; occupancy: the dur column
-                  ///< (`column` is ts); unused otherwise
+    double param = 0.0;  ///< Pct: quantile q in [0, 1]; occupancy: occ_cell_us;
+                         ///< Distinct/TopK/BottomK/ApproxTopK/Sample: k
+    std::string by{};    ///< the second input column for the ops
+                         ///< agg_uses_by_col() names; unused otherwise
 };
 
-class LazyFrame;  // dataframe/lazyframe.h
+class LazyFrame;         // dataframe/lazyframe.h
 
 /// A named ordered set of columns (the RecordBatch / DataChunk analogue). The
 /// eager methods return a new DataFrame (move-only); projection ops share the

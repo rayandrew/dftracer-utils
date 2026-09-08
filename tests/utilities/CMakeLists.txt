@@ -85,18 +85,9 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_versioning.cpp
     plugins/test_plugin_comms.cpp
     plugins/test_plugin_ports.cpp
-    plugins/test_plugin_handles.cpp
     plugins/test_plugin_results.cpp
     plugins/test_plugin_agg.cpp
     plugins/test_plugin_ops.cpp
-    plugins/test_plugin_map.cpp
-    plugins/test_map_join.cpp
-    plugins/test_map_join_arrow.cpp
-    plugins/test_map_grouping.cpp
-    plugins/test_map_grouping_arrow.cpp
-    plugins/test_map_unnest.cpp
-    plugins/test_map_unnest_arrow.cpp
-    plugins/test_monoid_serialize.cpp
     plugins/test_plugin_planner.cpp
 )
 

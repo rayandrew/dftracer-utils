@@ -87,11 +87,11 @@ std::string agg_serialize(const AggState& st) {
             s.append(reinterpret_cast<const char*>(blob.data()), blob.size());
         }
     }
-    put(s, static_cast<std::uint8_t>(st.has_argmax ? 1 : 0));
-    if (st.has_argmax) {
-        for (double b : st.argmax_by) put(s, b);
-        for (char h : st.argmax_has) put(s, static_cast<std::uint8_t>(h));
-        for (const std::string& r : st.argmax_repr) put_bytes(s, r);
+    put(s, static_cast<std::uint8_t>(st.has_arg ? 1 : 0));
+    if (st.has_arg) {
+        for (double b : st.arg_by) put(s, b);
+        for (char h : st.arg_has) put(s, static_cast<std::uint8_t>(h));
+        for (const std::string& r : st.arg_repr) put_bytes(s, r);
     }
     put(s, static_cast<std::uint8_t>(st.has_set ? 1 : 0));
     if (st.has_set) {
@@ -152,6 +152,49 @@ std::string agg_serialize(const AggState& st) {
                 }
             }
         }
+    }
+    put(s, static_cast<std::uint8_t>(st.has_bitor ? 1 : 0));
+    if (st.has_bitor)
+        for (std::uint64_t b : st.bitor_acc) put(s, b);
+    put(s, static_cast<std::uint8_t>(st.has_kmv ? 1 : 0));
+    if (st.has_kmv) {
+        for (const KmvMap& m : st.kmv) {
+            put(s, static_cast<std::uint32_t>(m.size()));
+            for (const auto& [h, v] : m) {
+                put(s, h);
+                put_bytes(s, v);
+            }
+        }
+    }
+    put(s, static_cast<std::uint8_t>(st.has_lst ? 1 : 0));
+    if (st.has_lst) {
+        for (const ListItems& items : st.lst) {
+            put(s, static_cast<std::uint32_t>(items.size()));
+            for (const auto& [by, repr] : items) {
+                put(s, by);
+                put_bytes(s, repr);
+            }
+        }
+    }
+    put(s, static_cast<std::uint8_t>(st.has_ss ? 1 : 0));
+    if (st.has_ss) {
+        for (const SpaceSavingMap& m : st.ss_counters) {
+            put(s, static_cast<std::uint32_t>(m.size()));
+            for (const auto& [v, c] : m) {
+                put_bytes(s, v);
+                put(s, c);
+            }
+        }
+    }
+    put(s, static_cast<std::uint8_t>(st.has_co ? 1 : 0));
+    if (st.has_co) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st.n_co;
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.co_n[i]);
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.co_sx[i]);
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.co_sy[i]);
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.co_sxx[i]);
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.co_syy[i]);
+        for (std::size_t i = 0; i < sz; ++i) put(s, st.co_sxy[i]);
     }
     return s;
 }
@@ -239,16 +282,17 @@ AggStatePtr agg_deserialize(const std::string& blob) {
             r.p += blen;
         }
     }
-    st->has_argmax = r.get<std::uint8_t>() != 0;
-    if (st->has_argmax) {
-        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_argmax;
-        st->argmax_by.resize(sz);
-        st->argmax_has.resize(sz);
-        st->argmax_repr.resize(sz);
-        for (std::size_t i = 0; i < sz; ++i) st->argmax_by[i] = r.get<double>();
+    st->has_arg = r.get<std::uint8_t>() != 0;
+    if (st->has_arg) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_arg;
+        const std::size_t rz = static_cast<std::size_t>(ng) * st->n_arg_repr;
+        st->arg_by.resize(sz);
+        st->arg_has.resize(sz);
+        st->arg_repr.resize(rz);
+        for (std::size_t i = 0; i < sz; ++i) st->arg_by[i] = r.get<double>();
         for (std::size_t i = 0; i < sz; ++i)
-            st->argmax_has[i] = static_cast<char>(r.get<std::uint8_t>());
-        for (std::size_t i = 0; i < sz; ++i) st->argmax_repr[i] = r.get_bytes();
+            st->arg_has[i] = static_cast<char>(r.get<std::uint8_t>());
+        for (std::size_t i = 0; i < rz; ++i) st->arg_repr[i] = r.get_bytes();
     }
     st->has_set = r.get<std::uint8_t>() != 0;
     if (st->has_set) {
@@ -324,6 +368,67 @@ AggStatePtr agg_deserialize(const std::string& blob) {
                 }
             }
         }
+    }
+    st->has_bitor = r.get<std::uint8_t>() != 0;
+    if (st->has_bitor) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_bitor;
+        st->bitor_acc.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i)
+            st->bitor_acc[i] = r.get<std::uint64_t>();
+    }
+    st->has_kmv = r.get<std::uint8_t>() != 0;
+    if (st->has_kmv) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_kmv;
+        st->kmv.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i) {
+            const std::uint32_t cnt = r.get<std::uint32_t>();
+            for (std::uint32_t j = 0; j < cnt; ++j) {
+                const std::uint64_t h = r.get<std::uint64_t>();
+                st->kmv[i].emplace(h, r.get_bytes());
+            }
+        }
+    }
+    st->has_lst = r.get<std::uint8_t>() != 0;
+    if (st->has_lst) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_lst;
+        st->lst.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i) {
+            const std::uint32_t cnt = r.get<std::uint32_t>();
+            st->lst[i].reserve(cnt);
+            for (std::uint32_t j = 0; j < cnt; ++j) {
+                const double by = r.get<double>();
+                st->lst[i].emplace_back(by, r.get_bytes());
+            }
+        }
+    }
+    st->has_ss = r.get<std::uint8_t>() != 0;
+    if (st->has_ss) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_ss;
+        st->ss_counters.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i) {
+            const std::uint32_t cnt = r.get<std::uint32_t>();
+            for (std::uint32_t j = 0; j < cnt; ++j) {
+                std::string v = r.get_bytes();
+                st->ss_counters[i].emplace(std::move(v),
+                                           r.get<std::uint64_t>());
+            }
+        }
+    }
+    st->has_co = r.get<std::uint8_t>() != 0;
+    if (st->has_co) {
+        const std::size_t sz = static_cast<std::size_t>(ng) * st->n_co;
+        st->co_n.resize(sz);
+        st->co_sx.resize(sz);
+        st->co_sy.resize(sz);
+        st->co_sxx.resize(sz);
+        st->co_syy.resize(sz);
+        st->co_sxy.resize(sz);
+        for (std::size_t i = 0; i < sz; ++i) st->co_n[i] = r.get<double>();
+        for (std::size_t i = 0; i < sz; ++i) st->co_sx[i] = r.get<double>();
+        for (std::size_t i = 0; i < sz; ++i) st->co_sy[i] = r.get<double>();
+        for (std::size_t i = 0; i < sz; ++i) st->co_sxx[i] = r.get<double>();
+        for (std::size_t i = 0; i < sz; ++i) st->co_syy[i] = r.get<double>();
+        for (std::size_t i = 0; i < sz; ++i) st->co_sxy[i] = r.get<double>();
     }
     st->inited = true;
     return st;

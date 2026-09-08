@@ -3,8 +3,8 @@
 
 `new` scaffolds a template plugin, `build` compiles it against the bundled ABI
 headers to a loadable .so, and PluginHost loads and runs it over a fake trace.
-The C template emits a per-process COUNTER map whose value column sums to the
-scanned event count.
+The C template folds each batch into a per-process count accumulator whose
+value column sums to the scanned event count.
 """
 
 import ctypes
@@ -77,7 +77,7 @@ def test_new_build_load_run_c(tmp_path):
 
     assert "mycount" in results
     tbl = pa.table(results["mycount"])
-    assert tbl.column_names == ["k0", "value"]
+    assert tbl.column_names == ["pid", "value"]
     val = tbl.column("value").to_numpy(zero_copy_only=False)
     assert int(val.sum()) == n
     assert host.stats["events_scanned"] == n

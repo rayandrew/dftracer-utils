@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <set>
 #include <string>
@@ -54,6 +55,61 @@ OccResult occ_summarize(
     o.busy = busy;
     o.active = peak;
     return o;
+}
+
+// KMV (bottom-k min-hash) distinct estimate: (k-1) / u_max, where u_max is the
+// largest kept hash normalized to [0, 1). Exact (the kept count) while fewer
+// than k distinct hashes have been seen.
+//
+// Bar-Yossef, Jayram, Kumar, Sivakumar, Trevisan, "Counting Distinct Elements
+// in a Data Stream", RANDOM 2002.
+double kmv_estimate(const KmvMap& m, std::size_t k) {
+    if (k < 2 || m.size() < k) return static_cast<double>(m.size());
+    const double u_max =
+        static_cast<double>(m.rbegin()->first) / std::ldexp(1.0, 64);
+    if (!(u_max > 0.0)) return static_cast<double>(m.size());
+    return static_cast<double>(k - 1) / u_max;
+}
+
+// One list<string> column from a per-group vector of already-ordered reprs.
+Series strings_list(const std::vector<std::vector<std::string>>& rows) {
+    std::vector<std::int32_t> off{0};
+    std::vector<std::string> flat;
+    off.reserve(rows.size() + 1);
+    for (const std::vector<std::string>& row : rows) {
+        flat.insert(flat.end(), row.begin(), row.end());
+        off.push_back(static_cast<std::int32_t>(flat.size()));
+    }
+    return Series::list(off, Series::strings(flat));
+}
+
+// The two-variable readouts over one co-moment slot's raw power sums.
+// Reproduces the deleted plugin monoid byte-for-byte, zero-guards included.
+double co_readout(AggOp op, double n, double sx, double sy, double sxx,
+                  double syy, double sxy) {
+    if (n < 2.0) return 0.0;
+    const double cxy = sxy - sx * sy / n;
+    const double cxx = sxx - sx * sx / n;
+    const double cyy = syy - sy * sy / n;
+    auto corr = [&]() -> double {
+        const double denom = cxx * cyy;
+        return denom > 0.0 ? cxy / std::sqrt(denom) : 0.0;
+    };
+    auto slope = [&]() -> double { return cxx > 0.0 ? cxy / cxx : 0.0; };
+    switch (op) {
+        case AggOp::CovarPop:
+            return cxy / n;
+        case AggOp::CovarSamp:
+            return cxy / (n - 1.0);
+        case AggOp::Corr:
+            return corr();
+        case AggOp::RegrSlope:
+            return slope();
+        case AggOp::RegrIntercept:
+            return sy / n - slope() * sx / n;
+        default:  // RegrR2
+            return corr() * corr();
+    }
 }
 
 }  // namespace
@@ -191,18 +247,113 @@ DataFrame agg_finalize(const AggState& st,
             for (std::int64_t g = 0; g < ng; ++g)
                 v[static_cast<std::size_t>(g)] = fs_at(g).sumsq;
             out.columns.push_back(Series::flat_f64(v.data(), ng));
-        } else if (sp.op == AggOp::ArgMax) {
-            const int slot = st.spec_argmax[s];
+        } else if (sp.op == AggOp::ArgMax || sp.op == AggOp::ArgMin) {
+            const int slot = st.spec_arg[s];
+            const int ri = st.spec_arg_repr[s];
             std::vector<std::string> v(static_cast<std::size_t>(ng));
             for (std::int64_t g = 0; g < ng; ++g) {
-                if (slot < 0) continue;
-                const std::size_t as =
-                    static_cast<std::size_t>(g) * st.n_argmax +
-                    static_cast<std::size_t>(slot);
-                if (st.argmax_has[as])
-                    v[static_cast<std::size_t>(g)] = st.argmax_repr[as];
+                if (slot < 0 || ri < 0) continue;
+                if (st.arg_has[static_cast<std::size_t>(g) * st.n_arg +
+                               static_cast<std::size_t>(slot)])
+                    v[static_cast<std::size_t>(g)] =
+                        st.arg_repr[static_cast<std::size_t>(g) *
+                                        st.n_arg_repr +
+                                    static_cast<std::size_t>(ri)];
             }
             out.columns.push_back(Series::strings(v));
+        } else if (sp.op == AggOp::BitOr) {
+            const int slot = st.spec_bitor[s];
+            std::vector<std::uint64_t> v(static_cast<std::size_t>(ng), 0);
+            for (std::int64_t g = 0; g < ng && slot >= 0; ++g)
+                v[static_cast<std::size_t>(g)] =
+                    st.bitor_acc[static_cast<std::size_t>(g) * st.n_bitor +
+                                 static_cast<std::size_t>(slot)];
+            out.columns.push_back(Series::flat(TypeId::Uint64, v.data(), ng));
+        } else if (sp.op == AggOp::Distinct) {
+            const int slot = st.spec_kmv[s];
+            std::vector<std::int64_t> v(static_cast<std::size_t>(ng), 0);
+            for (std::int64_t g = 0; g < ng && slot >= 0; ++g) {
+                const std::size_t ks = static_cast<std::size_t>(g) * st.n_kmv +
+                                       static_cast<std::size_t>(slot);
+                v[static_cast<std::size_t>(g)] =
+                    static_cast<std::int64_t>(std::llround(kmv_estimate(
+                        st.kmv[ks], st.kmv_k[static_cast<std::size_t>(slot)])));
+            }
+            out.columns.push_back(Series::flat_i64(v.data(), ng));
+        } else if (sp.op == AggOp::Sample) {
+            const int slot = st.spec_kmv[s];
+            std::vector<std::vector<std::string>> rows(
+                static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng && slot >= 0; ++g) {
+                const std::size_t ks = static_cast<std::size_t>(g) * st.n_kmv +
+                                       static_cast<std::size_t>(slot);
+                std::vector<std::string>& row =
+                    rows[static_cast<std::size_t>(g)];
+                for (const auto& [h, val] : st.kmv[ks]) row.push_back(val);
+                std::sort(row.begin(), row.end());
+            }
+            out.columns.push_back(strings_list(rows));
+        } else if (sp.op == AggOp::ListSorted || sp.op == AggOp::TopK ||
+                   sp.op == AggOp::BottomK) {
+            const int slot = st.spec_lst[s];
+            std::vector<std::vector<std::string>> rows(
+                static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng && slot >= 0; ++g) {
+                const std::size_t ls = static_cast<std::size_t>(slot);
+                ListItems items =
+                    st.lst[static_cast<std::size_t>(g) * st.n_lst + ls];
+                list_bound(items, st.lst_kind[ls], st.lst_k[ls]);
+                std::vector<std::string>& row =
+                    rows[static_cast<std::size_t>(g)];
+                row.reserve(items.size());
+                for (auto& [by, repr] : items) row.push_back(std::move(repr));
+            }
+            out.columns.push_back(strings_list(rows));
+        } else if (sp.op == AggOp::ApproxTopK) {
+            // list<struct{value, count}>, heaviest first, value breaking ties.
+            const int slot = st.spec_ss[s];
+            std::vector<std::int32_t> off{0};
+            std::vector<std::string> vals;
+            std::vector<std::uint64_t> cnts;
+            for (std::int64_t g = 0; g < ng; ++g) {
+                if (slot >= 0) {
+                    const SpaceSavingMap& m =
+                        st.ss_counters[static_cast<std::size_t>(g) * st.n_ss +
+                                       static_cast<std::size_t>(slot)];
+                    std::vector<std::pair<std::string, std::uint64_t>> hh(
+                        m.begin(), m.end());
+                    std::sort(hh.begin(), hh.end(),
+                              [](const auto& a, const auto& b) {
+                                  if (a.second != b.second)
+                                      return a.second > b.second;
+                                  return a.first < b.first;
+                              });
+                    for (auto& [val, cnt] : hh) {
+                        vals.push_back(std::move(val));
+                        cnts.push_back(cnt);
+                    }
+                }
+                off.push_back(static_cast<std::int32_t>(vals.size()));
+            }
+            const std::int64_t nv = static_cast<std::int64_t>(vals.size());
+            std::vector<Series> fields;
+            fields.push_back(Series::strings(vals));
+            fields.push_back(Series::flat(TypeId::Uint64, cnts.data(), nv));
+            out.columns.push_back(Series::list(
+                off, Series::structs({"value", "count"}, std::move(fields))));
+        } else if (sp.op == AggOp::Corr || sp.op == AggOp::CovarPop ||
+                   sp.op == AggOp::CovarSamp || sp.op == AggOp::RegrSlope ||
+                   sp.op == AggOp::RegrIntercept || sp.op == AggOp::RegrR2) {
+            const int slot = st.spec_co[s];
+            std::vector<double> v(static_cast<std::size_t>(ng), 0.0);
+            for (std::int64_t g = 0; g < ng && slot >= 0; ++g) {
+                const std::size_t cs = static_cast<std::size_t>(g) * st.n_co +
+                                       static_cast<std::size_t>(slot);
+                v[static_cast<std::size_t>(g)] =
+                    co_readout(sp.op, st.co_n[cs], st.co_sx[cs], st.co_sy[cs],
+                               st.co_sxx[cs], st.co_syy[cs], st.co_sxy[cs]);
+            }
+            out.columns.push_back(Series::flat_f64(v.data(), ng));
         } else if (sp.op == AggOp::SetUnion) {
             const int slot = st.spec_set[s];
             std::vector<std::string> v(static_cast<std::size_t>(ng));
