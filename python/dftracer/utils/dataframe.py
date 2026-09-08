@@ -1329,7 +1329,7 @@ class Session:
     def __init__(self, viewer: "TraceViewer") -> None:
         self._viewer = viewer
         # (kind, branch-object, sink); branch-object is a SessionView, or a
-        # PluginHost for a plugin branch (both expose ._native to the native
+        # Plugins set for a plugin branch (both expose ._native to the native
         # session executor).
         self._branches: List[Tuple[str, Any, Optional[str]]] = []
         self._handles: List[Optional[Handle]] = []
@@ -1360,17 +1360,16 @@ class Session:
         if self._executed:
             raise RuntimeError("cannot add a branch after the session has executed")
         # plugins imports dataframe, so import lazily to avoid a cycle.
-        from .plugins import PluginHost
+        from .plugins import Plugins, _plugin_key
 
-        host = PluginHost()
-        host.load(plugin, config)
+        plugins = Plugins([plugin], {_plugin_key(plugin): config} if config else None)
 
         def shape(raw: "Dict[str, Any]") -> object:
-            shaped = {name: host._shape(name, val) for name, val in raw.items()}
+            shaped = {name: plugins._shape(val) for name, val in raw.items()}
             return next(iter(shaped.values())) if len(shaped) == 1 else shaped
 
         handle = Handle(self, len(self._branches), shape)
-        self._branches.append(("plugin", host, None))
+        self._branches.append(("plugin", plugins, None))
         self._handles.append(handle)
         return handle
 

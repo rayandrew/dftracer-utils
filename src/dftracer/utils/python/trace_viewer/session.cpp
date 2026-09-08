@@ -162,7 +162,7 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
         if (bdata[i].kind == Kind::Plugin) {
             if (!PyObject_TypeCheck(vobj, &PluginHostType)) {
                 PyErr_SetString(PyExc_TypeError,
-                                "a plugin branch needs a PluginHost");
+                                "a plugin branch needs a Plugins instance");
                 return nullptr;
             }
             bdata[i].host_obj = vobj;  // borrowed; branches list holds it

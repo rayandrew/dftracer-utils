@@ -12,7 +12,7 @@ import pytest
 
 from dftracer.utils import jit
 from dftracer.utils.jit_op import JitOpError
-from dftracer.utils.plugins import PluginHost
+from dftracer.utils.plugins import Plugins
 
 _HAS_CXX = bool(shutil.which("c++") or shutil.which("clang++") or shutil.which("g++"))
 _needs_cxx = pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler for the jit backend")
@@ -100,9 +100,8 @@ class TestInlineInPlugin:
         assert "static int64_t dftu_jitop_bucket" in src
         assert "dftu_jitop_bucket(" in src.split("on_batch")[1]
 
-        host = PluginHost()
-        host.load(WithOp)
-        table = pa.table(host.run([tr])["counts"])
+        plugins = Plugins([WithOp])
+        table = pa.table(plugins.run([tr]).results["counts"])
         got = dict(zip(table.column("k0").to_pylist(), table.column("value").to_pylist()))
         ref = collections.Counter((i // 100) * 100 for i in range(n))
         assert got == dict(ref)

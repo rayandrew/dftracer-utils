@@ -2,7 +2,7 @@
 """End-to-end test for the dftracer_plugin CLI.
 
 `new` scaffolds a template plugin, `build` compiles it against the bundled ABI
-headers to a loadable .so, and PluginHost loads and runs it over a fake trace.
+headers to a loadable .so, and Plugins loads and runs it over a fake trace.
 The C template folds each batch into a per-process count accumulator whose
 value column sums to the scanned event count.
 """
@@ -14,7 +14,7 @@ import shutil
 import pytest
 
 from dftracer.utils import plugin_cli
-from dftracer.utils.plugins import PluginHost
+from dftracer.utils.plugins import Plugins
 
 _HAS_CXX = bool(shutil.which("c++") or shutil.which("clang++") or shutil.which("g++"))
 
@@ -99,16 +99,15 @@ def test_new_build_load_run_c(tmp_path):
     n = 40
     _write_trace(str(tmp_path / "trace.pfw.gz"), n)
 
-    host = PluginHost()
-    host.load(str(so))
-    results = host.run(str(tmp_path))
+    plugins = Plugins([str(so)])
+    run = plugins.run(str(tmp_path))
 
-    assert "mycount" in results
-    tbl = pa.table(results["mycount"])
+    assert "mycount" in run.results
+    tbl = pa.table(run.results["mycount"])
     assert tbl.column_names == ["pid", "value"]
     val = tbl.column("value").to_numpy(zero_copy_only=False)
     assert int(val.sum()) == n
-    assert host.stats["events_scanned"] == n
+    assert run.stats["events_scanned"] == n
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available")
@@ -123,9 +122,8 @@ def test_new_build_load_run_cpp(tmp_path):
     n = 40
     _write_trace(str(tmp_path / "trace.pfw.gz"), n)
 
-    host = PluginHost()
-    host.load(str(so))
-    results = host.run(str(tmp_path))
+    plugins = Plugins([str(so)])
+    results = plugins.run(str(tmp_path)).results
 
     tbl = pa.table(results["mycount"])
     val = tbl.column("value").to_numpy(zero_copy_only=False)

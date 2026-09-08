@@ -1,37 +1,38 @@
-"""Load and run compiled DFTracer analysis plugins from Python.
+"""Build and run compiled DFTracer analysis plugins from Python.
 
 A plugin is a compiled shared library exporting the ``dftracer_plugin`` ABI
-symbol. :class:`PluginHost` loads one or more and runs them as folds over a
+symbol. :class:`Plugins` builds a fixed set of them (dlopen, ABI gate,
+capability resolution) at construction, then runs the set as folds over a
 single fused parallel scan of a trace set.
 
 Example::
 
-    from dftracer.utils.plugins import PluginHost
+    from dftracer.utils.plugins import Plugins
 
-    host = PluginHost()
-    host.load("process_counts.so")     # a compiled .so path
-    host.load(MyPlugin)                 # or a @jit.plugin class (compiled + cached)
-    results = host.run("./traces")
-    print(results["process_counts"])          # the plugin's emitted bytes
-    print(host.stats["events_scanned"])
+    plugins = Plugins(["process_counts.so", MyPlugin])  # .so path, or a
+                                                          # @jit.plugin class
+    run = plugins.run("./traces")
+    print(run.results["process_counts"])   # the plugin's emitted bytes
+    print(run.stats["events_scanned"])
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from .dataframe import DataFrame
-from .dftracer_utils_ext import PluginHost as _NativePluginHost
+from .dftracer_utils_ext import Plugins as _NativePlugins
 from .dftracer_utils_ext import _DataFrame
-from .lazyframe import LazyFrame
 
 if TYPE_CHECKING:
     import pyarrow as pa  # ty: ignore[unresolved-import]
 
+    from .lazyframe import LazyFrame
     from .runtime import Runtime
 
-__all__ = ["PluginHost", "unnest"]
+__all__ = ["Plugins", "PluginRun", "unnest"]
 
 # A JSON-serializable value tree (config is handed straight to json.dumps).
 JSONValue = Union[str, int, float, bool, None, List["JSONValue"], Dict[str, "JSONValue"]]
@@ -81,56 +82,84 @@ def unnest(
     return pa.table(_unnest(batch, column, keep_empty))
 
 
-class PluginHost:
-    """Load and run compiled DFTracer plugins over trace files."""
+def _plugin_key(plugin: Union[str, type]) -> str:
+    """The name a caller's ``config`` mapping keys this plugin by: a compiled
+    ``.so``'s stem, or a ``@jit.plugin`` class's name."""
+    if isinstance(plugin, str):
+        return Path(plugin).stem
+    return getattr(plugin, "__name__", str(plugin))
 
-    __slots__ = ("_native", "_renames", "_result_names")
 
-    def __init__(self, runtime: "Optional[Runtime]" = None) -> None:
-        """Create a host bound to ``runtime`` (a ``Runtime`` or None for the
-        module default)."""
-        self._native = _NativePluginHost(runtime)
-        self._renames: Dict[str, List[str]] = {}
-        self._result_names: Dict[str, str] = {}
+class PluginRun:
+    """The named results and scan counters of one :meth:`Plugins.run` call.
 
-    # config values are an arbitrary JSON-serializable object tree (json.dumps'd).
-    def load(self, path: Union[str, type], config: Optional[Dict[str, JSONValue]] = None) -> None:
-        """Queue the compiled plugin at ``path``.
+    ``results`` is ``{name: value}`` of every plugin's emitted results;
+    ``stats`` is the scan counters ``{"events_scanned", "events_matched"}``.
+    """
 
-        ``path`` is either a compiled ``.so`` path or a ``@jit.plugin`` class,
-        which is AST-compiled to a cached native ``.so`` first. ``config`` is an
-        optional JSON-serializable dict handed to the plugin factory. The dlopen,
-        the ABI check, and capability resolution all run when the plugin set is
-        first used, so :meth:`run` is what raises ImportError on a
-        load/symbol/ABI/capability failure. Raises DFTUtilsValueError on a bad
-        config, or jit.JitError on a compile failure.
+    __slots__ = ("results", "stats")
+
+    def __init__(self, results: "Dict[str, _RunResult]", stats: Dict[str, int]) -> None:
+        self.results = results
+        self.stats = stats
+
+
+class Plugins:
+    """A fixed, built set of compiled DFTracer plugins.
+
+    Construction builds the set immediately: dlopen, the ABI gate, and
+    capability resolution all run in ``__init__``, so a bad path, an ABI
+    mismatch, or a name collision raises ImportError there rather than from
+    :meth:`run`. The set is immutable once built.
+    """
+
+    __slots__ = ("_native",)
+
+    def __init__(
+        self,
+        plugins: "List[Union[str, type]]",
+        config: "Optional[Dict[str, Dict[str, JSONValue]]]" = None,
+        runtime: "Optional[Runtime]" = None,
+    ) -> None:
+        """Build ``plugins`` (each a compiled ``.so`` path or a ``@jit.plugin``
+        class, AST-compiled to a cached native ``.so`` first) into one set bound
+        to ``runtime`` (or the module default).
+
+        ``config`` is an optional ``{plugin_key: {...}}`` mapping, keyed by
+        :func:`_plugin_key` (a ``.so``'s filename stem, or a jit class's name);
+        each value is a JSON-serializable dict handed to that plugin's factory.
+        Raises ImportError on a load/symbol/ABI/capability failure, or
+        DFTUtilsValueError on a bad config.
         """
-        if not isinstance(path, str):
-            from . import jit
+        config = config or {}
+        result_names: Dict[str, str] = {}
+        specs = []
+        for plugin in plugins:
+            if isinstance(plugin, str):
+                path = plugin
+            else:
+                from . import jit
 
-            self._renames.update(jit.plugin_renames(path))
-            self._result_names.update(jit.plugin_result_names(path))
-            path = jit.compile_class(path)
-        self._native.load(path, json.dumps(config) if config is not None else None)
+                result_names.update(jit.plugin_result_names(plugin))
+                path = jit.compile_class(plugin)
+            cfg = config.get(_plugin_key(plugin))
+            specs.append((path, json.dumps(cfg) if cfg is not None else None))
+        self._native = _NativePlugins(specs, result_names or None, runtime)
 
     def run(
         self,
         traces: Union[str, List[str]],
         index_dir: Optional[str] = None,
         auto_index: bool = True,
-    ) -> "Dict[str, _RunResult]":
-        """Fold every loaded plugin over one fused scan of ``traces`` (a file, a
-        directory, or a list of paths).
+    ) -> PluginRun:
+        """Fold every plugin in the set over one fused scan of ``traces`` (a
+        file, a directory, or a list of paths).
 
-        With ``auto_index`` the traces are normalized and indexed first. Returns
-        the emitted named results as ``{name: value}``; the scan counters are on
-        :attr:`stats`. Raises ImportError if a loaded plugin fails to load, fails
-        the ABI check, or has an unmet or reserved capability.
+        With ``auto_index`` the traces are normalized and indexed first.
+        Returns a :class:`PluginRun` holding the named results and the scan
+        counters.
 
         A result's type depends on what the plugin emitted:
-
-        The shape follows the plugin's emit call, never whether a conversion
-        happens to succeed:
 
         - ``emit_frame`` -> our :class:`~dftracer.utils.DataFrame`, zero-copy.
           Call ``.to_arrow()`` / ``.to_pandas()`` for other shapes.
@@ -139,44 +168,19 @@ class PluginHost:
         - ``emit_lazyframe`` -> a :class:`~dftracer.utils.LazyFrame`.
         - ``emit_result`` bytes -> ``bytes``.
         """
-        raw = self._native.run(traces, index_dir, auto_index)
-        out: "Dict[str, _RunResult]" = {}
-        for wire_name, obj in raw.items():
-            name = self._result_names.get(wire_name, wire_name)
-            out[name] = self._shape(name, obj)
-        return out
+        raw_results, stats = self._native.run(traces, index_dir, auto_index)
+        results = {name: self._shape(obj) for name, obj in raw_results.items()}
+        return PluginRun(results, stats)
 
-    def _shape(self, name: str, obj: object) -> "_RunResult":
-        """Return the result in the shape its emit kind implies.
+    def _shape(self, obj: object) -> "_RunResult":
+        """Return one native result in the shape its emit kind implies.
 
-        The native layer already hands back one Python type per emit kind, so
-        this only renames a jit result's positional v0.. value columns. It must
-        never re-derive the kind by trying a conversion: coercing an Arrow
-        result into a DataFrame made the return type depend on whether the
-        engine could import the schema, so the same plugin returned a DataFrame
-        for a flat result and a pyarrow.Table for a nested one.
+        The native layer already hands back one Python type per emit kind and
+        has already applied the plugin's wire-id -> attribute-name result
+        renaming, so this only distinguishes a native frame from bytes/Arrow.
         """
         if isinstance(obj, bytes):
             return obj
         if isinstance(obj, _DataFrame):
             return DataFrame(obj)
-        fields = self._renames.get(name)
-        if not fields:
-            return obj
-
-        import pyarrow as pa
-
-        if not isinstance(obj, pa.Table):
-            return obj
-        cols = list(obj.column_names)
-        for i, field in enumerate(fields):
-            v = f"v{i}"
-            if v in cols:
-                cols[cols.index(v)] = field
-        return obj.rename_columns(cols)
-
-    @property
-    def stats(self) -> Optional[Dict[str, int]]:
-        """The last run's scan counters ``{"events_scanned", "events_matched"}``,
-        or ``None`` before the first :meth:`run`."""
-        return self._native.stats
+        return obj

@@ -4,17 +4,17 @@
 #include <Python.h>
 #include <dftracer/utils/plugins/plugins.h>
 
-// PluginHost: the Python surface over the C++ plugins::Plugins set. load()
-// queues a compiled .so plugin and run() builds the set (dlopen, ABI gate,
-// capability resolution) and drives every plugin as a fold over one fused
-// parallel scan of a trace set, returning each plugin's named results and
-// exposing the scan counters on the `stats` attribute.
+// PluginHostObject backs the Python `Plugins` type: the C++ plugins::Plugins
+// set. The set is built eagerly at construction (dlopen, ABI gate, capability
+// resolution), so a load/symbol/ABI/capability failure raises ImportError from
+// the constructor. run() drives every plugin as a fold over one fused parallel
+// scan of a trace set and returns its named results; the scan counters are
+// returned alongside them, not stored on this object.
 
 typedef struct {
     PyObject_HEAD PyObject
         *runtime_obj;  // RuntimeObject* or NULL (uses default)
     void *host_ptr;    // python::PluginHostState*
-    PyObject *stats;   // dict of the last run's scan counters, or NULL
 } PluginHostObject;
 
 extern PyTypeObject PluginHostType;
@@ -27,8 +27,8 @@ int init_plugin_host(PyObject *m);
 // its session has executed. NULL with a Python error set on failure.
 PyObject *plugin_host_results_dict(PyObject *host);
 
-// The built plugin set behind a PluginHostObject, built on first use. NULL with
-// a Python error set on a load/ABI/capability failure.
+// The built plugin set behind a PluginHostObject. NULL with a Python error set
+// if construction failed to leave a built set (should not happen post-init).
 const plugins::Plugins *plugin_host_plugins(PyObject *host);
 
 // Where a co-scan should deposit that host's named results; owned by the host

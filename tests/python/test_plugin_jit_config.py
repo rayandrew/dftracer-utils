@@ -1,5 +1,5 @@
 """jit.config: a runtime-configurable @jit.plugin. The threshold is bound at
-load from PluginHost config and read in the body as self.threshold."""
+construction from Plugins config and read in the body as self.threshold."""
 
 import gzip
 import shutil
@@ -7,7 +7,7 @@ import shutil
 import pytest
 
 from dftracer.utils import jit
-from dftracer.utils.plugins import PluginHost
+from dftracer.utils.plugins import Plugins
 
 pa = pytest.importorskip("pyarrow")
 _HAS_CXX = bool(shutil.which("c++") or shutil.which("clang++") or shutil.which("g++"))
@@ -23,9 +23,12 @@ def _write(path, durs):
             )
 
 
-def _count(host, path):
+def _count(plugins, path):
     return int(
-        pa.table(host.run(path)["hits"]).column("value").to_numpy(zero_copy_only=False).sum()
+        pa.table(plugins.run(path).results["hits"])
+        .column("value")
+        .to_numpy(zero_copy_only=False)
+        .sum()
     )
 
 
@@ -43,13 +46,11 @@ def test_jit_config_threshold_drives_behavior(tmp_path):
 
     _write(str(tmp_path / "t.pfw.gz"), [10, 20, 30, 40, 50, 60, 70])
 
-    hi = PluginHost()
-    hi.load(Slow, {"threshold": 45})
-    assert _count(hi, str(tmp_path)) == 3  # 50, 60, 70
+    hi_plugins = Plugins([Slow], config={"Slow": {"threshold": 45}})
+    assert _count(hi_plugins, str(tmp_path)) == 3  # 50, 60, 70
 
-    lo = PluginHost()
-    lo.load(Slow, {"threshold": 5})
-    assert _count(lo, str(tmp_path)) == 7  # all
+    lo_plugins = Plugins([Slow], config={"Slow": {"threshold": 5}})
+    assert _count(lo_plugins, str(tmp_path)) == 7  # all
 
 
 class TestAuthoring:

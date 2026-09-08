@@ -44,6 +44,7 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -72,12 +73,14 @@ namespace filesystem = dftracer::utils::utilities::filesystem;
 
 namespace dftracer::utils::python {
 
-// A host object's mutable side: the queued plugins, the set they build into on
-// first use, and the named results of the most recent run or session.
+// A host object's mutable side: the built set (immutable once constructed) and
+// the named results of the most recent run or session.
 struct PluginHostState {
-    Plugins::Builder builder;
     std::optional<Plugins> set;
     NamedResultRegistry results;
+    // wire id -> attribute name, so a caller indexes results[...] with the
+    // plugin's declared name rather than its package-qualified wire identity.
+    std::unordered_map<std::string, std::string> result_names;
 };
 
 }  // namespace dftracer::utils::python
@@ -90,17 +93,13 @@ PluginHostState* state_of(PluginHostObject* self) {
     return static_cast<PluginHostState*>(self->host_ptr);
 }
 
-// Build the queued plugins on first use. NULL with a Python error set on a
-// load, ABI, or capability failure.
+// The set built at construction. NULL with a Python error set if construction
+// did not leave a built set (should not happen: __init__ raises on failure).
 const Plugins* built_set(PluginHostObject* self) {
     PluginHostState* st = state_of(self);
     if (!st->set) {
-        auto built = st->builder.build();
-        if (!built) {
-            PyErr_SetString(PyExc_ImportError, built.error().message.c_str());
-            return nullptr;
-        }
-        st->set.emplace(std::move(*built));
+        PyErr_SetString(PyExc_RuntimeError, "Plugins set was not built");
+        return nullptr;
     }
     return &*st->set;
 }
@@ -726,13 +725,16 @@ PyObject* result_to_py(NamedResult& result) {
 PyObject* results_to_dict(PluginHostState* st) {
     PyObject* d = PyDict_New();
     if (!d) return nullptr;
-    for (auto& [name, result] : st->results.results()) {
+    for (auto& [wire_name, result] : st->results.results()) {
         PyObject* val = result_to_py(result);
         if (!val) {
             Py_DECREF(d);
             return nullptr;
         }
-        if (PyDict_SetItemString(d, name.c_str(), val) < 0) {
+        auto it = st->result_names.find(wire_name);
+        const std::string& key =
+            it != st->result_names.end() ? it->second : wire_name;
+        if (PyDict_SetItemString(d, key.c_str(), val) < 0) {
             Py_DECREF(val);
             Py_DECREF(d);
             return nullptr;
@@ -746,7 +748,6 @@ PyObject* ph_new(PyTypeObject* type, PyObject*, PyObject*) {
     PluginHostObject* self = (PluginHostObject*)type->tp_alloc(type, 0);
     if (!self) return nullptr;
     self->runtime_obj = nullptr;
-    self->stats = nullptr;
     self->host_ptr = new PluginHostState();
     return (PyObject*)self;
 }
@@ -754,45 +755,93 @@ PyObject* ph_new(PyTypeObject* type, PyObject*, PyObject*) {
 void ph_dealloc(PluginHostObject* self) {
     delete state_of(self);
     Py_XDECREF(self->runtime_obj);
-    Py_XDECREF(self->stats);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-int ph_init(PluginHostObject* self, PyObject* args, PyObject* kwds) {
-    return runtime_backed_init(self, args, kwds);
+bool parse_result_names(PyObject* obj,
+                        std::unordered_map<std::string, std::string>& out) {
+    if (!obj || obj == Py_None) return true;
+    if (!PyDict_Check(obj)) {
+        PyErr_SetString(PyExc_TypeError, "result_names must be a dict or None");
+        return false;
+    }
+    PyObject *key = nullptr, *value = nullptr;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(obj, &pos, &key, &value)) {
+        const char* k = as_utf8(key);
+        const char* v = as_utf8(value);
+        if (!k || !v) {
+            PyErr_SetString(PyExc_TypeError,
+                            "result_names keys and values must be str");
+            return false;
+        }
+        out.emplace(k, v);
+    }
+    return true;
 }
 
-// load(path, config=None): config is a JSON object string (the Python wrapper
-// serializes a dict). The plugin is queued; dlopen, the ABI gate, and
-// capability resolution all run when the set is first used.
-PyObject* ph_load(PluginHostObject* self, PyObject* args, PyObject* kwds) {
-    static const char* kwlist[] = {"path", "config", nullptr};
-    const char* path = nullptr;
-    const char* config_json = nullptr;
-    if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "s|z", const_cast<char**>(kwlist), &path, &config_json))
-        return nullptr;
+// __init__(specs, result_names=None, runtime=None): specs is a sequence of
+// (path, config_json_or_None) pairs; config_json is a JSON object string (the
+// Python wrapper serializes a dict). Builds the set now - dlopen, the ABI
+// gate, and capability resolution all run here, so a load/symbol/ABI/
+// capability failure raises ImportError from the constructor.
+int ph_init(PluginHostObject* self, PyObject* args, PyObject* kwds) {
+    static const char* kwlist[] = {"specs", "result_names", "runtime", nullptr};
+    PyObject* specs = nullptr;
+    PyObject* result_names_obj = nullptr;
+    PyObject* runtime_arg = nullptr;
+    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O|OO",
+                                     const_cast<char**>(kwlist), &specs,
+                                     &result_names_obj, &runtime_arg))
+        return -1;
+    if (bind_runtime_arg(self, runtime_arg) != 0) return -1;
 
     PluginHostState* st = state_of(self);
-    if (config_json) {
-        try {
-            st->builder.add(path, ConfigTree::from_json_string(config_json));
-        } catch (const std::exception& e) {
-            PyErr_SetString(dftracer::utils::python::g_dft_value_error
-                                ? dftracer::utils::python::g_dft_value_error
-                                : PyExc_ValueError,
-                            e.what());
-            return nullptr;
+    if (!parse_result_names(result_names_obj, st->result_names)) return -1;
+
+    Plugins::Builder builder;
+    PyObject* iter = PyObject_GetIter(specs);
+    if (!iter) return -1;
+    PyObject* item;
+    while ((item = PyIter_Next(iter)) != nullptr) {
+        const char* path = nullptr;
+        const char* config_json = nullptr;
+        bool ok = PyArg_ParseTuple(item, "s|z", &path, &config_json) != 0;
+        if (ok) {
+            try {
+                if (config_json)
+                    builder.add(path,
+                                ConfigTree::from_json_string(config_json));
+                else
+                    builder.add(path);
+            } catch (const std::exception& e) {
+                PyErr_SetString(dftracer::utils::python::g_dft_value_error
+                                    ? dftracer::utils::python::g_dft_value_error
+                                    : PyExc_ValueError,
+                                e.what());
+                ok = false;
+            }
         }
-    } else {
-        st->builder.add(path);
+        Py_DECREF(item);
+        if (!ok) {
+            Py_DECREF(iter);
+            return -1;
+        }
     }
-    st->set.reset();
-    Py_RETURN_NONE;
+    Py_DECREF(iter);
+    if (PyErr_Occurred()) return -1;
+
+    auto built = builder.build();
+    if (!built) {
+        PyErr_SetString(PyExc_ImportError, built.error().message.c_str());
+        return -1;
+    }
+    st->set.emplace(std::move(*built));
+    return 0;
 }
 
-// run(traces, index_dir=None, auto_index=True) -> {name: result}. Drives the
-// fused scan with the GIL released; scan counters land on the `stats` attr.
+// run(traces, index_dir=None, auto_index=True) -> (results, stats). Drives the
+// fused scan with the GIL released.
 PyObject* ph_run(PluginHostObject* self, PyObject* args, PyObject* kwds) {
     static const char* kwlist[] = {"traces", "index_dir", "auto_index",
                                    nullptr};
@@ -828,40 +877,31 @@ PyObject* ph_run(PluginHostObject* self, PyObject* args, PyObject* kwds) {
                  (long long)run.stats.events_scanned);
     dict_set_i64(stats_dict, "events_matched",
                  (long long)run.stats.events_matched);
-    Py_XSETREF(self->stats, stats_dict);
 
     PluginHostState* st = state_of(self);
     st->results = std::move(run.results);
-    return results_to_dict(st);
+    PyObject* results_dict = results_to_dict(st);
+    if (!results_dict) {
+        Py_DECREF(stats_dict);
+        return nullptr;
+    }
+    PyObject* out = PyTuple_Pack(2, results_dict, stats_dict);
+    Py_DECREF(results_dict);
+    Py_DECREF(stats_dict);
+    return out;
 }
-
-PyObject* ph_get_stats(PluginHostObject* self, void*) {
-    PyObject* s = self->stats ? self->stats : Py_None;
-    Py_INCREF(s);
-    return s;
-}
-
-PyGetSetDef ph_getset[] = {
-    {"stats", (getter)ph_get_stats, nullptr,
-     "dict of the last run's scan counters {events_scanned, events_matched}, "
-     "or None before the first run().",
-     nullptr},
-    {nullptr, nullptr, nullptr, nullptr, nullptr}};
 
 PyMethodDef ph_methods[] = {
-    {"load", DFTU_PYCFUNCTION(ph_load), METH_VARARGS | METH_KEYWORDS,
-     "load(path, config=None): dlopen a compiled plugin .so; config is a JSON "
-     "object string. Raises on load/symbol/ABI/config failure."},
     {"run", DFTU_PYCFUNCTION(ph_run), METH_VARARGS | METH_KEYWORDS,
-     "run(traces, index_dir=None, auto_index=True) -> dict: fold every loaded "
-     "plugin over one fused scan. Returns {name: bytes | pyarrow table} of the "
-     "emitted results; scan counters land on the .stats attribute."},
+     "run(traces, index_dir=None, auto_index=True) -> (dict, dict): fold every "
+     "plugin over one fused scan. Returns ({name: bytes | pyarrow table}, "
+     "{events_scanned, events_matched})."},
     {nullptr, nullptr, 0, nullptr}};
 
 }  // namespace
 
 PyTypeObject PluginHostType = {
-    PyVarObject_HEAD_INIT(nullptr, 0) "dftracer_utils_ext.PluginHost",
+    PyVarObject_HEAD_INIT(nullptr, 0) "dftracer_utils_ext.Plugins",
     sizeof(PluginHostObject),
     0,
     (destructor)ph_dealloc,
@@ -889,7 +929,7 @@ PyTypeObject PluginHostType = {
     0,
     ph_methods,
     0,
-    ph_getset,
+    0,
     0,
     0,
     0,
@@ -905,12 +945,12 @@ int dftracer::utils::python::init_plugin_host(PyObject* m) {
     if (PyModule_AddFunctions(m, unnest_methods) < 0) return -1;
     if (PyModule_AddFunctions(m, arrow_ops_methods) < 0) return -1;
 #endif
-    return register_type(m, &PluginHostType, "PluginHost");
+    return register_type(m, &PluginHostType, "Plugins");
 }
 
 PyObject* dftracer::utils::python::plugin_host_results_dict(PyObject* host) {
     if (!PyObject_TypeCheck(host, &PluginHostType)) {
-        PyErr_SetString(PyExc_TypeError, "expected a PluginHost");
+        PyErr_SetString(PyExc_TypeError, "expected a Plugins instance");
         return nullptr;
     }
     return results_to_dict(state_of((PluginHostObject*)host));
@@ -919,7 +959,7 @@ PyObject* dftracer::utils::python::plugin_host_results_dict(PyObject* host) {
 const dftracer::utils::plugins::Plugins*
 dftracer::utils::python::plugin_host_plugins(PyObject* host) {
     if (!PyObject_TypeCheck(host, &PluginHostType)) {
-        PyErr_SetString(PyExc_TypeError, "expected a PluginHost");
+        PyErr_SetString(PyExc_TypeError, "expected a Plugins instance");
         return nullptr;
     }
     return built_set((PluginHostObject*)host);
@@ -928,7 +968,7 @@ dftracer::utils::python::plugin_host_plugins(PyObject* host) {
 dftracer::utils::plugins::NamedResultRegistry*
 dftracer::utils::python::plugin_host_results(PyObject* host) {
     if (!PyObject_TypeCheck(host, &PluginHostType)) {
-        PyErr_SetString(PyExc_TypeError, "expected a PluginHost");
+        PyErr_SetString(PyExc_TypeError, "expected a Plugins instance");
         return nullptr;
     }
     return &state_of((PluginHostObject*)host)->results;

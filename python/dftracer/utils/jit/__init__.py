@@ -3,7 +3,7 @@
 Decorate a class with :func:`plugin`; its :func:`map` attributes and single
 :func:`each_event` method are AST-compiled to a C plugin against the stable ABI,
 built to a cached ``.so``, and loaded through
-:class:`dftracer.utils.plugins.PluginHost` exactly like a hand-written plugin.
+:class:`dftracer.utils.plugins.Plugins` exactly like a hand-written plugin.
 
 The ``each_event`` subset is deliberately small: an optional ``if`` guard (one
 comparison on ``e.<field>``) wrapping ``self.<map>[(<key>)] += <1 | e.<field>>``.
@@ -258,7 +258,7 @@ class _Config(Generic[T_co]):
 
 
 def config(of: "_Type[T_co]") -> T_co:
-    """Declare a runtime config field bound at load from PluginHost config.
+    """Declare a runtime config field bound at construction from Plugins config.
 
     ``threshold = jit.config(jit.i64)`` reads ``config["threshold"]`` into the
     plugin and the body reads it as ``self.threshold``. Any numeric type works
@@ -1240,7 +1240,7 @@ class JitPlugin:
         # {wire id: attribute name}: a jit.map's provides/results wire id is
         # package-qualified to avoid cross-plugin collisions, but the value a
         # caller indexes results[...] with is always the attribute name, so
-        # PluginHost.run() rewrites native result keys through this map.
+        # The extension rewrites native result keys through this map.
         self.result_names = result_names if result_names is not None else {}
         # False when built under an implicit __main__ identity (a script or
         # notebook with no JitPackage namespace); build() refuses those.
@@ -3181,7 +3181,7 @@ def vfold(cls: type) -> type:
     map is one with key columns, a scalar accumulator one with none. The host
     merges same-named accumulators across worker slices and finalizes each to a
     native DataFrame; run it through
-    :class:`dftracer.utils.plugins.PluginHost` like any other jit plugin."""
+    :class:`dftracer.utils.plugins.Plugins` like any other jit plugin."""
     return _build_vfold(cls)
 
 
@@ -3283,15 +3283,6 @@ def plugin(
     if cls is None:
         return lambda c: _build_plugin(c, needs)
     return _build_plugin(cls, needs)
-
-
-def plugin_renames(obj: object) -> Dict[str, List[str]]:
-    """Value-column rename map ``{result_name: [field, ...]}`` for a
-    ``@jit.plugin`` class, or empty if it declares no named product."""
-    spec = getattr(obj, "_jit_plugin", None)
-    if isinstance(spec, JitPlugin):
-        return spec.renames
-    return {}
 
 
 def plugin_result_names(obj: object) -> Dict[str, str]:

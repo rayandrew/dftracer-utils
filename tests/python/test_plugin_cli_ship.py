@@ -85,7 +85,7 @@ def _forget(*names: str) -> None:
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available")
 def test_build_python_plugin_spec_produces_loadable_so_and_header(tmp_path, monkeypatch):
-    from dftracer.utils.plugins import PluginHost
+    from dftracer.utils.plugins import Plugins
 
     _write_wide_plugin(tmp_path)
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -108,11 +108,10 @@ def test_build_python_plugin_spec_produces_loadable_so_and_header(tmp_path, monk
 
         n = 30
         _write_trace(str(tmp_path / "trace.pfw.gz"), n)
-        host = PluginHost()
-        host.load(str(so))
-        results = host.run(str(tmp_path / "trace.pfw.gz"))
-        assert "acme/stats.io.wide.edges" in results
-        assert host.stats["events_scanned"] == n
+        plugins = Plugins([str(so)])
+        run = plugins.run(str(tmp_path / "trace.pfw.gz"))
+        assert "acme/stats.io.wide.edges" in run.results
+        assert run.stats["events_scanned"] == n
     finally:
         _forget("acme", "acme.stats", "acme.stats.io")
 

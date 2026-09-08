@@ -18,7 +18,7 @@ import shutil
 import pytest
 
 from dftracer.utils import jit
-from dftracer.utils.plugins import PluginHost
+from dftracer.utils.plugins import Plugins
 
 pa = pytest.importorskip("pyarrow")
 
@@ -371,10 +371,8 @@ def test_jit_ports_data_crosses_producer_to_consumer(tmp_path):
 
     producer = _producer()
     consumer = _consumer(producer)
-    host = PluginHost()
-    host.load(producer)
-    host.load(consumer)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([producer, consumer])
+    results = plugins.run(str(tmp_path)).results
 
     seen = _pid_counts(pa.table(results["seen"]))
     got = _pid_counts(pa.table(results["got"]))
@@ -386,18 +384,16 @@ def test_jit_ports_data_crosses_producer_to_consumer(tmp_path):
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
 def test_jit_ports_cross_in_either_load_order(tmp_path):
-    # The consumer is loaded first; the publish/consume names the JIT derives
-    # decide the fold order, not host.load() call order.
+    # The consumer is listed first; the publish/consume names the JIT derives
+    # decide the fold order, not the Plugins([...]) list order.
     n = 80
     pids = [1, 2, 3]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids)
 
     producer = _producer()
     consumer = _consumer(producer)
-    host = PluginHost()
-    host.load(consumer)
-    host.load(producer)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([consumer, producer])
+    results = plugins.run(str(tmp_path)).results
 
     seen = _pid_counts(pa.table(results["seen"]))
     got = _pid_counts(pa.table(results["got"]))
@@ -406,17 +402,13 @@ def test_jit_ports_cross_in_either_load_order(tmp_path):
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
-def test_jit_consume_without_a_producer_fails_the_build(tmp_path):
+def test_jit_consume_without_a_producer_fails_the_build():
     # A consume port no loaded plugin publishes is a load error, not a whole
     # scan that quietly reads zero.
-    _write_trace(str(tmp_path / "trace.pfw.gz"), 40, [1, 2])
-
     producer = _producer()
     consumer = _consumer(producer)
-    host = PluginHost()
-    host.load(consumer)
     with pytest.raises(Exception, match=re.escape(producer.sig.name)):
-        host.run(str(tmp_path))
+        Plugins([consumer])
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
@@ -444,7 +436,6 @@ def test_results_key_stays_the_attr_name_with_and_without_jit_package(tmp_path):
             self.edges[(e.pid,)] += 1
 
     for cls in (Bare, Packaged):
-        host = PluginHost()
-        host.load(cls)
-        results = host.run(str(tmp_path))
+        plugins = Plugins([cls])
+        results = plugins.run(str(tmp_path)).results
         assert "edges" in results

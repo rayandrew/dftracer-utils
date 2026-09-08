@@ -14,7 +14,7 @@ import shutil
 import pytest
 
 from dftracer.utils import jit
-from dftracer.utils.plugins import PluginHost, unnest
+from dftracer.utils.plugins import Plugins, unnest
 
 np = pytest.importorskip("numpy")
 sparse = pytest.importorskip("scipy.sparse")
@@ -52,12 +52,11 @@ def test_process_file_edges_builds_adjacency(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(ProcessFileEdges)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([ProcessFileEdges])
+    run = plugins.run(str(tmp_path))
 
-    assert "process_file_edges" in results
-    tbl = pa.table(results["process_file_edges"])
+    assert "process_file_edges" in run.results
+    tbl = pa.table(run.results["process_file_edges"])
     assert tbl.column_names == ["k0", "k1", "value"]
 
     k0 = tbl.column("k0").to_numpy(zero_copy_only=False)
@@ -95,11 +94,10 @@ def test_process_file_edges_wide_builds_product_columns(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(Wide)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Wide])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["edges"])
+    tbl = pa.table(run.results["edges"])
     assert tbl.column_names == ["k0", "k1", "v0", "v1"]
 
     v0 = tbl.column("v0").to_numpy(zero_copy_only=False)
@@ -125,11 +123,10 @@ def test_name_edges_resolves_str_key_column(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(NameEdges)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([NameEdges])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["name_edges"])
+    tbl = pa.table(run.results["name_edges"])
     assert tbl.column_names == ["k0", "k1", "value"]
 
     # k1 is the STR key component resolved to a string column, not raw ids.
@@ -156,11 +153,10 @@ def test_process_file_set_builds_list_string_column(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(FileSet)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([FileSet])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["process_file_set"])
+    tbl = pa.table(run.results["process_file_set"])
     assert tbl.column_names == ["k0", "value"]
 
     # value is a String column: the set of files each pid touched, sorted and
@@ -204,11 +200,10 @@ def test_process_event_seq_builds_ts_ordered_list(tmp_path):
     ]
     _write_seq_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(EventSeq)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([EventSeq])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["process_event_seq"])
+    tbl = pa.table(run.results["process_event_seq"])
     assert tbl.column_names == ["k0", "value"]
 
     vtype = tbl.schema.field("value").type
@@ -242,9 +237,8 @@ def test_many_keys_stay_one_accumulator(tmp_path):
             if e.fhash != jit.NONE:
                 self.process_file_edges[(e.pid, e.fhash)] += 1
 
-    host = PluginHost()
-    host.load(Edges)
-    tbl = pa.table(host.run(str(tmp_path))["process_file_edges"])
+    plugins = Plugins([Edges])
+    tbl = pa.table(plugins.run(str(tmp_path)).results["process_file_edges"])
 
     assert tbl.column_names == ["k0", "k1", "value"]
     assert tbl.num_rows == keys
@@ -283,11 +277,10 @@ def test_process_pid_durs_builds_ts_ordered_int64_list(tmp_path):
     ]
     _write_dur_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(PidDurs)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([PidDurs])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["process_pid_durs"])
+    tbl = pa.table(run.results["process_pid_durs"])
     assert tbl.column_names == ["k0", "value"]
 
     vtype = tbl.schema.field("value").type
@@ -374,13 +367,12 @@ def test_unnest_aggregated_set_recovers_edges(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(FileSet)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([FileSet])
+    run = plugins.run(str(tmp_path))
 
     # The aggregated per-pid file set explodes back into scannable (pid, file)
     # rows: the inverse of the set-union aggregate.
-    out = unnest(pa.table(results["process_file_set"]), "value")
+    out = unnest(pa.table(run.results["process_file_set"]), "value")
     assert out.column_names == ["k0", "value"]
     edges = set(zip(out.column("k0").to_pylist(), out.column("value").to_pylist()))
     assert edges == {(p, f) for p in pids for f in files}

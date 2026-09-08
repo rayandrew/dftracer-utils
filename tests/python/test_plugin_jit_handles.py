@@ -14,7 +14,7 @@ import shutil
 import pytest
 
 from dftracer.utils import jit
-from dftracer.utils.plugins import PluginHost
+from dftracer.utils.plugins import Plugins
 
 pa = pytest.importorskip("pyarrow")
 
@@ -121,9 +121,8 @@ def test_jit_scalar_accumulators_merge_across_scan(tmp_path):
     durs = [10 + i for i in range(200)]
     _write_trace(str(tmp_path / "trace.pfw.gz"), durs)
 
-    host = PluginHost()
-    host.load(_stats_plugin())
-    results = host.run(str(tmp_path))
+    plugins = Plugins([_stats_plugin()])
+    results = plugins.run(str(tmp_path)).results
 
     # The per-pid accumulator still materializes normally.
     per_pid = pa.table(results["per_pid"])
@@ -152,9 +151,8 @@ def test_jit_scalar_only_plugin(tmp_path):
     durs = [5 + i for i in range(50)]
     _write_trace(str(tmp_path / "trace.pfw.gz"), durs)
 
-    host = PluginHost()
-    host.load(CountOnly)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([CountOnly])
+    results = plugins.run(str(tmp_path)).results
 
     assert _scalar(results, "n") == len(durs)
 
@@ -184,11 +182,5 @@ def test_jit_same_named_accumulator_in_two_plugins_fails_the_build(tmp_path):
     b = _shared_total_plugin()
     assert a._jit_plugin.result_names == b._jit_plugin.result_names
 
-    durs = [3 + i for i in range(40)]
-    _write_trace(str(tmp_path / "trace.pfw.gz"), durs)
-
-    host = PluginHost()
-    host.load(a)
-    host.load(b)
     with pytest.raises(Exception, match="shared_total"):
-        host.run(str(tmp_path))
+        Plugins([a, b])

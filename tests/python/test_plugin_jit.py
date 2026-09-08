@@ -2,7 +2,7 @@
 """End-to-end test for @jit.plugin authoring.
 
 A plugin authored in Python is AST-compiled to a native C plugin, built to a
-cached .so, and run through PluginHost. The result must be identical to the
+cached .so, and run through Plugins. The result must be identical to the
 hand-written name_edges plugin: a {pid, event-name} COUNTER map materialized to
 an Arrow table [k0:int64, k1:string, value:int64] whose value column sums to the
 event count.
@@ -16,7 +16,7 @@ import statistics
 import pytest
 
 from dftracer.utils import jit
-from dftracer.utils.plugins import PluginHost
+from dftracer.utils.plugins import Plugins
 
 pa = pytest.importorskip("pyarrow")
 
@@ -72,22 +72,20 @@ def test_jit_plan_query_narrows_scan(tmp_path):
         def step(self, e):
             self.hits[(e.pid,)] += 1
 
-    pruned_host = PluginHost()
-    pruned_host.load(Pruned)
-    pruned_res = pruned_host.run(files)
-    pruned_scanned = pruned_host.stats["events_scanned"]
+    pruned_plugins = Plugins([Pruned])
+    pruned_run = pruned_plugins.run(files)
+    pruned_scanned = pruned_run.stats["events_scanned"]
 
-    full_host = PluginHost()
-    full_host.load(Full)
-    full_res = full_host.run(files)
-    full_scanned = full_host.stats["events_scanned"]
+    full_plugins = Plugins([Full])
+    full_run = full_plugins.run(files)
+    full_scanned = full_run.stats["events_scanned"]
 
     assert full_scanned == 2 * n
     assert pruned_scanned == n
     assert pruned_scanned < full_scanned
 
-    pruned_val = pa.table(pruned_res["hits"]).column("value").to_numpy(zero_copy_only=False)
-    full_val = pa.table(full_res["hits"]).column("value").to_numpy(zero_copy_only=False)
+    pruned_val = pa.table(pruned_run.results["hits"]).column("value").to_numpy(zero_copy_only=False)
+    full_val = pa.table(full_run.results["hits"]).column("value").to_numpy(zero_copy_only=False)
     assert int(pruned_val.sum()) == n
     assert int(full_val.sum()) == 2 * n
 
@@ -118,11 +116,10 @@ def test_jit_string_literal_guard_counts_matching(tmp_path):
     _write_mixed_trace(str(tmp_path / "trace.pfw.gz"), n, cats)
     expected = sum(1 for i in range(n) if cats[i % len(cats)] == "POSIX")
 
-    host = PluginHost()
-    host.load(OnlyPosix)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([OnlyPosix])
+    run = plugins.run(str(tmp_path))
 
-    val = pa.table(results["hits"]).column("value").to_numpy(zero_copy_only=False)
+    val = pa.table(run.results["hits"]).column("value").to_numpy(zero_copy_only=False)
     assert int(val.sum()) == expected
 
 
@@ -142,11 +139,10 @@ def test_jit_string_literal_ne_guard(tmp_path):
     _write_mixed_trace(str(tmp_path / "trace.pfw.gz"), n, cats)
     expected = sum(1 for i in range(n) if cats[i % len(cats)] != "POSIX")
 
-    host = PluginHost()
-    host.load(NotPosix)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([NotPosix])
+    run = plugins.run(str(tmp_path))
 
-    val = pa.table(results["hits"]).column("value").to_numpy(zero_copy_only=False)
+    val = pa.table(run.results["hits"]).column("value").to_numpy(zero_copy_only=False)
     assert int(val.sum()) == expected
 
 
@@ -192,12 +188,11 @@ def test_jit_name_edges_matches_handwritten(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(NameEdges)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([NameEdges])
+    run = plugins.run(str(tmp_path))
 
-    assert "edges" in results
-    tbl = pa.table(results["edges"])
+    assert "edges" in run.results
+    tbl = pa.table(run.results["edges"])
     assert tbl.column_names == ["k0", "k1", "value"]
     assert pa.types.is_string(tbl.schema.field("k1").type)
 
@@ -225,12 +220,11 @@ def test_jit_wide_edges_matches_handwritten(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(WideEdges)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([WideEdges])
+    run = plugins.run(str(tmp_path))
 
-    assert "edges" in results
-    tbl = pa.table(results["edges"])
+    assert "edges" in run.results
+    tbl = pa.table(run.results["edges"])
     assert tbl.column_names == ["k0", "k1", "v0", "v1"]
     assert pa.types.is_int64(tbl.schema.field("k0").type)
     assert pa.types.is_string(tbl.schema.field("k1").type)
@@ -263,11 +257,10 @@ def test_jit_dict_value_names_columns(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(Wide)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Wide])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["edges"])
+    tbl = pa.table(run.results["edges"])
     assert tbl.column_names == ["k0", "k1", "count", "dur"]
     assert pa.types.is_int64(tbl.schema.field("count").type)
     assert pa.types.is_float64(tbl.schema.field("dur").type)
@@ -297,11 +290,10 @@ def test_jit_dict_value_positional_and_named(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(Wide)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Wide])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["edges"])
+    tbl = pa.table(run.results["edges"])
     assert tbl.column_names == ["k0", "k1", "count", "dur"]
     assert int(tbl.column("count").to_numpy(zero_copy_only=False).sum()) == n
     assert float(tbl.column("dur").to_numpy(zero_copy_only=False).sum()) == float(
@@ -331,11 +323,10 @@ def test_jit_record_value_form(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(Wide)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Wide])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["edges"])
+    tbl = pa.table(run.results["edges"])
     assert tbl.column_names == ["k0", "k1", "count", "dur"]
     assert int(tbl.column("count").to_numpy(zero_copy_only=False).sum()) == n
     assert float(tbl.column("dur").to_numpy(zero_copy_only=False).sum()) == float(
@@ -370,11 +361,10 @@ def test_jit_single_sum_map(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(DurSum)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([DurSum])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["tot"])
+    tbl = pa.table(run.results["tot"])
     assert tbl.column_names == ["k0", "value"]
     assert pa.types.is_float64(tbl.schema.field("value").type)
     val = tbl.column("value").to_numpy(zero_copy_only=False)
@@ -396,11 +386,10 @@ def test_jit_arithmetic_doubles_sum(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(DurSumX2)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([DurSumX2])
+    run = plugins.run(str(tmp_path))
 
-    val = pa.table(results["tot"]).column("value").to_numpy(zero_copy_only=False)
+    val = pa.table(run.results["tot"]).column("value").to_numpy(zero_copy_only=False)
     assert float(val.sum()) == float(2 * sum(10 + i for i in range(n)))
 
 
@@ -417,11 +406,10 @@ def test_jit_primitive_ilog2_buckets_duration(tmp_path):
     n = 60
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, [1, 2], ["fileA", "fileB"])
 
-    host = PluginHost()
-    host.load(DurHist)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([DurHist])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["hist"])
+    tbl = pa.table(run.results["hist"])
     got = dict(zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist()))
 
     expected: dict = {}
@@ -444,11 +432,10 @@ def test_jit_float_primitives_sum(tmp_path):
     n = 60
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, [1, 2], ["fileA", "fileB"])
 
-    host = PluginHost()
-    host.load(SqrtSum)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([SqrtSum])
+    run = plugins.run(str(tmp_path))
 
-    val = pa.table(results["tot"]).column("value").to_numpy(zero_copy_only=False)
+    val = pa.table(run.results["tot"]).column("value").to_numpy(zero_copy_only=False)
     import math
 
     expected = sum(math.sqrt(math.log2(10 + i)) for i in range(n))
@@ -609,14 +596,13 @@ def test_jit_cse_result_matches_unfused(tmp_path):
 
     n = 60
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, [1, 2], ["fileA"])
-    host = PluginHost()
-    host.load(Buckets)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Buckets])
+    run = plugins.run(str(tmp_path))
 
     counts = dict(
         zip(
-            pa.table(results["n"]).column("k0").to_pylist(),
-            pa.table(results["n"]).column("value").to_pylist(),
+            pa.table(run.results["n"]).column("k0").to_pylist(),
+            pa.table(run.results["n"]).column("value").to_pylist(),
         )
     )
     exp: dict = {}
@@ -680,21 +666,20 @@ def test_jit_same_key_maps_match_separately_computed(tmp_path):
 
     m = 60
     _write_trace(str(tmp_path / "trace.pfw.gz"), m, [1, 2], ["fileA"])
-    host = PluginHost()
-    host.load(Stats)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Stats])
+    run = plugins.run(str(tmp_path))
 
     # Two same-key maps surface as the two separate declared tables.
     ncount = dict(
         zip(
-            pa.table(results["n"]).column("k0").to_pylist(),
-            pa.table(results["n"]).column("value").to_pylist(),
+            pa.table(run.results["n"]).column("k0").to_pylist(),
+            pa.table(run.results["n"]).column("value").to_pylist(),
         )
     )
     tot = dict(
         zip(
-            pa.table(results["tot"]).column("k0").to_pylist(),
-            pa.table(results["tot"]).column("value").to_pylist(),
+            pa.table(run.results["tot"]).column("k0").to_pylist(),
+            pa.table(run.results["tot"]).column("value").to_pylist(),
         )
     )
     assert sum(ncount.values()) == m
@@ -728,10 +713,9 @@ def test_jit_accepts_large_in_range_literal(tmp_path):
 
     n = 5
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, [1], ["fileA"])
-    host = PluginHost()
-    host.load(BigKey)
-    results = host.run(str(tmp_path))
-    tbl = pa.table(results["m"])
+    plugins = Plugins([BigKey])
+    run = plugins.run(str(tmp_path))
+    tbl = pa.table(run.results["m"])
     assert tbl.column("k0").to_pylist() == [1099511627776]
     assert int(tbl.column("value")[0].as_py()) == n
 
@@ -757,11 +741,10 @@ def test_jit_raw_body_reproduces_name_edges(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(RawEdges)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([RawEdges])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["edges"])
+    tbl = pa.table(run.results["edges"])
     assert tbl.column_names == ["k0", "k1", "value"]
     assert set(tbl.column("k1").to_pylist()) == {"read"}
     assert int(tbl.column("value").to_numpy(zero_copy_only=False).sum()) == n
@@ -809,11 +792,10 @@ def test_jit_quantiles_per_key(tmp_path):
                 f'"ts":{1000 + i},"dur":{i},"ph":"X","args":{{}}}}\n'
             )
 
-    host = PluginHost()
-    host.load(Lat)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Lat])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["lat"])
+    tbl = pa.table(run.results["lat"])
     assert tbl.column_names == ["k0", "count", "p50", "p90", "p99"]
     assert int(tbl.column("count")[0].as_py()) == 1000
     # DDSketch is ~1% relative error.
@@ -868,11 +850,10 @@ def test_jit_distinct_count_per_key(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(OutDeg)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([OutDeg])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["outdeg"])
+    tbl = pa.table(run.results["outdeg"])
     assert tbl.column_names == ["k0", "value"]
     assert pa.types.is_int64(tbl.schema.field("value").type)
     kv = _kv(tbl)
@@ -897,9 +878,8 @@ def test_jit_min_max_observe(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(Lat)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Lat])
+    run = plugins.run(str(tmp_path))
 
     exp_min: dict = {}
     exp_max: dict = {}
@@ -909,8 +889,8 @@ def test_jit_min_max_observe(tmp_path):
         exp_min[pid] = builtins.min(exp_min.get(pid, dur), dur)
         exp_max[pid] = builtins.max(exp_max.get(pid, dur), dur)
 
-    lo = _kv(pa.table(results["lo"]))
-    hi = _kv(pa.table(results["hi"]))
+    lo = _kv(pa.table(run.results["lo"]))
+    hi = _kv(pa.table(run.results["hi"]))
     assert {k: int(v) for k, v in lo.items()} == exp_min
     assert {k: int(v) for k, v in hi.items()} == exp_max
 
@@ -931,11 +911,10 @@ def test_jit_product_mixed_add_and_observe(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(Mixed)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Mixed])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["m"])
+    tbl = pa.table(run.results["m"])
     assert tbl.column_names == ["k0", "cnt", "lo"]
     assert pa.types.is_int64(tbl.schema.field("cnt").type)
     assert pa.types.is_int64(tbl.schema.field("lo").type)
@@ -967,9 +946,8 @@ def test_jit_minf_maxf_observe(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(LatF)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([LatF])
+    run = plugins.run(str(tmp_path))
 
     exp_min: dict = {}
     exp_max: dict = {}
@@ -979,9 +957,9 @@ def test_jit_minf_maxf_observe(tmp_path):
         exp_min[pid] = builtins.min(exp_min.get(pid, dur), dur)
         exp_max[pid] = builtins.max(exp_max.get(pid, dur), dur)
 
-    assert pa.types.is_float64(pa.table(results["lo"]).schema.field("value").type)
-    lo = _kv(pa.table(results["lo"]))
-    hi = _kv(pa.table(results["hi"]))
+    assert pa.types.is_float64(pa.table(run.results["lo"]).schema.field("value").type)
+    lo = _kv(pa.table(run.results["lo"]))
+    hi = _kv(pa.table(run.results["hi"]))
     assert {k: float(v) for k, v in lo.items()} == {k: float(v) for k, v in exp_min.items()}
     assert {k: float(v) for k, v in hi.items()} == {k: float(v) for k, v in exp_max.items()}
 
@@ -1012,11 +990,10 @@ def test_jit_set_collects_distinct_names_per_pid(tmp_path):
     names = ["read", "write", "open"]
     _write_named_trace(str(tmp_path / "trace.pfw.gz"), n, pids, names)
 
-    host = PluginHost()
-    host.load(Files)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Files])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["files"])
+    tbl = pa.table(run.results["files"])
     assert tbl.column_names == ["k0", "value"]
     assert pa.types.is_string(tbl.schema.field("value").type)
 
@@ -1054,11 +1031,10 @@ def test_jit_list_collects_ts_ordered_names_per_pid(tmp_path):
     ]
     _write_seq_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(Seq)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Seq])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["seq"])
+    tbl = pa.table(run.results["seq"])
     assert tbl.column_names == ["k0", "value"]
     vtype = tbl.schema.field("value").type
     assert pa.types.is_list(vtype)
@@ -1231,11 +1207,10 @@ def test_jit_set_i64_collects_distinct_durs_sorted(tmp_path):
     ]
     _write_dur_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(Durs)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Durs])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["durs"])
+    tbl = pa.table(run.results["durs"])
     assert tbl.column_names == ["k0", "value"]
     assert pa.types.is_string(tbl.schema.field("value").type)
 
@@ -1265,11 +1240,10 @@ def test_jit_list_i64_collects_ts_ordered_durs(tmp_path):
     ]
     _write_dur_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(Durs)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Durs])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["durs"])
+    tbl = pa.table(run.results["durs"])
     assert tbl.column_names == ["k0", "value"]
     vtype = tbl.schema.field("value").type
     assert pa.types.is_list(vtype)
@@ -1329,12 +1303,11 @@ def test_jit_multikey_counts_group_by_both_columns(tmp_path):
     rows = [(3, 7), (1, 2), (3, 1), (1, 9), (2, 5), (1, 2), (3, 7), (2, 5)]
     _write_pid_tid_trace(str(tmp_path / "trace.pfw.gz"), rows)
 
-    host = PluginHost()
-    host.load(Two)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Two])
+    run = plugins.run(str(tmp_path))
 
-    asc = pa.table(results["asc"])
-    plain = pa.table(results["plain"])
+    asc = pa.table(run.results["asc"])
+    plain = pa.table(run.results["plain"])
 
     asc_keys = list(zip(asc.column("k0").to_pylist(), asc.column("k1").to_pylist()))
     asc_vals = dict(zip(asc_keys, asc.column("value").to_pylist()))
@@ -1360,11 +1333,10 @@ def test_jit_integer_key_columns(tmp_path):
     rows = [(1000, 7), (1000, 7), (2000, 9), (2000, 9), (2000, 9)]
     _write_pid_tid_trace(str(tmp_path / "trace.pfw.gz"), rows)
 
-    host = PluginHost()
-    host.load(Typed)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Typed])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["m"])
+    tbl = pa.table(run.results["m"])
     assert tbl.column_names == ["k0", "k1", "value"]
     assert pa.types.is_int64(tbl.schema.field("k0").type)
     assert pa.types.is_int64(tbl.schema.field("k1").type)
@@ -1395,11 +1367,10 @@ def test_jit_f64_key_column(tmp_path):
     events = [(1, 10, 1), (1, 10, 2), (1, 20, 3), (1, 20, 4), (1, 20, 5)]
     _write_dur_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(ByDur)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([ByDur])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["m"])
+    tbl = pa.table(run.results["m"])
     assert tbl.column_names == ["k0", "value"]
     assert pa.types.is_float64(tbl.schema.field("k0").type)
 
@@ -1427,19 +1398,18 @@ def test_jit_min_max_value_columns(tmp_path):
     events = [(1, 3, 10), (1, 11, 20), (1, 4000000000, 30)]
     _write_dur_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(Vals)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Vals])
+    run = plugins.run(str(tmp_path))
 
-    mn = pa.table(results["mn"])
+    mn = pa.table(run.results["mn"])
     assert pa.types.is_integer(mn.schema.field("value").type)
     assert mn.column("value").to_pylist() == [-5]
 
-    mx = pa.table(results["mx"])
+    mx = pa.table(run.results["mx"])
     assert pa.types.is_integer(mx.schema.field("value").type)
     assert mx.column("value").to_pylist() == [4000000000]
 
-    mf = pa.table(results["mf"])
+    mf = pa.table(run.results["mf"])
     assert pa.types.is_floating(mf.schema.field("value").type)
     assert mf.column("value").to_pylist() == [1.5]
 
@@ -1487,11 +1457,10 @@ def test_jit_arg_f64_as_value_sums(tmp_path):
     tags = ["ta", "tb", "tc"]
     _write_arg_trace(str(tmp_path / "trace.pfw.gz"), n, pids, tags)
 
-    host = PluginHost()
-    host.load(Bw)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Bw])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["bw"])
+    tbl = pa.table(run.results["bw"])
     assert pa.types.is_float64(tbl.schema.field("value").type)
     val = tbl.column("value").to_numpy(zero_copy_only=False)
     assert float(val.sum()) == float(builtins.sum(i * 0.5 for i in range(n)))
@@ -1512,11 +1481,10 @@ def test_jit_arg_i64_into_counter_sums(tmp_path):
     tags = ["ta", "tb", "tc"]
     _write_arg_trace(str(tmp_path / "trace.pfw.gz"), n, pids, tags)
 
-    host = PluginHost()
-    host.load(Sizes)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Sizes])
+    run = plugins.run(str(tmp_path))
 
-    val = pa.table(results["tot"]).column("value").to_numpy(zero_copy_only=False)
+    val = pa.table(run.results["tot"]).column("value").to_numpy(zero_copy_only=False)
     assert int(val.sum()) == builtins.sum(100 + i for i in range(n))
 
 
@@ -1535,11 +1503,10 @@ def test_jit_arg_i64_as_key(tmp_path):
     tags = ["ta", "tb", "tc"]
     _write_arg_trace(str(tmp_path / "trace.pfw.gz"), n, pids, tags)
 
-    host = PluginHost()
-    host.load(ByRank)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([ByRank])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["cnt"])
+    tbl = pa.table(run.results["cnt"])
     kv = _kv(tbl)
     expected: dict = {}
     for i in range(n):
@@ -1562,11 +1529,10 @@ def test_jit_arg_str_set_element(tmp_path):
     tags = ["ta", "tb", "tc"]
     _write_arg_trace(str(tmp_path / "trace.pfw.gz"), n, pids, tags)
 
-    host = PluginHost()
-    host.load(Tags)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Tags])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["tags"])
+    tbl = pa.table(run.results["tags"])
     assert pa.types.is_string(tbl.schema.field("value").type)
     by_pid = _sets(tbl)
     assert by_pid[1] == sorted(tags)
@@ -1637,11 +1603,10 @@ def test_jit_two_key_counter_per_pid_file(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(PidFileCounts)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([PidFileCounts])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["m"])
+    tbl = pa.table(run.results["m"])
     assert tbl.column_names == ["k0", "k1", "value"]
     assert pa.types.is_int64(tbl.schema.field("k0").type)
     assert pa.types.is_string(tbl.schema.field("k1").type)
@@ -1680,11 +1645,10 @@ def test_jit_two_key_product_count_and_sum(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    host = PluginHost()
-    host.load(PidFileStats)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([PidFileStats])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["m"])
+    tbl = pa.table(run.results["m"])
     assert tbl.column_names == ["k0", "k1", "cnt", "dur"]
     assert pa.types.is_int64(tbl.schema.field("cnt").type)
     assert pa.types.is_float64(tbl.schema.field("dur").type)
@@ -1745,11 +1709,10 @@ def test_jit_flat_multikey_chained_subscript_sugar(tmp_path):
     rows = [(1, 7), (1, 7), (2, 9), (2, 9), (2, 9)]
     _write_pid_tid_trace(str(tmp_path / "trace.pfw.gz"), rows)
 
-    host = PluginHost()
-    host.load(Chained)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Chained])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["m"])
+    tbl = pa.table(run.results["m"])
     assert tbl.column_names == ["k0", "k1", "value"]
     kv = {
         (k0, k1): v
@@ -1797,13 +1760,11 @@ def test_jit_bare_single_key_matches_tuple_form(tmp_path):
     files = ["fileA", "fileB", "fileC"]
     _write_trace(str(tmp_path / "trace.pfw.gz"), n, pids, files)
 
-    bare_host = PluginHost()
-    bare_host.load(Bare)
-    bare = _kv(pa.table(bare_host.run(str(tmp_path))["m"]))
+    bare_plugins = Plugins([Bare])
+    bare = _kv(pa.table(bare_plugins.run(str(tmp_path)).results["m"]))
 
-    tup_host = PluginHost()
-    tup_host.load(Tupled)
-    tup = _kv(pa.table(tup_host.run(str(tmp_path))["m"]))
+    tup_plugins = Plugins([Tupled])
+    tup = _kv(pa.table(tup_plugins.run(str(tmp_path)).results["m"]))
 
     assert {int(k): int(v) for k, v in bare.items()} == {int(k): int(v) for k, v in tup.items()}
     assert int(sum(bare.values())) == n
@@ -1841,11 +1802,10 @@ def test_jit_str_key_map_groups_by_label(tmp_path):
     names = ["cat", "apple", "cat", "banana", "apple", "cat"]
     _write_name_only_trace(str(tmp_path / "trace.pfw.gz"), names)
 
-    host = PluginHost()
-    host.load(ByName)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([ByName])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["by_name"])
+    tbl = pa.table(run.results["by_name"])
     keys = tbl.column("k0").to_pylist()
     vals = tbl.column("value").to_pylist()
 
@@ -1867,11 +1827,10 @@ def test_jit_variance_matches_handcomputed(tmp_path):
     events = [(1, 20, 10), (1, 5, 20), (1, 20, 30), (1, 8, 40), (2, 3, 1), (2, 7, 5)]
     _write_dur_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(DurVar)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([DurVar])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["dv"])
+    tbl = pa.table(run.results["dv"])
     assert tbl.column_names == ["k0", "value"]
     assert pa.types.is_float64(tbl.schema.field("value").type)
 
@@ -1898,18 +1857,17 @@ def test_jit_mean_and_stddev_columns(tmp_path):
     events = [(1, 20, 10), (1, 5, 20), (1, 20, 30), (1, 8, 40), (2, 3, 1), (2, 7, 5)]
     _write_dur_trace(str(tmp_path / "trace.pfw.gz"), events)
 
-    host = PluginHost()
-    host.load(DurStats)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([DurStats])
+    run = plugins.run(str(tmp_path))
 
-    assert pa.types.is_float64(pa.table(results["mu"]).schema.field("value").type)
-    assert pa.types.is_float64(pa.table(results["sd"]).schema.field("value").type)
+    assert pa.types.is_float64(pa.table(run.results["mu"]).schema.field("value").type)
+    assert pa.types.is_float64(pa.table(run.results["sd"]).schema.field("value").type)
 
     durs: dict = {}
     for pid, dur, _ts in events:
         durs.setdefault(pid, []).append(dur)
-    mu = _kv(pa.table(results["mu"]))
-    sd = _kv(pa.table(results["sd"]))
+    mu = _kv(pa.table(run.results["mu"]))
+    sd = _kv(pa.table(run.results["sd"]))
     for pid, vs in durs.items():
         assert float(mu[pid]) == pytest.approx(statistics.mean(vs))
         assert float(sd[pid]) == pytest.approx(statistics.stdev(vs))
@@ -1942,12 +1900,11 @@ def test_jit_argmax_argmin_str_payload(tmp_path):
     rows = [(1, "a", 5), (1, "b", 30), (1, "c", 10), (2, "x", 7), (2, "y", 2)]
     _write_file_dur_trace(str(tmp_path / "trace.pfw.gz"), rows)
 
-    host = PluginHost()
-    host.load(HotCold)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([HotCold])
+    run = plugins.run(str(tmp_path))
 
-    hot = pa.table(results["hot"])
-    cold = pa.table(results["cold"])
+    hot = pa.table(run.results["hot"])
+    cold = pa.table(run.results["cold"])
     assert pa.types.is_string(hot.schema.field("value").type)
     hot_by_pid = {
         k: v for k, v in zip(hot.column("k0").to_pylist(), hot.column("value").to_pylist())
@@ -1982,11 +1939,10 @@ def test_jit_argmax_i64_payload(tmp_path):
     rows = [(1, 7, 10), (1, 8, 30), (1, 9, 20), (2, 5, 40), (2, 6, 15)]
     _write_tid_dur_trace(str(tmp_path / "trace.pfw.gz"), rows)
 
-    host = PluginHost()
-    host.load(SlowTid)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([SlowTid])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["tid_at_max"])
+    tbl = pa.table(run.results["tid_at_max"])
     # argmax reports the String repr of the payload whatever its column type.
     assert pa.types.is_string(tbl.schema.field("value").type)
     got = dict(zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist()))
@@ -2078,11 +2034,10 @@ def test_jit_topk_keeps_extreme_payloads_in_order(tmp_path):
 
     _write_row_trace(str(tmp_path / "trace.pfw.gz"), _ROWS)
 
-    host = PluginHost()
-    host.load(Hot)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Hot])
+    run = plugins.run(str(tmp_path))
 
-    hot = pa.table(results["hot"])
+    hot = pa.table(run.results["hot"])
     vtype = hot.schema.field("value").type
     assert pa.types.is_list(vtype)
     assert pa.types.is_string(vtype.value_type)
@@ -2093,7 +2048,7 @@ def test_jit_topk_keeps_extreme_payloads_in_order(tmp_path):
     assert hot_by_pid[1] == ["b", "c"]
     assert hot_by_pid[2] == ["y", "x"]
 
-    low = pa.table(results["low"])
+    low = pa.table(run.results["low"])
     assert pa.types.is_string(low.schema.field("value").type.value_type)
     low_by_pid = {
         k: v for k, v in zip(low.column("k0").to_pylist(), low.column("value").to_pylist())
@@ -2116,11 +2071,10 @@ def test_jit_approx_topk_exact_when_k_ge_distinct(tmp_path):
 
     _write_row_trace(str(tmp_path / "trace.pfw.gz"), _ROWS)
 
-    host = PluginHost()
-    host.load(Freq)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Freq])
+    run = plugins.run(str(tmp_path))
 
-    tbl = pa.table(results["freq"])
+    tbl = pa.table(run.results["freq"])
     vtype = tbl.schema.field("value").type
     assert pa.types.is_list(vtype)
     assert pa.types.is_struct(vtype.value_type)
@@ -2148,21 +2102,20 @@ def test_jit_sample_keeps_items_from_input(tmp_path):
 
     _write_row_trace(str(tmp_path / "trace.pfw.gz"), _ROWS)
 
-    host = PluginHost()
-    host.load(Samp)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Samp])
+    run = plugins.run(str(tmp_path))
 
     # The sample keeps String reprs of the distinct values.
     ts_by_pid = {1: {"1000", "1001", "1002", "1003"}, 2: {"2000", "2001"}}
 
-    tbl = pa.table(results["samp"])
+    tbl = pa.table(run.results["samp"])
     assert pa.types.is_string(tbl.schema.field("value").type.value_type)
     by_pid = {k: v for k, v in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist())}
     # k >= distinct: the full distinct set, sorted.
     assert by_pid[1] == sorted(ts_by_pid[1])
     assert by_pid[2] == sorted(ts_by_pid[2])
 
-    small = pa.table(results["small"])
+    small = pa.table(run.results["small"])
     sm_by_pid = {
         k: v for k, v in zip(small.column("k0").to_pylist(), small.column("value").to_pylist())
     }
@@ -2188,18 +2141,17 @@ def test_jit_argmax_keeps_each_winning_field(tmp_path):
 
     _write_row_trace(str(tmp_path / "trace.pfw.gz"), _ROWS)
 
-    host = PluginHost()
-    host.load(Slow)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([Slow])
+    run = plugins.run(str(tmp_path))
 
     def col(name):
-        tbl = pa.table(results[name])
+        tbl = pa.table(run.results[name])
         assert tbl.column_names == ["k0", "value"]
         return dict(zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist()))
 
     who, tid, ts = col("who"), col("tid"), col("ts")
     for name in ("who", "tid", "ts"):
-        assert pa.types.is_string(pa.table(results[name]).schema.field("value").type)
+        assert pa.types.is_string(pa.table(run.results[name]).schema.field("value").type)
     # The (fhash, tid, ts) at the max dur, per pid, as String reprs.
     assert (who[1], tid[1], ts[1]) == ("b", "8", "1001")
     assert (who[2], tid[2], ts[2]) == ("y", "6", "2001")
@@ -2290,13 +2242,12 @@ def test_jit_guarded_accumulator_keys_are_independent(tmp_path):
 
     _write_join_trace(str(tmp_path / "trace.pfw.gz"), _JOIN_ROWS)
 
-    host = PluginHost()
-    host.load(PidStats)
-    results = host.run(str(tmp_path))
+    plugins = Plugins([PidStats])
+    run = plugins.run(str(tmp_path))
 
-    assert _kv(pa.table(results["counts"])) == {1: 2, 2: 3}
+    assert _kv(pa.table(run.results["counts"])) == {1: 2, 2: 3}
     # Only pid 1 ever fed the guarded accumulator, so pid 2 has no row there.
-    assert _kv(pa.table(results["durs"])) == {1: 30.0}
+    assert _kv(pa.table(run.results["durs"])) == {1: 30.0}
 
 
 @jit.plugin

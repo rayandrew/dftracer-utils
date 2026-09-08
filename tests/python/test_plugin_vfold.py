@@ -8,7 +8,7 @@ import shutil
 import pytest
 
 from dftracer.utils import jit
-from dftracer.utils.plugins import PluginHost
+from dftracer.utils.plugins import Plugins
 
 pa = pytest.importorskip("pyarrow")
 _HAS_CXX = bool(shutil.which("c++") or shutil.which("clang++") or shutil.which("g++"))
@@ -48,9 +48,8 @@ def test_vfold_scalar_sum(tmp_path):
 
     durs = [10, 20, 30, 40, 50]
     _write_trace(str(tmp_path / "t.pfw.gz"), durs)
-    host = PluginHost()
-    host.load(Busy)
-    result = host.run(str(tmp_path))
+    plugins = Plugins([Busy])
+    result = plugins.run(str(tmp_path)).results
     assert float(_value(result, "total").sum()) == float(sum(durs))  # 150
 
 
@@ -68,9 +67,8 @@ def test_vfold_scalar_min_max(tmp_path):
 
     durs = [30, 10, 50, 20, 40]
     _write_trace(str(tmp_path / "t.pfw.gz"), durs)
-    host = PluginHost()
-    host.load(Bounds)
-    result = host.run(str(tmp_path))
+    plugins = Plugins([Bounds])
+    result = plugins.run(str(tmp_path)).results
     assert int(_value(result, "lo").sum()) == 10
     assert int(_value(result, "hi").sum()) == 50
 
@@ -88,9 +86,8 @@ def test_vfold_keyed_sum_per_pid(tmp_path):
     durs = [10, 20, 30, 40]
     pids = [1, 2, 1, 2]
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
-    host = PluginHost()
-    host.load(PerPid)
-    got = _keyed(host.run(str(tmp_path)), "busy", "pid")
+    plugins = Plugins([PerPid])
+    got = _keyed(plugins.run(str(tmp_path)).results, "busy", "pid")
     assert got == {1: 40.0, 2: 60.0}  # pid1: 10+30, pid2: 20+40
 
 
@@ -112,9 +109,8 @@ def test_vfold_keyed_sum_per_name(tmp_path):
                 f'{{"name":"{nm}","cat":"POSIX","pid":1,"tid":1,'
                 f'"ts":{1000 + i},"dur":{d},"ph":"X","args":{{}}}}\n'
             )
-    host = PluginHost()
-    host.load(ByName)
-    got = _keyed(host.run(str(tmp_path)), "dur", "name")
+    plugins = Plugins([ByName])
+    got = _keyed(plugins.run(str(tmp_path)).results, "dur", "name")
     assert got == {"read": 60.0, "write": 300.0}
 
 
@@ -129,9 +125,8 @@ def test_vfold_keyed_max_per_pid(tmp_path):
             self.hi[df["pid"]] += df["dur"]
 
     _write_trace(str(tmp_path / "t.pfw.gz"), [10, 90, 30, 40], [1, 2, 1, 2])
-    host = PluginHost()
-    host.load(Peak)
-    got = _keyed(host.run(str(tmp_path)), "hi", "pid")
+    plugins = Plugins([Peak])
+    got = _keyed(plugins.run(str(tmp_path)).results, "hi", "pid")
     assert got == {1: 30, 2: 90}  # per-pid max
 
 
@@ -146,9 +141,8 @@ def test_vfold_keyed_count_per_pid(tmp_path):
             self.n[df["pid"]] += 1
 
     _write_trace(str(tmp_path / "t.pfw.gz"), [1, 1, 1, 1, 1], [1, 1, 2, 2, 2])
-    host = PluginHost()
-    host.load(Hits)
-    got = _keyed(host.run(str(tmp_path)), "n", "pid")
+    plugins = Plugins([Hits])
+    got = _keyed(plugins.run(str(tmp_path)).results, "n", "pid")
     assert got == {1: 2, 2: 3}
 
 
@@ -166,11 +160,10 @@ def test_vfold_keyed_pct_per_pid(tmp_path):
     durs = [10, 20, 30, 40, 50, 100, 200, 300]
     pids = [1, 1, 1, 1, 1, 2, 2, 2]
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
-    host = PluginHost()
-    host.load(Median)
+    plugins = Plugins([Median])
     # A quantile accumulator names its columns after the levels it holds (plus
     # the group count), like the multi-quantile case.
-    pdf = host.run(str(tmp_path))["p50"].to_pandas()
+    pdf = plugins.run(str(tmp_path)).results["p50"].to_pandas()
     assert list(pdf.columns) == ["pid", "count", "p50"]
     got = dict(zip(pdf["pid"].tolist(), pdf["p50"].tolist()))
     counts = dict(zip(pdf["pid"].tolist(), pdf["count"].tolist()))
@@ -205,9 +198,8 @@ def test_vfold_keyed_moments(tmp_path):
             self.nvalid[df["pid"]] += df["dur"]
 
     _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
-    host = PluginHost()
-    host.load(Moments)
-    result = host.run(str(tmp_path))
+    plugins = Plugins([Moments])
+    result = plugins.run(str(tmp_path)).results
     var = _keyed(result, "variance", "pid")
     std = _keyed(result, "std", "pid")
     skew = _keyed(result, "skew", "pid")
@@ -238,9 +230,8 @@ def test_vfold_keyed_set_union(tmp_path):
     durs = [10, 20, 10, 30, 20, 200, 200, 100]
     pids = [1, 1, 1, 1, 1, 2, 2, 2]
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, pids)
-    host = PluginHost()
-    host.load(Distinct)
-    got = _keyed(host.run(str(tmp_path)), "vals", "pid")
+    plugins = Plugins([Distinct])
+    got = _keyed(plugins.run(str(tmp_path)).results, "vals", "pid")
 
     # SET_UNION crosses as one text cell of distinct values, separated by 0x1e.
     def _members(cell):
@@ -263,9 +254,8 @@ def test_vfold_keyed_first_last(tmp_path):
             self.hi[df["pid"]] += df["dur"]
 
     _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
-    host = PluginHost()
-    host.load(Ends)
-    result = host.run(str(tmp_path))
+    plugins = Plugins([Ends])
+    result = plugins.run(str(tmp_path)).results
     lo = _keyed(result, "lo", "pid")
     hi = _keyed(result, "hi", "pid")
     # first/last land on a real value in each group (row order is scan-dependent).
@@ -293,9 +283,8 @@ def test_vfold_keyed_hist(tmp_path):
             self.h[df["pid"]] += df["dur"]
 
     _write_trace(str(tmp_path / "t.pfw.gz"), _MOM_DURS, _MOM_PIDS)
-    host = PluginHost()
-    host.load(Hist)
-    rows = _keyed_arrow(host.run(str(tmp_path)), "h", "pid")
+    plugins = Plugins([Hist])
+    rows = _keyed_arrow(plugins.run(str(tmp_path)).results, "h", "pid")
     assert set(rows) == {1, 2}
     for pid, bins in rows.items():
         assert len(bins) > 0
@@ -321,11 +310,10 @@ def test_vfold_keyed_argmax(tmp_path):
             self.latest[df["pid"]] += df["dur"], df["ts"]
 
     _write_trace(str(tmp_path / "t.pfw.gz"), [10, 20, 30, 40], [1, 2, 1, 2])
-    host = PluginHost()
-    host.load(Peak)
+    plugins = Plugins([Peak])
     # ts = 1000 + i; pid1 rows are i=0 (dur10) and i=2 (dur30); pid2 i=1 (dur20)
     # and i=3 (dur40). The max-ts row's dur is the argmax repr.
-    got = _keyed(host.run(str(tmp_path)), "latest", "pid")
+    got = _keyed(plugins.run(str(tmp_path)).results, "latest", "pid")
     assert got == {1: "30", 2: "40"}
 
 
@@ -352,9 +340,8 @@ def test_vfold_keyed_occupancy(tmp_path):
                 f'{{"name":"read","cat":"POSIX","pid":{pid},"tid":1,'
                 f'"ts":{ts},"dur":{dur},"ph":"X","args":{{}}}}\n'
             )
-    host = PluginHost()
-    host.load(Occ)
-    result = host.run(str(tmp_path))
+    plugins = Plugins([Occ])
+    result = plugins.run(str(tmp_path)).results
     busy = _keyed(result, "busy", "pid")
     active = _keyed(result, "active", "pid")
     assert busy[1] == 150.0
@@ -381,9 +368,8 @@ def test_vfold_multi_key_groups_by_both_columns(tmp_path):
                 f'"ts":{1000 + i},"dur":{d},"ph":"X","args":{{}}}}\n'
             )
 
-    host = PluginHost()
-    host.load(Both)
-    pdf = host.run(str(tmp_path))["dur"].to_pandas()
+    plugins = Plugins([Both])
+    pdf = plugins.run(str(tmp_path)).results["dur"].to_pandas()
     got = {(p, n): v for p, n, v in zip(pdf["pid"], pdf["name"], pdf["value"])}
     assert got == {(1, "read"): 15.0, (1, "write"): 100.0, (2, "read"): 20.0}
 
@@ -400,9 +386,8 @@ def test_vfold_keyed_multi_quantile(tmp_path):
 
     durs = list(range(1, 101))
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, [1] * 100)
-    host = PluginHost()
-    host.load(Lat)
-    pdf = host.run(str(tmp_path))["q"].to_pandas()
+    plugins = Plugins([Lat])
+    pdf = plugins.run(str(tmp_path)).results["q"].to_pandas()
     assert list(pdf.columns) == ["pid", "count", "p50", "p90"]
     assert int(pdf["count"][0]) == 100
     assert pdf["p50"][0] == pytest.approx(50.0, rel=0.05)
@@ -422,9 +407,8 @@ def test_vfold_keyed_regr_slope(tmp_path):
 
     durs = [2 * i for i in range(10)]
     _write_trace(str(tmp_path / "t.pfw.gz"), durs, [1] * 10)
-    host = PluginHost()
-    host.load(Fit)
-    got = _keyed(host.run(str(tmp_path)), "slope", "pid")
+    plugins = Plugins([Fit])
+    got = _keyed(plugins.run(str(tmp_path)).results, "slope", "pid")
     assert got[1] == pytest.approx(2.0, rel=1e-6)
 
 

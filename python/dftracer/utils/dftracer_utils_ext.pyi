@@ -1102,26 +1102,28 @@ class _AggregatedTraceViewer(_TraceViewer):
     def materialize_partials(self, partials: List[bytes]) -> None: ...
     def reconstruct_if_cached(self) -> object: ...
 
-class PluginHost:
-    """Load and run compiled DFTracer plugins over trace files."""
+class Plugins:
+    """A fixed, built set of compiled DFTracer plugins."""
 
-    def __init__(self, runtime: Optional[object] = ...) -> None: ...
-    def load(self, path: str, config: Optional[str] = ...) -> None:
-        """Queue a compiled plugin; ``config`` is a JSON object string. The
-        dlopen and capability resolution run on first use."""
+    def __init__(
+        self,
+        specs: "List[Tuple[str, Optional[str]]]",
+        result_names: Optional[Dict[str, str]] = ...,
+        runtime: Optional[object] = ...,
+    ) -> None:
+        """Build every ``(path, config_json_or_None)`` spec now; raises
+        ImportError on a load/symbol/ABI/capability failure."""
         ...
     def run(
         self,
         traces: "str | List[str]",
         index_dir: Optional[str] = ...,
         auto_index: bool = ...,
-    ) -> Dict[str, _RunResultValue]:
-        """Fold every loaded plugin over one fused scan; returns the emitted
-        named results as ``{name: bytes | pyarrow object}``. Scan counters are
-        on ``stats``."""
+    ) -> "Tuple[Dict[str, _RunResultValue], Dict[str, int]]":
+        """Fold every plugin in the set over one fused scan; returns
+        ``({name: bytes | pyarrow object}, {events_scanned, events_matched})``.
+        """
         ...
-    @property
-    def stats(self) -> Optional[Dict[str, int]]: ...
 
 def get_log_level() -> str:
     """Return the current C++ logger level as a string."""
