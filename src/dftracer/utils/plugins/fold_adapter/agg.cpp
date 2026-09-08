@@ -31,7 +31,19 @@ void host_agg_accumulate(void* h, ::dftu_agg* a, const ::dftu_dataframe* df) {
     return static_cast<PluginFold*>(h)->agg_result(name);
 }
 
-const dftu_ext_agg g_agg = {host_agg_new, host_agg_accumulate, host_agg_result};
+// Registration is a build-phase call: by the time a fold runs, the registry
+// the host builds its slices from is already settled.
+int host_register_state(void* h, const ::dftu_state_desc* desc, void*) {
+    DFTRACER_UTILS_LOG_ERROR(
+        "[plugin:%s] register_state('%s') refused: a state type is registered "
+        "from the factory, not during the scan",
+        static_cast<PluginFold*>(h)->plugin_name().c_str(),
+        desc && desc->name ? desc->name : "(null)");
+    return -1;
+}
+
+const dftu_ext_agg g_agg = {host_agg_new, host_agg_accumulate, host_agg_result,
+                            host_register_state};
 
 // Finalize `acc` and move its columns into a dftu_dataframe handle (the
 // engine's own ABI boundary type) so the result crosses as our DataFrame, no

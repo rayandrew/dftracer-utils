@@ -14,6 +14,7 @@
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/fold_adapter/ext.h>
+#include <dftracer/utils/plugins/fold_adapter/state.h>
 #include <dftracer/utils/plugins/plugin/map.h>
 #include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/event_source.h>
@@ -1164,14 +1165,23 @@ PluginFold::PluginFold(const dftu_plugin* plugin,
                        dftracer::utils::StringIntern& intern,
                        SharedResultRegistry* results,
                        NamedResultRegistry* named_results,
-                       std::string plugin_name, std::uint64_t memory_budget)
+                       std::string plugin_name, std::uint64_t memory_budget,
+                       const StateRegistry* states)
     : plugin_(plugin),
       plugin_name_(std::move(plugin_name)),
       intern_(&intern),
       slice_(plugin->make_slice(plugin->self)),
       results_(results),
       named_results_(named_results),
-      memory_budget_(memory_budget) {
+      memory_budget_(memory_budget),
+      states_(states) {
+    if (states_) {
+        state_accums_.reserve(states_->size());
+        for (const RegisteredState& reg : *states_)
+            state_accums_.push_back(
+                std::make_unique<StateAccum>(reg, memory_budget_));
+    }
+
     host_.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     host_.h = this;
     host_.get_extension = host_get_extension;
@@ -1302,7 +1312,8 @@ bool PluginFold::passes_query(const FoldEvent& ev) {
 // plugin runs SIMD column ops instead of a per-event loop. build_row_frame is
 // the same columnar materializer NativeRowFold uses.
 void PluginFold::step(const FoldBatch& batch) {
-    if (!slice_ || !plugin_->on_batch) return;
+    const bool has_on_batch = slice_ && plugin_->on_batch;
+    if (!has_on_batch && state_accums_.empty()) return;
 
     // The previous step's tasks were awaited by the fuse worker before this
     // call, so freeing them now is safe.
@@ -1335,9 +1346,11 @@ void PluginFold::step(const FoldBatch& batch) {
     dftu_dataframe* cdf =
         dftu_dataframe_new(names.data(), handles.data(),
                            static_cast<std::int32_t>(handles.size()));
+    states_update(cdf);
     // The seam is contractually synchronous (abi.h: must return NULL); a
     // returned task would reference the now-freed cdf and cannot be driven.
-    ::dftu_task* t = plugin_->on_batch(slice_, cdf, &host_);
+    ::dftu_task* t =
+        has_on_batch ? plugin_->on_batch(slice_, cdf, &host_) : nullptr;
     dftu_dataframe_free(cdf);
     if (t)
         DFTRACER_UTILS_LOG_ERROR(
@@ -1348,8 +1361,9 @@ void PluginFold::step(const FoldBatch& batch) {
 }
 
 void PluginFold::merge(Fold& other) {
-    if (!slice_) return;
     auto& o = static_cast<PluginFold&>(other);
+    states_merge(o);
+    if (!slice_) return;
     if (o.slice_) plugin_->merge(slice_, o.slice_);
 
     // Fold each worker's aggregation accumulators into this master by name via
@@ -1376,6 +1390,7 @@ coro::CoroTask<bool> PluginFold::finalize(const CoverageSet&) {
     // read this one's merged accumulators via agg_result().
     publish_aggs();
     materialize_aggs();
+    states_finalize();
     if (slice_) {
         if (::dftu_task* t = plugin_->on_finalize(slice_, &host_))
             co_await *as_task(t);

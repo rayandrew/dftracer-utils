@@ -150,6 +150,16 @@ DFTU_RESULT_DECL(dftu_result_series, dftu_series*);
 DFTU_RESULT_DECL(dftu_result_frame, dftu_dataframe*);
 DFTU_RESULT_DECL(dftu_result_u64, uint64_t);
 
+/** A byte buffer crossing the ABI. `free_fn` is NULL when the bytes need no
+   release (a borrowed view, or storage the producer keeps); otherwise the
+   receiver calls free_fn(data, ud) exactly once when it is done with them. */
+typedef struct dftu_bytes {
+    const void* data;
+    uint64_t len;
+    void (*free_fn)(void* data, void* ud);
+    void* ud;
+} dftu_bytes;
+
 /** Work function for spawn()/then(); arg is plugin-owned. */
 typedef void (*dftu_work_fn)(void* arg);
 

@@ -4,6 +4,7 @@
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/build_host.h>
 #include <dftracer/utils/plugins/fold_adapter/ext.h>
+#include <dftracer/utils/plugins/state_registry.h>
 
 #include <cstdint>
 #include <string>
@@ -74,8 +75,13 @@ void build_agg_accumulate(void* h, ::dftu_agg*, const ::dftu_dataframe*) {
     return nullptr;
 }
 
+int build_register_state(void* h, const ::dftu_state_desc* desc, void* self) {
+    BuildHost& bh = self_of(h);
+    return register_state_into(bh.states(), desc, self, bh.plugin_name());
+}
+
 const ::dftu_ext_agg g_build_agg = {build_agg_new, build_agg_accumulate,
-                                    build_agg_result};
+                                    build_agg_result, build_register_state};
 
 // A port key is a pure hash of the name, so wiring a port up is available at
 // load; moving bytes through one needs a batch that does not exist yet.

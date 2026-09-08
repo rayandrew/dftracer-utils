@@ -2,8 +2,10 @@
 #define DFTRACER_UTILS_PLUGINS_BUILD_HOST_H
 
 #include <dftracer/utils/plugins/abi.h>
+#include <dftracer/utils/plugins/state_registry.h>
 
 #include <string>
+#include <utility>
 
 namespace dftracer::utils::plugins {
 
@@ -31,9 +33,15 @@ class BuildHost {
     /// the call that first stepped outside the build phase.
     void deny(const char* what);
 
+    /// The state types the factory registered, moved out once it returns.
+    StateRegistry take_states() { return std::move(states_); }
+
+    StateRegistry& states() { return states_; }
+
    private:
     std::string plugin_name_;
     std::string denied_;
+    StateRegistry states_;
     dftu_host host_{};
 };
 

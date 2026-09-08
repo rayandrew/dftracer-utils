@@ -90,6 +90,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_order.cpp
     plugins/test_plugin_abi_gate.cpp
     plugins/test_plugin_factory_host.cpp
+    plugins/test_plugin_state.cpp
 )
 
 # +++++++++++++++++++++++++++++++++++++++++

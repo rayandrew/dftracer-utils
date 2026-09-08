@@ -10,6 +10,7 @@
 
 #include <dftracer/utils/dataframe/agg_op_codes.h> /* DFTU_AGG_* for dftu_agg_col */
 #include <dftracer/utils/plugins/abi/core.h>
+#include <dftracer/utils/plugins/abi/result.h>     /* dftu_result_value */
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -45,6 +46,49 @@ typedef struct dftu_agg_col {
     const char* by;
 } dftu_agg_col;
 
+/** A plugin-defined mergeable state type, registered from the factory. dftu_agg
+   covers every shape the engine's agg table knows; this covers the ones it does
+   not - a call tree, an interval tree, an adjacency list, a custom sketch. The
+   host drives a registered state exactly as it drives an accumulator, without
+   knowing its shape: one init per worker slice, update per batch, merge at the
+   fan-in, serialize to spill when the slice runs past the scan's memory budget,
+   finalize once on the merged state, destroy for every state it created.
+
+   These callbacks run INTO the plugin, the opposite direction from
+   dftu_ext_ops::run*, so update/merge/serialize/finalize report failure as 0 ok
+   / non-zero with `err` filled rather than as a value-or-error union: they
+   produce no value, so the success side would be empty. `err`'s message is
+   borrowed by the host for the duration of the call only. */
+typedef struct dftu_state_desc {
+    /** Registry key; must be `<plugin>.<name>` and outlive the registration.
+       The host emits the finalized result under this name. */
+    const char* name;
+    /** A fresh empty state; `self` is the pointer given to register_state. A
+       NULL return fails the slice. */
+    void* (*init)(void* self);
+    /** Fold one batch in. `batch` is host-owned and borrowed for the call. */
+    int (*update)(void* state, const dftu_dataframe* batch, dftu_error* err);
+    /** Fold `other` into `into`; must be associative. `other` stays valid and
+       is destroyed by the host. */
+    int (*merge)(void* into, void* other, dftu_error* err);
+    /** Live size in bytes. The host's ONLY measure of the state against the
+       scan's memory budget; NULL means unmeasurable, and the host then never
+       spills the state however large it grows. */
+    uint64_t (*bytes)(const void* state);
+    /** Optional pair, given together or not at all: enables spill under budget
+       and distributed partials. NULL = in-memory only, and a state past the
+       budget is REFUSED a spill with an error rather than silently kept.
+       serialize fills `out`; the host releases it through out->free_fn.
+       deserialize returns a new state the host owns. */
+    int (*serialize)(const void* state, dftu_bytes* out, dftu_error* err);
+    void* (*deserialize)(void* self, dftu_bytes in, dftu_error* err);
+    /** The whole-scan result, filled into `out` (see dftu_ext_result::emit for
+       ownership per kind). Called once, on the merged state. */
+    int (*finalize)(void* state, dftu_result_value* out, dftu_error* err);
+    /** Release a state from init or deserialize; one call per state. */
+    void (*destroy)(void* state);
+} dftu_state_desc;
+
 typedef struct dftu_ext_agg {
     /** Get-or-create a named accumulator grouping by the `key_n` columns named
        in `key_names` and computing each of `spec_n` aggregates. Returns a
@@ -69,6 +113,15 @@ typedef struct dftu_ext_agg {
        frees with dftu_dataframe_free, or NULL if the producer created no such
        accumulator (an empty scan). */
     dftu_dataframe* (*agg_result)(void* h, const char* name);
+    /** Register a mergeable state type; `self` is handed back to init and
+       deserialize and must outlive the plugin. Callable ONLY from the factory:
+       by the time a fold runs, the registry the host plans from is settled, so
+       the run-time host refuses it. The descriptor is COPIED, so it need not
+       outlive the call. Returns 0 on success, non-zero on a NULL desc, a name
+       that is NULL, in the host's "dftu." namespace, not `<plugin>.<name>`, or
+       already registered, a missing init/update/merge/finalize/destroy, or a
+       serialize/deserialize pair given only half. */
+    int (*register_state)(void* h, const dftu_state_desc* desc, void* self);
 } dftu_ext_agg;
 
 #ifdef __cplusplus

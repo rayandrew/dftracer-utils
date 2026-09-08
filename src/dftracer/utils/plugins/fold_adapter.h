@@ -6,6 +6,7 @@
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/plugins/abi.h>
 #include <dftracer/utils/plugins/result_registry.h>
+#include <dftracer/utils/plugins/state_registry.h>
 #include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/utilities/fileio/parallel/parallel_writer.h>
@@ -68,6 +69,10 @@ struct ComposeOp {
 // dft.ext.agg accumulator; defined in the .cpp to keep agg.h (and its Arrow
 // tangle) out of this header.
 struct AggAccum;
+
+// One live instance of a plugin-registered dftu_state_desc; defined in
+// fold_adapter/state.cpp.
+struct StateAccum;
 
 // Cross-plugin view of the merged, named accumulators backing dft.ext.agg's
 // agg_result. Each master fold publishes its merged AggAccums here at the top
@@ -146,10 +151,14 @@ class PluginFold : public trace::views::detail::Fold {
     /// the same knob as View::memory_budget: 0 means auto (~1/3 of available
     /// memory) and NO_SPILL_BUDGET disables spilling. Past it, an accumulator's
     /// live group map spills to a sorted temp run instead of growing.
+    /// `states` are the state types the plugin's factory registered; the fold
+    /// makes one instance of each per slice and drives it like an accumulator.
+    /// It must outlive the fold; null means the plugin registered none.
     PluginFold(const dftu_plugin* plugin, dftracer::utils::StringIntern& intern,
                SharedResultRegistry* results = nullptr,
                NamedResultRegistry* named_results = nullptr,
-               std::string plugin_name = {}, std::uint64_t memory_budget = 0);
+               std::string plugin_name = {}, std::uint64_t memory_budget = 0,
+               const StateRegistry* states = nullptr);
     ~PluginFold() override;
 
     PluginFold(const PluginFold&) = delete;
@@ -163,7 +172,7 @@ class PluginFold : public trace::views::detail::Fold {
     std::unique_ptr<Fold> slice() const override {
         return std::make_unique<PluginFold>(plugin_, *intern_, results_,
                                             named_results_, plugin_name_,
-                                            memory_budget_);
+                                            memory_budget_, states_);
     }
 
     /// Name this plugin logs under (its load-path stem); empty if unknown.
@@ -216,6 +225,13 @@ class PluginFold : public trace::views::detail::Fold {
     /// that the memory budget engaged.
     std::size_t agg_spill_runs(const char* name) const;
 
+    /// Spill runs written by the registered state named `name`; the same
+    /// budget-engaged signal as agg_spill_runs, for a tier-2 state.
+    std::size_t state_spill_runs(const char* name) const;
+    /// True when the state named `name` ran past the budget with no
+    /// serialize/deserialize pair, so the host had to refuse it a spill.
+    bool state_spill_refused(const char* name) const;
+
     // Allocate a lazy CoroTask into this step's arena, returning its stable
     // address as an opaque dftu_task*; null if allocation throws.
     ::dftu_task* emplace_task(coro::CoroTask<void>&& task);
@@ -262,6 +278,12 @@ class PluginFold : public trace::views::detail::Fold {
     // Finalize each merged accumulator to a frame and emit it under its name.
     void materialize_aggs();
 
+    // The registered-state half of step/merge/finalize; see
+    // fold_adapter/state.cpp.
+    void states_update(const dftu_dataframe* df);
+    void states_merge(PluginFold& other);
+    void states_finalize();
+
     const dftu_plugin* plugin_;
     std::string plugin_name_;
     dftracer::utils::StringIntern* intern_;
@@ -276,6 +298,10 @@ class PluginFold : public trace::views::detail::Fold {
     // dft.ext.agg accumulators; unique_ptr keeps each handed-out dftu_agg*
     // stable and lets the header forward-declare AggAccum.
     StableRegistry<std::unique_ptr<AggAccum>> aggs_;
+
+    // One live instance per registered state type, parallel to *states_.
+    const StateRegistry* states_ = nullptr;
+    std::vector<std::unique_ptr<StateAccum>> state_accums_;
 
     // unique_ptr keeps each CoroTask address stable so when_all/then can
     // reference them; cleared once the awaited root completes.

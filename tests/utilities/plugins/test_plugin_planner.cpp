@@ -229,4 +229,31 @@ TEST_SUITE("PluginPlannerScan") {
         CHECK(full.events_scanned == 2 * N);
         CHECK(pruned.events_scanned == N);
     }
+
+    // Result equality cannot see a dead prune: a scan that reads every chunk
+    // and filters afterwards returns exactly the same rows. Only the chunk
+    // counter distinguishes them, so the prune is asserted on that.
+    TEST_CASE("the prune skips index chunks, not just rows") {
+        dftu_utils_test::TestEnvironment env(0);
+        REQUIRE(env.is_valid());
+        const int N = 200;
+        std::vector<ViewFile> files{
+            index_trace(make_homog_trace(env, "s1", "fwrite", "STDIO", N)),
+            index_trace(make_homog_trace(env, "p1", "read", "POSIX", N)),
+            index_trace(make_homog_trace(env, "p2", "write", "POSIX", N))};
+
+        CountState keeps_stdio{R"(cat == "STDIO")"};
+        dftu_plugin a = make_count_plugin(&keeps_stdio);
+        ExportStats pruned = run_host({&a}, files);
+
+        CountState same_filter{R"(cat == "STDIO")"}, no_filter{nullptr};
+        dftu_plugin b = make_count_plugin(&same_filter);
+        dftu_plugin c = make_count_plugin(&no_filter);
+        ExportStats full = run_host({&b, &c}, files);
+
+        CHECK(pruned.chunks_skipped > 0);
+        CHECK(full.chunks_skipped == 0);
+        CHECK(pruned.chunks_scanned < full.chunks_scanned);
+        CHECK(keeps_stdio.total.load() == same_filter.total.load());
+    }
 }

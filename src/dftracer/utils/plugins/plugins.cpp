@@ -6,6 +6,7 @@
 #include <dftracer/utils/plugins/plugins.h>
 #include <dftracer/utils/plugins/plugins_internal.h>
 #include <dftracer/utils/plugins/reserved_names.h>
+#include <dftracer/utils/plugins/state_registry.h>
 #include <dftracer/utils/trace/views/view_plan.h>
 #include <dlfcn.h>
 
@@ -41,6 +42,8 @@ struct Plugins::Impl {
         std::string name;  /* load-path stem, used to tag the plugin's logs */
         std::string path;  /* as given to Builder::add; empty for injected test
                               plugins */
+        /* State types the factory registered; one instance per fold slice. */
+        StateRegistry states;
     };
 
     ~Impl() {
@@ -145,8 +148,9 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                               std::to_string(DFTRACER_PLUGIN_ABI_VERSION));
     }
 
-    return Plugins::Impl::Loaded{handle, plugin, true,
-                                 plugin_name_from_path(path), path};
+    return Plugins::Impl::Loaded{handle, plugin,
+                                 true,   plugin_name_from_path(path),
+                                 path,   build_host.take_states()};
 }
 
 // Kahn topological sort of `n` nodes over `from -> to` edges (from must precede
@@ -374,7 +378,8 @@ coro::CoroTask<Result<PluginRun>> Plugins::run(const View& view) const {
     for (std::size_t i : impl_->order) {
         owned.push_back(std::make_unique<PluginFold>(
             impl_->plugins[i].plugin, intern, &shared, &out.results,
-            impl_->plugins[i].name, view.plan().memory_budget));
+            impl_->plugins[i].name, view.plan().memory_budget,
+            &impl_->plugins[i].states));
         folds.push_back(owned.back().get());
     }
 
@@ -394,14 +399,16 @@ void Plugins::attach(trace::views::ViewSession& session,
     for (std::size_t i : impl_->order) {
         const dftu_plugin* plugin = impl_->plugins[i].plugin;
         std::string name = impl_->plugins[i].name;
+        const StateRegistry* states = &impl_->plugins[i].states;
         // A session does not expose its plan's budget here, so an attached
         // plugin's accumulators spill on the auto policy rather than on an
         // explicit session budget.
         session.attach_fold_factory(
-            [plugin, shared, named, name](dftracer::utils::StringIntern& intern)
+            [plugin, shared, named, name,
+             states](dftracer::utils::StringIntern& intern)
                 -> std::unique_ptr<views::detail::Fold> {
-                return std::make_unique<PluginFold>(plugin, intern,
-                                                    shared.get(), named, name);
+                return std::make_unique<PluginFold>(
+                    plugin, intern, shared.get(), named, name, 0, states);
             },
             []() {});
     }
@@ -411,7 +418,7 @@ Result<Plugins> build_injected_plugins(std::vector<dftu_plugin*> plugins) {
     auto impl = std::make_unique<Plugins::Impl>();
     impl->plugins.reserve(plugins.size());
     for (dftu_plugin* pl : plugins)
-        impl->plugins.push_back({nullptr, pl, false, {}, {}});
+        impl->plugins.push_back({nullptr, pl, false, {}, {}, {}});
     auto ordered = settle_order(*impl);
     if (!ordered) return unexpected(std::move(ordered).error());
     settle_prune(*impl);
