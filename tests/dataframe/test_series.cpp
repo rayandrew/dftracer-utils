@@ -2499,6 +2499,28 @@ TEST_SUITE("vec_arrow") {
         schema.release(&schema);
     }
 
+    // filter/take return a zero-copy SELECTION over a base, which carries no
+    // value buffer of its own. Reading it through string_at used to segfault.
+    TEST_CASE("string_at on a non-FLAT column is empty, not a crash") {
+        Series s = Series::strings({"alpha", "beta", "gamma"});
+        // Bool is bit-packed: keep rows 0 and 2.
+        std::vector<std::uint8_t> keep{0b0000'0101};
+        Series mask = Series::flat(TypeId::Bool, keep.data(), 3);
+        Series sel = s.filter(mask);
+
+        REQUIRE(sel.valid());
+        if (!sel.is_flat()) {
+            for (std::int64_t i = 0; i < sel.length(); ++i)
+                CHECK(sel.string_at(i).empty());
+        }
+
+        Series flat = sel.materialize();
+        REQUIRE(flat.is_flat());
+        REQUIRE(flat.length() == 2);
+        CHECK(flat.string_at(0) == "alpha");
+        CHECK(flat.string_at(1) == "gamma");
+    }
+
     TEST_CASE("bool round-trips through Arrow (bit-packed)") {
         std::vector<std::int64_t> v{5, 1, 9, 3, 7};
         Series b = gt(Series::flat_i64(v.data(), 5), 4);

@@ -241,13 +241,28 @@ class Series {
                    : std::span<const T>();
     }
 
-    /// Value of a FLAT String/Binary column at `i`. Undefined for other types.
+    /// Value of a String/Binary column at `i`, valid while this column lives.
+    ///
+    /// FLAT only: a DICTIONARY or SELECTION column (what `filter`, `take` and
+    /// the sort/topk kernels return, zero-copy over a base) carries no value
+    /// buffer of its own, so there is nothing to read at `i`. Those return an
+    /// empty view; call `materialize()` first to read them. Empty is therefore
+    /// ambiguous with a genuine empty string - use `is_flat()` when the
+    /// difference matters.
     std::string_view string_at(std::int64_t i) const noexcept {
         const std::int32_t* off = dftu_series_offsets(handle_);
         const char* d = static_cast<const char*>(dftu_series_data(handle_));
+        // dftu_series_data returns NULL for a non-FLAT column; reading through
+        // it produced a segfault rather than a diagnosable result.
+        if (off == nullptr || d == nullptr) return {};
         return std::string_view(d + off[i],
                                 static_cast<std::size_t>(off[i + 1] - off[i]));
     }
+
+    /// Whether the values live in this column's own buffers, so `data()`,
+    /// `offsets()` and `string_at()` can read them. False for CONSTANT,
+    /// DICTIONARY and SELECTION, which `materialize()` converts.
+    bool is_flat() const noexcept { return encoding() == Encoding::Flat; }
 
     /// int32 offset buffer (length+1 entries) of a String/Binary or List
     /// column, or null for fixed-width types.
