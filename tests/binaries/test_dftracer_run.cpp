@@ -273,6 +273,44 @@ TEST_SUITE("DFTracerRun") {
         MESSAGE("dur_stats unmet: " << r.err);
     }
 
+    TEST_CASE("--describe prints provides/consumes without a trace") {
+        std::string run = env_or_probe("DFTRACER_RUN_PATH", "dftracer_run");
+        std::string producer = env_or_probe(
+            "DFTRACER_DUR_STATS_PRODUCER_PLUGIN_PATH", "dur_stats_producer.so");
+        std::string consumer = env_or_probe(
+            "DFTRACER_DUR_STATS_CONSUMER_PLUGIN_PATH", "dur_stats_consumer.so");
+        if (run.empty() || producer.empty() || consumer.empty()) {
+            MESSAGE("dftracer_run or dur_stats plugins not found, skipping.");
+            return;
+        }
+
+        // No -d/--files at all: --describe must not require a trace, an
+        // index, or a directory argument.
+        RunResult r = run_capture_stderr(
+            run, {"--describe", "--plugin", producer, "--plugin", consumer});
+        CHECK(r.exit_code == 0);
+        CHECK(r.err.find("plugin: " + producer) != std::string::npos);
+        CHECK(r.err.find("plugin: " + consumer) != std::string::npos);
+        CHECK(r.err.find("provides: com.example.dur_stats") !=
+              std::string::npos);
+        CHECK(r.err.find("consumes: com.example.dur_stats") !=
+              std::string::npos);
+        MESSAGE("describe: " << r.err);
+    }
+
+    TEST_CASE("--describe on a plugin that fails to load reports the error") {
+        std::string run = env_or_probe("DFTRACER_RUN_PATH", "dftracer_run");
+        if (run.empty()) {
+            MESSAGE("dftracer_run not found, skipping.");
+            return;
+        }
+
+        RunResult r = run_capture_stderr(
+            run, {"--describe", "--plugin", "/no/such/plugin.so"});
+        CHECK(r.exit_code != 0);
+        CHECK(!r.err.empty());
+    }
+
     TEST_CASE("missing plugin path fails cleanly") {
         std::string run = env_or_probe("DFTRACER_RUN_PATH", "dftracer_run");
         if (run.empty()) {

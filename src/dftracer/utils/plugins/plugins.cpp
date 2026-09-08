@@ -38,6 +38,8 @@ struct Plugins::Impl {
         dftu_plugin* plugin = nullptr;
         bool owned = true; /* injected test plugins are not owned */
         std::string name;  /* load-path stem, used to tag the plugin's logs */
+        std::string path;  /* as given to Builder::add; empty for injected test
+                              plugins */
     };
 
     ~Impl() {
@@ -127,7 +129,7 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
     }
 
     return Plugins::Impl::Loaded{handle, plugin, true,
-                                 plugin_name_from_path(path)};
+                                 plugin_name_from_path(path), path};
 }
 
 // Kahn topological sort of `n` nodes over `from -> to` edges (from must precede
@@ -321,6 +323,21 @@ Plugins::~Plugins() = default;
 
 std::size_t Plugins::size() const { return impl_->plugins.size(); }
 
+std::vector<Plugins::PluginInfo> Plugins::describe() const {
+    std::vector<PluginInfo> out;
+    out.reserve(impl_->plugins.size());
+    for (const auto& p : impl_->plugins) {
+        PluginInfo info;
+        info.path = p.path;
+        info.abi_version = p.plugin->abi_version;
+        info.has_plan_query = p.plugin->plan_query != nullptr;
+        info.provides = name_list(p.plugin->provides, p.plugin->self);
+        info.consumes = name_list(p.plugin->consumes, p.plugin->self);
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
 View Plugins::prune(const View& view) const {
     return impl_->prune ? view.filter(*impl_->prune) : view;
 }
@@ -375,7 +392,7 @@ Result<Plugins> build_injected_plugins(std::vector<dftu_plugin*> plugins) {
     auto impl = std::make_unique<Plugins::Impl>();
     impl->plugins.reserve(plugins.size());
     for (dftu_plugin* pl : plugins)
-        impl->plugins.push_back({nullptr, pl, false, {}});
+        impl->plugins.push_back({nullptr, pl, false, {}, {}});
     auto ordered = settle_order(*impl);
     if (!ordered) return unexpected(std::move(ordered).error());
     settle_prune(*impl);

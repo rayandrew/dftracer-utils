@@ -134,6 +134,7 @@ class RunArgParse : public cli::ArgParse {
     cli::WatchdogArgs watchdog;
 
     bool no_auto_index = false;
+    bool describe = false;
 
     explicit RunArgParse(argparse::ArgumentParser& p) : ArgParse(p) {
         indexing.with_force = false;
@@ -151,10 +152,17 @@ class RunArgParse : public cli::ArgParse {
             .help(
                 "Disable automatic index building for files missing .dftindex")
             .flag();
+        parser()
+            .add_argument("--describe")
+            .help(
+                "Load --plugin libraries, print what each provides/consumes, "
+                "and exit without scanning")
+            .flag();
     }
 
     void post_parse() override {
         no_auto_index = parser().get<bool>("--no-auto-index");
+        describe = parser().get<bool>("--describe");
     }
 };
 
@@ -176,6 +184,68 @@ static bool block_has_config(const SharedConfig& shared,
                              const PluginBlock& block) {
     return !shared.pconfig.empty() || !shared.pargs.empty() ||
            !block.pconfig.empty() || !block.pargs.empty();
+}
+
+// Build the plugin set from --plugin/--pconfig/--parg blocks. Shared by
+// --describe and the real run so both go through the same load-time
+// validation (ABI gate, reserved-name refusal, duplicate-provides, unmet
+// consumes).
+static Result<Plugins> build_plugins(const PluginArgs& plugin_args) {
+    auto builder = Plugins::builder();
+    for (const auto& block : plugin_args.blocks) {
+        if (block_has_config(plugin_args.shared, block)) {
+            try {
+                builder.add(block.path,
+                            build_config(plugin_args.shared, block));
+            } catch (const std::exception& e) {
+                return make_error(
+                    ErrorCode::INVALID_ARGUMENT,
+                    "plugin '" + block.path + "' config error: " + e.what());
+            }
+        } else {
+            builder.add(block.path);
+        }
+    }
+    return builder.build();
+}
+
+static std::string join_or_none(const std::vector<std::string>& names) {
+    if (names.empty()) return "(none)";
+    std::string out;
+    for (const auto& name : names) {
+        if (!out.empty()) out += ", ";
+        out += name;
+    }
+    return out;
+}
+
+// Print each loaded plugin's path and provides/consumes, one line per fact so
+// the output is greppable, and exit without touching any trace file.
+static int describe_plugins(const PluginArgs& plugin_args) {
+    if (plugin_args.blocks.empty()) {
+        DFTRACER_UTILS_LOG_ERROR("%s",
+                                 "No plugins specified. Use --plugin path.so.");
+        return 1;
+    }
+
+    auto plugins = build_plugins(plugin_args);
+    if (!plugins) {
+        DFTRACER_UTILS_LOG_ERROR("%s", plugins.error().format().c_str());
+        return 1;
+    }
+
+    for (const auto& info : plugins->describe()) {
+        std::fprintf(stderr, "plugin: %s\n", info.path.c_str());
+        std::fprintf(stderr, "  abi_version: %u\n", info.abi_version);
+        std::fprintf(stderr, "  plan_query: %s\n",
+                     info.has_plan_query ? "yes" : "no");
+        std::fprintf(stderr, "  provides: %s\n",
+                     join_or_none(info.provides).c_str());
+        std::fprintf(stderr, "  consumes: %s\n",
+                     join_or_none(info.consumes).c_str());
+        std::fprintf(stderr, "\n");
+    }
+    return 0;
 }
 
 static coro::CoroTask<int> run_plugins(const RunArgParse* cli,
@@ -216,24 +286,8 @@ static coro::CoroTask<int> run_plugins(const RunArgParse* cli,
         files = std::move(norm.files);
     }
 
-    auto builder = Plugins::builder();
-    for (const auto& block : plugin_args->blocks) {
-        if (block_has_config(plugin_args->shared, block)) {
-            try {
-                builder.add(block.path,
-                            build_config(plugin_args->shared, block));
-            } catch (const std::exception& e) {
-                DFTRACER_UTILS_LOG_ERROR("Plugin '%s' config error: %s",
-                                         block.path.c_str(), e.what());
-                co_return 1;
-            }
-        } else {
-            builder.add(block.path);
-        }
-    }
-
     // A load or fold-ordering failure must stop the run before any scanning.
-    auto plugins = builder.build();
+    auto plugins = build_plugins(*plugin_args);
     if (!plugins) {
         DFTRACER_UTILS_LOG_ERROR("%s", plugins.error().format().c_str());
         co_return 1;
@@ -300,8 +354,11 @@ int main(int argc, char** argv) {
         "--plugin shared library is loaded and run as a fold over one shared, "
         "index-pruned parallel scan. Add per-plugin config with --pconfig FILE "
         "and --parg KEY=VALUE (after a --plugin), or shared config with "
-        "--shared-pconfig FILE and --shared-parg KEY=VALUE.",
+        "--shared-pconfig FILE and --shared-parg KEY=VALUE. --describe loads "
+        "the plugins and reports what each provides/consumes without "
+        "scanning.",
         [&plugin_args](RunArgParse& cli) -> int {
+            if (cli.describe) return describe_plugins(plugin_args);
             try {
                 return run_plugins(&cli, &plugin_args).get();
             } catch (const std::exception& e) {

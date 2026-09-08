@@ -7,8 +7,10 @@
 #include <dftracer/utils/trace/views/view.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Load plugin shared libraries and run them as folds over one fused scan of a
 // View. Free of the C ABI: the ABI types and the test seams live in
@@ -62,6 +64,22 @@ class Plugins {
     ~Plugins();
 
     std::size_t size() const;
+
+    /// Static facts about one loaded plugin: the path it was loaded from and
+    /// what build() already resolved from its descriptor, with no scan. The
+    /// only way to discover a compiled plugin's provides/consumes without its
+    /// source.
+    struct PluginInfo {
+        std::string path;  ///< the shared-library path given to Builder::add
+        std::uint32_t abi_version = 0;
+        bool has_plan_query =
+            false;         ///< true if the plugin declares a plan_query
+        std::vector<std::string> provides;
+        std::vector<std::string> consumes;
+    };
+
+    /// One entry per loaded plugin, in registration order.
+    std::vector<PluginInfo> describe() const;
 
     /// Drive every plugin as a fold over one fused, pruned scan of `view`.
     coro::CoroTask<Result<PluginRun>> run(const trace::views::View& view) const;
