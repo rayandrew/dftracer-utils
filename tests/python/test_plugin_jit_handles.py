@@ -56,11 +56,13 @@ def test_jit_scalar_accumulator_emits_keyless_agg():
             self.max_dur[()].observe(e.dur)
 
     src = Stats._jit_plugin.source
+    rn = Stats._jit_plugin.result_names
+    wire = {attr: wid for wid, attr in rn.items()}
     assert "DFTU_EXT_AGG" in src
     # A keyed accumulator passes its key columns; a scalar one passes none.
-    assert 'agg_new(host->h, "per_pid", _keys, 1u,' in src
-    assert 'agg_new(host->h, "total_dur", NULL, 0u,' in src
-    assert 'agg_new(host->h, "n_events", NULL, 0u,' in src
+    assert f'agg_new(host->h, "{wire["per_pid"]}", _keys, 1u,' in src
+    assert f'agg_new(host->h, "{wire["total_dur"]}", NULL, 0u,' in src
+    assert f'agg_new(host->h, "{wire["n_events"]}", NULL, 0u,' in src
     assert '{DFTU_AGG_MAX, "v0", "value", 0.0, NULL}' in src
     # The per-event contribution lands in that accumulator's row buffer.
     assert "_v0_total_dur[_r] = (double)(dftu_jit_u64(&_col_dur, i));" in src
@@ -157,36 +159,36 @@ def test_jit_scalar_only_plugin(tmp_path):
     assert _scalar(results, "n") == len(durs)
 
 
+def _shared_total_plugin():
+    # Nested in this one function so every call's class shares one qualname
+    # ("Shared") - two independently authored plugins that happen to reuse
+    # the same class and attribute name, the case the wire id must still
+    # catch even though it is now package-qualified.
+    @jit.plugin
+    class Shared:
+        shared_total = jit.map(key=(), value=jit.sum())
+
+        @jit.each_event
+        def step(self, e):
+            self.shared_total[()] += e.dur
+
+    return Shared
+
+
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
 def test_jit_same_named_accumulator_in_two_plugins_fails_the_build(tmp_path):
-    # One accumulator name is one result name, so two plugins claiming it is a
-    # collision the host refuses at load rather than resolving last-writer-wins
-    # after a whole scan.
-    @jit.plugin
-    class A:
-        shared_total = jit.map(key=(), value=jit.sum())
-        a_total = jit.map(key=(), value=jit.sum())
-
-        @jit.each_event
-        def step(self, e):
-            self.shared_total[()] += e.dur
-            self.a_total[()] += e.dur
-
-    @jit.plugin
-    class B:
-        shared_total = jit.map(key=(), value=jit.sum())
-        b_total = jit.map(key=(), value=jit.sum())
-
-        @jit.each_event
-        def step(self, e):
-            self.shared_total[()] += e.dur
-            self.b_total[()] += e.dur
+    # One accumulator wire id is one result name, so two plugins claiming it
+    # is a collision the host refuses at load rather than resolving
+    # last-writer-wins after a whole scan.
+    a = _shared_total_plugin()
+    b = _shared_total_plugin()
+    assert a._jit_plugin.result_names == b._jit_plugin.result_names
 
     durs = [3 + i for i in range(40)]
     _write_trace(str(tmp_path / "trace.pfw.gz"), durs)
 
     host = PluginHost()
-    host.load(A)
-    host.load(B)
+    host.load(a)
+    host.load(b)
     with pytest.raises(Exception, match="shared_total"):
         host.run(str(tmp_path))

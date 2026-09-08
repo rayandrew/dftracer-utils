@@ -34,7 +34,9 @@ from __future__ import annotations
 import ast
 import builtins
 import inspect
+import subprocess
 import textwrap
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Callable,
@@ -74,6 +76,8 @@ __all__ = [
     "compile_op",
     "run_op",
     "plugin",
+    "JitPackage",
+    "build",
     "map",
     "publish",
     "consume",
@@ -1091,8 +1095,8 @@ class Port(Protocol):
     """Authoring-only handle for a batch-scoped inter-plugin port.
 
     A :func:`publish` port is written per event with ``self.<port> += <expr>`` and
-    the host publishes the per-batch total for a later plugin's consume port of the
-    same capability id; a :func:`consume` port reads that value as a plain scalar
+    the host publishes the per-batch total for a later plugin's consume port wired
+    to it; a :func:`consume` port reads that value as a plain scalar
     (``self.<port>``, 0 when no producer published this batch). Never instantiated."""
 
     def __iadd__(self, x: float) -> "Port": ...
@@ -1100,11 +1104,15 @@ class Port(Protocol):
 
 _PORT_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._/-")
 
+# The registry namespace reserved for host ops (see _HOST_NAME_PREFIX below);
+# not available as a JitPackage namespace or an explicit consume() wire id.
+_RESERVED_NAMESPACE = "dftu"
+
 
 class _Port:
     __slots__ = ("is_f64", "name", "role")
 
-    def __init__(self, name: str, is_f64: bool, role: str) -> None:
+    def __init__(self, name: "str | None", is_f64: bool, role: str) -> None:
         self.name = name
         self.is_f64 = is_f64
         self.role = role
@@ -1113,7 +1121,7 @@ class _Port:
 def _check_port_name(fn: str, name: object) -> str:
     if not isinstance(name, str) or not name:
         raise JitError(f"jit.{fn} needs a non-empty port name such as 'com.example.edges'")
-    if name.startswith("dftu."):
+    if name == _RESERVED_NAMESPACE or name.startswith(_RESERVED_NAMESPACE + "."):
         raise JitError(
             f"jit.{fn} port name '{name}' uses the reserved dftu. namespace; pick your own, "
             "e.g. 'com.example.edges'"
@@ -1131,27 +1139,45 @@ def _port_is_f64(fn: str, of: "_Type[object]") -> bool:
     raise JitError(f"jit.{fn}(of=...) must be jit.u64, jit.i64, or jit.f64")
 
 
-def publish(name: str, of: "_Type[object]" = u64) -> Port:
-    """Declare a batch-scoped publish port called ``name``.
+def publish(of: "_Type[object]" = u64) -> Port:
+    """Declare a batch-scoped publish port.
 
-    A consumer wires to it by naming the same port. In ``each_event`` accumulate
-    a per-batch total with ``self.<port> += <expr>`` (a u64 sum by default,
+    Its wire id is derived from the attribute it is assigned to (package +
+    module + class + attribute, see :class:`JitPackage`), resolved when the
+    enclosing class is built by :func:`plugin`. In ``each_event`` accumulate a
+    per-batch total with ``self.<port> += <expr>`` (a u64 sum by default,
     ``of=jit.f64`` for a double sum). The total is published once per batch and
     reset for the next batch; ``of`` picks the wire width (u64/i64 as an 8-byte
     int, f64 as a double)."""
-    _check_port_name("publish", name)
-    return cast(Port, _Port(name, _port_is_f64("publish", of), "publish"))
+    return cast(Port, _Port(None, _port_is_f64("publish", of), "publish"))
 
 
-def consume(name: str, of: "_Type[object]" = u64) -> Port:
-    """Declare a batch-scoped consume port called ``name``.
+def consume(producer: "Port | str", of: "_Type[object]" = u64) -> Port:
+    """Declare a batch-scoped consume port wired to ``producer``.
 
-    In ``each_event`` read the value a producer published for the current batch
-    as a plain scalar ``self.<port>`` (0 when no producer published this batch).
-    ``of`` must match the producer's width (u64/i64/f64). The producer must be
-    registered before this plugin."""
-    _check_port_name("consume", name)
-    return cast(Port, _Port(name, _port_is_f64("consume", of), "consume"))
+    ``producer`` is the other plugin's :func:`publish` attribute itself
+    (``consume(Other.total)``), never a typed string - identity comes from the
+    producer's object, and it must already be built (the producer class must be
+    declared and decorated before this one). A string is accepted only for the
+    C-interop case where the producer is a hand-written plugin with no Python
+    object to reference. In ``each_event`` read the value a producer published
+    for the current batch as a plain scalar ``self.<port>`` (0 when no producer
+    published this batch). ``of`` must match the producer's width."""
+    is_f64 = _port_is_f64("consume", of)
+    if isinstance(producer, str):
+        _check_port_name("consume", producer)
+        return cast(Port, _Port(producer, is_f64, "consume"))
+    port = cast(_Port, producer)
+    if not isinstance(port, _Port) or port.role != "publish":
+        raise JitError("jit.consume(...) needs a jit.publish attribute or an explicit wire id")
+    if port.name is None:
+        raise JitError(
+            "jit.consume(...) references a jit.publish attribute whose plugin is not "
+            "built yet; declare and decorate the producer class before this one"
+        )
+    if port.is_f64 != is_f64:
+        raise JitError(f"jit.consume(of=...) does not match the producer's width for '{port.name}'")
+    return cast(Port, _Port(port.name, is_f64, "consume"))
 
 
 class _EachEvent:
@@ -1198,16 +1224,163 @@ def each_batch(fn: Callable[..., object]) -> _EachBatch:
 
 
 class JitPlugin:
-    __slots__ = ("name", "source", "renames")
+    __slots__ = ("name", "source", "renames", "result_names", "shippable")
 
-    def __init__(self, name: str, source: str, renames: Dict[str, List[str]]) -> None:
+    def __init__(
+        self,
+        name: str,
+        source: str,
+        renames: Dict[str, List[str]],
+        result_names: "Dict[str, str] | None" = None,
+        shippable: bool = True,
+    ) -> None:
         self.name = name
         self.source = source
         self.renames = renames
+        # {wire id: attribute name}: a jit.map's provides/results wire id is
+        # package-qualified to avoid cross-plugin collisions, but the value a
+        # caller indexes results[...] with is always the attribute name, so
+        # PluginHost.run() rewrites native result keys through this map.
+        self.result_names = result_names if result_names is not None else {}
+        # False when built under an implicit __main__ identity (a script or
+        # notebook with no JitPackage namespace); build() refuses those.
+        self.shippable = shippable
 
 
 def _c_str_literal(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _top_level_package(module: str) -> str:
+    """The first dotted segment of an import path (its top-level package)."""
+    return module.split(".", 1)[0]
+
+
+def _module_rest(module: str) -> str:
+    """``module`` with its top-level package segment stripped."""
+    top = _top_level_package(module)
+    rest = module[len(top) :]
+    return rest[1:] if rest.startswith(".") else rest
+
+
+def _check_namespace(fn: str, namespace: str) -> str:
+    if not isinstance(namespace, str) or not namespace:
+        raise JitError(f"{fn} needs a non-empty namespace such as 'acme'")
+    if namespace == _RESERVED_NAMESPACE or namespace.startswith(_RESERVED_NAMESPACE + "."):
+        raise JitError(f"{fn} namespace '{namespace}' uses the reserved dftu namespace")
+    if any(c not in _PORT_ID_CHARS for c in namespace):
+        raise JitError(f"{fn} namespace '{namespace}' must be lowercase ASCII [a-z0-9._/-]")
+    return namespace
+
+
+def _qualname_of(cls: type) -> str:
+    qn = getattr(cls, "__qualname__", None) or getattr(cls, "__name__", None)
+    if not isinstance(qn, str) or not qn:
+        raise JitError("@jit.plugin needs a named class")
+    # A class authored inside a function/notebook cell carries "<locals>" in
+    # its qualname; drop it rather than emit an identity outside [a-z0-9._/-].
+    return qn.replace(".<locals>.", ".")
+
+
+def _module_of(cls: type) -> str:
+    mod = getattr(cls, "__module__", None)
+    if not isinstance(mod, str) or not mod:
+        raise JitError("@jit.plugin needs a class with a __module__")
+    return mod
+
+
+class JitPackage:
+    """The namespace and build settings a group of jit-authored plugins ship
+    under.
+
+    Identity for anything a jit plugin declares (a :func:`map` accumulator, a
+    :func:`publish` port) is package + module + class + attribute, never a
+    typed string: ``<namespace>/<module-without-its-top-package>.<qualname>.<attr>``,
+    all lowercase. Bare :func:`plugin` / :func:`series` use a default
+    ``JitPackage()``, whose namespace is the decorated class's top-level import
+    package - so ``JitPackage("mypkg")`` on code already living in package
+    ``mypkg`` produces the identical identity; pass an explicit namespace only
+    to ship under a different name, or to name code authored in ``__main__``
+    (a script or notebook has no package, and :meth:`build` refuses a
+    shippable ``.so`` from one unless a namespace is supplied).
+
+    Also carries the build settings for :meth:`build`: ``cache_dir`` (default
+    the module's JIT cache), ``cflags`` (extra compiler flags), and ``out``
+    (a fixed output path instead of the content-hashed cache).
+    """
+
+    __slots__ = ("namespace", "cache_dir", "cflags", "out")
+
+    def __init__(
+        self,
+        namespace: "str | None" = None,
+        *,
+        cache_dir: "str | None" = None,
+        cflags: "List[str] | None" = None,
+        out: "str | None" = None,
+    ) -> None:
+        if namespace is not None:
+            namespace = _check_namespace("JitPackage", namespace.lower())
+        self.namespace = namespace
+        self.cache_dir = cache_dir
+        self.cflags = builtins.list(cflags) if cflags is not None else None
+        self.out = out
+
+    def _namespace_for(self, module: str) -> str:
+        return self.namespace if self.namespace is not None else _top_level_package(module)
+
+    def identity(self, cls: type, attr: "str | None" = None) -> str:
+        """The qualified identity for ``attr`` on ``cls`` (or for ``cls``
+        itself when ``attr`` is None), all lowercase."""
+        module = _module_of(cls)
+        namespace = self._namespace_for(module)
+        parts = [p for p in (_module_rest(module), _qualname_of(cls), attr) if p]
+        return (namespace + "/" + ".".join(parts)).lower()
+
+    def shippable(self, cls: type) -> bool:
+        """False for a class authored in ``__main__`` with no explicit
+        namespace to fall back on - :meth:`build` refuses those."""
+        return not (_module_of(cls) == "__main__" and self.namespace is None)
+
+    def plugin(
+        self, cls: "type | None" = None, *, needs: Tuple[object, ...] | None = None
+    ) -> "type | Callable[[type], type]":
+        """Like :func:`plugin`, but names every map/port under this package."""
+        if cls is None:
+            return lambda c: _build_plugin(c, needs, self)
+        return _build_plugin(cls, needs, self)
+
+    def series(
+        self, fn: "Callable[..., object] | None" = None, *, module: "str | None" = None
+    ) -> object:
+        """Like :func:`series`, but the default op name comes from this
+        package instead of the raw ``__module__``."""
+        if fn is None:
+            return lambda f: _series_impl(f, module, self)
+        return _series_impl(fn, module, self)
+
+    def build(self, cls: type, *, out: "str | None" = None) -> str:
+        """Compile ``cls`` (a :func:`plugin`-decorated class) to a shippable
+        native ``.so`` and return its path.
+
+        Raises :class:`JitError` for a class authored in ``__main__`` unless
+        this package (or the one that decorated ``cls``) has an explicit
+        namespace: a script or notebook has no import path to derive one
+        from."""
+        spec = getattr(cls, "_jit_plugin", None)
+        if not isinstance(spec, JitPlugin):
+            raise TypeError("expected a @jit.plugin-decorated class")
+        if not spec.shippable:
+            raise JitError(
+                f"cannot build a shippable .so for '{cls.__name__}' from __main__; "
+                'move it to a module, or pass JitPackage("yourname")'
+            )
+        return compile_plugin(
+            spec, cache_dir=self.cache_dir, extra_cflags=self.cflags, out=out or self.out
+        )
+
+
+_DEFAULT_PACKAGE = JitPackage()
 
 
 # Each expression reads the batch-resolved column for that field at row `i`
@@ -2069,6 +2242,14 @@ def _port_ctype(port: _Port) -> Tuple[str, str]:
     return ("double", "0.0") if port.is_f64 else ("uint64_t", "0")
 
 
+def _wire_id(port: _Port) -> str:
+    """A port's resolved wire id: non-None by the time _emit runs, since
+    _build_plugin resolves every publish port's name before emitting, and
+    consume() never returns a port without one."""
+    assert port.name is not None
+    return port.name
+
+
 def _emit_name_lists(provides: List[str], consumes: List[str]) -> Tuple[List[str], List[str]]:
     """The dftu_plugin::provides / ::consumes definitions and the two factory
     assignment lines. Both lists are derived, never author-declared: a plugin
@@ -2106,7 +2287,7 @@ def _emit_port_pre(
     ]
     for name, port in sub_ports:
         ctype, zero = _port_ctype(port)
-        cap = _c_str_literal(port.name)
+        cap = _c_str_literal(_wire_id(port))
         out += [
             f"    {ctype} _sub_{name} = {zero};",
             "    if (_ports && _ports->consume) {",
@@ -2126,7 +2307,7 @@ def _emit_port_flush(pub_ports: List[Tuple[str, _Port]]) -> List[str]:
     """Publish each publish port's per-batch accumulator after the event loop."""
     out: List[str] = []
     for name, port in pub_ports:
-        cap = _c_str_literal(port.name)
+        cap = _c_str_literal(_wire_id(port))
         out += [
             "    if (_ports && _ports->publish) {",
             f"        _ports->publish(host->h, _ports->port_key(host->h, {cap}), &_pub_{name}, 8u);",
@@ -2245,9 +2426,10 @@ def _emit_buffers(attr: str, decl: _MapDecl, rows: int) -> List[str]:
     return out
 
 
-def _emit_flush(attr: str, decl: _MapDecl) -> List[str]:
-    """Build one batch frame from the row buffers and fold it into the named
-    DFTU_EXT_AGG accumulator."""
+def _emit_flush(attr: str, decl: _MapDecl, wire_name: str) -> List[str]:
+    """Build one batch frame from the row buffers and fold it into the
+    DFTU_EXT_AGG accumulator named ``wire_name`` (the package-qualified id;
+    ``attr`` only ever names local C buffers)."""
     cols: List[Tuple[str, List[str]]] = []
     for idx, kt in enumerate(decl.key_types):
         _, dtype = _key_ctype(kt.dft)
@@ -2306,7 +2488,7 @@ def _emit_flush(attr: str, decl: _MapDecl) -> List[str]:
     spec_rows = ", ".join("{" + ", ".join(s) + "}" for s in specs)
     out += [
         f"        const dftu_agg_col _specs[{len(specs)}] = {{{spec_rows}}};",
-        f"        dftu_agg* _a = _agg->agg_new(host->h, {_c_str_literal(attr)}, "
+        f"        dftu_agg* _a = _agg->agg_new(host->h, {_c_str_literal(wire_name)}, "
         f"{keys_arg}, {n_keys}u, _specs, {len(specs)}u);",
         f"        if (_a && _n_{attr} > 0) {{",
         f"            dftu_series* _cols[{n_cols}];",
@@ -2369,9 +2551,11 @@ def _emit(
     ports: Dict[str, _Port] | None = None,
     config_fields: "Dict[str, bool] | None" = None,
     raw_event: bool = False,
+    map_ids: "Dict[str, str] | None" = None,
 ) -> str:
     op_defs = op_defs or []
     ports = ports or {}
+    map_ids = map_ids if map_ids is not None else {attr: attr for attr in maps}
     pub_ports = [(n, p) for n, p in ports.items() if p.role == "publish"]
     sub_ports = [(n, p) for n, p in ports.items() if p.role == "consume"]
     needs_str = any(
@@ -2429,8 +2613,8 @@ def _emit(
             "",
         ]
     name_defs, name_assigns = _emit_name_lists(
-        sorted([p.name for _, p in pub_ports] + [*maps]),
-        sorted(p.name for _, p in sub_ports),
+        sorted([_wire_id(p) for _, p in pub_ports] + [map_ids[attr] for attr in maps]),
+        sorted(_wire_id(p) for _, p in sub_ports),
     )
     out += name_defs
     out += [
@@ -2480,7 +2664,7 @@ def _emit(
     if ports:
         inner += _emit_port_flush(pub_ports)
     for attr, decl in maps.items():
-        inner += _emit_flush(attr, decl)
+        inner += _emit_flush(attr, decl, map_ids[attr])
     out += ["    " + ln for ln in inner]
     out.append("    }")
     for attr, decl in maps.items():
@@ -2574,7 +2758,10 @@ def _referenced_ops(fn: Callable[..., object]) -> Dict[str, Op]:
     return {name: val for name, val in scope.items() if isinstance(val, Op)}
 
 
-def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
+def _build_plugin(
+    cls: type, needs: Tuple[object, ...] | None, package: "JitPackage | None" = None
+) -> type:
+    pkg = package if package is not None else _DEFAULT_PACKAGE
     maps: Dict[str, _MapDecl] = {}
     ports: Dict[str, _Port] = {}
     configs: Dict[str, _Config] = {}
@@ -2592,6 +2779,13 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
         raise JitError(
             "@jit.plugin needs at least one jit.map or jit.publish/jit.consume attribute"
         )
+    # A publish port's wire id is only knowable once its class is built: it is
+    # package + module + class + attribute, resolved here so a later
+    # consume(ThisClass.port) sees a real name.
+    for attr, port in ports.items():
+        if port.role == "publish":
+            port.name = pkg.identity(cls, attr)
+    map_ids = {attr: pkg.identity(cls, attr) for attr in maps}
     for attr, decl in maps.items():
         if decl.is_product and any(m.elem == "str" for m in decl.values):
             raise JitError(
@@ -2649,8 +2843,11 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
         ports,
         config_f64,
         raw_event=each[0].raw,
+        map_ids=map_ids,
     )
-    setattr(cls, "_jit_plugin", JitPlugin(cls.__name__, source, {}))
+    result_names = {qid: attr for attr, qid in map_ids.items()}
+    plugin = JitPlugin(cls.__name__, source, {}, result_names, pkg.shippable(cls))
+    setattr(cls, "_jit_plugin", plugin)
     return cls
 
 
@@ -2992,10 +3189,21 @@ def vfold(cls: type) -> type:
 _HOST_NAME_PREFIX = "dftu."
 
 
-def _series_module(fn: Callable[..., object], module: "str | None") -> str:
-    mod = module if module is not None else getattr(fn, "__module__", None)
-    if not isinstance(mod, str) or not mod:
-        raise JitError('@jit.series needs a module prefix; pass module="<name>"')
+def _series_module(
+    fn: Callable[..., object], module: "str | None", package: "JitPackage | None"
+) -> str:
+    if module is not None:
+        mod = module
+    else:
+        fn_module = getattr(fn, "__module__", None)
+        if not isinstance(fn_module, str) or not fn_module:
+            raise JitError('@jit.series needs a module prefix; pass module="<name>"')
+        pkg = package if package is not None else _DEFAULT_PACKAGE
+        # namespace + rest reconstructs fn.__module__ exactly for a default
+        # package (namespace is its top-level segment), so an explicit
+        # JitPackage only ever changes the leading segment.
+        rest = _module_rest(fn_module)
+        mod = pkg._namespace_for(fn_module) + (f".{rest}" if rest else "")
     if mod == _HOST_NAME_PREFIX[:-1] or mod.startswith(_HOST_NAME_PREFIX):
         raise JitError(
             f"module '{mod}' is reserved for host ops; the 'dftu.' namespace is not "
@@ -3004,7 +3212,9 @@ def _series_module(fn: Callable[..., object], module: "str | None") -> str:
     return mod
 
 
-def _series_impl(fn: Callable[..., object], module: "str | None") -> Callable[..., object]:
+def _series_impl(
+    fn: Callable[..., object], module: "str | None", package: "JitPackage | None" = None
+) -> Callable[..., object]:
     from ..columnar import Expr, col
     from . import ops as _ops
 
@@ -3020,7 +3230,7 @@ def _series_impl(fn: Callable[..., object], module: "str | None") -> Callable[..
     built = fn(*[col(f"__x{i}__") for i in range(n)])
     if not isinstance(built, Expr):
         raise JitError("@jit.series body must return a column expression built from its arguments")
-    name = f"{_series_module(fn, module)}.{fname}"
+    name = f"{_series_module(fn, module, package)}.{fname}"
     _ops._register_user(name, n, built)
     return _ops.get(name)
 
@@ -3039,12 +3249,13 @@ def series(fn: "Callable[..., object] | None" = None, *, module: "str | None" = 
     evaluator - no compile step, and it fuses with built-in Expr math.
 
     It also registers in dftracer.utils.jit.ops under ``<module>.<name>``, where
-    the module defaults to the defining ``fn.__module__``; pass
-    ``module="stats"`` to choose it. The registry is shared with the engine's
-    built-in ops, so a user op never takes a bare name, and the host's ``dftu.``
-    namespace is refused. Reach it as ``ops.run("stats.<name>", s)``,
-    ``ops.stats.<name>(s)`` and ``s.ops.stats.<name>()``. Arguments are
-    positional column operands."""
+    the module defaults to the defining function's :class:`JitPackage` (a bare
+    ``fn.__module__`` for a default package); pass ``module="stats"`` to choose
+    it explicitly, or use :meth:`JitPackage.series` for a named package. The
+    registry is shared with the engine's built-in ops, so a user op never takes
+    a bare name, and the host's ``dftu.`` namespace is refused. Reach it as
+    ``ops.run("stats.<name>", s)``, ``ops.stats.<name>(s)`` and
+    ``s.ops.stats.<name>()``. Arguments are positional column operands."""
     if fn is None:
         return lambda f: _series_impl(f, module)
     return _series_impl(fn, module)
@@ -3081,22 +3292,52 @@ def plugin_renames(obj: object) -> Dict[str, List[str]]:
     return {}
 
 
-def compile_plugin(spec: JitPlugin) -> str:
-    """Build ``spec`` to a cached native ``.so`` and return its path.
+def plugin_result_names(obj: object) -> Dict[str, str]:
+    """``{wire id: attribute name}`` for a ``@jit.plugin`` class's maps, so a
+    host can rewrite its package-qualified result keys back to the attribute
+    name callers index ``results[...]`` with."""
+    spec = getattr(obj, "_jit_plugin", None)
+    if isinstance(spec, JitPlugin):
+        return spec.result_names
+    return {}
 
-    Content-hashes the emitted source, include dir, and compiler so an unchanged
-    plugin never rebuilds. Raises :class:`JitError` if the compile fails.
+
+def compile_plugin(
+    spec: JitPlugin,
+    *,
+    cache_dir: "str | Path | None" = None,
+    extra_cflags: "List[str] | None" = None,
+    out: "str | None" = None,
+) -> str:
+    """Build ``spec`` to a native ``.so`` and return its path.
+
+    With ``cache_dir``/``extra_cflags``/``out`` unset, this is a content-hashed
+    cache build (an unchanged plugin never rebuilds); pass them (see
+    :class:`JitPackage`) for a fixed output path or extra compiler flags.
+    Raises :class:`JitError` if the compile fails.
     """
     try:
         include = _plugin_build.include_dir()
         cxx = _plugin_build.compiler()
-        digest = _plugin_build.source_digest(spec.source, include, cxx)
-        out = _plugin_build.cache_dir() / f"{spec.name}.{digest}.so"
-        if out.is_file():
-            return str(out)
-        src = out.with_suffix(".cpp")
-        src.write_text(spec.source, encoding="utf-8")
-        return _plugin_build.build_shared(str(src), out=str(out), name=spec.name)
+        flags = builtins.list(_plugin_build.cflags())
+        if extra_cflags:
+            flags += builtins.list(extra_cflags)
+        cache = Path(cache_dir) if cache_dir is not None else _plugin_build.cache_dir()
+        cache.mkdir(parents=True, exist_ok=True)
+        if out is not None:
+            out_path = Path(out)
+        else:
+            digest = _plugin_build.source_digest(spec.source, include, cxx)
+            out_path = cache / f"{spec.name}.{digest}.so"
+            if out_path.is_file():
+                return str(out_path)
+        src_path = out_path.with_suffix(".cpp")
+        src_path.write_text(spec.source, encoding="utf-8")
+        cmd = [cxx, *flags, "-o", str(out_path), str(src_path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise _plugin_build.PluginBuildError(proc.stderr)
+        return str(out_path)
     except _plugin_build.PluginBuildError as exc:
         raise JitError(f"jit compile failed:\n{exc}") from exc
 
@@ -3107,6 +3348,15 @@ def compile_class(obj: object) -> str:
     if not isinstance(spec, JitPlugin):
         raise TypeError("expected a @jit.plugin-decorated class")
     return compile_plugin(spec)
+
+
+def build(cls: type, *, out: "str | None" = None) -> str:
+    """Compile ``cls`` to a shippable native ``.so`` under the default package.
+
+    Equivalent to ``JitPackage().build(cls, out=out)``; raises :class:`JitError`
+    for a class authored in ``__main__`` (pass a :class:`JitPackage` there
+    instead - see :meth:`JitPackage.build`)."""
+    return _DEFAULT_PACKAGE.build(cls, out=out)
 
 
 def is_jit_plugin(obj: object) -> bool:

@@ -641,10 +641,11 @@ def test_jit_each_map_gets_its_own_accumulator():
 
     src = Stats._jit_plugin.source
     b = _body(Stats)
+    wire = {attr: wid for wid, attr in Stats._jit_plugin.result_names.items()}
     # Each declared map is its own named DFTU_EXT_AGG accumulator, fed by its own
     # per-batch row buffer.
     for name, op in (("n", "DFTU_AGG_SUM"), ("tot", "DFTU_AGG_SUM"), ("avg", "DFTU_AGG_MEAN")):
-        assert f'agg_new(host->h, "{name}"' in src
+        assert f'agg_new(host->h, "{wire[name]}"' in src
         assert f"{{{op}, " in src
         assert f"_n_{name}++" in b
 
@@ -1780,8 +1781,14 @@ def test_jit_bare_single_key_matches_tuple_form(tmp_path):
         def step(self, e):
             self.m[(e.pid,)] += 1
 
-    # Bare key normalizes to the identical 1-tuple decl the compiler reads.
-    assert Bare._jit_plugin.source == Tupled._jit_plugin.source
+    # Bare key normalizes to the identical 1-tuple decl the compiler reads (up
+    # to the class-qualified wire id, which differs because the two classes
+    # have different names).
+    (bare_wire_id,) = Bare._jit_plugin.result_names.keys()
+    (tupled_wire_id,) = Tupled._jit_plugin.result_names.keys()
+    bare_src = Bare._jit_plugin.source.replace(bare_wire_id, "m")
+    tupled_src = Tupled._jit_plugin.source.replace(tupled_wire_id, "m")
+    assert bare_src == tupled_src
     assert 'const char* _keys[1] = {"k0"};' in Bare._jit_plugin.source
     assert "DFTU_TYPE_INT64, _k0_m" in Bare._jit_plugin.source
 

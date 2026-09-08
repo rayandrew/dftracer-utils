@@ -84,13 +84,14 @@ def unnest(
 class PluginHost:
     """Load and run compiled DFTracer plugins over trace files."""
 
-    __slots__ = ("_native", "_renames")
+    __slots__ = ("_native", "_renames", "_result_names")
 
     def __init__(self, runtime: "Optional[Runtime]" = None) -> None:
         """Create a host bound to ``runtime`` (a ``Runtime`` or None for the
         module default)."""
         self._native = _NativePluginHost(runtime)
         self._renames: Dict[str, List[str]] = {}
+        self._result_names: Dict[str, str] = {}
 
     # config values are an arbitrary JSON-serializable object tree (json.dumps'd).
     def load(self, path: Union[str, type], config: Optional[Dict[str, JSONValue]] = None) -> None:
@@ -108,6 +109,7 @@ class PluginHost:
             from . import jit
 
             self._renames.update(jit.plugin_renames(path))
+            self._result_names.update(jit.plugin_result_names(path))
             path = jit.compile_class(path)
         self._native.load(path, json.dumps(config) if config is not None else None)
 
@@ -138,7 +140,11 @@ class PluginHost:
         - ``emit_result`` bytes -> ``bytes``.
         """
         raw = self._native.run(traces, index_dir, auto_index)
-        return {name: self._shape(name, obj) for name, obj in raw.items()}
+        out: "Dict[str, _RunResult]" = {}
+        for wire_name, obj in raw.items():
+            name = self._result_names.get(wire_name, wire_name)
+            out[name] = self._shape(name, obj)
+        return out
 
     def _shape(self, name: str, obj: object) -> "_RunResult":
         """Return the result in the shape its emit kind implies.
