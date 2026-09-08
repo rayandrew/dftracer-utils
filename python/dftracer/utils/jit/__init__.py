@@ -3362,3 +3362,17 @@ def build(cls: type, *, out: "str | None" = None) -> str:
 def is_jit_plugin(obj: object) -> bool:
     """True if ``obj`` is a ``@jit.plugin``-decorated class."""
     return isinstance(getattr(obj, "_jit_plugin", None), JitPlugin)
+
+
+def provided_names(cls: type) -> Dict[str, str]:
+    """``{attribute: qualified identity}`` for every name ``cls`` provides: each
+    :func:`map` accumulator and each :func:`publish` port, already resolved
+    under whichever :class:`JitPackage` decorated it."""
+    spec = getattr(cls, "_jit_plugin", None)
+    if not isinstance(spec, JitPlugin):
+        raise TypeError("expected a @jit.plugin-decorated class")
+    names: Dict[str, str] = {attr: qid for qid, attr in spec.result_names.items()}
+    for attr, val in vars(cls).items():
+        if isinstance(val, _Port) and val.role == "publish":
+            names[attr] = val.name
+    return names
