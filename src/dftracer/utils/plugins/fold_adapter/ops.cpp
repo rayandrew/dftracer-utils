@@ -33,20 +33,17 @@ namespace {
     return ::dftu_result_series{1, {.value = result}};
 }
 
-void host_ops_run_aggregate(void*, const char* name,
-                            const ::dftu_series* const* in, std::uint32_t n_in,
-                            const ::dftu_op_arg* args, ::dftu_scalar* out,
-                            int* ok) {
-    if (out) *out = ::dftu_scalar{};
+::dftu_result_scalar host_ops_run_aggregate(void*, const char* name,
+                                            const ::dftu_series* const* in,
+                                            std::uint32_t n_in,
+                                            const ::dftu_op_arg* args) {
     const ::dftu_op_desc* op = name ? ::dftu_op_find(name) : nullptr;
-    if (!op || n_in != 1) {
-        if (ok) *ok = 0;
-        return;
-    }
+    if (!op) return ::dftu_result_scalar{0, {.err = not_found_error()}};
+    if (n_in != 1) return ::dftu_result_scalar{0, {.err = rejected_error()}};
     int run_ok = 0;
     ::dftu_scalar result = ::dftu_op_run_aggregate(op, in[0], args, &run_ok);
-    if (out) *out = result;
-    if (ok) *ok = run_ok;
+    if (!run_ok) return ::dftu_result_scalar{0, {.err = rejected_error()}};
+    return ::dftu_result_scalar{1, {.value = result}};
 }
 
 ::dftu_result_frame host_ops_run_frame(void*, const char* name,

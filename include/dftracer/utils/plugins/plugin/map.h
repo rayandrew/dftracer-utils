@@ -312,12 +312,13 @@ class Host {
                                  const dftu_op_arg* args = nullptr,
                                  bool* ok = nullptr) const {
         const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
-        dftu_scalar out{};
-        int run_ok = 0;
-        if (e && e->run_aggregate)
-            e->run_aggregate(h_->h, name, &in, 1, args, &out, &run_ok);
-        if (ok) *ok = run_ok != 0;
-        return out;
+        if (!e || !e->run_aggregate) {
+            if (ok) *ok = false;
+            return dftu_scalar{};
+        }
+        dftu_result_scalar r = e->run_aggregate(h_->h, name, &in, 1, args);
+        if (ok) *ok = DFTU_RESULT_OK(r);
+        return DFTU_RESULT_OK(r) ? DFTU_RESULT_VALUE(r) : dftu_scalar{};
     }
     /// The registered op named `name` (built-in or user), or NULL if none or
     /// the host lacks the ops group. See dftu_op_find.
