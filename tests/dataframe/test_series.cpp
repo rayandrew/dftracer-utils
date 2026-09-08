@@ -782,6 +782,18 @@ TEST_SUITE("vec") {
         CHECK(parsed.data<std::uint64_t>()[1] == 0xdeadbeefull);
         CHECK(parsed.is_null(2));  // not the 16-digit form
 
+        Series formatted = parsed.hex64_format();
+        CHECK(formatted.type() == TypeId::String);
+        CHECK(formatted.string_at(0) == "00000000000000ff");
+        CHECK(formatted.string_at(1) == "00000000deadbeef");
+        CHECK(formatted.is_null(2));
+        CHECK(formatted.hex64_parse().data<std::uint64_t>()[1] ==
+              0xdeadbeefull);
+        CHECK(Series::strings({"f07c4ebf132e3799"})
+                  .hex64_parse()
+                  .hex64_format()
+                  .string_at(0) == "f07c4ebf132e3799");
+
         // transforms
         Series lo = s.to_lowercase();
         CHECK(lo.string_at(0) == "read");

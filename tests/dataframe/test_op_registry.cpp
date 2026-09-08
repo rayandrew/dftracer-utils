@@ -253,6 +253,18 @@ TEST_SUITE("op_registry") {
         dftu_op_desc dup{"add", DFTU_OP_SIG(SERIES, SERIES, SERIES, NONE),
                          reinterpret_cast<const void*>(&dftu_series_add)};
         CHECK(dftu_op_register(&dup) != 0);
+
+        // A name is a stable public key, so a second registration of one
+        // already taken fails instead of shadowing it.
+        dftu_op_desc first{"mymod.once",
+                           DFTU_OP_SIG(SERIES, SERIES, NONE, NONE),
+                           reinterpret_cast<const void*>(&dftu_series_share)};
+        REQUIRE(dftu_op_register(&first) == 0);
+        dftu_op_desc second{"mymod.once",
+                            DFTU_OP_SIG(SERIES, SERIES, NONE, NONE),
+                            reinterpret_cast<const void*>(&dftu_series_abs)};
+        CHECK(dftu_op_register(&second) != 0);
+        CHECK(dftu_op_find("mymod.once")->fn == first.fn);
         std::int64_t v[1] = {1};
         dftu_series* c = i64_col(v, 1);
         const dftu_series* in[1] = {c};

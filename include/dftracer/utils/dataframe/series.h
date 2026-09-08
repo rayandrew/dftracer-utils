@@ -454,6 +454,9 @@ class Series {
     /// UInt64 parse of each row as dftracer's 16-hex-digit hash form;
     /// a row not in that form is null.
     Series hex64_parse() const;
+    /// String format of each UInt64/Int64 row as dftracer's 16-lowercase-hex-
+    /// digit hash form; the inverse of hex64_parse.
+    Series hex64_format() const;
     Series to_lowercase() const;  ///< ASCII case fold (non-ASCII unchanged).
     Series to_uppercase() const;  ///< ASCII case fold (non-ASCII unchanged).
     Series str_strip() const;     ///< Trim ASCII whitespace both ends.

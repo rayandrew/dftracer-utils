@@ -4,7 +4,9 @@
  *   DFTU_SERIES_OP(name, fn, ret, o0, o1, o2)
  *     name        - registry key (lower_snake). A built-in column op is
  *                   unprefixed; a host utility a plugin calls through
- *                   dftu.ext.ops is `dftu.<family>.<op>`, where <family> is
+ *                   dftu.ext.ops is `dftu.<family>.<op>`. The `dftu.` prefix
+ *                   is ours: a plugin registering one is refused at the plugin
+ *                   seam, so a plugin can never shadow a host op. <family> is
  *                   the source module the utility comes from (hash ->
  *                   core/common/hash, hex -> the scalar hex codecs, text ->
  *                   utilities/text, fs -> utilities/filesystem, file ->
@@ -14,6 +16,12 @@
  *     ret,o0..o2  - the signature tokens (DFTU_TOK_* suffixes): the return
  *                   token then up to three operand tokens, packed by
  *                   DFTU_OP_SIG. Pad unused operand slots with NONE.
+ *
+ * Only host utilities that are genuine column kernels belong here. The file
+ * and filesystem families (dftu.fs.*, dftu.file.*, dftu.text.line_filter) are
+ * I/O, not kernels: they register into the same name-keyed registry at runtime
+ * from the utilities layer (utilities/host_ops.h) via dftu_op_register, so the
+ * columnar engine keeps no dependency on the file system.
  *
  * This is the whole column-op surface (every dftu_series_* op). Frame ops
  * (dftu_dataframe_*: join / group_by / pivot / select / ...) are a separate
@@ -175,5 +183,7 @@ DFTU_SERIES_OP(is_between, dftu_series_is_between, SERIES, SERIES, SCALAR, SCALA
 DFTU_SERIES_OP(dftu.hash.fnv1a, dftu_series_fnv1a, SERIES, SERIES, NONE, NONE)
 DFTU_SERIES_OP(dftu.hex.parse64, dftu_series_hex64_parse, SERIES, SERIES, NONE,
                NONE)
+DFTU_SERIES_OP(dftu.hex.format64, dftu_series_hex64_format, SERIES, SERIES,
+               NONE, NONE)
 
 #undef DFTU_SERIES_OP

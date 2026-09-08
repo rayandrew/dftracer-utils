@@ -661,6 +661,41 @@ dftu_series* dftu_series_hex64_parse(const dftu_series* v) {
     return out;
 }
 
+dftu_series* dftu_series_hex64_format(const dftu_series* v) {
+    using dftracer::utils::hash::format_hex64;
+    using dftracer::utils::hash::HEX64_DIGITS;
+    if (!v || (v->type != TypeId::Uint64 && v->type != TypeId::Int64)) {
+        return nullptr;
+    }
+    if (v->encoding != Encoding::Flat || !v->data) return nullptr;
+
+    const std::size_t n = static_cast<std::size_t>(v->length);
+    const std::size_t total = n * HEX64_DIGITS;
+    // Every row is exactly HEX64_DIGITS bytes, so the byte total is known up
+    // front; refuse rather than overflow the int32 offsets Arrow uses here.
+    if (total > static_cast<std::size_t>(INT32_MAX)) return nullptr;
+
+    const std::uint64_t* src =
+        reinterpret_cast<const std::uint64_t*>(v->data->data());
+    auto* out = new dftu_series();
+    out->type = TypeId::String;
+    out->encoding = Encoding::Flat;
+    out->length = v->length;
+    out->null_count = v->null_count;
+    out->validity = v->validity;
+    out->offsets = Buffer::allocate((n + 1) * sizeof(std::int32_t));
+    out->data = Buffer::allocate(total);
+    std::int32_t* od = reinterpret_cast<std::int32_t*>(out->offsets->data());
+    char* bd =
+        total != 0 ? reinterpret_cast<char*>(out->data->data()) : nullptr;
+    for (std::size_t i = 0; i < n; ++i) {
+        od[i] = static_cast<std::int32_t>(i * HEX64_DIGITS);
+        format_hex64(src[i], bd + i * HEX64_DIGITS);
+    }
+    od[n] = static_cast<std::int32_t>(total);
+    return out;
+}
+
 dftu_series* dftu_series_to_lowercase(const dftu_series* v) {
     return ascii_fold(v, 'A', 'Z', 32);
 }

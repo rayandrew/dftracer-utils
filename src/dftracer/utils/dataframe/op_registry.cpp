@@ -170,9 +170,10 @@ int dftu_op_register(const dftu_op_desc* desc) {
 
 dftu_series* dftu_op_run(const dftu_op_desc* op, const dftu_series* const* in,
                          uint32_t n, const dftu_op_arg* a) {
-    if (!op || !op->fn || !in) return nullptr;
+    if (!op || !op->fn) return nullptr;
     if (dftu_op_kind_of(op->sig) != DFTU_OP_KIND_SERIES) return nullptr;
     if (n != dftu_op_arity(op->sig)) return nullptr;
+    if (n != 0 && !in) return nullptr;
     if (needs_arg(op->sig) && !a) return nullptr;
     const dftu_op_val* g = a ? a->args : nullptr;
     switch (op->sig) {
@@ -223,6 +224,15 @@ dftu_series* dftu_op_run(const dftu_op_desc* op, const dftu_series* const* in,
         case DFTU_OP_SIG(SERIES, SERIES, I64, ROLLING):
             return as<dftu_series* (*)(CS, int64_t, dftu_rolling_op)>(op->fn)(
                 in[0], g[1].i64, static_cast<dftu_rolling_op>(g[2].i32));
+        // Source ops: no column operand, so the whole column is built from
+        // the string operands (a directory listing, say).
+        case DFTU_OP_SIG(SERIES, STR, NONE, NONE):
+            return as<dftu_series* (*)(const char*, int32_t)>(op->fn)(
+                g[0].str.ptr, g[0].str.len);
+        case DFTU_OP_SIG(SERIES, STR, STR, NONE):
+            return as<dftu_series* (*)(const char*, int32_t, const char*,
+                                       int32_t)>(op->fn)(
+                g[0].str.ptr, g[0].str.len, g[1].str.ptr, g[1].str.len);
         case DFTU_OP_SIG(SERIES, SERIES, RANK, I64):
             return as<dftu_series* (*)(CS, dftu_rank_method, int32_t)>(op->fn)(
                 in[0], static_cast<dftu_rank_method>(g[1].i32),
@@ -275,6 +285,14 @@ dftu_scalar dftu_op_run_aggregate(const dftu_op_desc* op, const dftu_series* v,
         case DFTU_OP_SIG(F64, SERIES, I32, NONE):
             z.kind = DFTU_SCALAR_TAG_F64;
             z.value.d = as<double (*)(CS, int32_t)>(op->fn)(v, g[1].i32);
+            return z;
+        // No column operand: an effectful op reporting success (a file
+        // compression, say). `v` is unused.
+        case DFTU_OP_SIG(BOOL, STR, STR, NONE):
+            z.value.i =
+                as<int32_t (*)(const char*, int32_t, const char*, int32_t)>(
+                    op->fn)(g[0].str.ptr, g[0].str.len, g[1].str.ptr,
+                            g[1].str.len);
             return z;
         case DFTU_OP_SIG(F64, SERIES, F64, NONE):
             z.kind = DFTU_SCALAR_TAG_F64;

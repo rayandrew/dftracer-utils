@@ -104,6 +104,11 @@ PyObject* Series_hex64_parse(PyObject* self, PyObject*) {
     if (!a) return nullptr;
     return make_series(a->hex64_parse());
 }
+PyObject* Series_hex64_format(PyObject* self, PyObject*) {
+    Series* a = as_series(self);
+    if (!a) return nullptr;
+    return make_series(a->hex64_format());
+}
 PyObject* Series_to_lowercase(PyObject* self, PyObject*) {
     Series* a = as_series(self);
     if (!a) return nullptr;

@@ -268,6 +268,11 @@ DFTU_EXPORT dftu_series* dftu_series_fnv1a(const dftu_series* v);
  * UInt64 column; a null row, or one not in that exact form, is null. */
 DFTU_EXPORT dftu_series* dftu_series_hex64_parse(const dftu_series* v);
 
+/** Format each row of a UInt64/Int64 column back into dftracer's
+ * 16-lowercase-hex-digit form as a String column; null rows stay null. The
+ * inverse of dftu_series_hex64_parse. Returns NULL on any other input type. */
+DFTU_EXPORT dftu_series* dftu_series_hex64_format(const dftu_series* v);
+
 DFTU_EXPORT dftu_series* dftu_series_to_lowercase(const dftu_series* v);
 DFTU_EXPORT dftu_series* dftu_series_to_uppercase(const dftu_series* v);
 /** Trim ASCII whitespace from both/left/right ends. String column, nulls

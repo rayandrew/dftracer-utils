@@ -670,6 +670,9 @@ class Series(_Wrapper["_ext._Series"]):
     def hex64_parse(self) -> "Series":
         return _wrap(self._native.hex64_parse())
 
+    def hex64_format(self) -> "Series":
+        return _wrap(self._native.hex64_format())
+
     def to_lowercase(self) -> "Series":
         return _wrap(self._native.to_lowercase())
 

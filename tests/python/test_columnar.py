@@ -1126,6 +1126,12 @@ def test_series_str_ops():
     # hex64 is dftracer's fhash/hhash form: exactly 16 hex digits, else null.
     hexes = _series_from_arrow(pa.array(["00000000deadbeef", "deadbeef", None], pa.string()))
     assert hexes.hex64_parse().to_arrow().to_pylist() == [0xDEADBEEF, None, None]
+    # hex64_format is its inverse and writes the same 16-lowercase-digit form.
+    assert hexes.hex64_parse().hex64_format().to_arrow().to_pylist() == [
+        "00000000deadbeef",
+        None,
+        None,
+    ]
 
     # transforms
     cased = _series_from_arrow(pa.array(["Abc", "XY", None], pa.string()))
@@ -1443,3 +1449,49 @@ def test_query_F_shorthand_and_callable():
     assert str(F.dur > 100) == str(Field("dur") > 100)
     assert str(F("args.level") == 3) == str(Field("args.level") == 3)
     assert str(F["args.level"] == 3) == str(Field("args.level") == 3)
+
+
+def test_host_ops_registered_by_name(tmp_path):
+    """The utilities a plugin reaches by name through dftu.ext.ops, run through
+    the same registry the plugin uses."""
+    names = set(_ext.op_list())
+    assert {
+        "dftu.hex.parse64",
+        "dftu.hex.format64",
+        "dftu.fs.scan_dir",
+        "dftu.fs.scan_dir_pattern",
+        "dftu.file.compress",
+        "dftu.file.decompress",
+        "dftu.text.line_filter",
+    } <= names
+
+    assert _ext.op_info("dftu.fs.scan_dir")["signature"] == "(str) -> series"
+    assert _ext.op_info("dftu.file.compress")["signature"] == "(str, str) -> bool"
+
+    (tmp_path / "a.log").write_text("x")
+    (tmp_path / "b.txt").write_text("y")
+
+    listed = _ext.op_run("dftu.fs.scan_dir", str(tmp_path))
+    assert sorted(pa.array(listed).to_pylist()) == [
+        str(tmp_path / "a.log"),
+        str(tmp_path / "b.txt"),
+    ]
+
+    matched = _ext.op_run("dftu.fs.scan_dir_pattern", str(tmp_path), ".log")
+    assert pa.array(matched).to_pylist() == [str(tmp_path / "a.log")]
+
+    src = tmp_path / "payload.txt"
+    src.write_text("hello " * 4096)
+    gz = tmp_path / "payload.txt.gz"
+    back = tmp_path / "roundtrip.txt"
+    assert _ext.op_run("dftu.file.compress", str(src), str(gz)) == 1
+    assert gz.exists()
+    assert _ext.op_run("dftu.file.decompress", str(gz), str(back)) == 1
+    assert back.read_text() == src.read_text()
+
+    # A missing input is reported, not raised.
+    assert _ext.op_run("dftu.file.compress", str(tmp_path / "absent"), str(gz)) == 0
+
+    lines = _series_from_arrow(pa.array(["ERROR: full", "INFO: ok", "ERROR: slow"], pa.string()))
+    kept = _ext.op_run("dftu.text.line_filter", lines._native, "ERROR")
+    assert pa.array(kept).to_pylist() == ["ERROR: full", "ERROR: slow"]

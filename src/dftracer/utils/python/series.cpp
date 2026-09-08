@@ -372,6 +372,9 @@ PyMethodDef Series_methods[] = {
     {"hex64_parse", Series_hex64_parse, METH_NOARGS,
      "hex64_parse() -> UInt64 Series parsing each row as hex64; unparsable "
      "rows are null."},
+    {"hex64_format", Series_hex64_format, METH_NOARGS,
+     "hex64_format() -> String Series formatting each UInt64/Int64 row as "
+     "dftracer's 16-lowercase-hex-digit form; the inverse of hex64_parse."},
     {"to_lowercase", Series_to_lowercase, METH_NOARGS,
      "to_lowercase() -> String Series, ASCII case fold (non-ASCII unchanged)."},
     {"to_uppercase", Series_to_uppercase, METH_NOARGS,
