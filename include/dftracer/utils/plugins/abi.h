@@ -7,6 +7,7 @@
 
 #include <dftracer/utils/core/common/export.h>
 #include <dftracer/utils/dataframe/agg_op_codes.h> /* DFTU_AGG_* for dftu_agg_col */
+#include <dftracer/utils/plugins/abi_version.h> /* DFTRACER_PLUGIN_ABI_VERSION */
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -21,8 +22,6 @@ extern "C" {
    opaque pointers to them cross this ABI. */
 struct ArrowArray;
 struct ArrowSchema;
-
-#define DFTRACER_PLUGIN_ABI_VERSION 1u
 
 /** Interned string id; resolve for bytes stable for the whole scan.
    DFTU_STR_NONE marks an absent field. */

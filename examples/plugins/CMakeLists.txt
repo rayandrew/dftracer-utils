@@ -2,6 +2,9 @@
 # (the include/ headers); they deliberately link none of the internal libraries,
 # so a broken build here is real ABI rot in abi.h / plugin.h.
 
+# Generated headers (abi_version.h) land under the build tree, not include/.
+include_directories(${CMAKE_BINARY_DIR}/include)
+
 # Reads the batch dataframe directly (dftu_series_data / dftu_series_type), so
 # it links the dataframe C ABI like dur_stats_consumer does.
 add_library(event_counter_plugin MODULE event_counter.c)

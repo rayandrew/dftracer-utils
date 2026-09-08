@@ -42,9 +42,52 @@ def compiler() -> str:
     return os.environ.get("CXX") or shutil.which("c++") or shutil.which("clang++") or "c++"
 
 
+def _abi_version_hex(include: str) -> str:
+    # Mirrors cmake/scripts/plugin_abi_version.cmake: a hash-of-hashes over the
+    # same two files, truncated to 32 bits, so a plugin built from source
+    # headers alone (no CMake build ever ran) still stamps the version its
+    # headers hash to.
+    base = Path(include) / "dftracer" / "utils"
+
+    def file_hash(rel: str) -> str:
+        try:
+            return hashlib.sha256((base / rel).read_bytes()).hexdigest()
+        except OSError:
+            return hashlib.sha256(b"\0").hexdigest()
+
+    combined = file_hash("plugins/abi.h") + file_hash("dataframe/abi.h")
+    return hashlib.sha256(combined.encode("ascii")).hexdigest()[:8].upper()
+
+
+def _ensure_abi_version_header(include: str) -> str | None:
+    """Write dftracer/utils/plugins/abi_version.h into the JIT cache when
+    ``include`` has none (a dev checkout with no CMake build ever generated
+    it), so a JIT-compiled plugin still stamps a real DFTRACER_PLUGIN_ABI_VERSION
+    instead of failing to find the header. Returns the extra include directory
+    to add, or None when ``include`` already has one (an installed package or a
+    CMake build tree)."""
+    rel = Path("dftracer") / "utils" / "plugins" / "abi_version.h"
+    if (Path(include) / rel).is_file():
+        return None
+    overlay = cache_dir() / "abi_version_include"
+    header_path = overlay / rel
+    header_path.parent.mkdir(parents=True, exist_ok=True)
+    header_path.write_text(
+        "#ifndef DFTRACER_UTILS_PLUGINS_ABI_VERSION_H\n"
+        "#define DFTRACER_UTILS_PLUGINS_ABI_VERSION_H\n\n"
+        f"#define DFTRACER_PLUGIN_ABI_VERSION 0x{_abi_version_hex(include)}u\n\n"
+        "#endif  // DFTRACER_UTILS_PLUGINS_ABI_VERSION_H\n"
+    )
+    return str(overlay)
+
+
 def cflags() -> List[str]:
     """Compile flags a plugin needs: C++20, position-independent, shared."""
-    flags = ["-std=c++20", "-fPIC", "-shared", f"-I{include_dir()}"]
+    inc = include_dir()
+    flags = ["-std=c++20", "-fPIC", "-shared", f"-I{inc}"]
+    overlay = _ensure_abi_version_header(inc)
+    if overlay:
+        flags.append(f"-I{overlay}")
     if sys.platform == "darwin":
         flags += ["-undefined", "dynamic_lookup"]
     return flags

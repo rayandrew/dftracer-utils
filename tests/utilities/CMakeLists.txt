@@ -88,6 +88,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_ops.cpp
     plugins/test_plugin_planner.cpp
     plugins/test_plugin_order.cpp
+    plugins/test_plugin_abi_gate.cpp
 )
 
 # +++++++++++++++++++++++++++++++++++++++++
@@ -374,3 +375,30 @@ target_enable_coroutine(${cabi_target})
 set_target_properties(${cabi_target} PROPERTIES OUTPUT_NAME test_plugin_c_abi
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins")
 add_test(NAME utilities/plugins/test_plugin_c_abi COMMAND ${cabi_target})
+
+# +++++++++++++++++++++++++++++++++++++++++
+# ABI version gate: a real .so stamped with a wrong DFTRACER_PLUGIN_ABI_VERSION,
+# loaded by utilities/plugins/test_plugin_abi_gate through a real dlopen.
+# +++++++++++++++++++++++++++++++++++++++++
+
+add_library(bad_abi_version_plugin MODULE plugins/bad_abi_version_plugin.c)
+set_target_properties(
+  bad_abi_version_plugin
+  PROPERTIES OUTPUT_NAME bad_abi_version_plugin
+             PREFIX ""
+             POSITION_INDEPENDENT_CODE ON
+             C_STANDARD 11
+             C_STANDARD_REQUIRED ON
+             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins"
+             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins")
+target_include_directories(bad_abi_version_plugin
+                           PRIVATE ${CMAKE_SOURCE_DIR}/include
+                                   ${CMAKE_BINARY_DIR}/include)
+
+if(TARGET utilities_plugins_test_plugin_abi_gate)
+  target_compile_definitions(
+    utilities_plugins_test_plugin_abi_gate PRIVATE
+    BAD_ABI_VERSION_PLUGIN_PATH="$<TARGET_FILE:bad_abi_version_plugin>")
+  add_dependencies(utilities_plugins_test_plugin_abi_gate
+                   bad_abi_version_plugin)
+endif()
