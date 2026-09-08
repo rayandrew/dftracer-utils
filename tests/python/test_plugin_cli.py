@@ -28,6 +28,34 @@ def _write_trace(path: str, n: int) -> None:
             )
 
 
+def test_ops_lists_host_ops_with_signatures(capsys):
+    assert plugin_cli.main(["ops"]) == 0
+    out = capsys.readouterr().out
+    assert "dftu.series.add" in out
+    # the signature and kind ride along, which is the point of the command
+    for line in out.splitlines():
+        if line.startswith("dftu.series.add "):
+            assert "[series," in line
+            break
+    else:
+        raise AssertionError("dftu.series.add not listed")
+
+
+def test_ops_prefix_filters_and_reports_frame_kind(capsys):
+    assert plugin_cli.main(["ops", "dftu.frame."]) == 0
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert lines, "expected registered dftu.frame.* ops"
+    for ln in lines:
+        assert ln.startswith("dftu.frame.")
+        assert "[frame," in ln
+
+
+def test_ops_unknown_prefix_errors(capsys):
+    assert plugin_cli.main(["ops", "nope.no.such."]) == 1
+    assert "no ops match" in capsys.readouterr().err
+
+
 def test_cflags_prints_include_dir(capsys):
     assert plugin_cli.main(["cflags"]) == 0
     out = capsys.readouterr().out.strip()

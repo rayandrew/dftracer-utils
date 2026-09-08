@@ -219,6 +219,26 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return _cmd_build_source(args, args.src)
 
 
+def _cmd_ops(args: argparse.Namespace) -> int:
+    """List the host ops a plugin may call by name, with their signatures.
+
+    A C plugin author reaching dftu.ext.ops otherwise has to read
+    exported_series_ops.def to learn what is callable and with what.
+    """
+    from .jit import ops as _ops
+
+    names = sorted(_ops.list())
+    if args.prefix:
+        names = [n for n in names if n.startswith(args.prefix)]
+    if not names:
+        print(f"dftracer_plugin: no ops match '{args.prefix}'", file=sys.stderr)
+        return 1
+    for n in names:
+        info = _ops.info(n)
+        print(f"{n}  {info['signature']}  [{info['kind']}, arity {info['arity']}]")
+    return 0
+
+
 def _cmd_cflags(args: argparse.Namespace) -> int:
     print(" ".join(_plugin_build.cflags()))
     return 0
@@ -252,6 +272,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="skip the generated header for a module:Class build",
     )
     p_build.set_defaults(func=_cmd_build)
+
+    p_ops = sub.add_parser("ops", help="list host ops callable by name")
+    p_ops.add_argument(
+        "prefix", nargs="?", default="", help="only ops starting with this, e.g. dftu.frame."
+    )
+    p_ops.set_defaults(func=_cmd_ops)
 
     p_cflags = sub.add_parser("cflags", help="print the plugin compile flags")
     p_cflags.set_defaults(func=_cmd_cflags)
