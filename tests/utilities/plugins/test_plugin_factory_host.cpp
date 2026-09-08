@@ -145,6 +145,29 @@ TEST_CASE(
     CHECK(dftu_op_find("factory_registers_op.double_rows") != nullptr);
 }
 
+TEST_CASE("the scan-time host refuses to register an op") {
+    auto set = Plugins::builder().add(SCAN_REGISTERS_OP_PLUGIN_PATH).build();
+    INFO((set.has_value() ? std::string{} : set.error().message));
+    REQUIRE(set.has_value());
+
+    dftu_utils_test::TestEnvironment env(0);
+    REQUIRE(env.is_valid());
+    View view = View::from_files({make_trace(env, "scanreg")});
+    PluginRun run = run_set(*set, view);
+
+    // The plugin records whether register_op said no from on_batch.
+    auto it = run.results.results().find("scan_register_refused");
+    REQUIRE(it != run.results.results().end());
+    const auto& bytes = std::get<std::vector<std::byte>>(it->second);
+    REQUIRE(bytes.size() == sizeof(std::int64_t));
+    std::int64_t refused = 0;
+    std::memcpy(&refused, bytes.data(), sizeof(refused));
+    CHECK(refused == 1);
+
+    // And nothing reached the registry, so no dangling entry survives the set.
+    CHECK(dftu_op_find("scan_registers_op.late") == nullptr);
+}
+
 TEST_CASE("the C++ builder registers a fold, an op and a state at once") {
     auto set = Plugins::builder().add(BUILDER_PLUGIN_PATH).build();
     INFO((set.has_value() ? std::string{} : set.error().message));

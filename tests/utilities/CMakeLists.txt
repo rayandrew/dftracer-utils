@@ -411,7 +411,8 @@ endif()
 # through Plugins::Builder by utilities/plugins/test_plugin_factory_host.
 # +++++++++++++++++++++++++++++++++++++++++
 
-foreach(fh_plugin factory_registers_op_plugin factory_escapes_plugin)
+foreach(fh_plugin factory_registers_op_plugin factory_escapes_plugin
+                  scan_registers_op_plugin)
   add_library(${fh_plugin} MODULE plugins/${fh_plugin}.c)
   set_target_properties(
     ${fh_plugin}
@@ -458,8 +459,10 @@ if(TARGET utilities_plugins_test_plugin_factory_host)
     utilities_plugins_test_plugin_factory_host PRIVATE
     FACTORY_REGISTERS_OP_PLUGIN_PATH="$<TARGET_FILE:factory_registers_op_plugin>"
     FACTORY_ESCAPES_PLUGIN_PATH="$<TARGET_FILE:factory_escapes_plugin>"
+    SCAN_REGISTERS_OP_PLUGIN_PATH="$<TARGET_FILE:scan_registers_op_plugin>"
     BUILDER_PLUGIN_PATH="$<TARGET_FILE:builder_plugin>")
   add_dependencies(utilities_plugins_test_plugin_factory_host
                    factory_registers_op_plugin factory_escapes_plugin
+                   scan_registers_op_plugin
                    builder_plugin)
 endif()

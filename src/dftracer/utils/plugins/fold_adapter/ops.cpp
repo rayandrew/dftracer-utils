@@ -61,8 +61,16 @@ const ::dftu_op_desc* host_ops_find(void*, const char* name) {
     return ::dftu_op_find(name);
 }
 
+// Registration is a load-time concern: an op registered mid-scan lands after
+// settle_order, settle_prune and the planner, so it cannot be ordered, pruned
+// or planned, and whether a peer sees it depends on which worker claimed which
+// morsel first. Talk to a peer during the scan through ports instead.
 int host_ops_register(void*, const ::dftu_op_desc* desc) {
-    return detail::register_plugin_op(desc);
+    DFTRACER_UTILS_LOG_ERROR(
+        "Plugin op '%s' refused: register from the plugin factory, which runs "
+        "before the scan; the scan-time host does not register ops",
+        desc && desc->name ? desc->name : "(null)");
+    return -1;
 }
 
 const ::dftu_ext_ops g_ops = {host_ops_run, host_ops_run_aggregate,
