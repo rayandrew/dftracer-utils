@@ -201,10 +201,12 @@ Result<void> settle_order(Plugins::Impl& impl) {
         for (const std::string& name : name_list(pl->provides, pl->self)) {
             auto [it, fresh] = producer.emplace(name, i);
             if (!fresh)
-                return make_error(ErrorCode::INVALID_ARGUMENT,
-                                  "plugins " + plugin_label(impl, it->second) +
-                                      " and " + plugin_label(impl, i) +
-                                      " both provide '" + name + "'");
+                return make_error(
+                    ErrorCode::INVALID_ARGUMENT,
+                    "plugins " + plugin_label(impl, it->second) + " and " +
+                        plugin_label(impl, i) + " both provide '" + name +
+                        "'. Names are lowercased, so two identifiers that "
+                        "differ only in case collide here");
         }
     }
 

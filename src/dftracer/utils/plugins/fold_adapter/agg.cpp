@@ -193,7 +193,9 @@ void PluginFold::publish_aggs() {
         if (owner != results_->owners.end() && owner->second != plugin_name_) {
             DFTRACER_UTILS_LOG_ERROR(
                 "Plugin '%s' accumulator '%s' refused: '%s' already published "
-                "that name; agg_result would return whichever finalized last",
+                "that name; agg_result would return whichever finalized last. "
+                "Names are lowercased, so two identifiers differing only in "
+                "case collide here",
                 plugin_name_.c_str(), acc->name.c_str(), owner->second.c_str());
             continue;
         }
