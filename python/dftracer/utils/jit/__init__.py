@@ -2891,6 +2891,24 @@ def vfold(cls: type) -> type:
     return _build_vfold(cls)
 
 
+# The op registry is shared with the engine's built-ins, whose names are bare
+# (`add`, `sum`) or `dftu.`-prefixed; both namespaces are the host's, so a user
+# op must be `<module>.<name>` (plugin ABI rule, see plugins/reserved_names.h).
+_HOST_NAME_PREFIX = "dftu."
+
+
+def _series_module(fn: Callable[..., object], module: "str | None") -> str:
+    mod = module if module is not None else getattr(fn, "__module__", None)
+    if not isinstance(mod, str) or not mod:
+        raise JitError('@jit.series needs a module prefix; pass module="<name>"')
+    if mod == _HOST_NAME_PREFIX[:-1] or mod.startswith(_HOST_NAME_PREFIX):
+        raise JitError(
+            f"module '{mod}' is reserved for host ops; the 'dftu.' namespace is not "
+            "available to a user op"
+        )
+    return mod
+
+
 def _series_impl(fn: Callable[..., object], module: "str | None") -> Callable[..., object]:
     from ..columnar import Expr, col
     from . import ops as _ops
@@ -2907,7 +2925,7 @@ def _series_impl(fn: Callable[..., object], module: "str | None") -> Callable[..
     built = fn(*[col(f"__x{i}__") for i in range(n)])
     if not isinstance(built, Expr):
         raise JitError("@jit.series body must return a column expression built from its arguments")
-    name = f"{module}.{fname}" if module else fname
+    name = f"{_series_module(fn, module)}.{fname}"
     _ops._register_user(name, n, built)
     return _ops.get(name)
 
@@ -2922,11 +2940,15 @@ def series(fn: "Callable[..., object] | None" = None, *, module: "str | None" = 
         def doubled(dur):
             return dur * 2
 
-    It registers in dftracer.utils.jit.ops and returns a callable, so both
-    ``doubled(s)`` and ``ops.doubled(s)`` apply it via the engine's Expr
-    evaluator - no compile step, and it fuses with built-in Expr math. Pass
-    ``module="stats"`` to group it as ``stats.<name>``, reachable as
-    ``ops.run("stats.<name>", s)`` and ``s.ops.stats.<name>()``. Arguments are
+    It returns a callable, so ``doubled(s)`` applies it via the engine's Expr
+    evaluator - no compile step, and it fuses with built-in Expr math.
+
+    It also registers in dftracer.utils.jit.ops under ``<module>.<name>``, where
+    the module defaults to the defining ``fn.__module__``; pass
+    ``module="stats"`` to choose it. The registry is shared with the engine's
+    built-in ops, so a user op never takes a bare name, and the host's ``dftu.``
+    namespace is refused. Reach it as ``ops.run("stats.<name>", s)``,
+    ``ops.stats.<name>(s)`` and ``s.ops.stats.<name>()``. Arguments are
     positional column operands."""
     if fn is None:
         return lambda f: _series_impl(f, module)

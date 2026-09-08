@@ -8,6 +8,8 @@ from dftracer.utils import jit
 from dftracer.utils.jit import ops
 from dftracer.utils.series import Series
 
+MOD = __name__
+
 
 def _col(vals):
     return Series.from_numpy(np.array(vals, dtype=np.int64))
@@ -17,6 +19,13 @@ def _vals(series):
     return np.asarray(series).tolist()
 
 
+def _ns(root):
+    """Walk `ops` (or a Series' `.ops`) down the dotted module of this test."""
+    for part in MOD.split("."):
+        root = getattr(root, part)
+    return root
+
+
 def test_series_op_is_callable_and_registered():
     @jit.series
     def doubled(dur):
@@ -24,11 +33,36 @@ def test_series_op_is_callable_and_registered():
 
     s = _col([1, 2, 3])
     assert _vals(doubled(s)) == [2, 4, 6]  # the decorated name is callable
-    assert _vals(ops.doubled(s)) == [2, 4, 6]  # and reachable via ops.<name>
-    assert _vals(ops.run("doubled", s)) == [2, 4, 6]  # and by name
-    assert "doubled" in ops.list()
-    info = ops.info("doubled")
+    assert _vals(_ns(ops).doubled(s)) == [2, 4, 6]  # and reachable via ops.<module>.<name>
+    assert _vals(ops.run(f"{MOD}.doubled", s)) == [2, 4, 6]  # and by qualified name
+    assert f"{MOD}.doubled" in ops.list()
+    info = ops.info(f"{MOD}.doubled")
     assert info["kind"] == "series" and info["arity"] == 1
+
+
+def test_series_op_never_takes_a_bare_name():
+    @jit.series
+    def unprefixed(a):
+        return a + 1
+
+    assert "unprefixed" not in ops.list()  # the bare namespace is the host's
+    assert f"{MOD}.unprefixed" in ops.list()
+    with pytest.raises(AttributeError):
+        ops.unprefixed
+
+
+def test_series_op_refuses_the_host_namespace():
+    with pytest.raises(jit.JitError):
+
+        @jit.series(module="dftu.fs")
+        def shadow(a):
+            return a + 1
+
+    with pytest.raises(jit.JitError):
+
+        @jit.series(module="dftu")
+        def shadow2(a):
+            return a + 1
 
 
 def test_series_op_two_args_fuses_expr():
@@ -36,7 +70,7 @@ def test_series_op_two_args_fuses_expr():
     def weighted(a, b):
         return a * 2 + b
 
-    assert _vals(ops.run("weighted", _col([1, 2, 3]), _col([10, 20, 30]))) == [12, 24, 36]
+    assert _vals(ops.run(f"{MOD}.weighted", _col([1, 2, 3]), _col([10, 20, 30]))) == [12, 24, 36]
 
 
 def test_series_op_arity_mismatch_raises():
@@ -45,7 +79,7 @@ def test_series_op_arity_mismatch_raises():
         return a * 3
 
     with pytest.raises(TypeError):
-        ops.run("triple", _col([1]), _col([2]))
+        ops.run(f"{MOD}.triple", _col([1]), _col([2]))
 
 
 def test_series_op_module_grouping():
@@ -58,6 +92,17 @@ def test_series_op_module_grouping():
     assert _vals(ops.stats.scaled(s)) == [10, 20, 30]  # ops.<module>.<name>
     assert _vals(s.ops.stats.scaled()) == [10, 20, 30]  # s.ops.<module>.<name>
     assert "stats.scaled" in ops.list()
+
+
+def test_series_op_dotted_module_nests():
+    @jit.series(module="pkg.stats")
+    def zscore(dur):
+        return dur * 100
+
+    s = _col([1, 2])
+    assert _vals(ops.run("pkg.stats.zscore", s)) == [100, 200]
+    assert _vals(ops.pkg.stats.zscore(s)) == [100, 200]
+    assert _vals(s.ops.pkg.stats.zscore()) == [100, 200]
 
 
 def test_series_op_rejects_non_expr_body():
@@ -74,14 +119,19 @@ def test_series_ops_accessor_on_a_series():
         return a * 3
 
     s = _col([1, 2, 3])
-    assert _vals(s.ops.tripled()) == [3, 6, 9]  # user op as a method
+    assert _vals(_ns(s.ops).tripled()) == [3, 6, 9]  # user op as a method
     assert _vals(s.ops.add(_col([10, 20, 30]))) == [11, 22, 33]  # built-in as a method
     assert s.ops.count() == 3  # reducer returns a scalar
 
 
-def test_series_op_rejects_builtin_name_clash():
+def test_series_op_rejects_a_duplicate_registration():
+    @jit.series(module="dup")
+    def twice(a):
+        return a * 2
+
+    assert _vals(ops.run("dup.twice", _col([1, 2]))) == [2, 4]
     with pytest.raises(ValueError):
 
-        @jit.series
-        def add(a, b):  # "add" is a built-in op
-            return a + b
+        @jit.series(module="dup")
+        def twice(a):  # noqa: F811 - same name, already registered
+            return a * 3

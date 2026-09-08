@@ -117,8 +117,12 @@ class _ModuleNs:
     def __init__(self, prefix: str) -> None:
         self._prefix = prefix
 
-    def __getattr__(self, name: str) -> Callable[..., Result]:
-        return get(f"{self._prefix}.{name}")
+    def __getattr__(self, name: str) -> Union[Callable[..., Result], "_ModuleNs"]:
+        full = f"{self._prefix}.{name}"
+        # A dotted module (`pkg.stats.zscore`) nests one namespace per segment.
+        if full not in _USER and _is_module(full):
+            return _ModuleNs(full)
+        return get(full)
 
 
 def __getattr__(name: str):

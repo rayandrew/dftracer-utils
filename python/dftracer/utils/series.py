@@ -137,8 +137,8 @@ _SeriesOrScalar = Union["Series", int, float]
 
 class _OpsAccessor:
     """Runs any registered op as a method on a Series: a built-in
-    (``s.ops.add(other)``, ``s.ops.count()``), a @jit.series user op
-    (``s.ops.mydouble()``), or a module namespace (``s.ops.stats.zscore()``).
+    (``s.ops.add(other)``, ``s.ops.count()``) or a module namespace holding a
+    @jit.series user op (``s.ops.stats.zscore()``).
     The Series is the first operand; extra operands follow. Returns a Series for
     a column op, or a scalar for a reducer."""
 
@@ -152,8 +152,8 @@ class _OpsAccessor:
         from .jit import ops as _ops  # lazy: jit imports series
 
         full = f"{self._prefix}.{name}" if self._prefix else name
-        if not self._prefix and _ops._is_module(name):
-            return _OpsAccessor(self._series, name)
+        if full not in _ops._USER and _ops._is_module(full):
+            return _OpsAccessor(self._series, full)
 
         def call(*rest: "Union[Series, int, float, str]") -> object:
             return _ops.run(full, self._series, *rest)
@@ -738,7 +738,7 @@ class Series(_Wrapper["_ext._Series"]):
     @property
     def ops(self) -> "_OpsAccessor":
         """Call any registered op (built-in or @jit.series user op) as a method,
-        e.g. ``s.ops.add(other)``, ``s.ops.mydouble()``, ``s.ops.count()``."""
+        e.g. ``s.ops.add(other)``, ``s.ops.count()``, ``s.ops.stats.zscore()``."""
         return _OpsAccessor(self)
 
     def __reduce__(self) -> "Tuple[Callable[[object], Series], Tuple[object, ...]]":
