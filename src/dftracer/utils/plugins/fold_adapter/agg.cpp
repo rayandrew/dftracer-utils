@@ -178,7 +178,17 @@ void PluginFold::publish_aggs() {
     if (!results_) return;
     for (const auto& [key, idx] : aggs_.index()) {
         std::unique_ptr<AggAccum>& acc = aggs_[idx];
-        if (acc && acc->state) results_->aggs[key] = acc.get();
+        if (!acc || !acc->state) continue;
+        auto owner = results_->owners.find(key);
+        if (owner != results_->owners.end() && owner->second != plugin_name_) {
+            DFTRACER_UTILS_LOG_ERROR(
+                "Plugin '%s' accumulator '%s' refused: '%s' already published "
+                "that name; agg_result would return whichever finalized last",
+                plugin_name_.c_str(), acc->name.c_str(), owner->second.c_str());
+            continue;
+        }
+        results_->aggs[key] = acc.get();
+        results_->owners[key] = plugin_name_;
     }
 }
 

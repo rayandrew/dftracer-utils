@@ -76,6 +76,11 @@ struct AggAccum;
 // needed. The registry borrows; the producing fold owns each AggAccum.
 struct SharedResultRegistry {
     std::unordered_map<std::uint64_t, AggAccum*> aggs;
+    /// Which plugin published each key, so a second publisher of the same name
+    /// is refused instead of silently replacing the first. A name declared in
+    /// `provides` is already rejected at build(); this catches the accumulator
+    /// a plugin creates without declaring it.
+    std::unordered_map<std::uint64_t, std::string> owners;
 };
 
 // Name-keyed registry of stable-address elements. Deque-backed so an element
