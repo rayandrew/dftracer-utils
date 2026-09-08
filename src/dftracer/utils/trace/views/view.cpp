@@ -706,16 +706,16 @@ ExportStats View::merge_counter_partials(
 ViewSession View::session() const { return ViewSession(plan_); }
 
 ViewSession::ViewSession(std::shared_ptr<const detail::ViewPlan> plan)
-    : num_slots_(available_parallelism()),
-      state_(detail::make_view_session_state(std::move(plan), num_slots_)) {}
+    : state_(detail::make_view_session_state(std::move(plan))) {}
 
 void ViewSession::attach_fold(
     Query predicate,
-    std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
-        consume,
+    std::function<
+        std::function<void(const json::JsonValue&, std::string_view)>()>
+        make_consumer,
     std::function<void()> finalize) {
-    detail::add_fold_branch(*state_, std::move(predicate), std::move(consume),
-                            std::move(finalize));
+    detail::add_fold_branch(*state_, std::move(predicate),
+                            std::move(make_consumer), std::move(finalize));
 }
 
 void ViewSession::attach_fold_factory(
@@ -864,33 +864,35 @@ Deferred<ExportStats> ViewSession::export_json(ExportSink& sink) {
 Deferred<dataframe::DataFrame> ViewSession::collect_events(const View& branch) {
     const auto& bp = *branch.plan_;
     auto out = std::make_shared<dataframe::DataFrame>();
-    const std::size_t slots = num_slots_ ? num_slots_ : 1;
-    // Per-slot owned events built straight into native columns (no Arrow); each
-    // slot interns its own strings, so build_row_frame resolves them per slot.
-    auto interns =
-        std::make_shared<std::vector<dftracer::utils::StringIntern> >(slots);
-    auto bufs =
-        std::make_shared<std::vector<std::vector<detail::FoldEvent> > >(slots);
+    // Per-worker owned events built straight into native columns (no Arrow);
+    // each worker interns its own strings, so build_row_frame resolves them per
+    // worker.
+    struct Slot {
+        dftracer::utils::StringIntern intern;
+        std::vector<detail::FoldEvent> events;
+    };
+    auto slots = std::make_shared<std::vector<std::shared_ptr<Slot> > >();
     auto select = std::make_shared<std::vector<std::string> >(bp.select);
     const double time_scale = bp.time_scale;
 
-    auto consume = [interns, bufs, slots](std::size_t slot,
-                                          const json::JsonValue& jv,
-                                          std::string_view) {
-        if (slot >= slots) return;
-        detail::FoldEvent fe = detail::extract_fold_event(
-            jv.element(), (*interns)[slot], /*needs_args=*/true);
-        if (fe.phase == RecordPhase::METADATA ||
-            fe.phase == RecordPhase::UNKNOWN)
-            return;
-        (*bufs)[slot].push_back(std::move(fe));
+    auto make_consumer = [slots]() {
+        auto slot = std::make_shared<Slot>();
+        slots->push_back(slot);
+        return [slot](const json::JsonValue& jv, std::string_view) {
+            detail::FoldEvent fe = detail::extract_fold_event(
+                jv.element(), slot->intern, /*needs_args=*/true);
+            if (fe.phase == RecordPhase::METADATA ||
+                fe.phase == RecordPhase::UNKNOWN)
+                return;
+            slot->events.push_back(std::move(fe));
+        };
     };
-    auto finalize = [interns, bufs, select, slots, out, time_scale]() {
+    auto finalize = [slots, select, out, time_scale]() {
         std::vector<dataframe::DataFrame> frames;
-        frames.reserve(slots);
-        for (std::size_t s = 0; s < slots; ++s) {
-            if ((*bufs)[s].empty()) continue;
-            frames.push_back(detail::build_row_frame((*bufs)[s], (*interns)[s],
+        frames.reserve(slots->size());
+        for (const auto& s : *slots) {
+            if (s->events.empty()) continue;
+            frames.push_back(detail::build_row_frame(s->events, s->intern,
                                                      *select, time_scale));
         }
         if (frames.empty()) return;  // out stays an empty frame
@@ -904,10 +906,10 @@ Deferred<dataframe::DataFrame> ViewSession::collect_events(const View& branch) {
     // effective_query folds the branch's phase into the predicate (bp.query
     // alone drops it), so a branch's phase() filters in a fused session.
     if (auto eq = detail::effective_query(bp))
-        detail::add_fold_branch(*state_, std::move(*eq), std::move(consume),
-                                std::move(finalize));
+        detail::add_fold_branch(*state_, std::move(*eq),
+                                std::move(make_consumer), std::move(finalize));
     else
-        detail::add_fold_branch(*state_, std::move(consume),
+        detail::add_fold_branch(*state_, std::move(make_consumer),
                                 std::move(finalize));
     return {out, executed_};
 }
@@ -921,29 +923,32 @@ void ViewSession::add_containment_branch(
     std::shared_ptr<dataframe::DataFrame> out_ct,
     std::shared_ptr<dataframe::DataFrame> out_fg) {
     const auto& bp = *branch.plan_;
-    const std::size_t slots = num_slots_ ? num_slots_ : 1;
     auto intern = std::make_shared<dftracer::utils::StringIntern>();
     auto spec = std::make_shared<detail::ContainmentSpec>(
         detail::make_containment_spec(*intern, partition, ts, dur, name));
-    auto bufs =
-        std::make_shared<std::vector<std::vector<detail::ContainmentRow> > >(
-            slots);
+    auto bufs = std::make_shared<
+        std::vector<std::shared_ptr<std::vector<detail::ContainmentRow> > > >();
     const double time_scale = bp.time_scale;
 
-    auto consume = [intern, spec, bufs, slots](std::size_t slot,
-                                               const json::JsonValue& jv,
-                                               std::string_view) {
-        if (slot >= slots) return;
-        detail::FoldEvent fe = detail::extract_fold_event(
-            jv.element(), *intern, spec->needs_args, &spec->nested_captures);
-        detail::ContainmentRow r;
-        if (detail::containment_row(fe, *spec, *intern, r))
-            (*bufs)[slot].push_back(r);
+    // One shared intern across workers keeps lane ids consistent, so the
+    // per-worker rows concatenate without a re-key.
+    auto make_consumer = [intern, spec, bufs]() {
+        auto rows = std::make_shared<std::vector<detail::ContainmentRow> >();
+        bufs->push_back(rows);
+        return
+            [intern, spec, rows](const json::JsonValue& jv, std::string_view) {
+                detail::FoldEvent fe = detail::extract_fold_event(
+                    jv.element(), *intern, spec->needs_args,
+                    &spec->nested_captures);
+                detail::ContainmentRow r;
+                if (detail::containment_row(fe, *spec, *intern, r))
+                    rows->push_back(r);
+            };
     };
-    auto finalize = [intern, bufs, slots, out_ct, out_fg, time_scale]() {
+    auto finalize = [intern, bufs, out_ct, out_fg, time_scale]() {
         std::vector<detail::ContainmentRow> all;
-        for (std::size_t s = 0; s < slots; ++s)
-            all.insert(all.end(), (*bufs)[s].begin(), (*bufs)[s].end());
+        for (const auto& rows : *bufs)
+            all.insert(all.end(), rows->begin(), rows->end());
         if (out_ct && out_fg) {
             auto pr = detail::build_containment_both(all, *intern, time_scale);
             *out_ct = std::move(pr.first);
@@ -958,10 +963,10 @@ void ViewSession::add_containment_branch(
     };
 
     if (bp.query)
-        detail::add_fold_branch(*state_, *bp.query, std::move(consume),
+        detail::add_fold_branch(*state_, *bp.query, std::move(make_consumer),
                                 std::move(finalize));
     else
-        detail::add_fold_branch(*state_, std::move(consume),
+        detail::add_fold_branch(*state_, std::move(make_consumer),
                                 std::move(finalize));
 }
 

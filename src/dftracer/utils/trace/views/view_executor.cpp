@@ -876,16 +876,14 @@ struct FoldFactory {
 
 struct ViewSessionState {
     std::shared_ptr<const ViewPlan> plan;
-    std::size_t num_slots = 1;
     std::vector<BranchHooks> branches;
     std::vector<FoldFactory> fold_factories;
 };
 
 std::shared_ptr<ViewSessionState> make_view_session_state(
-    std::shared_ptr<const ViewPlan> plan, std::size_t num_slots) {
+    std::shared_ptr<const ViewPlan> plan) {
     auto st = std::make_shared<ViewSessionState>();
     st->plan = std::move(plan);
-    st->num_slots = num_slots ? num_slots : 1;
     return st;
 }
 
@@ -900,25 +898,21 @@ void add_fold_factory(
     state.fold_factories.push_back({std::move(make), std::move(finalize)});
 }
 
-void add_fold_branch(
-    ViewSessionState& state, Query predicate,
-    std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
-        consume,
-    std::function<void()> finalize) {
+void add_fold_branch(ViewSessionState& state, Query predicate,
+                     std::function<BranchConsumer()> make_consumer,
+                     std::function<void()> finalize) {
     BranchHooks h;
     h.predicate = std::move(predicate);
-    h.consume = std::move(consume);
+    h.make_consumer = std::move(make_consumer);
     h.finalize = std::move(finalize);
     add_branch(state, std::move(h));
 }
 
-void add_fold_branch(
-    ViewSessionState& state,
-    std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
-        consume,
-    std::function<void()> finalize) {
+void add_fold_branch(ViewSessionState& state,
+                     std::function<BranchConsumer()> make_consumer,
+                     std::function<void()> finalize) {
     BranchHooks h;  // predicate unset = match all scanned events
-    h.consume = std::move(consume);
+    h.make_consumer = std::move(make_consumer);
     h.finalize = std::move(finalize);
     add_branch(state, std::move(h));
 }
@@ -937,7 +931,9 @@ void add_materialize_branch(ViewSessionState& state,
     // The engine builds AggState partials from columnar batches, which the
     // session's per-event fold cannot feed, so the materialize branch does no
     // per-event work and (re)builds the rollup through the engine in finalize.
-    h.consume = [](std::size_t, const json::JsonValue&, std::string_view) {};
+    h.make_consumer = []() -> BranchConsumer {
+        return [](const json::JsonValue&, std::string_view) {};
+    };
     h.finalize = [plan]() {
         const std::string rdir = rollup_index_path(*plan);
         if (rdir.empty()) return;
@@ -966,40 +962,51 @@ void add_materialize_branch(ViewSessionState& state,
 
 BranchHooks make_export_branch(ExportSink& sink,
                                std::shared_ptr<ExportStats> out) {
+    // The sink is one shared object, so writes still serialize on a mutex; only
+    // the count is per worker.
     auto mtx = std::make_shared<std::mutex>();
-    auto count = std::make_shared<std::uint64_t>(0);
+    auto counts =
+        std::make_shared<std::vector<std::shared_ptr<std::uint64_t>>>();
 
     BranchHooks h;
-    h.consume = [&sink, mtx, count](std::size_t, const json::JsonValue&,
-                                    std::string_view raw) {
-        std::lock_guard<std::mutex> lk(*mtx);
-        sink.write(raw);
-        sink.write("\n");
-        ++*count;
+    h.make_consumer = [&sink, mtx, counts]() -> BranchConsumer {
+        auto count = std::make_shared<std::uint64_t>(0);
+        counts->push_back(count);
+        return
+            [&sink, mtx, count](const json::JsonValue&, std::string_view raw) {
+                std::lock_guard<std::mutex> lk(*mtx);
+                sink.write(raw);
+                sink.write("\n");
+                ++*count;
+            };
     };
-    h.finalize = [out, count]() { out->events_matched = *count; };
+    h.finalize = [out, counts]() {
+        std::uint64_t total = 0;
+        for (const auto& c : *counts) total += *c;
+        out->events_matched = total;
+    };
     return h;
 }
 
 // Drives the session's raw fold/export branches over the fused scan: parses
 // each raw line once, then dispatches to every branch whose predicate matches.
-// One per session; fuse slices it per worker, each slice claiming a slot so the
-// branches' per-slot partials stay lock-free. finalize (on the shared fold)
-// reduces each branch's partials into its result.
+// Sharing one parse across the branches is why they ride one fold instead of
+// one fold each. Each slice owns its branches' consumers, so nothing is shared
+// between workers; the unsliced fold holds none and only runs finalize.
 class BranchDriverFold : public Fold {
    public:
     explicit BranchDriverFold(
         std::shared_ptr<std::vector<const BranchHooks*>> branches)
-        : branches_(std::move(branches)),
-          next_slot_(std::make_shared<std::atomic<std::size_t>>(0)) {}
+        : branches_(std::move(branches)) {}
 
     bool accepts(const ScanShape&) const override { return true; }
     bool wants_raw() const override { return true; }
 
     std::unique_ptr<Fold> slice() const override {
         auto s = std::make_unique<BranchDriverFold>(branches_);
-        s->next_slot_ = next_slot_;
-        s->slot_ = next_slot_->fetch_add(1, std::memory_order_relaxed);
+        s->consumers_.reserve(branches_->size());
+        for (const auto* br : *branches_)
+            s->consumers_.push_back(br->make_consumer());
         return s;
     }
 
@@ -1011,15 +1018,19 @@ class BranchDriverFold : public Fold {
             auto root = res.value_unsafe();
             if (!root.is_object()) continue;
             json::JsonValue jv(root);
-            for (const auto* br : *branches_)
+            for (std::size_t i = 0; i < branches_->size(); ++i) {
+                const BranchHooks* br = (*branches_)[i];
                 if (!br->predicate || br->predicate->evaluate(jv))
-                    br->consume(slot_, jv, line);
+                    consumers_[i](jv, line);
+            }
         }
     }
 
     void seal_unit(const ScanUnit&) override {}
     void drop_unit(const ScanUnit&) override {}
-    void merge(Fold&) override {}  // per-slot partials are shared and disjoint
+    // Each slice's consumers hold their own state and the branch reduces them
+    // in finalize, so there is nothing to fold slice-to-slice here.
+    void merge(Fold&) override {}
 
     coro::CoroTask<bool> finalize(const CoverageSet&) override {
         for (const auto* br : *branches_)
@@ -1029,8 +1040,7 @@ class BranchDriverFold : public Fold {
 
    private:
     std::shared_ptr<std::vector<const BranchHooks*>> branches_;
-    std::shared_ptr<std::atomic<std::size_t>> next_slot_;
-    std::size_t slot_ = 0;
+    std::vector<BranchConsumer> consumers_;
     simdjson::dom::parser parser_;
     std::string buf_;
 };

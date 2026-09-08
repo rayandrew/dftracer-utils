@@ -171,26 +171,29 @@ struct AggBranch {
 // `consume` (slot, parsed event, raw JSON), and a `finalize` that reduces the
 // branch's per-slot partials into its result. `agg` is set only for a match-all
 // aggregation collect branch, enabling the pre-scan rollup reconstruct.
+/// One raw branch of a fused session. `make_consumer` is called once per fuse
+/// worker, serially, before the parallel scan starts, and the consumer it
+/// returns is never shared between workers, so it needs no locking. `finalize`
+/// runs once after the scan and reduces whatever state those consumers hold.
+/// A branch's per-worker consumer: the parsed event plus its raw JSON bytes.
+using BranchConsumer =
+    std::function<void(const json::JsonValue&, std::string_view)>;
+
 struct BranchHooks {
     std::optional<query::Query> predicate;  // nullopt = match all
-    std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
-        consume;
+    std::function<BranchConsumer()> make_consumer;
     std::function<void()> finalize;
     std::optional<AggBranch> agg;
 };
 
-void add_fold_branch(
-    ViewSessionState& state, Query predicate,
-    std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
-        consume,
-    std::function<void()> finalize);
+void add_fold_branch(ViewSessionState& state, Query predicate,
+                     std::function<BranchConsumer()> make_consumer,
+                     std::function<void()> finalize);
 
 // Match-all fold branch (no per-branch predicate): consume every scanned event.
-void add_fold_branch(
-    ViewSessionState& state,
-    std::function<void(std::size_t, const json::JsonValue&, std::string_view)>
-        consume,
-    std::function<void()> finalize);
+void add_fold_branch(ViewSessionState& state,
+                     std::function<BranchConsumer()> make_consumer,
+                     std::function<void()> finalize);
 
 // Attach a match-all branch that aggregates (group_by + agg) and, on finalize,
 // persists the result as a rollup under the session's base plan overlaid with
@@ -200,7 +203,7 @@ void add_materialize_branch(ViewSessionState& state,
                             std::vector<GroupKey> group_by,
                             std::vector<AggSpec> agg);
 std::shared_ptr<ViewSessionState> make_view_session_state(
-    std::shared_ptr<const ViewPlan> plan, std::size_t num_slots);
+    std::shared_ptr<const ViewPlan> plan);
 void add_branch(ViewSessionState& state, BranchHooks hooks);
 
 // Attach an externally-built Fold to the session's shared scan: `make`

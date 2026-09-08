@@ -401,9 +401,9 @@ class ViewSession {
         Deferred<dftracer::utils::dataframe::DataFrame> variant,
         std::int64_t n_key = -1);
 
-    /// Fold the branch's matching events into a caller partial `P`, reduced
-    /// across slots by `combine`. The fold gets the parsed event (no re-parse)
-    /// and its raw JSON bytes (for verbatim passthrough). `P` must be
+    /// Fold the branch's matching events into a caller partial `P`, one per
+    /// scan worker, reduced by `combine`. The fold gets the parsed event (no
+    /// re-parse) and its raw JSON bytes (for verbatim passthrough). `P` must be
     /// default-constructible and a default `P` the identity of combine.
     template <class P>
     Deferred<P> fold(
@@ -411,16 +411,20 @@ class ViewSession {
         std::function<void(P&, const json::JsonValue&, std::string_view)> f,
         std::function<P(P&&, P&&)> combine) {
         auto out = std::make_shared<P>();
-        auto partials = std::make_shared<std::vector<P>>(num_slots_);
+        auto partials = std::make_shared<std::vector<std::shared_ptr<P>>>();
         attach_fold(
             std::move(predicate),
-            [f = std::move(f), partials](
-                std::size_t slot, const json::JsonValue& jv,
-                std::string_view raw) { f((*partials)[slot], jv, raw); },
+            [f, partials]() {
+                auto p = std::make_shared<P>();
+                partials->push_back(p);
+                return [f, p](const json::JsonValue& jv, std::string_view raw) {
+                    f(*p, jv, raw);
+                };
+            },
             [partials, out, combine = std::move(combine)]() {
-                P acc = std::move((*partials)[0]);
-                for (std::size_t i = 1; i < partials->size(); ++i)
-                    acc = combine(std::move(acc), std::move((*partials)[i]));
+                P acc{};
+                for (const auto& p : *partials)
+                    acc = combine(std::move(acc), std::move(*p));
                 *out = std::move(acc);
             });
         return {out, executed_};
@@ -453,12 +457,14 @@ class ViewSession {
     friend class View;
     explicit ViewSession(std::shared_ptr<const detail::ViewPlan> plan);
     /// Type-erased seam behind fold(): attach one branch to the run. The engine
-    /// (BranchHooks etc.) stays internal; defined in the .cpp.
-    void attach_fold(Query predicate,
-                     std::function<void(std::size_t, const json::JsonValue&,
-                                        std::string_view)>
-                         consume,
-                     std::function<void()> finalize);
+    /// (BranchHooks etc.) stays internal; defined in the .cpp. `make_consumer`
+    /// is called once per scan worker, serially, before the scan starts.
+    void attach_fold(
+        Query predicate,
+        std::function<
+            std::function<void(const json::JsonValue&, std::string_view)>()>
+            make_consumer,
+        std::function<void()> finalize);
     /// Look up the leading key-column count recorded for a collect branch's
     /// output, or -1 if that output was not a collect() of this session.
     std::int64_t key_count_of(const void* out) const;
@@ -467,7 +473,6 @@ class ViewSession {
         const std::string& ts, const std::string& dur, const std::string& name,
         std::shared_ptr<dftracer::utils::dataframe::DataFrame> out_ct,
         std::shared_ptr<dftracer::utils::dataframe::DataFrame> out_fg);
-    std::size_t num_slots_;
     std::shared_ptr<detail::ViewSessionState> state_;
     std::shared_ptr<bool> executed_ = std::make_shared<bool>(false);
     /// Leading key-column count per collect branch, keyed by its output
