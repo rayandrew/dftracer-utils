@@ -1098,7 +1098,7 @@ class Port(Protocol):
     def __iadd__(self, x: float) -> "Port": ...
 
 
-_PORT_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+_PORT_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._/-")
 
 
 class _Port:
@@ -1119,7 +1119,7 @@ def _check_port_name(fn: str, name: object) -> str:
             "e.g. 'com.example.edges'"
         )
     if any(c not in _PORT_ID_CHARS for c in name):
-        raise JitError(f"jit.{fn} port name '{name}' must be ASCII [a-z0-9._-]")
+        raise JitError(f"jit.{fn} port name '{name}' must be lowercase ASCII [a-z0-9._/-]")
     return name
 
 

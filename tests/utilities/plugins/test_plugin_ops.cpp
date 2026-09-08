@@ -56,7 +56,7 @@ TEST_CASE("plugin ops: run_op runs a registered column op by name") {
     REQUIRE(a);
     REQUIRE(b);
 
-    dftu_series* sum = h.run_op("add", {a, b});
+    dftu_series* sum = h.run_op("dftu.series.add", {a, b});
     REQUIRE(sum);
     REQUIRE(dftu_series_length(sum) == 3);
     const auto* sum_data =
@@ -79,8 +79,8 @@ TEST_CASE("plugin ops: run_op reports unknown names and bad arity") {
     const std::int64_t a_vals[] = {1, 2, 3};
     dftu_series* a = dftu_series_new_flat(DFTU_TYPE_INT64, a_vals, 3, nullptr);
     REQUIRE(a);
-    // "add" takes two series operands; one is an arity mismatch.
-    CHECK(h.run_op("add", {a}) == nullptr);
+    // "dftu.series.add" takes two series operands; one is an arity mismatch.
+    CHECK(h.run_op("dftu.series.add", {a}) == nullptr);
     dftu_series_free(a);
 }
 
@@ -88,7 +88,7 @@ TEST_CASE("plugin ops: find_op resolves a built-in by name") {
     HostFixture fx;
     Host h{&fx.host()};
 
-    const dftu_op_desc* desc = h.find_op("add");
+    const dftu_op_desc* desc = h.find_op("dftu.series.add");
     REQUIRE(desc);
     CHECK(dftu_op_kind_of(desc->sig) == DFTU_OP_KIND_SERIES);
     CHECK(h.find_op("dftu.test.nonexistent_op") == nullptr);
@@ -123,8 +123,9 @@ TEST_CASE("plugin ops: a bare op name is refused") {
         fx.host().get_extension(fx.host().h, DFTU_EXT_OPS));
     REQUIRE(ops);
 
-    // The bare namespace holds the host's built-in column ops, so a plugin op
-    // must be <plugin>.<name>.
+    // The bare namespace has no dot, so it fails the <plugin>.<name>
+    // qualification a plugin op must have (reserved regardless of whether the
+    // host currently populates it).
     dftu_op_desc bare{};
     bare.name = "my_op";
     CHECK(ops->register_op(fx.host().h, &bare) != 0);

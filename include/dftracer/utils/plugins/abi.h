@@ -314,8 +314,8 @@ typedef struct dftu_ext_trace {
    registration order.
  */
 typedef struct dftu_ext_ports {
-    /** Stable key for the port named `name` (ASCII [a-z0-9._-]). The "dftu."
-       namespace belongs to the host and is refused to plugins. */
+    /** Stable key for the port named `name` (lowercase ASCII [a-z0-9._/-]).
+       The "dftu." namespace belongs to the host and is refused to plugins. */
     uint64_t (*port_key)(void* h, const char* name);
     void (*publish)(void* h, uint64_t key, const void* data, uint32_t len);
     const void* (*consume)(void* h, uint64_t key, uint32_t* out_len);

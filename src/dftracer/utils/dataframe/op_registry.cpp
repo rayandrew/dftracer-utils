@@ -14,8 +14,8 @@ const dftu_op_desc BUILTINS[] = {
 #define DFTU_SERIES_OP(name, fn, ret, o0, o1, o2) \
     {#name, DFTU_OP_SIG(ret, o0, o1, o2), reinterpret_cast<const void*>(&fn)},
 #include <dftracer/utils/dataframe/exported_series_ops.def>
-#define DFTU_FRAME_OP(name, fn, ret, o0, o1, o2, o3, o4)    \
-    {"frame." #name, DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4), \
+#define DFTU_FRAME_OP(name, fn, ret, o0, o1, o2, o3, o4)         \
+    {"dftu.frame." #name, DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4), \
      reinterpret_cast<const void*>(&fn)},
 #include <dftracer/utils/dataframe/exported_frame_ops.def>
 };

@@ -1,9 +1,9 @@
 /* Built-in dataframe frame ops (table -> table) seeded into the op registry
- * under the "frame." prefix (so they neither clash with the same-named column
- * ops nor need a separate registry). APPEND ONLY.
+ * under the "dftu.frame." prefix (so they neither clash with the same-named
+ * column ops nor need a separate registry). APPEND ONLY.
  *
  *   DFTU_FRAME_OP(name, fn, ret, o0, o1, o2, o3, o4)
- *     name        - registry key suffix; registered as "frame.<name>".
+ *     name        - registry key suffix; registered as "dftu.frame.<name>".
  *     fn          - the dftu_dataframe_* (or dftu_series_*) C ABI function.
  *     ret,o0..o4  - signature tokens (DFTU_TOK_* suffixes), packed by
  *                   DFTU_OP_SIG6. A frame op reads its dftu_dataframe operands

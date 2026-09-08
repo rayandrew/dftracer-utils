@@ -25,10 +25,11 @@ constexpr bool is_plugin_qualified(std::string_view name) noexcept {
     return dot != std::string_view::npos && dot != 0 && dot + 1 < name.size();
 }
 
-/// The gate for a name a plugin registers into a namespace the host also
-/// populates: the op registry, whose bare names are the built-in column ops
-/// (`add`, `sum`, ...). Both the host prefix and the bare namespace are the
-/// host's, so a plugin op must be `<plugin>.<name>`.
+/// The gate for a name a plugin registers into the op registry. Every host op
+/// now lives under `dftu.` (`dftu.series.add`, `dftu.frame.select`, ...), so
+/// the bare namespace (`add`, `sum`, ...) is no longer host-owned in fact - but
+/// it stays reserved anyway: a plugin op must be `<plugin>.<name>`, keeping the
+/// bare namespace free for a future host op without a further ABI break.
 constexpr bool refuse_plugin_op_name(std::string_view name) noexcept {
     return is_host_namespace(name) || !is_plugin_qualified(name);
 }

@@ -36,7 +36,7 @@ dftu_scalar i64_scalar(std::int64_t v) {
 
 TEST_SUITE("op_registry") {
     TEST_CASE("a built-in binary op is found and its signature decodes") {
-        auto add = find_op("add");
+        auto add = find_op("dftu.series.add");
         REQUIRE(add.has_value());
         CHECK(add->sig().kind() == OpKind::Series);
         CHECK(add->sig().arity() == 2);
@@ -46,7 +46,8 @@ TEST_SUITE("op_registry") {
         dftu_series* ca = i64_col(a, 3);
         dftu_series* cb = i64_col(b, 3);
         const dftu_series* in[2] = {ca, cb};
-        dftu_series* out = dftu_op_run(dftu_op_find("add"), in, 2, nullptr);
+        dftu_series* out =
+            dftu_op_run(dftu_op_find("dftu.series.add"), in, 2, nullptr);
         REQUIRE(out != nullptr);
         const std::int64_t* d = i64_of(out);
         CHECK(d[0] == 11);
@@ -65,7 +66,8 @@ TEST_SUITE("op_registry") {
         // add_scalar: SCALAR at operand slot 1.
         OpArgs a1;
         a1.scalar(1, i64_scalar(100));
-        dftu_series* o1 = dftu_op_run(dftu_op_find("add_scalar"), in, 1, a1);
+        dftu_series* o1 =
+            dftu_op_run(dftu_op_find("dftu.series.add_scalar"), in, 1, a1);
         REQUIRE(o1 != nullptr);
         CHECK(i64_of(o1)[0] == 101);
         dftu_series_free(o1);
@@ -73,7 +75,8 @@ TEST_SUITE("op_registry") {
         // compare: enum at slot 1, scalar at slot 2 -> v > 3.
         OpArgs a2;
         a2.i32(1, DFTU_CMP_GT).scalar(2, i64_scalar(3));
-        dftu_series* o2 = dftu_op_run(dftu_op_find("compare"), in, 1, a2);
+        dftu_series* o2 =
+            dftu_op_run(dftu_op_find("dftu.series.compare"), in, 1, a2);
         REQUIRE(o2 != nullptr);
         CHECK(bit_of(o2, 1) == true);
         CHECK(bit_of(o2, 0) == false);
@@ -87,7 +90,8 @@ TEST_SUITE("op_registry") {
         const dftu_series* sin[1] = {sc};
         OpArgs a3;
         a3.str(1, "oo");
-        dftu_series* o3 = dftu_op_run(dftu_op_find("str_contains"), sin, 1, a3);
+        dftu_series* o3 =
+            dftu_op_run(dftu_op_find("dftu.series.str_contains"), sin, 1, a3);
         REQUIRE(o3 != nullptr);
         CHECK(bit_of(o3, 0) == true);
         CHECK(bit_of(o3, 1) == false);
@@ -99,27 +103,31 @@ TEST_SUITE("op_registry") {
         std::int64_t v[3] = {1, 5, 2};
         dftu_series* c = i64_col(v, 3);
         int ok = 0;
-        CHECK(dftu_op_run_aggregate(dftu_op_find("count"), c, nullptr, &ok)
+        CHECK(dftu_op_run_aggregate(dftu_op_find("dftu.series.count"), c,
+                                    nullptr, &ok)
                   .value.i == 3);
         CHECK(ok == 1);
-        CHECK(dftu_op_run_aggregate(dftu_op_find("arg_max"), c, nullptr, &ok)
+        CHECK(dftu_op_run_aggregate(dftu_op_find("dftu.series.arg_max"), c,
+                                    nullptr, &ok)
                   .value.i == 1);
 
         std::int64_t p[3] = {2, 3, 4};
         dftu_series* cp = i64_col(p, 3);
-        CHECK(dftu_op_run_aggregate(dftu_op_find("product"), cp, nullptr, &ok)
+        CHECK(dftu_op_run_aggregate(dftu_op_find("dftu.series.product"), cp,
+                                    nullptr, &ok)
                   .value.i == 24);
         OpArgs arg;
         arg.i32(1, DFTU_REDUCE_SUM);
-        CHECK(dftu_op_run_aggregate(dftu_op_find("reduce"), cp, arg, &ok)
+        CHECK(dftu_op_run_aggregate(dftu_op_find("dftu.series.reduce"), cp, arg,
+                                    &ok)
                   .value.i == 9);
 
         // dot: second series rides args[1].series -> 2*2 + 3*3 + 4*4 = 29.
         OpArgs darg;
         darg.series(1, cp);
-        CHECK(
-            dftu_op_run_aggregate(dftu_op_find("dot"), cp, darg, &ok).value.d ==
-            doctest::Approx(29.0));
+        CHECK(dftu_op_run_aggregate(dftu_op_find("dftu.series.dot"), cp, darg,
+                                    &ok)
+                  .value.d == doctest::Approx(29.0));
         CHECK(ok == 1);
         dftu_series_free(c);
         dftu_series_free(cp);
@@ -127,8 +135,11 @@ TEST_SUITE("op_registry") {
 
     TEST_CASE("the whole column-op surface is registered and listable") {
         for (const char* name :
-             {"add", "compare", "cast", "prim", "logical", "str_contains",
-              "str_replace", "str_slice", "count", "reduce", "mode"})
+             {"dftu.series.add", "dftu.series.compare", "dftu.series.cast",
+              "dftu.series.prim", "dftu.series.logical",
+              "dftu.series.str_contains", "dftu.series.str_replace",
+              "dftu.series.str_slice", "dftu.series.count",
+              "dftu.series.reduce", "dftu.series.mode"})
             CHECK(dftu_op_find(name) != nullptr);
         CHECK(dftu_op_find("no_such_op") == nullptr);
 
@@ -141,8 +152,8 @@ TEST_SUITE("op_registry") {
         for (uint32_t i = 0; i < n; ++i) {
             auto op = op_at(i);
             REQUIRE(static_cast<bool>(op));
-            if (op.name() == "add") saw_add = true;
-            if (op.name() == "frame.head") saw_frame = true;
+            if (op.name() == "dftu.series.add") saw_add = true;
+            if (op.name() == "dftu.frame.head") saw_frame = true;
         }
         CHECK(saw_add);
         CHECK(saw_frame);
@@ -151,9 +162,13 @@ TEST_SUITE("op_registry") {
 
     TEST_CASE("newly-added column ops and sig shapes run") {
         for (const char* name :
-             {"abs", "sqrt", "cumsum", "fillna", "shift", "is_in", "nunique",
-              "variance", "stddev", "quantile", "skewness", "clip",
-              "is_between", "sort", "rank", "rolling", "ewm_mean"})
+             {"dftu.series.abs", "dftu.series.sqrt", "dftu.series.cumsum",
+              "dftu.series.fillna", "dftu.series.shift", "dftu.series.is_in",
+              "dftu.series.nunique", "dftu.series.variance",
+              "dftu.series.stddev", "dftu.series.quantile",
+              "dftu.series.skewness", "dftu.series.clip",
+              "dftu.series.is_between", "dftu.series.sort", "dftu.series.rank",
+              "dftu.series.rolling", "dftu.series.ewm_mean"})
             CHECK(dftu_op_find(name) != nullptr);
 
         std::int64_t v[4] = {1, 2, 3, 4};
@@ -163,27 +178,29 @@ TEST_SUITE("op_registry") {
 
         OpArgs varg;
         varg.i32(1, 1);  // sample
-        dftu_scalar var =
-            dftu_op_run_aggregate(dftu_op_find("variance"), c, varg, &ok);
+        dftu_scalar var = dftu_op_run_aggregate(
+            dftu_op_find("dftu.series.variance"), c, varg, &ok);
         CHECK(ok == 1);
         CHECK(var.kind == DFTU_SCALAR_TAG_F64);
         CHECK(var.value.d == doctest::Approx(5.0 / 3.0));
 
         OpArgs qarg;
         qarg.f64(1, 0.5);
-        dftu_scalar q =
-            dftu_op_run_aggregate(dftu_op_find("quantile"), c, qarg, &ok);
+        dftu_scalar q = dftu_op_run_aggregate(
+            dftu_op_find("dftu.series.quantile"), c, qarg, &ok);
         CHECK(q.kind == DFTU_SCALAR_TAG_F64);
 
         OpArgs carg;
         carg.scalar(1, i64_scalar(2)).scalar(2, i64_scalar(3));
-        dftu_series* clipped = dftu_op_run(dftu_op_find("clip"), in1, 1, carg);
+        dftu_series* clipped =
+            dftu_op_run(dftu_op_find("dftu.series.clip"), in1, 1, carg);
         REQUIRE(clipped != nullptr);
         CHECK(i64_of(clipped)[0] == 2);
         CHECK(i64_of(clipped)[3] == 3);
         dftu_series_free(clipped);
 
-        dftu_series* cs = dftu_op_run(dftu_op_find("cumsum"), in1, 1, nullptr);
+        dftu_series* cs =
+            dftu_op_run(dftu_op_find("dftu.series.cumsum"), in1, 1, nullptr);
         REQUIRE(cs != nullptr);
         CHECK(i64_of(cs)[3] == 10);
         dftu_series_free(cs);
@@ -198,13 +215,13 @@ TEST_SUITE("op_registry") {
         REQUIRE(df != nullptr);
         const dftu_dataframe* fin[1] = {df};
 
-        auto head = find_op("frame.head");
+        auto head = find_op("dftu.frame.head");
         REQUIRE(head.has_value());
         CHECK(head->sig().kind() == OpKind::Frame);
         OpArgs harg;
         harg.i64(1, 2);
         dftu_dataframe* h =
-            dftu_op_run_frame(dftu_op_find("frame.head"), fin, 1, harg);
+            dftu_op_run_frame(dftu_op_find("dftu.frame.head"), fin, 1, harg);
         REQUIRE(h != nullptr);
         CHECK(dftu_dataframe_num_rows(h) == 2);
         dftu_dataframe_free(h);
@@ -213,7 +230,7 @@ TEST_SUITE("op_registry") {
         OpArgs sarg;
         sarg.strlist(1, sel, 1);
         dftu_dataframe* s =
-            dftu_op_run_frame(dftu_op_find("frame.select"), fin, 1, sarg);
+            dftu_op_run_frame(dftu_op_find("dftu.frame.select"), fin, 1, sarg);
         REQUIRE(s != nullptr);
         CHECK(dftu_dataframe_num_columns(s) == 1);
         dftu_dataframe_free(s);
@@ -226,11 +243,19 @@ TEST_SUITE("op_registry") {
         OpArgs vcarg;
         vcarg.series(0, cvc);
         dftu_dataframe* vcf = dftu_op_run_frame(
-            dftu_op_find("frame.value_counts"), nullptr, 0, vcarg);
+            dftu_op_find("dftu.frame.value_counts"), nullptr, 0, vcarg);
         REQUIRE(vcf != nullptr);
         CHECK(dftu_dataframe_num_rows(vcf) == 3);  // 3 distinct values
         dftu_dataframe_free(vcf);
         dftu_series_free(cvc);
+    }
+
+    TEST_CASE("built-in ops live under dftu.series/dftu.frame, not bare") {
+        CHECK(dftu_op_find("add") == nullptr);
+        CHECK(dftu_op_find("head") == nullptr);
+        CHECK(dftu_op_find("select") == nullptr);
+        CHECK(dftu_op_find("dftu.series.add") != nullptr);
+        CHECK(dftu_op_find("dftu.frame.head") != nullptr);
     }
 
     TEST_CASE("a user op registers under a module prefix and runs") {
@@ -250,7 +275,8 @@ TEST_SUITE("op_registry") {
 
     TEST_CASE("registration rejects a clash and run rejects a mismatch") {
         CHECK(dftu_op_register(nullptr) != 0);
-        dftu_op_desc dup{"add", DFTU_OP_SIG(SERIES, SERIES, SERIES, NONE),
+        dftu_op_desc dup{"dftu.series.add",
+                         DFTU_OP_SIG(SERIES, SERIES, SERIES, NONE),
                          reinterpret_cast<const void*>(&dftu_series_add)};
         CHECK(dftu_op_register(&dup) != 0);
 
@@ -268,7 +294,8 @@ TEST_SUITE("op_registry") {
         std::int64_t v[1] = {1};
         dftu_series* c = i64_col(v, 1);
         const dftu_series* in[1] = {c};
-        CHECK(dftu_op_run(dftu_op_find("add"), in, 1, nullptr) == nullptr);
+        CHECK(dftu_op_run(dftu_op_find("dftu.series.add"), in, 1, nullptr) ==
+              nullptr);
         dftu_series_free(c);
     }
 }

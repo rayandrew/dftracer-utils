@@ -1,16 +1,23 @@
 """The dataframe op registry, as callables.
 
 Every engine column op and reducer lives in one name-keyed registry, alongside
-any user ops authored with :func:`dftracer.utils.jit.series`. Look one up and
-call it, discover what is there, or run one dynamically by name::
+any user ops authored with :func:`dftracer.utils.jit.series`. A built-in's
+registry key (the ABI truth, e.g. from :func:`names`/:func:`info`, or what a C
+plugin types) carries the host's `dftu.` prefix: `dftu.series.add`. `ops` is
+already that namespace, so the attribute path elides the redundant prefix::
 
     from dftracer.utils.jit import ops
 
-    ops.add(a, b)            # a registered op as an attribute
-    ops.run("add", a, b)     # by name (name-as-data)
-    ops.get("mul")(a, b)     # bound callable
-    ops.list()               # every op name (built-in + user)
-    ops.info("compare")      # {name, kind, arity, signature}
+    ops.series.add(a, b)             # a built-in, dftu. elided
+    ops.run("dftu.series.add", a, b) # run() / get() / info() take the full key
+    ops.get("dftu.series.mul")(a, b) # bound callable
+    ops.list()                       # every registry key (built-in + user)
+    ops.info("dftu.series.compare")  # {name, kind, arity, signature}
+    ops.mymod.zscore(a)              # a user op: its own literal path, unprefixed
+
+`ops.dftu.series.add` does not resolve - one spelling per surface. A user op
+(`@jit.series`) is reached by its own literal path either way, since it is
+never under `dftu.`.
 
 Column arguments are Series; any other operands (a scalar, an op-enum int, a
 string, an int, a char) follow the op's signature. The call returns a Series for
@@ -69,7 +76,7 @@ def run(name: str, *args: Operand) -> Result:
 
 
 def get(name: str) -> Callable[..., Result]:
-    """The op `name` as a bound callable, so `ops.get("mul")(a, b)` runs it."""
+    """The op `name` as a bound callable, so `ops.get("dftu.series.mul")(a, b)` runs it."""
 
     def call(*args: Operand) -> Result:
         return run(name, *args)
@@ -80,7 +87,8 @@ def get(name: str) -> Callable[..., Result]:
 
 
 def names() -> List[str]:
-    """Every registered op name (built-in and user)."""
+    """Every registered op's registry key (built-in and user): the full
+    `dftu.<family>.<op>` form for a built-in, the literal path for a user op."""
     return [*_ext.op_list(), *_USER]
 
 
@@ -102,15 +110,38 @@ def info(name: str) -> Dict[str, object]:
     return _ext.op_info(name)
 
 
+_HOST_PREFIX = "dftu."
+
+
+def _resolve(path: str) -> Union[str, None]:
+    """The registry key `path` reaches as an attribute path: a user op's own
+    literal path, else the built-in at `dftu.<path>` (the host prefix elided
+    from the attribute surface). None if neither is registered - in
+    particular, a path that already starts with "dftu." never resolves here,
+    so the un-elided spelling does not also work."""
+    if path in _USER:
+        return path
+    host_key = _HOST_PREFIX + path
+    if host_key in _ext.op_list():
+        return host_key
+    return None
+
+
 def _is_module(name: str) -> bool:
-    """True if `name` is a module prefix, i.e. some user op is `name.<op>`."""
+    """True if `name` is an attribute-path prefix, i.e. some user op is
+    `name.<op>` or some built-in is `dftu.name.<op>` (e.g. "series" for the
+    built-in "dftu.series.add")."""
     prefix = name + "."
-    return any(k.startswith(prefix) for k in _USER)
+    host_prefix = _HOST_PREFIX + prefix
+    return any(k.startswith(prefix) for k in _USER) or any(
+        k.startswith(host_prefix) for k in _ext.op_list()
+    )
 
 
 class _ModuleNs:
-    """A module namespace: ``ops.stats.zscore(a, b)`` runs the user op
-    ``stats.zscore``."""
+    """A module namespace: ``ops.series.add(a, b)`` runs the built-in op
+    ``dftu.series.add`` (the host prefix elided); ``ops.stats.zscore(a, b)``
+    runs the user op ``stats.zscore`` (its own literal path)."""
 
     __slots__ = ("_prefix",)
 
@@ -119,16 +150,19 @@ class _ModuleNs:
 
     def __getattr__(self, name: str) -> Union[Callable[..., Result], "_ModuleNs"]:
         full = f"{self._prefix}.{name}"
-        # A dotted module (`pkg.stats.zscore`) nests one namespace per segment.
-        if full not in _USER and _is_module(full):
+        key = _resolve(full)
+        # A dotted module (`series.add`) nests one namespace per segment.
+        if key is None and _is_module(full):
             return _ModuleNs(full)
-        return get(full)
+        return get(key if key is not None else full)
 
 
 def __getattr__(name: str):
-    # ops.add / a user op -> a bound callable; ops.<module> -> a namespace.
-    if name in _USER or name in _ext.op_list():
-        return get(name)
+    # A user op's literal path, or a built-in with "dftu." elided -> a bound
+    # callable; ops.<module> -> a namespace.
+    key = _resolve(name)
+    if key is not None:
+        return get(key)
     if _is_module(name):
         return _ModuleNs(name)
     raise AttributeError(f"module {__name__!r} has no op or attribute {name!r}")

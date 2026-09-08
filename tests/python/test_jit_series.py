@@ -45,7 +45,7 @@ def test_series_op_never_takes_a_bare_name():
     def unprefixed(a):
         return a + 1
 
-    assert "unprefixed" not in ops.list()  # the bare namespace is the host's
+    assert "unprefixed" not in ops.list()  # the bare namespace stays reserved
     assert f"{MOD}.unprefixed" in ops.list()
     with pytest.raises(AttributeError):
         ops.unprefixed
@@ -80,6 +80,18 @@ def test_series_op_arity_mismatch_raises():
 
     with pytest.raises(TypeError):
         ops.run(f"{MOD}.triple", _col([1]), _col([2]))
+
+
+def test_ops_attribute_path_elides_the_host_prefix():
+    @jit.series(module="mymod")
+    def zscore(a):
+        return a * 2
+
+    s = _col([1, 2, 3])
+    assert _vals(ops.series.add(s, _col([10, 20, 30]))) == [11, 22, 33]  # dftu. elided
+    with pytest.raises(AttributeError):
+        ops.dftu  # the un-elided spelling does not also work
+    assert _vals(ops.mymod.zscore(s)) == [2, 4, 6]  # a user op keeps its own literal path
 
 
 def test_series_op_module_grouping():
@@ -120,8 +132,12 @@ def test_series_ops_accessor_on_a_series():
 
     s = _col([1, 2, 3])
     assert _vals(_ns(s.ops).tripled()) == [3, 6, 9]  # user op as a method
-    assert _vals(s.ops.add(_col([10, 20, 30]))) == [11, 22, 33]  # built-in as a method
-    assert s.ops.count() == 3  # reducer returns a scalar
+    assert _vals(s.ops.series.add(_col([10, 20, 30]))) == [
+        11,
+        22,
+        33,
+    ]  # built-in as a method, dftu. elided
+    assert s.ops.series.count() == 3  # reducer returns a scalar
 
 
 def test_series_op_rejects_a_duplicate_registration():
