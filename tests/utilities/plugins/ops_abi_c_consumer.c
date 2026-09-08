@@ -13,16 +13,18 @@ int dftu_test_ops_fnv1a(const dftu_host* h, const char* data, uint32_t len,
     int32_t offsets[2];
     dftu_series* in;
     dftu_series* hashed;
+    dftu_result_series res;
     const uint64_t* vals;
     if (!ops || !ops->run) return -1;
     offsets[0] = 0;
     offsets[1] = (int32_t)len;
     in = dftu_series_new_string(DFTU_TYPE_STRING, offsets, data, 1, NULL);
     if (!in) return -1;
-    hashed = ops->run(h->h, "dftu.hash.fnv1a", (const dftu_series* const*)&in,
-                      1, NULL);
+    res = ops->run(h->h, "dftu.hash.fnv1a", (const dftu_series* const*)&in, 1,
+                   NULL);
     dftu_series_free(in);
-    if (!hashed) return -1;
+    if (!DFTU_RESULT_OK(res)) return -1;
+    hashed = DFTU_RESULT_VALUE(res);
     vals = (const uint64_t*)dftu_series_data(hashed);
     if (vals) *out = vals[0];
     dftu_series_free(hashed);

@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/error.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/fold_adapter/ext.h>
@@ -8,12 +9,28 @@
 namespace dftracer::utils::plugins {
 namespace {
 
-::dftu_series* host_ops_run(void*, const char* name,
-                            const ::dftu_series* const* in, std::uint32_t n_in,
-                            const ::dftu_op_arg* args) {
-    const ::dftu_op_desc* op = ::dftu_op_find(name);
-    if (!op) return nullptr;
-    return ::dftu_op_run(op, in, n_in, args);
+::dftu_error not_found_error() {
+    return ::dftu_error{dftracer::utils::CORE_DOMAIN.id,
+                        static_cast<std::int32_t>(DFTU_COND_NOT_FOUND),
+                        DFTU_COND_NOT_FOUND, "no such op"};
+}
+
+::dftu_error rejected_error() {
+    return ::dftu_error{dftracer::utils::CORE_DOMAIN.id,
+                        static_cast<std::int32_t>(DFTU_COND_INVALID_ARGUMENT),
+                        DFTU_COND_INVALID_ARGUMENT,
+                        "op rejected: kind/arity/shape mismatch"};
+}
+
+::dftu_result_series host_ops_run(void*, const char* name,
+                                  const ::dftu_series* const* in,
+                                  std::uint32_t n_in,
+                                  const ::dftu_op_arg* args) {
+    const ::dftu_op_desc* op = name ? ::dftu_op_find(name) : nullptr;
+    if (!op) return ::dftu_result_series{0, {.err = not_found_error()}};
+    ::dftu_series* result = ::dftu_op_run(op, in, n_in, args);
+    if (!result) return ::dftu_result_series{0, {.err = rejected_error()}};
+    return ::dftu_result_series{1, {.value = result}};
 }
 
 void host_ops_run_aggregate(void*, const char* name,
@@ -32,13 +49,15 @@ void host_ops_run_aggregate(void*, const char* name,
     if (ok) *ok = run_ok;
 }
 
-::dftu_dataframe* host_ops_run_frame(void*, const char* name,
-                                     const ::dftu_dataframe* const* in,
-                                     std::uint32_t n_in,
-                                     const ::dftu_op_arg* args) {
-    const ::dftu_op_desc* op = ::dftu_op_find(name);
-    if (!op) return nullptr;
-    return ::dftu_op_run_frame(op, in, n_in, args);
+::dftu_result_frame host_ops_run_frame(void*, const char* name,
+                                       const ::dftu_dataframe* const* in,
+                                       std::uint32_t n_in,
+                                       const ::dftu_op_arg* args) {
+    const ::dftu_op_desc* op = name ? ::dftu_op_find(name) : nullptr;
+    if (!op) return ::dftu_result_frame{0, {.err = not_found_error()}};
+    ::dftu_dataframe* result = ::dftu_op_run_frame(op, in, n_in, args);
+    if (!result) return ::dftu_result_frame{0, {.err = rejected_error()}};
+    return ::dftu_result_frame{1, {.value = result}};
 }
 
 const ::dftu_op_desc* host_ops_find(void*, const char* name) {

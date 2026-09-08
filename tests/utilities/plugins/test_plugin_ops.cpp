@@ -84,6 +84,32 @@ TEST_CASE("plugin ops: run_op reports unknown names and bad arity") {
     dftu_series_free(a);
 }
 
+TEST_CASE("plugin ops: unknown op and a failed op are distinguishable") {
+    HostFixture fx;
+    const auto* ops = static_cast<const dftu_ext_ops*>(
+        fx.host().get_extension(fx.host().h, DFTU_EXT_OPS));
+    REQUIRE(ops);
+    REQUIRE(ops->run);
+
+    dftu_result_series unknown =
+        ops->run(fx.host().h, "dftu.test.nonexistent_op", nullptr, 0, nullptr);
+    CHECK_FALSE(DFTU_RESULT_OK(unknown));
+    CHECK(DFTU_RESULT_ERROR(unknown).condition == DFTU_COND_NOT_FOUND);
+
+    const std::int64_t a_vals[] = {1, 2, 3};
+    dftu_series* a = dftu_series_new_flat(DFTU_TYPE_INT64, a_vals, 3, nullptr);
+    REQUIRE(a);
+    const dftu_series* in[1] = {a};
+    // "dftu.series.add" is a real op, but this call gives it the wrong arity.
+    dftu_result_series failed =
+        ops->run(fx.host().h, "dftu.series.add", in, 1, nullptr);
+    CHECK_FALSE(DFTU_RESULT_OK(failed));
+    CHECK(DFTU_RESULT_ERROR(failed).condition == DFTU_COND_INVALID_ARGUMENT);
+    CHECK(DFTU_RESULT_ERROR(failed).condition !=
+          DFTU_RESULT_ERROR(unknown).condition);
+    dftu_series_free(a);
+}
+
 TEST_CASE("plugin ops: find_op resolves a built-in by name") {
     HostFixture fx;
     Host h{&fx.host()};

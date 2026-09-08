@@ -287,8 +287,10 @@ class Host {
         const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
         if (!e || !e->run) return nullptr;
         std::vector<const dftu_series*> vin(in);
-        return e->run(h_->h, name, vin.data(),
-                      static_cast<std::uint32_t>(vin.size()), args);
+        dftu_result_series res =
+            e->run(h_->h, name, vin.data(),
+                   static_cast<std::uint32_t>(vin.size()), args);
+        return DFTU_RESULT_OK(res) ? DFTU_RESULT_VALUE(res) : nullptr;
     }
     /// run_op for a signature whose return token is FRAME; the result is
     /// newly owned by the caller (free with dftu_dataframe_free).
@@ -298,8 +300,10 @@ class Host {
         const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
         if (!e || !e->run_frame) return nullptr;
         std::vector<const dftu_dataframe*> vin(in);
-        return e->run_frame(h_->h, name, vin.data(),
-                            static_cast<std::uint32_t>(vin.size()), args);
+        dftu_result_frame res =
+            e->run_frame(h_->h, name, vin.data(),
+                         static_cast<std::uint32_t>(vin.size()), args);
+        return DFTU_RESULT_OK(res) ? DFTU_RESULT_VALUE(res) : nullptr;
     }
     /// run_op for a signature whose return token is SCALAR/I64/BOOL, reducing
     /// one column; `ok` (if given) is set false on a NULL/kind/shape mismatch
