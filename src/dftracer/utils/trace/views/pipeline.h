@@ -8,6 +8,7 @@
 #include <dftracer/utils/trace/views/view_plan.h>
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace dftracer::utils::trace::views::detail {
@@ -24,23 +25,27 @@ struct PipelineNode {
     Fold* fold = nullptr;
 };
 
-/// A linear pipeline: one scan source, zero or more streaming ops, one sink.
-/// Breakers split pipelines; a Pipeline is one fuse pass or one driver run.
+/// A linear pipeline: one scan source, zero or more streaming ops, and the
+/// sinks it feeds. Breakers split pipelines; a Pipeline is one fuse pass or one
+/// driver run.
 struct Pipeline {
     PipelineNode source;
     std::vector<PipelineNode> ops;
-    PipelineNode sink;
+    std::vector<PipelineNode> sinks;
 };
 
-/// Identity lowering: the scan as the Source, `sink` as the only fold, no
-/// streaming ops. Executing it is exactly `fuse(plan, vdef, {&sink}, ...)`.
-Pipeline lower_single_fold(const ViewPlan& plan, const ViewDefinition& vdef,
-                           Fold& sink);
+/// Lowering (a): the scan as the Source with every fold in `sinks` fused into
+/// one pass, no streaming ops. Executing it is exactly
+/// `fuse(plan, vdef, sinks, ...)`. `sinks` is borrowed, not copied.
+Pipeline lower_fused_folds(const ViewPlan& plan, const ViewDefinition& vdef,
+                           std::span<Fold* const> sinks);
 
 /// Run a lowered pipeline. A Source feeding fold Sinks with no streaming ops is
 /// lowering (a): one direct `fuse` call. Throws std::logic_error on a shape no
-/// lowering handles yet, rather than silently dropping nodes.
-coro::CoroTask<ExportStats> execute(const Pipeline& pipeline,
+/// lowering handles yet, rather than silently dropping nodes. Taken by value:
+/// a coroutine holding a reference to a caller's temporary plan dangles as soon
+/// as the call is not itself the awaited full-expression.
+coro::CoroTask<ExportStats> execute(Pipeline pipeline,
                                     dftracer::utils::StringIntern& intern,
                                     const CoverageSet* covered = nullptr,
                                     std::uint64_t limit = 0);

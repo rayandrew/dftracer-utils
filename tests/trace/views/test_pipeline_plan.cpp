@@ -32,6 +32,12 @@ TEST_SUITE("Pipeline plan") {
         views_detail::Pipeline incomplete;
         CHECK_THROWS_AS(run(views_detail::execute(incomplete, intern)),
                         std::logic_error);
+
+        views_detail::Pipeline null_sink;
+        null_sink.sinks.push_back(
+            {views_detail::NodeKind::Sink, nullptr, nullptr, nullptr});
+        CHECK_THROWS_AS(run(views_detail::execute(null_sink, intern)),
+                        std::logic_error);
     }
 
     TEST_CASE("a row query lowered to the identity pipeline returns its rows") {

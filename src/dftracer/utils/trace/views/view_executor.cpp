@@ -692,7 +692,8 @@ coro::CoroTask<dataframe::DataFrame> run_collect_rows(const ViewPlan& plan) {
     }
     NativeRowFold fold(intern, plan.select, plan.time_scale, resolver,
                        plan.phase == Phase::Metadata);
-    co_await execute(lower_single_fold(plan, vdef, fold), intern);
+    std::array<Fold*, 1> folds{&fold};
+    co_await execute(lower_fused_folds(plan, vdef, folds), intern);
     dataframe::DataFrame b = fold.build();
     // sort_col/topk_col name a column the way a caller would select it (bare
     // or "args."-prefixed); canonicalize to match build_row_frame's actual
@@ -1161,7 +1162,8 @@ coro::CoroTask<ExportStats> run_session(
     const std::uint64_t scan_cap =
         (agg_b.empty() && !has_factories) ? plan.limit : 0;
     ExportStats stats =
-        co_await fuse(scan_plan, avdef, fold_ptrs, intern, nullptr, scan_cap);
+        co_await execute(lower_fused_folds(scan_plan, avdef, fold_ptrs), intern,
+                         nullptr, scan_cap);
 
     for (std::size_t i = 0; i < agg_b.size(); ++i) {
         // A partial serializes the mergeable AggState for a distributed merge;

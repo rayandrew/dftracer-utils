@@ -1,32 +1,43 @@
 #include <dftracer/utils/trace/views/pipeline.h>
 
-#include <array>
 #include <stdexcept>
+#include <vector>
 
 namespace dftracer::utils::trace::views::detail {
 
-Pipeline lower_single_fold(const ViewPlan& plan, const ViewDefinition& vdef,
-                           Fold& sink) {
+Pipeline lower_fused_folds(const ViewPlan& plan, const ViewDefinition& vdef,
+                           std::span<Fold* const> sinks) {
     Pipeline p;
     p.source.kind = NodeKind::Source;
     p.source.plan = &plan;
     p.source.vdef = &vdef;
-    p.sink.kind = NodeKind::Sink;
-    p.sink.fold = &sink;
+    p.sinks.reserve(sinks.size());
+    for (Fold* f : sinks) {
+        PipelineNode n;
+        n.kind = NodeKind::Sink;
+        n.fold = f;
+        p.sinks.push_back(n);
+    }
     return p;
 }
 
-coro::CoroTask<ExportStats> execute(const Pipeline& pipeline,
+coro::CoroTask<ExportStats> execute(Pipeline pipeline,
                                     dftracer::utils::StringIntern& intern,
                                     const CoverageSet* covered,
                                     std::uint64_t limit) {
     if (!pipeline.ops.empty())
         throw std::logic_error("pipeline: streaming ops need the pull driver");
     if (pipeline.source.plan == nullptr || pipeline.source.vdef == nullptr ||
-        pipeline.sink.fold == nullptr)
-        throw std::logic_error("pipeline: incomplete source or sink node");
+        pipeline.sinks.empty())
+        throw std::logic_error("pipeline: incomplete source or no sink");
 
-    std::array<Fold*, 1> folds{pipeline.sink.fold};
+    std::vector<Fold*> folds;
+    folds.reserve(pipeline.sinks.size());
+    for (const PipelineNode& s : pipeline.sinks) {
+        if (s.fold == nullptr)
+            throw std::logic_error("pipeline: sink node carries no fold");
+        folds.push_back(s.fold);
+    }
     co_return co_await fuse(*pipeline.source.plan, *pipeline.source.vdef, folds,
                             intern, covered, limit);
 }
