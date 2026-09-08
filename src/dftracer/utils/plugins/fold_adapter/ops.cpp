@@ -62,6 +62,16 @@ const ::dftu_op_desc* host_ops_find(void*, const char* name) {
 }
 
 int host_ops_register(void*, const ::dftu_op_desc* desc) {
+    return detail::register_plugin_op(desc);
+}
+
+const ::dftu_ext_ops g_ops = {host_ops_run, host_ops_run_aggregate,
+                              host_ops_run_frame, host_ops_find,
+                              host_ops_register};
+
+}  // namespace
+
+int detail::register_plugin_op(const ::dftu_op_desc* desc) {
     if (desc && refuse_plugin_op_name(desc->name)) {
         DFTRACER_UTILS_LOG_ERROR(
             "Plugin op '%s' refused: the bare and 'dftu.' namespaces hold the "
@@ -71,12 +81,6 @@ int host_ops_register(void*, const ::dftu_op_desc* desc) {
     }
     return ::dftu_op_register(desc);
 }
-
-const ::dftu_ext_ops g_ops = {host_ops_run, host_ops_run_aggregate,
-                              host_ops_run_frame, host_ops_find,
-                              host_ops_register};
-
-}  // namespace
 
 const void* detail::ops_ext_vtable() { return &g_ops; }
 

@@ -64,7 +64,8 @@ static dftu_plugin g_plugin;
 #ifdef __cplusplus
 extern "C"
 #endif
-dftu_plugin* dftracer_plugin(const dftu_value* config) {{
+dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {{
+    (void)h;
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     g_plugin.self = NULL;
@@ -100,7 +101,8 @@ struct {cls} {{
     void finalize(Host) {{}}
 }};
 
-extern "C" dftu_plugin* dftracer_plugin(const dftu_value* config) {{
+extern "C" dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {{
+    (void)h;
     return make_plugin<{cls}>(config);
 }}
 """

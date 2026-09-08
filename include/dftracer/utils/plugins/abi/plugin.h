@@ -53,10 +53,23 @@ typedef struct dftu_plugin {
     const char* const* (*consumes)(void* self);
 } dftu_plugin;
 
-/** The one symbol the loader resolves via dlsym; config is NULL when none
- * given.
- */
-typedef dftu_plugin* (*dftu_plugin_factory)(const dftu_value* config);
+/** The one symbol the loader resolves via dlsym; the plugin's init. `config` is
+   NULL when none was given.
+
+   `h` is a BUILD-PHASE host: its get_extension answers only the registration
+   groups (DFTU_EXT_OPS, DFTU_EXT_AGG, DFTU_EXT_PORTS) and, within those, only
+   the registration slots - register_op, register_state and port_key. Every
+   other group, every non-registration slot, and resolve/intern return
+   NULL/failure, and the host fails the load naming what was denied. Scanning,
+   spawning, I/O and emitting belong to the run-time host the fold callbacks
+   receive. `h` and anything obtained from it die when the factory returns; only
+   log() is safe to keep using, and only for the duration of the call.
+
+   The returned descriptor is still pure data: plan_query, provides and consumes
+   are read after every factory has run, so registering here does not reorder
+   the fold or change the prune. */
+typedef dftu_plugin* (*dftu_plugin_factory)(dftu_host* h,
+                                            const dftu_value* config);
 #define DFTRACER_PLUGIN_FACTORY_SYMBOL "dftracer_plugin"
 
 #ifdef __cplusplus

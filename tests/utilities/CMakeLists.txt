@@ -89,6 +89,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_planner.cpp
     plugins/test_plugin_order.cpp
     plugins/test_plugin_abi_gate.cpp
+    plugins/test_plugin_factory_host.cpp
 )
 
 # +++++++++++++++++++++++++++++++++++++++++
@@ -401,4 +402,45 @@ if(TARGET utilities_plugins_test_plugin_abi_gate)
     BAD_ABI_VERSION_PLUGIN_PATH="$<TARGET_FILE:bad_abi_version_plugin>")
   add_dependencies(utilities_plugins_test_plugin_abi_gate
                    bad_abi_version_plugin)
+endif()
+
+# +++++++++++++++++++++++++++++++++++++++++
+# Build-phase host: one plugin whose factory registers an op at load, one whose
+# factory reaches past the registration surface. Both are real .so files loaded
+# through Plugins::Builder by utilities/plugins/test_plugin_factory_host.
+# +++++++++++++++++++++++++++++++++++++++++
+
+foreach(fh_plugin factory_registers_op_plugin factory_escapes_plugin)
+  add_library(${fh_plugin} MODULE plugins/${fh_plugin}.c)
+  set_target_properties(
+    ${fh_plugin}
+    PROPERTIES OUTPUT_NAME ${fh_plugin}
+               PREFIX ""
+               POSITION_INDEPENDENT_CODE ON
+               C_STANDARD 11
+               C_STANDARD_REQUIRED ON
+               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins"
+               LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins")
+  target_include_directories(${fh_plugin}
+                             PRIVATE ${CMAKE_SOURCE_DIR}/include
+                                     ${CMAKE_BINARY_DIR}/include)
+endforeach()
+
+# It reads the batch dataframe and runs its own registered op, so it links the
+# dataframe C ABI like the examples that do the same.
+if(TARGET dftracer_utils_dataframe::shared)
+  target_link_libraries(factory_registers_op_plugin
+                        PRIVATE dftracer_utils_dataframe::shared)
+elseif(TARGET dftracer_utils_dataframe::static)
+  target_link_libraries(factory_registers_op_plugin
+                        PRIVATE dftracer_utils_dataframe::static)
+endif()
+
+if(TARGET utilities_plugins_test_plugin_factory_host)
+  target_compile_definitions(
+    utilities_plugins_test_plugin_factory_host PRIVATE
+    FACTORY_REGISTERS_OP_PLUGIN_PATH="$<TARGET_FILE:factory_registers_op_plugin>"
+    FACTORY_ESCAPES_PLUGIN_PATH="$<TARGET_FILE:factory_escapes_plugin>")
+  add_dependencies(utilities_plugins_test_plugin_factory_host
+                   factory_registers_op_plugin factory_escapes_plugin)
 endif()

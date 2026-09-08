@@ -1,5 +1,6 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/plugins/abi.h>
+#include <dftracer/utils/plugins/build_host.h>
 #include <dftracer/utils/plugins/config.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/plugins.h>
@@ -111,7 +112,23 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                               DFTRACER_PLUGIN_FACTORY_SYMBOL + "' symbol");
     }
 
-    dftu_plugin* plugin = factory(config);
+    BuildHost build_host(plugin_name_from_path(path));
+    dftu_plugin* plugin = factory(build_host.host(), config);
+
+    // A factory that reached outside the registration surface built itself on
+    // a host that was not there; whether it noticed the NULL or not, the load
+    // fails here rather than at the first batch.
+    if (!build_host.denied().empty()) {
+        if (plugin && plugin->destroy) plugin->destroy(plugin->self);
+        dlclose(handle);
+        return make_error(
+            ErrorCode::INVALID_ARGUMENT,
+            "plugin '" + path + "' factory asked for '" + build_host.denied() +
+                "', which the build-phase host does not provide. A factory may "
+                "only register ops, state types and ports; the full host "
+                "arrives with the first fold callback");
+    }
+
     if (!plugin) {
         dlclose(handle);
         return make_error(ErrorCode::INVALID_ARGUMENT,

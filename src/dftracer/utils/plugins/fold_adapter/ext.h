@@ -47,6 +47,10 @@ const void* agg_ext_vtable();
 const void* result_ext_vtable();
 const void* ops_ext_vtable();
 
+/// dftu_ext_ops::register_op with the plugin-name gate applied. Shared with
+/// the build-phase host, whose op registration is the same call.
+int register_plugin_op(const ::dftu_op_desc* desc);
+
 }  // namespace detail
 
 }  // namespace dftracer::utils::plugins
