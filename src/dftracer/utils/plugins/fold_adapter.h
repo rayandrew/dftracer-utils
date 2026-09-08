@@ -194,15 +194,10 @@ class PluginFold : public trace::views::detail::Fold {
         return nullptr;
     }
 
-    // Emit a named result into the host registry; no-ops when none is bound.
-    void result_emit(const char* name, const void* data, std::uint64_t len);
-    int result_emit_arrow(const char* name, ::ArrowArray* a, ::ArrowSchema* s);
-    // Emit a native dataframe result; takes ownership of the handle. -1 when no
-    // named-result registry is bound.
-    int result_emit_frame(const char* name, dftu_dataframe* df);
-    // Emit a deferred (lazyframe) result; takes ownership of the handle. -1
-    // when no named-result registry is bound.
-    int result_emit_lazyframe(const char* name, dftu_lazyframe* lf);
+    // Emit a named, kind-tagged result into the host registry; moves the
+    // Arrow/frame/lazyframe handle carried in `v` (bytes are copied). -1 on a
+    // NULL name/v/registry or an unrecognized kind.
+    int result_emit(const char* name, dftu_result_value* v);
 
     // Get-or-create this slice's named dft.ext.agg accumulator; null on a bad
     // op code, a missing output name, or an allocation failure. A name seen

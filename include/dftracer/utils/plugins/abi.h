@@ -376,35 +376,51 @@ typedef struct dftu_ext_ports {
     const void* (*consume)(void* h, uint64_t key, uint32_t* out_len);
 } dftu_ext_ports;
 
+/** The alternative a dftu_result_value carries; matches the host's own
+   NamedResult variant one for one. */
+typedef enum {
+    DFTU_RESULT_KIND_BYTES = 0,
+    DFTU_RESULT_KIND_ARROW,
+    DFTU_RESULT_KIND_FRAME,
+    DFTU_RESULT_KIND_LAZYFRAME
+} dftu_result_kind;
+
+/** A tagged named-result value: exactly one of `bytes`/`arrow`/`frame`/
+   `lazyframe` is live, selected by `kind`. See dftu_ext_result::emit for
+   ownership per kind. */
+typedef struct dftu_result_value {
+    int32_t kind; /**< a dftu_result_kind value */
+    union {
+        struct {
+            const void* data;
+            uint64_t len;
+        } bytes;
+        struct {
+            struct ArrowArray* array;
+            struct ArrowSchema* schema;
+        } arrow;
+        dftu_dataframe* frame;
+        dftu_lazyframe* lazyframe;
+    } u;
+} dftu_result_value;
+
 /** Named result channel, fetched via dftu_host::get_extension(DFTU_EXT_RESULT).
-   The host moves opaque bytes / user-schema Arrow and never interprets them;
-   Plugins::run returns the collected results to the caller keyed by name. */
+   The host moves Arrow/frame/lazyframe handles and copies bytes, never
+   interpreting any of them; Plugins::run returns the collected results to the
+   caller keyed by name. */
 typedef struct dftu_ext_result {
-    /** Emit a named opaque result; the host COPIES len bytes. Intended for
-       on_finalize (called on the merged master fold); if called concurrently
-       from on_batch the host serializes writes, last-writer-wins on a name. */
-    void (*emit)(void* h, const char* name, const void* data, uint64_t len);
-    /** Emit a named Arrow result; the host MOVES the array/schema (like
-       ArrowArrayMove/ArrowSchemaMove). 0 ok, -1 on error. Same
-       finalize/collision semantics. */
-    int (*emit_arrow)(void* h, const char* name, struct ArrowArray* a,
-                      struct ArrowSchema* s);
-    /** Emit a named native dataframe result; the host TAKES OWNERSHIP of the
-       dftu_dataframe handle (do not free it after). The plugin ABI is internal,
-       so a columnar result crosses it as our own dataframe with no Arrow
-       round-trip; the Arrow edge is the external (Python) reader's concern. 0
-       ok, -1 on error. Same finalize/collision semantics. Appended after
-       emit_arrow; a host predating it leaves the slot NULL. */
-    int (*emit_frame)(void* h, const char* name, dftu_dataframe* df);
-    /** Emit a named deferred dataframe result; the host TAKES OWNERSHIP of the
-       dftu_lazyframe handle (do not free it after) and collects it at the
-       Python edge. The plan MUST be self-contained - its source an in-memory
-       frame or a re-openable source (dftu_dataframe_lazy of a materialized
-       frame is the supported construction); a plan referencing the plugin's
-       per-scan/executor state, which dies at finalize, is a plugin bug. 0 ok,
-       -1 on error. Same finalize/collision semantics. Appended after
-       emit_frame; a host predating it leaves the slot NULL. */
-    int (*emit_lazyframe)(void* h, const char* name, dftu_lazyframe* lf);
+    /** Emit a named result carrying `v`. DFTU_RESULT_KIND_BYTES is COPIED
+       (`v->u.bytes.len` bytes); ARROW/FRAME/LAZYFRAME are MOVED - the host
+       takes ownership of the array/schema or handle (do not use or free it
+       after a successful call). A LAZYFRAME plan MUST be self-contained - its
+       source an in-memory frame or a re-openable source (dftu_dataframe_lazy
+       of a materialized frame is the supported construction); a plan
+       referencing the plugin's per-scan/executor state, which dies at
+       finalize, is a plugin bug. Intended for on_finalize (called on the
+       merged master fold); if called concurrently from on_batch the host
+       serializes writes, last-writer-wins on a name. Returns 0 ok, -1 on a
+       NULL name/v or an unrecognized kind. */
+    int (*emit)(void* h, const char* name, dftu_result_value* v);
 } dftu_ext_result;
 
 /** Host-owned cross-batch aggregation accumulator, fetched via

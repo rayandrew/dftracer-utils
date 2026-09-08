@@ -100,7 +100,13 @@ static dftu_task* on_finalize(void* slice, const dftu_host* host) {
                          (unsigned long long)c->entries[i].count);
         if (n > 0) len += (size_t)n;
     }
-    res->emit(host->h, "process_counts", buf, (uint64_t)len);
+    {
+        dftu_result_value v;
+        v.kind = DFTU_RESULT_KIND_BYTES;
+        v.u.bytes.data = buf;
+        v.u.bytes.len = (uint64_t)len;
+        res->emit(host->h, "process_counts", &v);
+    }
     free(buf);
     return NULL;
 }

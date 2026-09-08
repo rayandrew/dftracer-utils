@@ -334,13 +334,15 @@ class Host {
         return e && e->register_op ? e->register_op(h_->h, desc) : -1;
     }
 
-    /// Named result channel: emit an opaque blob (the host copies `len` bytes)
-    /// or a user-schema Arrow array (the host moves it); both surface from
-    /// Plugins::run keyed by name. Best called at on_finalize.
+    /// Named result channel: emit an opaque blob; the host copies `len` bytes.
+    /// Surfaces from Plugins::run keyed by name. Best called at on_finalize.
     void emit_result(const char* name, const void* data,
                      std::uint64_t len) const {
-        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
-        if (e && e->emit) e->emit(h_->h, name, data, len);
+        dftu_result_value v{};
+        v.kind = DFTU_RESULT_KIND_BYTES;
+        v.u.bytes.data = data;
+        v.u.bytes.len = len;
+        emit(name, &v);
     }
     void emit_result(const char* name, std::string_view data) const {
         emit_result(name, data.data(), data.size());
@@ -348,32 +350,39 @@ class Host {
     /// Moves *a and *s into the host; -1 if the host lacks the result channel.
     int emit_result_arrow(const char* name, ArrowArray* a,
                           ArrowSchema* s) const {
-        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
-        return e && e->emit_arrow ? e->emit_arrow(h_->h, name, a, s) : -1;
-    }
-    /// Hands a deferred plan to the host, which takes ownership and collects it
-    /// at the Python edge; -1 if the host lacks the result channel or the
-    /// emit_lazyframe slot. The plan must be self-contained (see the
-    /// emit_lazyframe contract in abi.h).
-    int emit_result_lazyframe(const char* name, dftu_lazyframe* lf) const {
-        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
-        return e && e->emit_lazyframe ? e->emit_lazyframe(h_->h, name, lf) : -1;
+        dftu_result_value v{};
+        v.kind = DFTU_RESULT_KIND_ARROW;
+        v.u.arrow.array = a;
+        v.u.arrow.schema = s;
+        return emit(name, &v);
     }
     /// Hands a native dataframe result to the host, which takes ownership; -1
-    /// if the host lacks the result channel or the emit_frame slot (`df` is
-    /// left intact so it frees normally). Same finalize/collision semantics as
-    /// emit_result.
+    /// if the host lacks the result channel (`df` is left intact so it frees
+    /// normally). Same finalize/collision semantics as emit_result.
     int emit_result_frame(const char* name, OwnedDataFrame&& df) const {
-        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
-        if (!e || !e->emit_frame) return -1;
-        return e->emit_frame(h_->h, name, df.release());
+        dftu_result_value v{};
+        v.kind = DFTU_RESULT_KIND_FRAME;
+        v.u.frame = df.handle;
+        int rc = emit(name, &v);
+        if (rc == 0) df.release();
+        return rc;
+    }
+    /// Hands a deferred plan to the host, which takes ownership and collects it
+    /// at the Python edge; -1 if the host lacks the result channel. The plan
+    /// must be self-contained (see the emit's DFTU_RESULT_KIND_LAZYFRAME
+    /// contract in abi.h).
+    int emit_result_lazyframe(const char* name, dftu_lazyframe* lf) const {
+        dftu_result_value v{};
+        v.kind = DFTU_RESULT_KIND_LAZYFRAME;
+        v.u.lazyframe = lf;
+        return emit(name, &v);
     }
     /// OwnedLazyFrame overload of emit_result_lazyframe; -1 leaves `lf` intact
     /// so it frees normally.
     int emit_result_lazyframe(const char* name, OwnedLazyFrame&& lf) const {
-        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
-        if (!e || !e->emit_lazyframe) return -1;
-        return e->emit_lazyframe(h_->h, name, lf.release());
+        int rc = emit_result_lazyframe(name, lf.handle);
+        if (rc == 0) lf.release();
+        return rc;
     }
 
     /// Typed batch-scoped output port: send() publishes a trivially-copyable T
@@ -396,6 +405,11 @@ class Host {
         if (!slot && h_->get_extension)
             slot = static_cast<const T*>(h_->get_extension(h_->h, id));
         return slot;
+    }
+
+    int emit(const char* name, dftu_result_value* v) const {
+        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
+        return e && e->emit ? e->emit(h_->h, name, v) : -1;
     }
 
     const dftu_host* h_;
