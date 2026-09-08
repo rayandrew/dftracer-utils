@@ -621,6 +621,49 @@ TEST_SUITE("lazyframe") {
         }
     }
 
+    // Every agg_uses_by_col() op must get its `by` resolved by the Expr
+    // desugar, not just ArgMax. ArgMin stands in for the whole set.
+    TEST_CASE("group_by(Expr, ...) resolves `by` for a non-ArgMax by_col op") {
+        std::vector<std::int64_t> g{0, 0, 1, 1, 0, 1};
+        std::vector<std::int64_t> x{10, 20, 30, 40, 50, 60};
+        std::vector<std::int64_t> by{5, 1, 9, 2, 3, 7};
+        DataFrame df;
+        df.names = {"g", "x", "by"};
+        df.columns.push_back(Series::flat_i64(g.data(), 6));
+        df.columns.push_back(Series::flat_i64(x.data(), 6));
+        df.columns.push_back(Series::flat_i64(by.data(), 6));
+
+        DataFrame ref =
+            run(df.lazy()
+                    .group_by("g", std::vector<GroupAgg>{{Agg::ArgMin, "x",
+                                                          "am", 0.0, "by"}})
+                    .collect(2));
+
+        AggExprSpec spec;
+        spec.op = dftracer::utils::dataframe::AggOp::ArgMin;
+        spec.value = col(1);
+        spec.by = col(2);
+        spec.out = "am";
+        DataFrame got =
+            run(df.lazy()
+                    .group_by(col(0), std::vector<AggExprSpec>{spec})
+                    .collect(2));
+
+        REQUIRE(got.num_rows() == ref.num_rows());
+        const std::int64_t* rk = ref.column("g").data<std::int64_t>();
+        const std::int64_t* gk = got.column(got.names[0]).data<std::int64_t>();
+        for (std::int64_t i = 0; i < got.num_rows(); ++i) {
+            bool matched = false;
+            for (std::int64_t j = 0; j < ref.num_rows(); ++j) {
+                if (rk[j] != gk[i]) continue;
+                matched = true;
+                CHECK(got.column("am").string_at(i) ==
+                      ref.column("am").string_at(j));
+            }
+            CHECK(matched);
+        }
+    }
+
     TEST_CASE("group_by(Expr, ...) with a computed key and an ArgMax agg") {
         std::vector<std::int64_t> a{0, 0, 1, 1, 0, 1};
         std::vector<std::int64_t> b{0, 1, 0, 0, 1, 1};  // a+b: 0,1,1,1,1,2

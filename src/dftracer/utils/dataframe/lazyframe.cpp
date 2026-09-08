@@ -2866,7 +2866,7 @@ LazyFrame desugar_expr_group_by(const LazyFrame& self, std::vector<Expr> keys,
         g.out = a.out;
         g.param = a.param;
         if (a.op != AggOp::Count) g.column = resolve_val(a.value, "v");
-        if (a.op == AggOp::ArgMax) g.by = resolve_val(a.by, "by");
+        if (agg_uses_by_col(a.op)) g.by = resolve_val(a.by, "by");
         gaggs.push_back(std::move(g));
     }
     return lf.group_by(std::move(key_names), std::move(gaggs));
