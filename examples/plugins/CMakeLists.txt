@@ -2,16 +2,25 @@
 # (the include/ headers); they deliberately link none of the internal libraries,
 # so a broken build here is real ABI rot in abi.h / plugin.h.
 
+# Reads the batch dataframe directly (dftu_series_data / dftu_series_type), so
+# it links the dataframe C ABI like dur_stats_consumer does.
 add_library(event_counter_plugin MODULE event_counter.c)
 set_target_properties(
   event_counter_plugin
   PROPERTIES OUTPUT_NAME event_counter
              PREFIX ""
              POSITION_INDEPENDENT_CODE ON
-             C_STANDARD 99
+             C_STANDARD 11
              C_STANDARD_REQUIRED ON)
 target_include_directories(event_counter_plugin
                            PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(TARGET dftracer_utils_dataframe::shared)
+  target_link_libraries(event_counter_plugin
+                        PRIVATE dftracer_utils_dataframe::shared)
+elseif(TARGET dftracer_utils_dataframe::static)
+  target_link_libraries(event_counter_plugin
+                        PRIVATE dftracer_utils_dataframe::static)
+endif()
 
 add_library(duration_histogram_plugin MODULE duration_histogram.cpp)
 set_target_properties(
@@ -25,6 +34,14 @@ set_target_properties(
 target_include_directories(duration_histogram_plugin
                            PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_enable_coroutine(duration_histogram_plugin)
+# plugins::Batch/Event (plugin.h) resolve columns through the dataframe C ABI.
+if(TARGET dftracer_utils_dataframe::shared)
+  target_link_libraries(duration_histogram_plugin
+                        PRIVATE dftracer_utils_dataframe::shared)
+elseif(TARGET dftracer_utils_dataframe::static)
+  target_link_libraries(duration_histogram_plugin
+                        PRIVATE dftracer_utils_dataframe::static)
+endif()
 
 add_library(query_filter_plugin MODULE query_filter.cpp)
 set_target_properties(
@@ -38,17 +55,34 @@ set_target_properties(
 target_include_directories(query_filter_plugin
                            PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_enable_coroutine(query_filter_plugin)
+# plugins::Batch/Event (plugin.h) resolve columns through the dataframe C ABI.
+if(TARGET dftracer_utils_dataframe::shared)
+  target_link_libraries(query_filter_plugin
+                        PRIVATE dftracer_utils_dataframe::shared)
+elseif(TARGET dftracer_utils_dataframe::static)
+  target_link_libraries(query_filter_plugin
+                        PRIVATE dftracer_utils_dataframe::static)
+endif()
 
+# Reads the batch dataframe directly (dftu_series_data / dftu_series_type), so
+# it links the dataframe C ABI like dur_stats_consumer does.
 add_library(perbatch_producer_plugin MODULE perbatch_producer.c)
 set_target_properties(
   perbatch_producer_plugin
   PROPERTIES OUTPUT_NAME perbatch_producer
              PREFIX ""
              POSITION_INDEPENDENT_CODE ON
-             C_STANDARD 99
+             C_STANDARD 11
              C_STANDARD_REQUIRED ON)
 target_include_directories(perbatch_producer_plugin
                            PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(TARGET dftracer_utils_dataframe::shared)
+  target_link_libraries(perbatch_producer_plugin
+                        PRIVATE dftracer_utils_dataframe::shared)
+elseif(TARGET dftracer_utils_dataframe::static)
+  target_link_libraries(perbatch_producer_plugin
+                        PRIVATE dftracer_utils_dataframe::static)
+endif()
 
 add_library(perbatch_consumer_plugin MODULE perbatch_consumer.c)
 set_target_properties(
@@ -93,16 +127,25 @@ elseif(TARGET dftracer_utils_dataframe::static)
                         PRIVATE dftracer_utils_dataframe::static)
 endif()
 
+# Reads the batch dataframe directly (dftu_series_data / dftu_series_type), so
+# it links the dataframe C ABI like dur_stats_consumer does.
 add_library(process_counts_plugin MODULE process_counts.c)
 set_target_properties(
   process_counts_plugin
   PROPERTIES OUTPUT_NAME process_counts
              PREFIX ""
              POSITION_INDEPENDENT_CODE ON
-             C_STANDARD 99
+             C_STANDARD 11
              C_STANDARD_REQUIRED ON)
 target_include_directories(process_counts_plugin
                            PRIVATE ${CMAKE_SOURCE_DIR}/include)
+if(TARGET dftracer_utils_dataframe::shared)
+  target_link_libraries(process_counts_plugin
+                        PRIVATE dftracer_utils_dataframe::shared)
+elseif(TARGET dftracer_utils_dataframe::static)
+  target_link_libraries(process_counts_plugin
+                        PRIVATE dftracer_utils_dataframe::static)
+endif()
 
 add_library(process_file_edges_plugin MODULE process_file_edges.c)
 set_target_properties(

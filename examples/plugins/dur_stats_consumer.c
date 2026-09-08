@@ -23,11 +23,6 @@
 
 #define DUR_STATS_PORT "com.example.dur_stats"
 
-static uint32_t needs(void* self) {
-    (void)self;
-    return 0;
-}
-
 static void* make_slice(void* self) {
     (void)self;
     return calloc(1, 1);
@@ -122,7 +117,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     g_plugin.self = NULL;
-    g_plugin.needs = needs;
     g_plugin.plan_query = NULL;
     g_plugin.make_slice = make_slice;
     g_plugin.on_batch = NULL;

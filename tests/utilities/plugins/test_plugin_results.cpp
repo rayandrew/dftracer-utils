@@ -70,7 +70,12 @@ struct FoldHolder {
 
 std::vector<FoldEvent> make_events(std::uint64_t count) {
     std::vector<FoldEvent> evs(count);
-    for (std::uint64_t i = 0; i < count; ++i) evs[i].ts = i;
+    for (std::uint64_t i = 0; i < count; ++i) {
+        evs[i].ts = i;
+        // step() drops METADATA/UNKNOWN-phase events before it ever reaches
+        // on_batch; the default FoldEvent phase is UNKNOWN.
+        evs[i].phase = dftracer::utils::trace::RecordPhase::COMPLETE;
+    }
     return evs;
 }
 

@@ -279,6 +279,9 @@ class _Need:
         self.dft = dft
 
 
+# Inert no-op sentinels kept for source compatibility with `jit.plugin(needs=
+# (...))`. The columnar ABI resolves every fixed/dyn-arg batch column
+# unconditionally, so there is no needs() negotiation left for these to drive.
 NEED_ARGS = _Need("DFTU_NEED_ARGS")
 NEED_FHASH = _Need("DFTU_NEED_FHASH")
 NEED_HHASH = _Need("DFTU_NEED_HHASH")
@@ -1165,11 +1168,14 @@ def each_event(
     """Mark the one per-event method to AST-compile.
 
     With ``raw=True`` the method instead returns a C++ string spliced verbatim
-    into the per-event loop; available C names are ``host``, ``e``, ``b``, ``i``,
+    into the per-row loop; available C names are ``host``, ``df``, ``e``, ``i``,
     and, for each declared accumulator ``m``, its row buffers ``_n_m``,
     ``_cap_m``, ``_k<i>_m``, ``_v<c>_m`` (plus ``_o<c>_m`` for a product and
-    ``_b<c>_m`` for a by-reading reduction). A raw body appends at most
-    ``_RAW_ROWS_PER_EVENT`` rows per event per accumulator."""
+    ``_b<c>_m`` for a by-reading reduction). ``e`` is a per-row shim populated
+    from every fixed scan column (``e->pid`` etc), since a raw body cannot be
+    re-lowered against the batch-resolved columns a compiled body uses. A raw
+    body appends at most ``_RAW_ROWS_PER_EVENT`` rows per event per
+    accumulator."""
     if fn is None:
         return lambda f: _EachEvent(f, raw)
     return _EachEvent(fn, raw)
@@ -1204,23 +1210,42 @@ def _c_str_literal(s: str) -> str:
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+# Each expression reads the batch-resolved column for that field at row `i`
+# (see _COLBUF_HELPERS); a column absent from the batch reads back its old
+# per-field default (0 / DFTU_STR_NONE), matching dftu_jit_resolve/accessors.
 _FIELD_EXPR: Dict[str, str] = {
-    "pid": "e->pid",
-    "tid": "e->tid",
-    "ts": "e->ts",
-    "dur": "e->dur",
-    "cat": "e->cat",
-    "name": "e->name",
-    "fhash": "e->fhash",
-    "hhash": "e->hhash",
-    "phase": "e->phase",
-    "has_dur": "e->has_dur",
+    "pid": "dftu_jit_u64(&_col_pid, i)",
+    "tid": "dftu_jit_u64(&_col_tid, i)",
+    "ts": "dftu_jit_u64(&_col_ts, i)",
+    "dur": "dftu_jit_u64(&_col_dur, i)",
+    "cat": "dftu_jit_strid(host, &_col_cat, i)",
+    "name": "dftu_jit_strid(host, &_col_name, i)",
+    "fhash": "dftu_jit_strid(host, &_col_fhash, i)",
+    "hhash": "dftu_jit_strid(host, &_col_hhash, i)",
+    "phase": "dftu_jit_i64(&_col_ph, i)",
+    # The row-fold frame has no per-row null tracking for dur; approximate
+    # has_dur as phase == Complete, matching plugins::Event::has_dur().
+    "has_dur": "(dftu_jit_i64(&_col_ph, i) == (int64_t)DFTU_PH_COMPLETE)",
 }
 
-_FIELD_NEED: Dict[str, str] = {
-    "fhash": "DFTU_NEED_FHASH",
-    "hhash": "DFTU_NEED_HHASH",
+# event field -> the batch column name it reads (the "_col_<name>" resolved in
+# on_batch).
+_FIELD_COLUMN: Dict[str, str] = {
+    "pid": "pid",
+    "tid": "tid",
+    "ts": "ts",
+    "dur": "dur",
+    "cat": "cat",
+    "name": "name",
+    "fhash": "fhash",
+    "hhash": "hhash",
+    "phase": "ph",
+    "has_dur": "ph",
 }
+
+# Every fixed scan column a raw each_event body might reference; raw text is
+# not AST-analyzable, so a raw plugin resolves all of them unconditionally.
+_ALL_FIXED_FIELDS = frozenset(_FIELD_COLUMN.values())
 
 _ARG_METHODS: Dict[str, Tuple[str, str]] = {
     "arg_i64": ("dftu_jit_arg_i64", "0"),
@@ -1230,33 +1255,102 @@ _ARG_METHODS: Dict[str, Tuple[str, str]] = {
 
 _ARG_HELPER_DEFS: Dict[str, List[str]] = {
     "arg_i64": [
-        "static int64_t dftu_jit_arg_i64(const dftu_event* e, dftu_str k, int64_t d) {",
-        "    for (uint32_t i = 0; i < e->arg_count; ++i)",
-        "        if (e->args[i].key == k && e->args[i].kind == DFTU_ARG_I64)",
-        "            return e->args[i].v.i64;",
-        "    return d;",
+        "static int64_t dftu_jit_arg_i64(const dftu_jit_col* c, int64_t i) {",
+        "    if (c->type != DFTU_TYPE_INT64 || !c->data || dftu_series_is_null(c->handle, i))",
+        "        return 0;",
+        "    return ((const int64_t*)c->data)[i];",
         "}",
         "",
     ],
     "arg_f64": [
-        "static double dftu_jit_arg_f64(const dftu_event* e, dftu_str k, double d) {",
-        "    for (uint32_t i = 0; i < e->arg_count; ++i)",
-        "        if (e->args[i].key == k && e->args[i].kind == DFTU_ARG_F64)",
-        "            return e->args[i].v.f64;",
-        "    return d;",
+        "static double dftu_jit_arg_f64(const dftu_jit_col* c, int64_t i) {",
+        "    if (c->type != DFTU_TYPE_FLOAT64 || !c->data || dftu_series_is_null(c->handle, i))",
+        "        return 0.0;",
+        "    return ((const double*)c->data)[i];",
         "}",
         "",
     ],
     "arg_str": [
-        "static dftu_str dftu_jit_arg_str(const dftu_event* e, dftu_str k, dftu_str d) {",
-        "    for (uint32_t i = 0; i < e->arg_count; ++i)",
-        "        if (e->args[i].key == k && e->args[i].kind == DFTU_ARG_STR)",
-        "            return e->args[i].v.str;",
-        "    return d;",
+        "static dftu_str dftu_jit_arg_str(const dftu_host* host, const dftu_jit_col* c,",
+        "                                 int64_t i) {",
+        "    if (c->type != DFTU_TYPE_STRING || !c->data || !c->offsets ||",
+        "        dftu_series_is_null(c->handle, i))",
+        "        return DFTU_STR_NONE;",
+        "    const char* base = (const char*)c->data;",
+        "    int32_t o0 = c->offsets[i], o1 = c->offsets[i + 1];",
+        "    return host->intern(host->h, base + o0, (uint32_t)(o1 - o0));",
         "}",
         "",
     ],
 }
+
+# A resolved batch column (see plugins::detail::ColBuf, the C++ SDK's mirror
+# of this): NULL/-1 fields when the named column is absent from the batch, so
+# every accessor below reads that as the field's old default rather than
+# re-resolving it.
+_COLBUF_HELPERS: List[str] = [
+    "typedef struct {",
+    "    dftu_series* handle;",
+    "    int32_t type;",
+    "    const void* data;",
+    "    const int32_t* offsets;",
+    "} dftu_jit_col;",
+    "",
+    "static dftu_jit_col dftu_jit_resolve(const dftu_dataframe* df, const char* name) {",
+    "    dftu_jit_col c;",
+    "    c.handle = dftu_dataframe_column(df, name);",
+    "    c.type = c.handle ? dftu_series_type(c.handle) : -1;",
+    "    c.data = c.handle ? dftu_series_data(c.handle) : NULL;",
+    "    c.offsets = c.handle ? dftu_series_offsets(c.handle) : NULL;",
+    "    return c;",
+    "}",
+    "",
+    "static uint64_t dftu_jit_u64(const dftu_jit_col* c, int64_t i) {",
+    "    if (!c->data || dftu_series_is_null(c->handle, i)) return 0;",
+    "    return ((const uint64_t*)c->data)[i];",
+    "}",
+    "",
+    "static int64_t dftu_jit_i64(const dftu_jit_col* c, int64_t i) {",
+    "    if (!c->data || dftu_series_is_null(c->handle, i)) return 0;",
+    "    return ((const int64_t*)c->data)[i];",
+    "}",
+    "",
+    "static dftu_str dftu_jit_strid(const dftu_host* host, const dftu_jit_col* c, int64_t i) {",
+    "    if (!c->data || !c->offsets || dftu_series_is_null(c->handle, i)) return DFTU_STR_NONE;",
+    "    const char* base = (const char*)c->data;",
+    "    int32_t o0 = c->offsets[i], o1 = c->offsets[i + 1];",
+    "    return host->intern(host->h, base + o0, (uint32_t)(o1 - o0));",
+    "}",
+    "",
+]
+
+# A raw each_event body is spliced verbatim and cannot be re-lowered against
+# _col_*, so it gets a per-row shim struct populated from every fixed column
+# up front, preserving the old e->field spelling.
+_RAW_EVENT_SHIM_TYPE: List[str] = [
+    "typedef struct {",
+    "    uint64_t pid, tid, ts, dur;",
+    "    int64_t phase;",
+    "    int has_dur;",
+    "    dftu_str cat, name, fhash, hhash;",
+    "} dftu_jit_event;",
+    "",
+]
+
+_RAW_EVENT_SHIM_POPULATE: List[str] = [
+    "dftu_jit_event _ev;",
+    "_ev.pid = dftu_jit_u64(&_col_pid, i);",
+    "_ev.tid = dftu_jit_u64(&_col_tid, i);",
+    "_ev.ts = dftu_jit_u64(&_col_ts, i);",
+    "_ev.dur = dftu_jit_u64(&_col_dur, i);",
+    "_ev.phase = dftu_jit_i64(&_col_ph, i);",
+    "_ev.has_dur = (_ev.phase == (int64_t)DFTU_PH_COMPLETE);",
+    "_ev.cat = dftu_jit_strid(host, &_col_cat, i);",
+    "_ev.name = dftu_jit_strid(host, &_col_name, i);",
+    "_ev.fhash = dftu_jit_strid(host, &_col_fhash, i);",
+    "_ev.hhash = dftu_jit_strid(host, &_col_hhash, i);",
+    "const dftu_jit_event* e = &_ev;",
+]
 
 _STR_FIELDS = frozenset({"cat", "name", "fhash", "hhash"})
 
@@ -1409,7 +1503,9 @@ class _Compiler:
         self.ops = ops if ops is not None else {}
         self.op_defs: List[str] = []
         self.op_emitted: builtins.set[str] = builtins.set()
-        self.needs: builtins.set[str] = builtins.set()
+        # Physical batch columns ("pid", "cat", "ph", ...) the body actually
+        # reads; on_batch resolves exactly these once per batch.
+        self.fields_used: builtins.set[str] = builtins.set()
         self.str_literals: List[str] = []
         self.arg_keys: List[str] = []
         self.arg_helpers: builtins.set[str] = builtins.set()
@@ -1621,15 +1717,17 @@ class _Compiler:
         return f"{c_name}(({in_ct})({arg_expr}))", jit_op.is_float_type(op_obj.out_type)
 
     def _lower_arg(self, method: str, name: str) -> Tuple[str, bool]:
-        """Lower ``e.arg_*("NAME")`` to a scan-helper call, returning (expr, is_float);
-        sets DFTU_NEED_ARGS and interns NAME once."""
-        self.needs.add("DFTU_NEED_ARGS")
+        """Lower ``e.arg_*("NAME")`` to a read of the batch-resolved "args.NAME"
+        dyn column, returning (expr, is_float); the column is resolved once per
+        batch in on_batch, by name, not re-scanned per row."""
         self.arg_helpers.add(method)
-        fn, dflt = _ARG_METHODS[method]
         if name not in self.arg_keys:
             self.arg_keys.append(name)
-        key = f"argkey_{self.arg_keys.index(name)}"
-        return f"{fn}(e, {key}, {dflt})", method == "arg_f64"
+        col = f"_argcol{self.arg_keys.index(name)}"
+        if method == "arg_str":
+            return f"dftu_jit_arg_str(host, &{col}, i)", False
+        fn, _dflt = _ARG_METHODS[method]
+        return f"{fn}(&{col}, i)", method == "arg_f64"
 
     def _str_literal(self, s: str) -> str:
         if s not in self.str_literals:
@@ -1963,9 +2061,7 @@ class _Compiler:
         expr = _FIELD_EXPR.get(attr)
         if expr is None:
             _reject(f"event field e.{attr}")
-        need = _FIELD_NEED.get(attr)
-        if need is not None:
-            self.needs.add(need)
+        self.fields_used.add(_FIELD_COLUMN[attr])
         return expr
 
 
@@ -2117,7 +2213,7 @@ def _agg_specs(decl: _MapDecl) -> List[Tuple[str, str, str, str, str]]:
 def _emit_buffers(attr: str, decl: _MapDecl, rows: int) -> List[str]:
     """Per-batch row buffers for one accumulator, sized to the batch."""
     out = [
-        f"    uint32_t _cap_{attr} = b->count * {rows}u;",
+        f"    uint32_t _cap_{attr} = (uint32_t)n * {rows}u;",
         f"    uint32_t _n_{attr} = 0;",
     ]
     for idx, kt in enumerate(decl.key_types):
@@ -2263,7 +2359,7 @@ def _emit_frees(attr: str, decl: _MapDecl) -> List[str]:
 def _emit(
     maps: Dict[str, _MapDecl],
     body: List[str],
-    needs: builtins.set[str],
+    fields_used: builtins.set[str],
     plan_query: str | None,
     str_literals: List[str],
     arg_keys: List[str],
@@ -2272,12 +2368,12 @@ def _emit(
     op_defs: List[str] | None = None,
     ports: Dict[str, _Port] | None = None,
     config_fields: "Dict[str, bool] | None" = None,
+    raw_event: bool = False,
 ) -> str:
     op_defs = op_defs or []
     ports = ports or {}
     pub_ports = [(n, p) for n, p in ports.items() if p.role == "publish"]
     sub_ports = [(n, p) for n, p in ports.items() if p.role == "consume"]
-    needs_expr = " | ".join(sorted(needs)) if needs else "0u"
     needs_str = any(
         kt.dft == "DFTU_T_STR" for decl in maps.values() for kt in decl.key_types
     ) or any(m.elem == "str" for decl in maps.values() for m in decl.values)
@@ -2292,12 +2388,11 @@ def _emit(
         "#include <stdint.h>",
         "#include <stdlib.h>",
         "",
-        "static uint32_t needs(void* self) {",
-        "    (void)self;",
-        f"    return {needs_expr};",
-        "}",
-        "",
     ]
+    if fields_used or arg_keys or raw_event:
+        out += _COLBUF_HELPERS
+    if raw_event:
+        out += _RAW_EVENT_SHIM_TYPE
     for method in ("arg_i64", "arg_f64", "arg_str"):
         if method in arg_helpers:
             out += _ARG_HELPER_DEFS[method]
@@ -2311,10 +2406,6 @@ def _emit(
         out.append(f"static dftu_str lit_{idx};")
     if str_literals:
         out += ["static int lits_resolved = 0;", ""]
-    for idx, _ in enumerate(arg_keys):
-        out.append(f"static dftu_str argkey_{idx};")
-    if arg_keys:
-        out += ["static int args_resolved = 0;", ""]
     cfgs = config_fields if config_fields is not None else {}
     for cn, is_f in cfgs.items():
         out.append(f"static {'double' if is_f else 'int64_t'} _cfg_{cn} = 0;")
@@ -2348,7 +2439,7 @@ def _emit(
         "    return calloc(1, 1);",
         "}",
         "",
-        "static dftu_task* on_batch(void* slice, const dftu_batch* b,",
+        "static dftu_task* on_batch(void* slice, const dftu_dataframe* df,",
         "                          const dftu_host* host) {",
         "    (void)slice;",
         "    const dftu_ext_agg* _agg =",
@@ -2358,6 +2449,7 @@ def _emit(
         out.append("    if (!_agg || !_agg->agg_new || !_agg->agg_accumulate) return NULL;")
     else:
         out.append("    (void)_agg;")
+    out.append("    int64_t n = dftu_dataframe_num_rows(df);")
     if str_literals:
         out.append("    if (!lits_resolved) {")
         for idx, lit in enumerate(str_literals):
@@ -2365,15 +2457,13 @@ def _emit(
             out.append(f"        lit_{idx} = host->intern(host->h, {_c_str_literal(lit)}, {blen});")
         out.append("        lits_resolved = 1;")
         out.append("    }")
-    if arg_keys:
-        out.append("    if (!args_resolved) {")
-        for idx, argname in enumerate(arg_keys):
-            blen = len(argname.encode("utf-8"))
-            out.append(
-                f"        argkey_{idx} = host->intern(host->h, {_c_str_literal(argname)}, {blen});"
-            )
-        out.append("        args_resolved = 1;")
-        out.append("    }")
+    for field in sorted(fields_used):
+        out.append(
+            f"    dftu_jit_col _col_{field} = dftu_jit_resolve(df, {_c_str_literal(field)});"
+        )
+    for idx, argname in enumerate(arg_keys):
+        col_name = _c_str_literal(f"args.{argname}")
+        out.append(f"    dftu_jit_col _argcol{idx} = dftu_jit_resolve(df, {col_name});")
     out.append("    int _alloc_ok = 1;")
     for attr, decl in maps.items():
         out += _emit_buffers(attr, decl, builtins.max(1, rows_per_event.get(attr, 1)))
@@ -2381,8 +2471,9 @@ def _emit(
     inner: List[str] = []
     if ports:
         inner += _emit_port_pre(pub_ports, sub_ports)
-    inner.append("    for (uint32_t i = 0; i < b->count; ++i) {")
-    inner.append("        const dftu_event* e = &b->events[i];")
+    inner.append("    for (int64_t i = 0; i < n; ++i) {")
+    if raw_event:
+        inner += ["        " + ln for ln in _RAW_EVENT_SHIM_POPULATE]
     for line in body:
         inner.append("        " + line)
     inner.append("    }")
@@ -2394,6 +2485,10 @@ def _emit(
     out.append("    }")
     for attr, decl in maps.items():
         out += _emit_frees(attr, decl)
+    for field in sorted(fields_used):
+        out.append(f"    dftu_series_free(_col_{field}.handle);")
+    for idx in range(len(arg_keys)):
+        out.append(f"    dftu_series_free(_argcol{idx}.handle);")
     out.extend(
         [
             "    return NULL;",
@@ -2423,7 +2518,6 @@ def _emit(
             cfg_reads,
             "    g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;",
             "    g_plugin.self = NULL;",
-            "    g_plugin.needs = needs;",
             f"    g_plugin.plan_query = {plan_query_field};",
             "    g_plugin.make_slice = make_slice;",
             "    g_plugin.on_batch = on_batch;",
@@ -2510,13 +2604,18 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
     plan_query = getattr(cls, "plan_query", None)
     if plan_query is not None and not isinstance(plan_query, str):
         raise JitError("@jit.plugin plan_query must be a query DSL string")
-    explicit_needs = _resolve_needs(needs)
+    # Validated for API compat only: the host resolves every fixed/dyn-arg
+    # column unconditionally now, so there is no needs() negotiation left to
+    # feed.
+    _resolve_needs(needs)
     # {name: is_f64} for config fields, read into a body-visible static.
     config_f64 = {n: c.dft in ("DFTU_T_F64", "DFTU_T_F32") for n, c in configs.items()}
     op_defs: List[str] = []
     if each[0].raw:
         body = _raw_body(each[0].fn)
-        inferred_needs = explicit_needs
+        # A raw body is spliced verbatim, so which fields it reads off `e` is
+        # not knowable; resolve all of them.
+        fields_used: builtins.set[str] = builtins.set(_ALL_FIXED_FIELDS)
         str_literals: List[str] = []
         arg_keys: List[str] = []
         arg_helpers: builtins.set[str] = builtins.set()
@@ -2531,7 +2630,7 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
             config_fields=config_f64,
         )
         body = compiler.lower(each[0].fn)
-        inferred_needs = compiler.needs | explicit_needs
+        fields_used = compiler.fields_used
         str_literals = compiler.str_literals
         arg_keys = compiler.arg_keys
         arg_helpers = compiler.arg_helpers
@@ -2540,7 +2639,7 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
     source = _emit(
         maps,
         body,
-        inferred_needs,
+        fields_used,
         plan_query,
         str_literals,
         arg_keys,
@@ -2549,6 +2648,7 @@ def _build_plugin(cls: type, needs: Tuple[object, ...] | None) -> type:
         op_defs,
         ports,
         config_f64,
+        raw_event=each[0].raw,
     )
     setattr(cls, "_jit_plugin", JitPlugin(cls.__name__, source, {}))
     return cls
@@ -2733,7 +2833,6 @@ def _compile_vfold(
 
 def _emit_vfold(
     ops: List[Dict[str, object]],
-    needs_expr: str,
     plan_query: str | None,
 ) -> str:
     plan_query_field = "plan_query" if plan_query is not None else "NULL"
@@ -2743,11 +2842,6 @@ def _emit_vfold(
         "",
         "#include <stdint.h>",
         "#include <stdlib.h>",
-        "",
-        "static uint32_t needs(void* self) {",
-        "    (void)self;",
-        f"    return {needs_expr};",
-        "}",
         "",
     ]
     if plan_query is not None:
@@ -2766,9 +2860,9 @@ def _emit_vfold(
         "    return calloc(1, 1);",
         "}",
         "",
-        "static dftu_task* on_batch_columns(void* slice,",
-        "                                   const dftu_dataframe* df,",
-        "                                   const dftu_host* host) {",
+        "static dftu_task* on_batch(void* slice,",
+        "                          const dftu_dataframe* df,",
+        "                          const dftu_host* host) {",
         "    (void)slice;",
         "    const dftu_ext_agg* agg =",
         "        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);",
@@ -2819,14 +2913,13 @@ def _emit_vfold(
         "    (void)config;",
         "    g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;",
         "    g_plugin.self = NULL;",
-        "    g_plugin.needs = needs;",
         f"    g_plugin.plan_query = {plan_query_field};",
         "    g_plugin.make_slice = make_slice;",
         "    g_plugin.merge = merge;",
         "    g_plugin.on_finalize = on_finalize;",
         "    g_plugin.destroy_slice = destroy_slice;",
         "    g_plugin.destroy = destroy;",
-        "    g_plugin.on_batch_columns = on_batch_columns;",
+        "    g_plugin.on_batch = on_batch;",
     ]
     out += name_assigns
     out += [
@@ -2862,9 +2955,11 @@ def _build_vfold(cls: type) -> type:
     plan_query = getattr(cls, "plan_query", None)
     if plan_query is not None and not isinstance(plan_query, str):
         raise JitError("@jit.vfold plan_query must be a query DSL string")
-    ops, fields = _compile_vfold(batch[0].fn, accums, maps)
-    needs_expr = "DFTU_NEED_ARGS" if any(f not in _VFOLD_TOP_FIELDS for f in fields) else "0u"
-    source = _emit_vfold(ops, needs_expr, plan_query)
+    # Every batch's dyn arg columns are resolved unconditionally now (no
+    # needs() negotiation), so the field set from _compile_vfold is only used
+    # for its own validation, not to gate what on_batch resolves.
+    ops, _fields = _compile_vfold(batch[0].fn, accums, maps)
+    source = _emit_vfold(ops, plan_query)
     setattr(cls, "_jit_plugin", JitPlugin(cls.__name__, source, {}))
     return cls
 
@@ -2967,8 +3062,9 @@ def plugin(
     """Class decorator: AST-compile the map decls + ``each_event`` to a C plugin.
 
     Attaches the emitted source under ``cls._jit_plugin``; the native ``.so`` is
-    built lazily on first load. Pass ``needs=(jit.NEED_FHASH, ...)`` to declare
-    scan extraction a raw ``each_event`` body cannot be inferred from. Raises
+    built lazily on first load. ``needs=(jit.NEED_FHASH, ...)`` is accepted for
+    source compatibility but is a no-op: every batch column (fixed and dyn arg)
+    is resolved unconditionally now, there is nothing left to negotiate. Raises
     :class:`JitError` for any construct outside the supported subset.
     """
     if cls is None:

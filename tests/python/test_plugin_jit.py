@@ -504,7 +504,7 @@ def test_jit_cse_applies_across_all_op_kinds():
 
 def _body(cls):
     s = cls._jit_plugin.source
-    i = s.index("for (uint32_t i = 0; i < b->count;")
+    i = s.index("for (int64_t i = 0; i < n; ++i)")
     return s[i : s.index("return NULL;", i)]
 
 
@@ -519,7 +519,8 @@ def test_jit_cse_shares_a_value_expression():
             self.a[(e.pid,)] += e.dur * e.dur
             self.b[(e.pid,)] += e.dur * e.dur
 
-    assert _body(V).count("e->dur * e->dur") == 1
+    dur = "dftu_jit_u64(&_col_dur, i)"
+    assert _body(V).count(f"{dur} * {dur}") == 1
 
 
 def test_jit_cse_shares_multikey_components():
@@ -660,8 +661,8 @@ def test_jit_different_keys_stay_separate():
             self.by_tid[(e.tid,)] += 1
 
     b = _body(NoFuse)
-    assert "_k0_by_pid[_r] = (int64_t)(e->pid);" in b
-    assert "_k0_by_tid[_r] = (int64_t)(e->tid);" in b
+    assert "_k0_by_pid[_r] = (int64_t)(dftu_jit_u64(&_col_pid, i));" in b
+    assert "_k0_by_tid[_r] = (int64_t)(dftu_jit_u64(&_col_tid, i));" in b
 
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
@@ -1474,11 +1475,11 @@ def test_jit_arg_f64_as_value_sums(tmp_path):
         def step(self, e):
             self.bw[(e.pid,)] += e.arg_f64("bw")
 
-    # The compiled plugin must request args and intern the arg key.
+    # The compiled plugin resolves the "args.bw" dyn column once per batch,
+    # then reads it by row index (no per-key interning, no per-row scan).
     src = Bw._jit_plugin.source
-    assert "DFTU_NEED_ARGS" in src
-    assert "static dftu_str argkey_0;" in src
-    assert "dftu_jit_arg_f64(e, argkey_0, 0.0)" in src
+    assert 'dftu_jit_resolve(df, "args.bw")' in src
+    assert "dftu_jit_arg_f64(&_argcol0, i)" in src
 
     n = 60
     pids = [1, 2]

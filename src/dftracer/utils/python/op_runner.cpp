@@ -23,7 +23,7 @@ using dftracer::utils::plugins::PluginFold;
 // only needs the host's compose extension and task machinery, never a scan.
 struct TrivialSlice {
     explicit TrivialSlice(const dftracer::utils::plugins::Config&) {}
-    void step(const dftu_batch&, dftracer::utils::plugins::Host) {}
+    void step(const dftu_dataframe*, dftracer::utils::plugins::Host) {}
     void merge(TrivialSlice&) {}
     void finalize(dftracer::utils::plugins::Host) {}
 };

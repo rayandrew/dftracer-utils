@@ -14,6 +14,7 @@
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/fold_adapter/ext.h>
+#include <dftracer/utils/plugins/plugin/map.h>
 #include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/fold_event.h>
@@ -56,22 +57,6 @@ namespace parallel = utilities::fileio::parallel;
 
 coro::CoroTask<void>* as_task(::dftu_task* t) {
     return reinterpret_cast<coro::CoroTask<void>*>(t);
-}
-
-std::uint8_t map_phase(RecordPhase phase) {
-    switch (phase) {
-        case RecordPhase::COMPLETE:
-            return DFTU_PH_COMPLETE;
-        case RecordPhase::COUNTER:
-            return DFTU_PH_COUNTER;
-        case RecordPhase::METADATA:
-            return DFTU_PH_METADATA;
-        case RecordPhase::AGGREGATED:
-            return DFTU_PH_AGGREGATED;
-        case RecordPhase::UNKNOWN:
-        default:
-            return DFTU_PH_UNKNOWN;
-    }
 }
 
 const char* host_resolve(void* h, dftu_str id, std::uint32_t* out_len) {
@@ -528,96 +513,146 @@ void append_json_escaped(std::string& out, std::string_view s) {
     }
 }
 
-void serialize_event(std::string& out, dftracer::utils::StringIntern& intern,
-                     const dftu_event& e, std::uint64_t id) {
+// Named-column access to a batch's dyn arg columns, resolved once per
+// dftu_dataframe (not per row): each ("args.<key>", column) pair the frame
+// carries. Used only for serializing a whole row's args (trace_write), which
+// needs every dyn column, not a lookup by name (see plugins::Batch's
+// per-batch column cache for the per-row-loop counterpart).
+struct DynCols {
+    std::vector<std::pair<std::string_view, dftu_series*>> cols;
+
+    explicit DynCols(const dftu_dataframe* df) {
+        static constexpr std::string_view ARGS_PREFIX = "args.";
+        const std::int32_t n = dftu_dataframe_num_columns(df);
+        for (std::int32_t i = 0; i < n; ++i) {
+            const char* name = dftu_dataframe_column_name(df, i);
+            if (!name) continue;
+            std::string_view nv{name};
+            if (nv.substr(0, ARGS_PREFIX.size()) != ARGS_PREFIX) continue;
+            cols.emplace_back(nv.substr(ARGS_PREFIX.size()),
+                              dftu_dataframe_column(df, name));
+        }
+    }
+    ~DynCols() {
+        for (auto& [name, c] : cols) dftu_series_free(c);
+    }
+    DynCols(const DynCols&) = delete;
+    DynCols& operator=(const DynCols&) = delete;
+};
+
+void serialize_row(std::string& out, const dftu_dataframe* df,
+                   const DynCols& dyn, std::int64_t row, std::uint64_t id) {
+    auto str_col = [&](const char* name, std::string_view* out_sv) {
+        dftu_series* c = dftu_dataframe_column(df, name);
+        if (!c) return;
+        if (dftu_series_type(c) == DFTU_TYPE_STRING &&
+            !dftu_series_is_null(c, row)) {
+            const auto* off = dftu_series_offsets(c);
+            const char* base = static_cast<const char*>(dftu_series_data(c));
+            if (off && base)
+                *out_sv = {base + off[row],
+                           static_cast<std::size_t>(off[row + 1] - off[row])};
+        }
+        dftu_series_free(c);
+    };
+    auto u64_col = [&](const char* name) -> std::uint64_t {
+        dftu_series* c = dftu_dataframe_column(df, name);
+        if (!c) return 0;
+        std::uint64_t v = 0;
+        if (dftu_series_type(c) == DFTU_TYPE_UINT64 &&
+            !dftu_series_is_null(c, row))
+            v = static_cast<const std::uint64_t*>(dftu_series_data(c))[row];
+        dftu_series_free(c);
+        return v;
+    };
+    auto i64_col = [&](const char* name, bool* present) -> std::int64_t {
+        dftu_series* c = dftu_dataframe_column(df, name);
+        if (!c) return 0;
+        std::int64_t v = 0;
+        if (dftu_series_type(c) == DFTU_TYPE_INT64 &&
+            !dftu_series_is_null(c, row)) {
+            v = static_cast<const std::int64_t*>(dftu_series_data(c))[row];
+            if (present) *present = true;
+        }
+        dftu_series_free(c);
+        return v;
+    };
+
+    std::string_view name_v, cat_v;
+    str_col("name", &name_v);
+    str_col("cat", &cat_v);
+    bool has_ph = false;
+    const std::int64_t ph = i64_col("ph", &has_ph);
+    const std::uint64_t pid = u64_col("pid");
+    const std::uint64_t tid = u64_col("tid");
+    const std::uint64_t ts = u64_col("ts");
+    const std::uint64_t dur = u64_col("dur");
+
     out += "{\"id\":";
     out += std::to_string(id);
     out += ",\"name\":\"";
-    append_json_escaped(out, resolve_id(intern, e.name));
+    append_json_escaped(out, name_v);
     out += "\",\"cat\":\"";
-    append_json_escaped(out, resolve_id(intern, e.cat));
+    append_json_escaped(out, cat_v);
     out += "\",\"ph\":";
-    out += std::to_string(static_cast<int>(e.phase));
+    out += std::to_string(has_ph ? ph
+                                 : static_cast<std::int64_t>(DFTU_PH_UNKNOWN));
     out += ",\"pid\":";
-    out += std::to_string(e.pid);
+    out += std::to_string(pid);
     out += ",\"tid\":";
-    out += std::to_string(e.tid);
+    out += std::to_string(tid);
     out += ",\"ts\":";
-    out += std::to_string(e.ts);
-    if (e.has_dur) {
+    out += std::to_string(ts);
+    if (has_ph && ph == DFTU_PH_COMPLETE) {
         out += ",\"dur\":";
-        out += std::to_string(e.dur);
+        out += std::to_string(dur);
     }
-    if (e.arg_count && e.args) {
-        out += ",\"args\":{";
-        for (std::uint32_t i = 0; i < e.arg_count; ++i) {
-            if (i) out += ',';
-            const dftu_arg& a = e.args[i];
-            out += '"';
-            append_json_escaped(out, resolve_id(intern, a.key));
-            out += "\":";
-            if (a.kind == DFTU_ARG_STR) {
+    bool args_open = false;
+    for (const auto& [key, c] : dyn.cols) {
+        if (dftu_series_is_null(c, row)) continue;
+        if (!args_open) {
+            out += ",\"args\":{";
+            args_open = true;
+        } else {
+            out += ',';
+        }
+        out += '"';
+        append_json_escaped(out, key);
+        out += "\":";
+        switch (dftu_series_type(c)) {
+            case DFTU_TYPE_STRING: {
+                const auto* off = dftu_series_offsets(c);
+                const char* base =
+                    static_cast<const char*>(dftu_series_data(c));
+                std::string_view sv =
+                    off && base ? std::string_view{base + off[row],
+                                                   static_cast<std::size_t>(
+                                                       off[row + 1] - off[row])}
+                                : std::string_view{};
                 out += '"';
-                append_json_escaped(out, resolve_id(intern, a.v.str));
+                append_json_escaped(out, sv);
                 out += '"';
-            } else if (a.kind == DFTU_ARG_I64) {
-                out += std::to_string(a.v.i64);
-            } else {
-                char b[32];
-                std::snprintf(b, sizeof(b), "%.17g", a.v.f64);
-                out += b;
+                break;
             }
+            case DFTU_TYPE_INT64:
+                out += std::to_string(
+                    static_cast<const std::int64_t*>(dftu_series_data(c))[row]);
+                break;
+            case DFTU_TYPE_FLOAT64: {
+                char b[32];
+                std::snprintf(
+                    b, sizeof(b), "%.17g",
+                    static_cast<const double*>(dftu_series_data(c))[row]);
+                out += b;
+                break;
+            }
+            default:
+                out += "null";
+                break;
         }
-        out += '}';
     }
+    if (args_open) out += '}';
     out += "}\n";
-}
-
-int host_batch_to_arrow(void* h, const dftu_batch* b, ::ArrowArray* out,
-                        ::ArrowSchema* out_schema) {
-#ifdef DFTRACER_UTILS_ENABLE_ARROW
-    if (!b || !out || !out_schema) return -1;
-    namespace arr = utilities::common::arrow;
-    auto& intern = static_cast<PluginFold*>(h)->intern_table();
-    try {
-        arr::RecordBatchBuilder builder;
-        builder.declare_schema({{"cat", arr::ColumnType::STRING},
-                                {"name", arr::ColumnType::STRING},
-                                {"pid", arr::ColumnType::UINT64},
-                                {"tid", arr::ColumnType::UINT64},
-                                {"ts", arr::ColumnType::UINT64},
-                                {"dur", arr::ColumnType::UINT64},
-                                {"phase", arr::ColumnType::INT64}});
-        builder.reserve(b->count);
-        for (std::uint32_t i = 0; i < b->count; ++i) {
-            const dftu_event& e = b->events[i];
-            builder.append_string(0, resolve_id(intern, e.cat));
-            builder.append_string(1, resolve_id(intern, e.name));
-            builder.append_uint64(2, e.pid);
-            builder.append_uint64(3, e.tid);
-            builder.append_uint64(4, e.ts);
-            if (e.has_dur)
-                builder.append_uint64(5, e.dur);
-            else
-                builder.append_null(5);
-            builder.append_int64(6, static_cast<std::int64_t>(e.phase));
-            builder.end_row();
-        }
-        arr::ArrowExportResult res = builder.finish();
-        if (!res.valid()) return -1;
-        ArrowArrayMove(res.get_array(), out);
-        ArrowSchemaMove(res.get_schema(), out_schema);
-        return 0;
-    } catch (...) {
-        return -1;
-    }
-#else
-    (void)h;
-    (void)b;
-    (void)out;
-    (void)out_schema;
-    return -1;
-#endif
 }
 
 int host_arrow_write_ipc(void*, ::ArrowArray* a, ::ArrowSchema* s,
@@ -688,14 +723,14 @@ int host_arrow_read_ipc(void*, const char* path, ::ArrowArray* out,
     return static_cast<PluginFold*>(h)->create_trace_writer(path);
 }
 
-int host_trace_write(void* h, ::dftu_trace_writer* w, const dftu_event* evs,
-                     std::uint32_t n) {
-    if (!w || (!evs && n)) return -1;
+int host_trace_write(void*, ::dftu_trace_writer* w, const dftu_dataframe* df) {
+    if (!w || !df) return -1;
     auto* tw = reinterpret_cast<PluginTraceWriter*>(w);
-    auto& intern = static_cast<PluginFold*>(h)->intern_table();
     try {
-        for (std::uint32_t i = 0; i < n; ++i)
-            serialize_event(tw->buffer, intern, evs[i], tw->next_id++);
+        DynCols dyn(df);
+        const std::int64_t n = dftu_dataframe_num_rows(df);
+        for (std::int64_t i = 0; i < n; ++i)
+            serialize_row(tw->buffer, df, dyn, i, tw->next_id++);
         return 0;
     } catch (...) {
         return -1;
@@ -714,12 +749,11 @@ const dftu_ext_sketch g_sketch = {host_sketch_create, host_sketch_add,
                                   host_sketch_merge, host_sketch_result,
                                   host_sketch_free};
 
-const dftu_ext_arrow g_arrow = {host_batch_to_arrow, host_arrow_write_ipc,
-                                host_arrow_read_ipc};
+const dftu_ext_arrow g_arrow = {host_arrow_write_ipc, host_arrow_read_ipc};
 
-int host_trace_read(void* h, const char* path, dftu_stream_item_fn on_event,
+int host_trace_read(void* h, const char* path, dftu_stream_item_fn on_batch,
                     void* ud) {
-    if (!path || !on_event) return -1;
+    if (!path || !on_batch) return -1;
     auto& intern = static_cast<PluginFold*>(h)->intern_table();
     namespace views = trace::views;
     try {
@@ -727,53 +761,38 @@ int host_trace_read(void* h, const char* path, dftu_stream_item_fn on_event,
         dftracer::utils::default_runtime().run_blocking(
             "dft-plugin-trace-read", [&](CoroScope&) -> coro::CoroTask<void> {
                 simdjson::dom::parser parser;
-                std::vector<dftu_arg> args;
+                std::vector<views::detail::FoldEvent> batch_events;
                 views::View v = views::View::from_file(p);
                 co_await v.for_each_batch(
                     [&](std::size_t,
                         const std::vector<std::string_view>& events) {
+                        batch_events.clear();
+                        batch_events.reserve(events.size());
                         for (std::string_view ev : events) {
                             simdjson::padded_string ps(ev);
                             simdjson::dom::element root;
                             if (parser.parse(ps).get(root)) continue;
-                            auto fe = views::detail::extract_fold_event(
-                                root, intern, /*needs_args=*/true);
-                            dftu_event ce{};
-                            ce.cat = fe.cat_id;
-                            ce.name = fe.name_id;
-                            ce.fhash = fe.fhash_id;
-                            ce.hhash = fe.hhash_id;
-                            ce.pid = fe.pid;
-                            ce.tid = fe.tid;
-                            ce.ts = fe.ts;
-                            ce.dur = fe.dur;
-                            ce.phase = map_phase(fe.phase);
-                            ce.has_dur = fe.has_dur ? 1 : 0;
-                            args.clear();
-                            for (const auto& [key, val] : fe.args) {
-                                dftu_arg a{};
-                                a.key = key;
-                                switch (val.index()) {
-                                    case 0:
-                                        a.kind = DFTU_ARG_F64;
-                                        a.v.f64 = std::get<double>(val);
-                                        break;
-                                    case 1:
-                                        a.kind = DFTU_ARG_I64;
-                                        a.v.i64 = std::get<std::int64_t>(val);
-                                        break;
-                                    default:
-                                        a.kind = DFTU_ARG_STR;
-                                        a.v.str = std::get<std::uint32_t>(val);
-                                        break;
-                                }
-                                args.push_back(a);
-                            }
-                            ce.arg_count =
-                                static_cast<std::uint32_t>(args.size());
-                            ce.args = args.empty() ? nullptr : args.data();
-                            on_event(&ce, ud);
+                            batch_events.push_back(
+                                views::detail::extract_fold_event(
+                                    root, intern, /*needs_args=*/true));
                         }
+                        if (batch_events.empty()) return;
+                        dataframe::DataFrame df =
+                            views::detail::build_row_frame(batch_events, intern,
+                                                           {}, 1.0, nullptr);
+                        std::vector<dftu_series*> handles;
+                        handles.reserve(df.columns.size());
+                        std::vector<const char*> names;
+                        names.reserve(df.names.size());
+                        for (const auto& c : df.columns)
+                            handles.push_back(dftu_series_share(c.handle()));
+                        for (const auto& n : df.names)
+                            names.push_back(n.c_str());
+                        dftu_dataframe* cdf = dftu_dataframe_new(
+                            names.data(), handles.data(),
+                            static_cast<std::int32_t>(handles.size()));
+                        on_batch(cdf, ud);
+                        dftu_dataframe_free(cdf);
                     },
                     /*num_slots=*/1, /*limit=*/0);
             });
@@ -790,11 +809,12 @@ dftu_query* host_query_compile(void* h, const char* src, std::uint32_t len) {
     return static_cast<PluginFold*>(h)->compile_query(src, len);
 }
 
-int host_query_matches(void* h, const dftu_query* q, const dftu_event* e) {
-    if (!q || !e) return 0;
+int host_query_matches(void* h, const dftu_query* q, const dftu_dataframe* df,
+                       std::int64_t row) {
+    if (!q || !df) return 0;
     try {
         return static_cast<PluginFold*>(h)->match_query(
-            *reinterpret_cast<const Query*>(q), *e);
+            *reinterpret_cast<const Query*>(q), df, row);
     } catch (...) {
         return 0;
     }
@@ -1188,42 +1208,70 @@ PluginFold::~PluginFold() {
     return reinterpret_cast<::dftu_query*>(&compiled_queries_.back());
 }
 
-int PluginFold::match_query(const Query& q, const dftu_event& e) {
+namespace {
+// One-shot column lookup for dftu_ext_query::query_matches: this is called at
+// most a few times per fold (a plugin testing an ad hoc predicate), not in the
+// hot per-row loop, so resolving by name per call is fine here (contrast
+// plugins::Batch, which caches columns once per batch for the on_batch loop).
+std::string_view df_str_field(const dftu_dataframe* df, const char* name,
+                              std::int64_t row) {
+    dftu_series* c = dftu_dataframe_column(df, name);
+    if (!c) return {};
+    std::string_view out;
+    if (dftu_series_type(c) == DFTU_TYPE_STRING &&
+        !dftu_series_is_null(c, row)) {
+        const auto* off = dftu_series_offsets(c);
+        const char* base = static_cast<const char*>(dftu_series_data(c));
+        if (off && base)
+            out = {base + off[row],
+                   static_cast<std::size_t>(off[row + 1] - off[row])};
+    }
+    dftu_series_free(c);
+    return out;
+}
+}  // namespace
+
+int PluginFold::match_query(const Query& q, const dftu_dataframe* df,
+                            std::int64_t row) {
     match_qmap_.clear();
     for (std::string_view f : q.fields()) {
-        if (f == "cat") {
-            if (e.cat != DFTU_STR_NONE)
-                match_qmap_[f] = std::string(intern_->resolve(e.cat));
-        } else if (f == "name") {
-            if (e.name != DFTU_STR_NONE)
-                match_qmap_[f] = std::string(intern_->resolve(e.name));
-        } else if (f == "fhash") {
-            if (e.fhash != DFTU_STR_NONE)
-                match_qmap_[f] = std::string(intern_->resolve(e.fhash));
-        } else if (f == "hhash") {
-            if (e.hhash != DFTU_STR_NONE)
-                match_qmap_[f] = std::string(intern_->resolve(e.hhash));
-        } else if (f == "pid") {
-            match_qmap_[f] = static_cast<double>(e.pid);
-        } else if (f == "tid") {
-            match_qmap_[f] = static_cast<double>(e.tid);
-        } else if (f == "ts") {
-            match_qmap_[f] = static_cast<double>(e.ts);
-        } else if (f == "dur") {
-            if (e.has_dur) match_qmap_[f] = static_cast<double>(e.dur);
+        if (f == "cat" || f == "name" || f == "fhash" || f == "hhash") {
+            std::string s(df_str_field(df, std::string(f).c_str(), row));
+            if (!s.empty()) match_qmap_[f] = std::move(s);
+        } else if (f == "pid" || f == "tid" || f == "ts" || f == "dur") {
+            dftu_series* c = dftu_dataframe_column(df, std::string(f).c_str());
+            if (c) {
+                if (dftu_series_type(c) == DFTU_TYPE_UINT64 &&
+                    !dftu_series_is_null(c, row))
+                    match_qmap_[f] =
+                        static_cast<double>(static_cast<const std::uint64_t*>(
+                            dftu_series_data(c))[row]);
+                dftu_series_free(c);
+            }
         } else {
-            std::string_view key = strip_args_prefix(f);
-            for (std::uint32_t i = 0; i < e.arg_count; ++i) {
-                const dftu_arg& a = e.args[i];
-                if (a.key == DFTU_STR_NONE || intern_->resolve(a.key) != key)
-                    continue;
-                if (a.kind == DFTU_ARG_F64)
-                    match_qmap_[f] = a.v.f64;
-                else if (a.kind == DFTU_ARG_I64)
-                    match_qmap_[f] = static_cast<double>(a.v.i64);
-                else if (a.v.str != DFTU_STR_NONE)
-                    match_qmap_[f] = std::string(intern_->resolve(a.v.str));
-                break;
+            std::string key(strip_args_prefix(f));
+            std::string col = std::string("args.") + key;
+            dftu_series* c = dftu_dataframe_column(df, col.c_str());
+            if (c) {
+                if (dftu_series_is_null(c, row)) {
+                    // no value for this row
+                } else if (dftu_series_type(c) == DFTU_TYPE_FLOAT64) {
+                    match_qmap_[f] =
+                        static_cast<const double*>(dftu_series_data(c))[row];
+                } else if (dftu_series_type(c) == DFTU_TYPE_INT64) {
+                    match_qmap_[f] =
+                        static_cast<double>(static_cast<const std::int64_t*>(
+                            dftu_series_data(c))[row]);
+                } else if (dftu_series_type(c) == DFTU_TYPE_STRING) {
+                    const auto* off = dftu_series_offsets(c);
+                    const char* base =
+                        static_cast<const char*>(dftu_series_data(c));
+                    if (off && base)
+                        match_qmap_[f] = std::string(
+                            base + off[row],
+                            static_cast<std::size_t>(off[row + 1] - off[row]));
+                }
+                dftu_series_free(c);
             }
         }
     }
@@ -1249,108 +1297,17 @@ bool PluginFold::passes_query(const FoldEvent& ev) {
     return query_->evaluate(qmap_);
 }
 
+// Materialize the (query-passing, non-metadata) events of this batch into a
+// native DataFrame and hand it across the ABI as a dftu_dataframe, so the
+// plugin runs SIMD column ops instead of a per-event loop. build_row_frame is
+// the same columnar materializer NativeRowFold uses.
 void PluginFold::step(const FoldBatch& batch) {
-    if (!slice_) return;
+    if (!slice_ || !plugin_->on_batch) return;
 
     // The previous step's tasks were awaited by the fuse worker before this
     // call, so freeing them now is safe.
     task_arena_.clear();
 
-    if (plugin_->on_batch_columns) {
-        step_columns(batch);
-        return;
-    }
-    if (!plugin_->on_batch) return;  // malformed plugin sets neither seam
-
-    const std::size_t count = batch.events.size();
-    const bool with_args = needs_args();
-
-    kept_scratch_.clear();
-    kept_scratch_.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        if (!query_ || passes_query(batch.events[i]))
-            kept_scratch_.push_back(i);
-    }
-
-    const std::size_t kept = kept_scratch_.size();
-    event_scratch_.clear();
-    event_scratch_.resize(kept);
-
-    if (with_args) {
-        // Fill arg_scratch_ fully before pointing events at it; growth would
-        // otherwise invalidate the pointers.
-        arg_scratch_.clear();
-        std::vector<std::pair<std::size_t, std::size_t>> ranges(kept);
-        for (std::size_t j = 0; j < kept; ++j) {
-            const auto& fe = batch.events[kept_scratch_[j]];
-            const std::size_t begin = arg_scratch_.size();
-            for (const auto& [key_id, val] : fe.args) {
-                dftu_arg a{};
-                a.key = key_id;
-                switch (val.index()) {
-                    case 0:
-                        a.kind = DFTU_ARG_F64;
-                        a.v.f64 = std::get<double>(val);
-                        break;
-                    case 1:
-                        a.kind = DFTU_ARG_I64;
-                        a.v.i64 = std::get<std::int64_t>(val);
-                        break;
-                    default:
-                        a.kind = DFTU_ARG_STR;
-                        a.v.str = std::get<std::uint32_t>(val);
-                        break;
-                }
-                arg_scratch_.push_back(a);
-            }
-            ranges[j] = {begin, fe.args.size()};
-        }
-        for (std::size_t j = 0; j < kept; ++j) {
-            const auto& fe = batch.events[kept_scratch_[j]];
-            dftu_event& ce = event_scratch_[j];
-            ce.cat = fe.cat_id;
-            ce.name = fe.name_id;
-            ce.fhash = fe.fhash_id;
-            ce.hhash = fe.hhash_id;
-            ce.pid = fe.pid;
-            ce.tid = fe.tid;
-            ce.ts = fe.ts;
-            ce.dur = fe.dur;
-            ce.phase = map_phase(fe.phase);
-            ce.has_dur = fe.has_dur ? 1 : 0;
-            ce.arg_count = static_cast<std::uint32_t>(ranges[j].second);
-            ce.args = ranges[j].second ? arg_scratch_.data() + ranges[j].first
-                                       : nullptr;
-        }
-    } else {
-        for (std::size_t j = 0; j < kept; ++j) {
-            const auto& fe = batch.events[kept_scratch_[j]];
-            dftu_event& ce = event_scratch_[j];
-            ce.cat = fe.cat_id;
-            ce.name = fe.name_id;
-            ce.fhash = fe.fhash_id;
-            ce.hhash = fe.hhash_id;
-            ce.pid = fe.pid;
-            ce.tid = fe.tid;
-            ce.ts = fe.ts;
-            ce.dur = fe.dur;
-            ce.phase = map_phase(fe.phase);
-            ce.has_dur = fe.has_dur ? 1 : 0;
-            ce.arg_count = 0;
-            ce.args = nullptr;
-        }
-    }
-
-    cbatch_ = dftu_batch{event_scratch_.data(),
-                         static_cast<std::uint32_t>(event_scratch_.size())};
-    pending_ = plugin_->on_batch(slice_, &cbatch_, &host_);
-}
-
-// Vectorized-fold seam: materialize the (query-passing, non-metadata) events of
-// this batch into a native DataFrame and hand it across the ABI as a
-// dftu_dataframe, so the plugin runs SIMD column ops instead of a per-event
-// loop. build_row_frame is the same columnar materializer NativeRowFold uses.
-void PluginFold::step_columns(const FoldBatch& batch) {
     namespace views = dftracer::utils::trace::views::detail;
     col_scratch_.clear();
     for (const auto& fe : batch.events) {
@@ -1380,12 +1337,12 @@ void PluginFold::step_columns(const FoldBatch& batch) {
                            static_cast<std::int32_t>(handles.size()));
     // The seam is contractually synchronous (abi.h: must return NULL); a
     // returned task would reference the now-freed cdf and cannot be driven.
-    ::dftu_task* t = plugin_->on_batch_columns(slice_, cdf, &host_);
+    ::dftu_task* t = plugin_->on_batch(slice_, cdf, &host_);
     dftu_dataframe_free(cdf);
     if (t)
         DFTRACER_UTILS_LOG_ERROR(
-            "[plugin:%s] on_batch_columns returned a non-null task; the seam "
-            "is synchronous, dropping it",
+            "[plugin:%s] on_batch returned a non-null task; the seam is "
+            "synchronous, dropping it",
             plugin_name().empty() ? "plugin" : plugin_name().c_str());
     pending_ = nullptr;
 }

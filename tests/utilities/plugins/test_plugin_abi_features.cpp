@@ -1,6 +1,6 @@
 // In-process coverage for the plugin ABI surface the host-service suite leaves
 // untested: the config tree, query compile/match and plan_query event routing,
-// the coroutine control ops, and the async on_batch take_pending/drive path.
+// and the coroutine control ops (drive path).
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/string_intern.h>
@@ -69,7 +69,7 @@ struct ConfigSlice {
             for (std::uint32_t i = 0; i < arr->count; ++i)
                 buckets.push_back(dftu_as_i64(&arr->as.items[i], 0));
     }
-    void step(const dftu_batch&, dftracer::utils::plugins::Host) {}
+    void step(const dftu_dataframe*, dftracer::utils::plugins::Host) {}
     void merge(ConfigSlice&) {}
     void finalize(dftracer::utils::plugins::Host) {}
 };
@@ -84,11 +84,11 @@ CountState g_count;
 struct CountSlice {
     explicit CountSlice(const dftracer::utils::plugins::Config&) {}
     void step(const dftracer::utils::plugins::Batch& b,
-              dftracer::utils::plugins::Host h) {
+              dftracer::utils::plugins::Host) {
         g_count.seen += b.size();
         for (const dftracer::utils::plugins::Event& e : b) {
-            g_count.fhashes.emplace_back(h.str(e.fhash_id()));
-            g_count.hhashes.emplace_back(h.str(e.hhash_id()));
+            g_count.fhashes.emplace_back(e.fhash());
+            g_count.hhashes.emplace_back(e.hhash());
         }
     }
     void merge(CountSlice&) {}
@@ -286,27 +286,6 @@ dftracer::utils::plugins::Task op_all(dftracer::utils::plugins::Host h,
     *out1 = out[1];
 }
 
-struct AsyncState {
-    std::atomic<int> done{0};
-    std::uint64_t batch_count = 0;
-};
-AsyncState g_async;
-
-void mark_done_fn(void* p) { static_cast<AsyncState*>(p)->done.fetch_add(1); }
-
-struct AsyncSlice {
-    explicit AsyncSlice(const dftracer::utils::plugins::Config&) {}
-    dftracer::utils::plugins::Task on_batch(const dftu_batch& b,
-                                            dftracer::utils::plugins::Host h) {
-        g_async.batch_count += b.count;
-        const dftu_ext_coro* c = static_cast<const dftu_ext_coro*>(
-            h.raw()->get_extension(h.raw()->h, DFTU_EXT_CORO));
-        co_await h.await(c->spawn(h.raw()->h, mark_done_fn, &g_async));
-    }
-    void merge(AsyncSlice&) {}
-    void finalize(dftracer::utils::plugins::Host) {}
-};
-
 // Owns a PluginFold plus its backing plugin; the fold references the plugin, so
 // it is destroyed first.
 template <class Slice>
@@ -324,9 +303,9 @@ struct FoldFixture {
     }
 };
 
-// A raw columnar plugin: on_batch_columns gets the batch as a dftu_dataframe
-// and SIMD-reduces its `dur` column. Mirrors the slice total into a global so
-// the test can read it.
+// A raw columnar plugin: on_batch gets the batch as a dftu_dataframe and
+// SIMD-reduces its `dur` column. Mirrors the slice total into a global so the
+// test can read it.
 struct ColState {
     std::int64_t dur_sum = 0;
 };
@@ -339,11 +318,10 @@ void col_merge(void* into, void* other) {
     static_cast<ColState*>(into)->dur_sum +=
         static_cast<ColState*>(other)->dur_sum;
 }
-std::uint32_t col_needs(void*) { return 0; }
 const char* col_plan_query(void*) { return nullptr; }
 ::dftu_task* col_on_finalize(void*, const dftu_host*) { return nullptr; }
-::dftu_task* col_on_batch_columns(void* slice, const dftu_dataframe* df,
-                                  const dftu_host*) {
+::dftu_task* col_on_batch(void* slice, const dftu_dataframe* df,
+                          const dftu_host*) {
     dftu_series* col = dftu_dataframe_column(df, "dur");
     if (col) {
         dftu_scalar s = dftu_series_reduce(col, DFTU_REDUCE_SUM);
@@ -357,21 +335,53 @@ const char* col_plan_query(void*) { return nullptr; }
     return nullptr;
 }
 
+// Owning wrapper for a hand-built [cat, name] test dataframe (freed on scope
+// exit), for dftu_ext_query::query_matches tests outside an on_batch call.
+struct QueryFrame {
+    dftu_dataframe* df = nullptr;
+    ~QueryFrame() {
+        if (df) dftu_dataframe_free(df);
+    }
+    QueryFrame(const QueryFrame&) = delete;
+    QueryFrame& operator=(const QueryFrame&) = delete;
+    QueryFrame() = default;
+    QueryFrame(QueryFrame&& o) noexcept : df(o.df) { o.df = nullptr; }
+};
+
+dftu_series* string_column(const std::vector<std::string>& vals) {
+    std::vector<std::int32_t> offsets(vals.size() + 1, 0);
+    std::string data;
+    for (std::size_t i = 0; i < vals.size(); ++i) {
+        data += vals[i];
+        offsets[i + 1] = static_cast<std::int32_t>(data.size());
+    }
+    return dftu_series_new_string(DFTU_TYPE_STRING, offsets.data(), data.data(),
+                                  static_cast<std::int64_t>(vals.size()),
+                                  nullptr);
+}
+
+QueryFrame cat_name_frame(const std::vector<std::string>& cats,
+                          const std::vector<std::string>& names) {
+    const char* col_names[2] = {"cat", "name"};
+    dftu_series* cols[2] = {string_column(cats), string_column(names)};
+    QueryFrame f;
+    f.df = dftu_dataframe_new(col_names, cols, 2);
+    return f;
+}
+
 }  // namespace
 
-TEST_CASE("plugin ABI: on_batch_columns hands the batch as columns") {
+TEST_CASE("plugin ABI: on_batch hands the batch as columns") {
     g_col_state = {};
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    p.needs = col_needs;
     p.plan_query = col_plan_query;
     p.make_slice = col_make_slice;
-    p.on_batch = nullptr;  // uses the columnar seam instead
     p.merge = col_merge;
     p.on_finalize = col_on_finalize;
     p.destroy_slice = col_destroy_slice;
     p.destroy = col_destroy;
-    p.on_batch_columns = col_on_batch_columns;
+    p.on_batch = col_on_batch;
 
     StringIntern intern;
     PluginFold fold(&p, intern);
@@ -415,9 +425,6 @@ TEST_CASE("plugin ABI: config tree reads scalars, nested, array, and default") {
 TEST_CASE("plugin ABI: query_compile then query_matches on known events") {
     FoldFixture<CountSlice> fx(nullptr);
     dftu_host& host = fx.host();
-    dftu_str posix = host.intern(host.h, "POSIX", 5);
-    dftu_str stdio = host.intern(host.h, "STDIO", 5);
-    dftu_str read = host.intern(host.h, "read", 4);
 
     const auto* qx = static_cast<const dftu_ext_query*>(
         host.get_extension(host.h, DFTU_EXT_QUERY));
@@ -428,15 +435,11 @@ TEST_CASE("plugin ABI: query_compile then query_matches on known events") {
                                       static_cast<std::uint32_t>(src.size()));
     REQUIRE(q != nullptr);
 
-    dftu_event match{};
-    match.cat = posix;
-    match.name = read;
-    CHECK(qx->query_matches(host.h, q, &match) == 1);
-
-    dftu_event miss{};
-    miss.cat = stdio;
-    miss.name = read;
-    CHECK(qx->query_matches(host.h, q, &miss) == 0);
+    // Row 0 is the hit (cat=POSIX), row 1 the miss (cat=STDIO); both name
+    // "read".
+    QueryFrame frame = cat_name_frame({"POSIX", "STDIO"}, {"read", "read"});
+    CHECK(qx->query_matches(host.h, q, frame.df, 0) == 1);
+    CHECK(qx->query_matches(host.h, q, frame.df, 1) == 0);
 
     SUBCASE("malformed query source does not compile and match is safe") {
         std::string bad = "cat ==";
@@ -444,7 +447,7 @@ TEST_CASE("plugin ABI: query_compile then query_matches on known events") {
             host.h, bad.data(), static_cast<std::uint32_t>(bad.size()));
         CHECK(bq == nullptr);
         // A null query must yield a defined 0, never a throw across the ABI.
-        CHECK(qx->query_matches(host.h, nullptr, &match) == 0);
+        CHECK(qx->query_matches(host.h, nullptr, frame.df, 0) == 0);
     }
 }
 
@@ -711,30 +714,6 @@ TEST_CASE("plugin ABI: then chains a continuation after its task") {
     REQUIRE(order.size() == 2);
     CHECK(order[0] == 1);
     CHECK(order[1] == 2);
-}
-
-TEST_CASE("plugin ABI: async on_batch drives to completion via take_pending") {
-    g_async.done.store(0);
-    g_async.batch_count = 0;
-    FoldFixture<AsyncSlice> fx(nullptr);
-
-    std::vector<FoldEvent> evs;
-    evs.push_back(make_event(fx.intern, "fh1", "hh1"));
-    evs.push_back(make_event(fx.intern, "fh2", "hh2"));
-    ScanUnit unit{};
-    FoldBatch batch{std::span<const FoldEvent>(evs), unit};
-
-    Runtime rt(1);
-    rt.scope("caller", [&](CoroScope&) -> coro::CoroTask<void> {
-          fx.fold->step(batch);
-          ::dftu_task* t = fx.fold->take_pending();
-          REQUIRE(t != nullptr);
-          co_await *as_coro(t);
-      }).wait();
-    rt.shutdown();
-
-    CHECK(g_async.batch_count == 2);
-    CHECK(g_async.done.load() == 1);
 }
 
 TEST_CASE("plugin ABI: host utility ops fnv1a and hex64_parse") {

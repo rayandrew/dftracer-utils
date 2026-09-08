@@ -14,8 +14,6 @@
 using namespace dftracer::utils::plugins;
 
 struct QueryFilter {
-    static constexpr std::uint32_t needs = 0;
-
     std::uint64_t total = 0;
     std::uint64_t matched = 0;
 
@@ -25,7 +23,7 @@ struct QueryFilter {
         dftu_query* q = h.query_compile(F("dur") > 300);
         for (const Event& e : b) {
             ++total;
-            if (q && h.query_matches(q, e.raw())) ++matched;
+            if (q && h.query_matches(q, e.frame(), e.row())) ++matched;
         }
     }
 

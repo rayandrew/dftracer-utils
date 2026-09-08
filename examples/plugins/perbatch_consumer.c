@@ -20,19 +20,14 @@ typedef struct {
     uint64_t batches;
 } Slice;
 
-static uint32_t needs(void* self) {
-    (void)self;
-    return 0;
-}
-
 static void* make_slice(void* self) {
     (void)self;
     return calloc(1, sizeof(Slice));
 }
 
-static dftu_task* on_batch(void* slice, const dftu_batch* b,
+static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {
-    (void)b;
+    (void)df;
     Slice* s = (Slice*)slice;
     const dftu_ext_ports* p =
         (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);
@@ -87,7 +82,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     g_plugin.self = NULL;
-    g_plugin.needs = needs;
     g_plugin.plan_query = NULL;
     g_plugin.make_slice = make_slice;
     g_plugin.on_batch = on_batch;

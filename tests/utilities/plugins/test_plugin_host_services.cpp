@@ -11,12 +11,22 @@
 // precede plugin.h so arrow_abi.h no-ops rather than tripping nanoarrow's outer
 // ARROW_FLAG_DICTIONARY_ORDERED sentinel.
 #include <dftracer/utils/core/runtime.h>
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/plugin.h>
 #include <dftracer/utils/trace/internal/utils.h>
 #include <doctest/doctest.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+
+// dftu_ext_arrow::batch_to_arrow was removed with the row ABI; the dataframe
+// engine's own Arrow bridge (DataFrame::to_arrow) now builds the test arrays
+// arrow_write_ipc round-trips.
+#ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
+#include <dftracer/utils/dataframe/arrow.h>
+#include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/series.h>
+#endif
 
 #include <chrono>
 #include <cstdint>
@@ -39,7 +49,7 @@ namespace {
 
 struct TrivialSlice {
     explicit TrivialSlice(const dftracer::utils::plugins::Config&) {}
-    void step(const dftu_batch&, dftracer::utils::plugins::Host) {}
+    void step(const dftu_dataframe*, dftracer::utils::plugins::Host) {}
     void merge(TrivialSlice&) {}
     void finalize(dftracer::utils::plugins::Host) {}
 };
@@ -74,93 +84,34 @@ namespace dfti = dftracer::utils::trace::internal;
 
 }  // namespace
 
-#ifdef DFTRACER_UTILS_ENABLE_ARROW
-TEST_CASE("plugin host: batch_to_arrow builds a released record batch") {
-    HostFixture fx;
-    dftu_host& host = fx.host();
-
-    const std::uint32_t N = 4;
-    std::vector<dftu_event> evs(N);
-    dftu_str cat = fx.intern_str("POSIX");
-    dftu_str name = fx.intern_str("read");
-    for (std::uint32_t i = 0; i < N; ++i) {
-        evs[i] = {};
-        evs[i].cat = cat;
-        evs[i].name = name;
-        evs[i].pid = 100 + i;
-        evs[i].tid = 200 + i;
-        evs[i].ts = 1000 + i * 10;
-        evs[i].dur = 5;
-        evs[i].has_dur = 1;
-        evs[i].phase = DFTU_PH_COMPLETE;
-    }
-    dftu_batch b{evs.data(), N};
-
-    const auto* arrow = static_cast<const dftu_ext_arrow*>(
-        host.get_extension(host.h, DFTU_EXT_ARROW));
-    REQUIRE(arrow != nullptr);
-
-    ArrowArray arr{};
-    ArrowSchema sch{};
-    int rc = arrow->batch_to_arrow(host.h, &b, &arr, &sch);
-    REQUIRE(rc == 0);
-    REQUIRE(arr.release != nullptr);
-    REQUIRE(sch.release != nullptr);
-
-    CHECK(arr.length == static_cast<std::int64_t>(N));  // rows == batch->count
-    REQUIRE(arr.n_children == 7);
-    CHECK(arr.children[0]->length ==
-          static_cast<std::int64_t>(N));                // col 0 len
-
-    const ArrowArray* ts_col = arr.children[4];
-    CHECK(ts_col->length == static_cast<std::int64_t>(N));
-    const std::uint64_t* ts =
-        static_cast<const std::uint64_t*>(ts_col->buffers[1]);
-    for (std::uint32_t i = 0; i < N; ++i) CHECK(ts[i] == evs[i].ts);
-    MESSAGE("arrow export: rows=" << arr.length << " cols=" << arr.n_children
-                                  << " ts0=" << ts[0]);
-
-    arr.release(&arr);
-    sch.release(&sch);
-    CHECK(arr.release == nullptr);  // no leak: release ran
-    CHECK(sch.release == nullptr);
-}
-#endif
-
 #ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
 TEST_CASE("plugin host: arrow_write_ipc writes a non-empty IPC file") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
     dftu_host& host = fx.host();
 
-    std::vector<dftu_event> evs(3);
-    dftu_str cat = fx.intern_str("STDIO");
-    dftu_str name = fx.intern_str("fwrite");
-    for (std::uint32_t i = 0; i < 3; ++i) {
-        evs[i] = {};
-        evs[i].cat = cat;
-        evs[i].name = name;
-        evs[i].ts = 500 + i;
-        evs[i].phase = DFTU_PH_COMPLETE;
-    }
-    dftu_batch b{evs.data(), 3};
+    namespace dfd = dftracer::utils::dataframe;
+    const std::uint64_t ts0[3] = {500, 501, 502};
+    dfd::DataFrame df;
+    df.names = {"cat", "name", "ts"};
+    df.columns.push_back(dfd::Series::strings({"STDIO", "STDIO", "STDIO"}));
+    df.columns.push_back(dfd::Series::strings({"fwrite", "fwrite", "fwrite"}));
+    df.columns.push_back(dfd::Series::flat(dfd::TypeId::Uint64, ts0, 3));
+    dfd::OwnedArrow owned = df.to_arrow();
+    REQUIRE(owned);
 
     const auto* arrow = static_cast<const dftu_ext_arrow*>(
         host.get_extension(host.h, DFTU_EXT_ARROW));
     REQUIRE(arrow != nullptr);
 
-    ArrowArray arr{};
-    ArrowSchema sch{};
-    REQUIRE(arrow->batch_to_arrow(host.h, &b, &arr, &sch) == 0);
-
     std::string ipc = env.get_dir() + "/x.arrow";
-    int wr = arrow->arrow_write_ipc(host.h, &arr, &sch, ipc.c_str());
+    int wr = arrow->arrow_write_ipc(host.h, owned.array(), owned.schema(),
+                                    ipc.c_str());
     CHECK(wr == 0);
     CHECK(file_size(ipc) > 0);
     MESSAGE("arrow ipc: " << ipc << " size=" << file_size(ipc));
 
-    if (arr.release) arr.release(&arr);
-    if (sch.release) sch.release(&sch);
+    owned.reset();
 
     ArrowArray back{};
     ArrowSchema back_sch{};
@@ -169,8 +120,8 @@ TEST_CASE("plugin host: arrow_write_ipc writes a non-empty IPC file") {
     REQUIRE(back.release != nullptr);
     REQUIRE(back_sch.release != nullptr);
     CHECK(back.length == 3);  // rows survive the write/read round-trip
-    REQUIRE(back.n_children == 7);
-    const ArrowArray* ts_col = back.children[4];
+    REQUIRE(back.n_children == 3);
+    const ArrowArray* ts_col = back.children[2];
     const std::uint64_t* ts =
         static_cast<const std::uint64_t*>(ts_col->buffers[1]);
     CHECK(ts[0] == 500);
@@ -233,43 +184,73 @@ TEST_CASE("plugin host: trace write then read round-trips events") {
     REQUIRE(w != nullptr);
 
     const std::uint32_t N = 50;
-    std::vector<dftu_event> evs(N);
-    dftu_str cat = fx.intern_str("POSIX");
-    dftu_str name = fx.intern_str("write");
-    for (std::uint32_t i = 0; i < N; ++i) {
-        evs[i] = {};
-        evs[i].cat = cat;
-        evs[i].name = name;
-        evs[i].pid = 7;
-        evs[i].tid = 9;
-        evs[i].ts = 1000000 + i * 100;
-        evs[i].dur = 3;
-        evs[i].has_dur = 1;
-        evs[i].phase = DFTU_PH_COMPLETE;
-    }
-    CHECK(tr->trace_write(host.h, w, evs.data(), N) == 0);
+    std::vector<std::string> cats(N, "POSIX"), names(N, "write");
+    std::vector<std::uint64_t> pid(N, 7), tid(N, 9), ts(N), dur(N, 3);
+    std::vector<std::int64_t> ph(N, DFTU_PH_COMPLETE);
+    for (std::uint32_t i = 0; i < N; ++i) ts[i] = 1000000 + i * 100;
+
+    auto string_col = [](const std::vector<std::string>& vals) -> dftu_series* {
+        std::vector<std::int32_t> offsets(vals.size() + 1, 0);
+        std::string data;
+        for (std::size_t i = 0; i < vals.size(); ++i) {
+            data += vals[i];
+            offsets[i + 1] = static_cast<std::int32_t>(data.size());
+        }
+        return dftu_series_new_string(
+            DFTU_TYPE_STRING, offsets.data(), data.data(),
+            static_cast<std::int64_t>(vals.size()), nullptr);
+    };
+    const char* col_names[7] = {"cat", "name", "ph", "pid", "tid", "ts", "dur"};
+    dftu_series* cols[7] = {
+        string_col(cats),
+        string_col(names),
+        dftu_series_new_flat(DFTU_TYPE_INT64, ph.data(),
+                             static_cast<std::int64_t>(N), nullptr),
+        dftu_series_new_flat(DFTU_TYPE_UINT64, pid.data(),
+                             static_cast<std::int64_t>(N), nullptr),
+        dftu_series_new_flat(DFTU_TYPE_UINT64, tid.data(),
+                             static_cast<std::int64_t>(N), nullptr),
+        dftu_series_new_flat(DFTU_TYPE_UINT64, ts.data(),
+                             static_cast<std::int64_t>(N), nullptr),
+        dftu_series_new_flat(DFTU_TYPE_UINT64, dur.data(),
+                             static_cast<std::int64_t>(N), nullptr)};
+    dftu_dataframe* df = dftu_dataframe_new(col_names, cols, 7);
+    REQUIRE(df != nullptr);
+
+    CHECK(tr->trace_write(host.h, w, df) == 0);
+    dftu_dataframe_free(df);
     CHECK(tr->trace_close(host.h, w) == 0);
     REQUIRE(file_size(trace) > 0);
 
     struct Sink {
-        const dftu_host* host;
         std::uint64_t count = 0;
         bool first_ok = false;
     };
-    Sink sink{&host};
-    auto on_event = [](const void* item, void* ud) {
-        const dftu_event* e = static_cast<const dftu_event*>(item);
-        Sink* s = static_cast<Sink*>(ud);
-        if (s->count == 0) {
-            std::uint32_t len = 0;
-            const char* nm = s->host->resolve(s->host->h, e->name, &len);
-            s->first_ok =
-                e->ts == 1000000 && std::string_view(nm, len) == "write";
+    Sink sink{};
+    auto on_batch = [](const void* item, void* ud) {
+        const auto* batch_df = static_cast<const dftu_dataframe*>(item);
+        auto* s = static_cast<Sink*>(ud);
+        dftu_series* ts_col = dftu_dataframe_column(batch_df, "ts");
+        dftu_series* name_col = dftu_dataframe_column(batch_df, "name");
+        const std::int64_t n = dftu_dataframe_num_rows(batch_df);
+        if (s->count == 0 && ts_col && name_col && n > 0 &&
+            dftu_series_type(ts_col) == DFTU_TYPE_UINT64 &&
+            dftu_series_type(name_col) == DFTU_TYPE_STRING) {
+            const auto* ts_data =
+                static_cast<const std::uint64_t*>(dftu_series_data(ts_col));
+            const auto* off = dftu_series_offsets(name_col);
+            const char* base =
+                static_cast<const char*>(dftu_series_data(name_col));
+            std::string_view nm(base + off[0],
+                                static_cast<std::size_t>(off[1] - off[0]));
+            s->first_ok = ts_data[0] == 1000000 && nm == "write";
         }
-        s->count++;
+        s->count += static_cast<std::uint64_t>(n);
+        if (ts_col) dftu_series_free(ts_col);
+        if (name_col) dftu_series_free(name_col);
     };
 
-    int rr = tr->trace_read(host.h, trace.c_str(), on_event, &sink);
+    int rr = tr->trace_read(host.h, trace.c_str(), on_batch, &sink);
     CHECK(rr == 0);
     CHECK(sink.count == N);
     CHECK(sink.first_ok);

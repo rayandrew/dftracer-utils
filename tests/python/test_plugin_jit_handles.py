@@ -63,7 +63,7 @@ def test_jit_scalar_accumulator_emits_keyless_agg():
     assert 'agg_new(host->h, "n_events", NULL, 0u,' in src
     assert '{DFTU_AGG_MAX, "v0", "value", 0.0, NULL}' in src
     # The per-event contribution lands in that accumulator's row buffer.
-    assert "_v0_total_dur[_r] = (double)(e->dur);" in src
+    assert "_v0_total_dur[_r] = (double)(dftu_jit_u64(&_col_dur, i));" in src
     assert "_v0_n_events[_r] = (int64_t)(1);" in src
 
 

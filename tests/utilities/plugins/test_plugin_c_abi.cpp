@@ -5,6 +5,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
+// After fold_adapter.h so nanoarrow is set up before dataframe/abi.h's
+// arrow_abi.
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/plugin.h>
 #include <doctest/doctest.h>
 
@@ -29,15 +32,16 @@ extern "C" {
                                    std::int64_t*, int*);
 int dftu_test_compose_typecheck(const ::dftu_host*);
 int dftu_test_query_match(const ::dftu_host*, const char*, std::uint32_t,
-                          const ::dftu_event*);
-int dftu_test_query_null_is_safe(const ::dftu_host*, const ::dftu_event*);
+                          const ::dftu_dataframe*, std::int64_t);
+int dftu_test_query_null_is_safe(const ::dftu_host*, const ::dftu_dataframe*,
+                                 std::int64_t);
 int dftu_test_sketch(const ::dftu_host*, double*, std::uint64_t*);
 int dftu_test_sketch_merge(const ::dftu_host*, std::uint64_t*);
 int dftu_test_ops_fnv1a(const ::dftu_host*, const char*, std::uint32_t,
                         std::uint64_t*);
 int dftu_test_ops_find(const ::dftu_host*);
 int dftu_test_trace_roundtrip(const ::dftu_host*, const char*,
-                              const ::dftu_event*, std::uint32_t, int*);
+                              const ::dftu_dataframe*, int*);
 ::dftu_task* dftu_test_io_open(const ::dftu_host*, const char*, int*);
 ::dftu_task* dftu_test_io_write(const ::dftu_host*, int, const void*,
                                 std::uint64_t, std::int64_t*);
@@ -49,19 +53,80 @@ int dftu_test_trace_roundtrip(const ::dftu_host*, const char*,
 ::dftu_task* dftu_test_writer_chunk(const ::dftu_host*, ::dftu_writer*,
                                     const void*, std::uint64_t);
 ::dftu_task* dftu_test_writer_close(const ::dftu_host*, ::dftu_writer*);
-#ifdef DFTU_TEST_HAS_ARROW
-std::int64_t dftu_test_arrow_batch(const ::dftu_host*, const ::dftu_batch*);
-#endif
 }
 
 namespace {
 
 struct TrivialSlice {
     explicit TrivialSlice(const dftracer::utils::plugins::Config&) {}
-    void step(const dftu_batch&, dftracer::utils::plugins::Host) {}
+    void step(const dftu_dataframe*, dftracer::utils::plugins::Host) {}
     void merge(TrivialSlice&) {}
     void finalize(dftracer::utils::plugins::Host) {}
 };
+
+// Owning wrapper for a hand-built test dataframe (freed on scope exit).
+struct TestFrame {
+    dftu_dataframe* df = nullptr;
+    ~TestFrame() {
+        if (df) dftu_dataframe_free(df);
+    }
+    TestFrame(const TestFrame&) = delete;
+    TestFrame& operator=(const TestFrame&) = delete;
+    TestFrame() = default;
+    TestFrame(TestFrame&& o) noexcept : df(o.df) { o.df = nullptr; }
+};
+
+dftu_series* string_column(const std::vector<std::string>& vals) {
+    std::vector<std::int32_t> offsets(vals.size() + 1, 0);
+    std::string data;
+    for (std::size_t i = 0; i < vals.size(); ++i) {
+        data += vals[i];
+        offsets[i + 1] = static_cast<std::int32_t>(data.size());
+    }
+    return dftu_series_new_string(DFTU_TYPE_STRING, offsets.data(), data.data(),
+                                  static_cast<std::int64_t>(vals.size()),
+                                  nullptr);
+}
+
+// A [cat, name] string-column frame; only the columns dftu_ext_query's tests
+// need.
+TestFrame cat_name_frame(const std::vector<std::string>& cats,
+                         const std::vector<std::string>& names) {
+    const char* col_names[2] = {"cat", "name"};
+    dftu_series* cols[2] = {string_column(cats), string_column(names)};
+    TestFrame f;
+    f.df = dftu_dataframe_new(col_names, cols, 2);
+    return f;
+}
+
+dftu_series* u64_column(const std::vector<std::uint64_t>& vals) {
+    return dftu_series_new_flat(DFTU_TYPE_UINT64, vals.data(),
+                                static_cast<std::int64_t>(vals.size()),
+                                nullptr);
+}
+
+dftu_series* i64_column(const std::vector<std::int64_t>& vals) {
+    return dftu_series_new_flat(DFTU_TYPE_INT64, vals.data(),
+                                static_cast<std::int64_t>(vals.size()),
+                                nullptr);
+}
+
+// A [cat, name, ph, pid, tid, ts, dur] frame - the columns trace_write reads
+// (see fold_adapter.cpp's serialize_row) - N complete events on one pid/tid.
+TestFrame trace_test_frame(std::uint32_t n) {
+    std::vector<std::string> cats(n, "POSIX"), names(n, "write");
+    std::vector<std::uint64_t> pid(n, 7), tid(n, 9), ts(n), dur(n, 3);
+    std::vector<std::int64_t> ph(n, DFTU_PH_COMPLETE);
+    for (std::uint32_t i = 0; i < n; ++i) ts[i] = 1000000 + i * 100;
+    const char* col_names[7] = {"cat", "name", "ph", "pid", "tid", "ts", "dur"};
+    dftu_series* cols[7] = {string_column(cats), string_column(names),
+                            i64_column(ph),      u64_column(pid),
+                            u64_column(tid),     u64_column(ts),
+                            u64_column(dur)};
+    TestFrame f;
+    f.df = dftu_dataframe_new(col_names, cols, 7);
+    return f;
+}
 
 struct HostFixture {
     StringIntern intern;
@@ -122,29 +187,24 @@ TEST_CASE("C ABI: dftu_ext_compose type-checks a pipe from C") {
 TEST_CASE("C ABI: dftu_ext_query compile + match from C") {
     HostFixture fx;
     dftu_host& host = fx.host();
-    dftu_str posix = host.intern(host.h, "POSIX", 5);
-    dftu_str stdio = host.intern(host.h, "STDIO", 5);
-    dftu_str read = host.intern(host.h, "read", 4);
 
     std::string src = "cat == \"POSIX\"";
     auto len = static_cast<std::uint32_t>(src.size());
 
-    dftu_event hit{};
-    hit.cat = posix;
-    hit.name = read;
-    dftu_event miss{};
-    miss.cat = stdio;
-    miss.name = read;
+    // Row 0 is the hit (cat=POSIX), row 1 the miss (cat=STDIO); both name
+    // "read".
+    TestFrame frame = cat_name_frame({"POSIX", "STDIO"}, {"read", "read"});
 
-    CHECK(dftu_test_query_match(&host, src.data(), len, &hit) == 1);
-    CHECK(dftu_test_query_match(&host, src.data(), len, &miss) == 0);
+    CHECK(dftu_test_query_match(&host, src.data(), len, frame.df, 0) == 1);
+    CHECK(dftu_test_query_match(&host, src.data(), len, frame.df, 1) == 0);
 
     std::string bad = "cat ==";
     CHECK(dftu_test_query_match(&host, bad.data(),
                                 static_cast<std::uint32_t>(bad.size()),
-                                &hit) == -1);  // malformed -> compile failure
-    CHECK(dftu_test_query_null_is_safe(&host, &hit) ==
-          0);                                  // null query is safe
+                                frame.df, 0) == -1);  // malformed -> compile
+                                                      // failure
+    CHECK(dftu_test_query_null_is_safe(&host, frame.df, 0) ==
+          0);                                         // null query is safe
 }
 
 TEST_CASE("C ABI: dftu_ext_sketch add/result/merge from C") {
@@ -181,27 +241,14 @@ TEST_CASE("C ABI: dftu_ext_trace write then read round-trips from C") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
     dftu_host& host = fx.host();
-    dftu_str cat = host.intern(host.h, "POSIX", 5);
-    dftu_str name = host.intern(host.h, "write", 5);
 
     const std::uint32_t N = 20;
-    std::vector<dftu_event> evs(N);
-    for (std::uint32_t i = 0; i < N; ++i) {
-        evs[i] = {};
-        evs[i].cat = cat;
-        evs[i].name = name;
-        evs[i].pid = 7;
-        evs[i].tid = 9;
-        evs[i].ts = 1000000 + i * 100;
-        evs[i].dur = 3;
-        evs[i].has_dur = 1;
-        evs[i].phase = DFTU_PH_COMPLETE;
-    }
+    TestFrame frame = trace_test_frame(N);
 
     std::string path = env.get_dir() + "/c_abi.pfw.gz";
     int read = 0;
-    REQUIRE(dftu_test_trace_roundtrip(&host, path.c_str(), evs.data(), N,
-                                      &read) == 0);
+    REQUIRE(dftu_test_trace_roundtrip(&host, path.c_str(), frame.df, &read) ==
+            0);
     CHECK(read == static_cast<int>(N));
 }
 
@@ -264,29 +311,3 @@ TEST_CASE("C ABI: dftu_ext_writer create/open/chunk/close from C") {
     CHECK(!ec);
     CHECK(sz > 0);
 }
-
-#ifdef DFTU_TEST_HAS_ARROW
-TEST_CASE("C ABI: dftu_ext_arrow batch_to_arrow from C") {
-    HostFixture fx;
-    dftu_host& host = fx.host();
-    dftu_str cat = host.intern(host.h, "POSIX", 5);
-    dftu_str name = host.intern(host.h, "read", 4);
-
-    const std::uint32_t N = 8;
-    std::vector<dftu_event> evs(N);
-    for (std::uint32_t i = 0; i < N; ++i) {
-        evs[i] = {};
-        evs[i].cat = cat;
-        evs[i].name = name;
-        evs[i].pid = 1;
-        evs[i].tid = 2;
-        evs[i].ts = i;
-        evs[i].dur = 1;
-        evs[i].has_dur = 1;
-        evs[i].phase = DFTU_PH_COMPLETE;
-    }
-
-    dftu_batch b{evs.data(), N};
-    CHECK(dftu_test_arrow_batch(&host, &b) == static_cast<std::int64_t>(N));
-}
-#endif

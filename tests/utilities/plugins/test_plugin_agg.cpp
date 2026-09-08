@@ -57,12 +57,12 @@ FoldEvent evt(StringIntern& intern, const char* cat, const char* name,
     return fe;
 }
 
-// A raw columnar plugin: on_batch_columns builds one dft.ext.agg accumulator
+// A raw columnar plugin: on_batch builds one dft.ext.agg accumulator
 // keyed by "cat" with sum(dur), p50(dur) and set_union(name), and folds each
 // batch's columns into it. The host merges and finalizes it to a native
 // dataframe named "by_cat".
-::dftu_task* agg_on_batch_columns(void* slice, const dftu_dataframe* df,
-                                  const dftu_host* host) {
+::dftu_task* agg_on_batch(void* slice, const dftu_dataframe* df,
+                          const dftu_host* host) {
     (void)slice;
     const auto* agg = static_cast<const dftu_ext_agg*>(
         host->get_extension(host->h, DFTU_EXT_AGG));
@@ -80,8 +80,8 @@ FoldEvent evt(StringIntern& intern, const char* cat, const char* name,
 
 // Same accumulator, built through the agg:: factories + Host::agg instead of
 // raw dftu_agg_col structs, proving each factory produces the same wire spec.
-::dftu_task* agg_factory_on_batch_columns(void* slice, const dftu_dataframe* df,
-                                          const dftu_host* host) {
+::dftu_task* agg_factory_on_batch(void* slice, const dftu_dataframe* df,
+                                  const dftu_host* host) {
     (void)slice;
     Host h(host);
     const auto acc =
@@ -94,7 +94,6 @@ FoldEvent evt(StringIntern& intern, const char* cat, const char* name,
 dftu_plugin make_agg_factory_plugin() {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    p.needs = [](void*) -> std::uint32_t { return 0; };
     p.plan_query = [](void*) -> const char* { return nullptr; };
     p.make_slice = [](void*) -> void* {
         static int sentinel;
@@ -106,14 +105,13 @@ dftu_plugin make_agg_factory_plugin() {
     };
     p.destroy_slice = [](void*) {};
     p.destroy = [](void*) {};
-    p.on_batch_columns = agg_factory_on_batch_columns;
+    p.on_batch = agg_factory_on_batch;
     return p;
 }
 
 dftu_plugin make_agg_plugin() {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    p.needs = [](void*) -> std::uint32_t { return 0; };
     p.plan_query = [](void*) -> const char* { return nullptr; };
     // This plugin holds no per-slice state (the accumulator lives in the host's
     // PluginFold), so a non-null sentinel is all PluginFold::step needs - no
@@ -128,7 +126,7 @@ dftu_plugin make_agg_plugin() {
     };
     p.destroy_slice = [](void*) {};
     p.destroy = [](void*) {};
-    p.on_batch_columns = agg_on_batch_columns;
+    p.on_batch = agg_on_batch;
     return p;
 }
 
@@ -271,7 +269,6 @@ dftu_plugin make_columns_plugin(
     ::dftu_task* (*on_final)(void*, const dftu_host*) = no_finalize) {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    p.needs = [](void*) -> std::uint32_t { return 0; };
     p.plan_query = [](void*) -> const char* { return nullptr; };
     p.make_slice = [](void*) -> void* {
         static int sentinel;
@@ -281,7 +278,7 @@ dftu_plugin make_columns_plugin(
     p.on_finalize = on_final;
     p.destroy_slice = [](void*) {};
     p.destroy = [](void*) {};
-    p.on_batch_columns = on_columns;
+    p.on_batch = on_columns;
     return p;
 }
 

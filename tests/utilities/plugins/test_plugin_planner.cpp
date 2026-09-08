@@ -7,6 +7,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/abi.h>
 #include <dftracer/utils/plugins/plugins_internal.h>
 #include <dftracer/utils/trace/internal/utils.h>
@@ -47,7 +48,6 @@ struct CountSlice {
     std::uint64_t n = 0;
 };
 
-std::uint32_t count_needs(void*) { return 0; }
 const char* count_plan_query(void* self) {
     return static_cast<CountState*>(self)->query;
 }
@@ -56,8 +56,10 @@ void* count_make_slice(void* self) {
     s->st = static_cast<CountState*>(self);
     return s;
 }
-dftu_task* count_on_batch(void* slice, const dftu_batch* b, const dftu_host*) {
-    static_cast<CountSlice*>(slice)->n += b->count;
+dftu_task* count_on_batch(void* slice, const dftu_dataframe* df,
+                          const dftu_host*) {
+    static_cast<CountSlice*>(slice)->n +=
+        static_cast<std::uint64_t>(dftu_dataframe_num_rows(df));
     return nullptr;
 }
 void count_merge(void* into, void* other) {
@@ -77,7 +79,6 @@ dftu_plugin make_count_plugin(CountState* st) {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     p.self = st;
-    p.needs = count_needs;
     p.plan_query = count_plan_query;
     p.make_slice = count_make_slice;
     p.on_batch = count_on_batch;

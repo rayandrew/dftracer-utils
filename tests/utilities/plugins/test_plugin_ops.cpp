@@ -25,7 +25,7 @@ namespace {
 
 struct TrivialSlice {
     explicit TrivialSlice(const dftracer::utils::plugins::Config&) {}
-    void step(const dftu_batch&, Host) {}
+    void step(const dftu_dataframe*, Host) {}
     void merge(TrivialSlice&) {}
     void finalize(Host) {}
 };

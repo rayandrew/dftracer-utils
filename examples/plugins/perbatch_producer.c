@@ -7,31 +7,37 @@
  *           -o perbatch_producer.so perbatch_producer.c
  */
 
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/abi.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define PERBATCH_PORT "com.example.perbatch_dur"
 
-static uint32_t needs(void* self) {
-    (void)self;
-    return 0;
-}
-
 static void* make_slice(void* self) {
     (void)self;
     return calloc(1, 1);
 }
 
-static dftu_task* on_batch(void* slice, const dftu_batch* b,
+static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {
     (void)slice;
     const dftu_ext_ports* p =
         (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);
     if (p) {
+        int64_t n = dftu_dataframe_num_rows(df);
+        dftu_series* ph_col = dftu_dataframe_column(df, "ph");
+        const int64_t* ph = NULL;
         uint64_t with_dur = 0;
-        for (uint32_t i = 0; i < b->count; ++i)
-            if (b->events[i].has_dur) ++with_dur;
+        int64_t i;
+        if (ph_col && dftu_series_type(ph_col) == DFTU_TYPE_INT64)
+            ph = (const int64_t*)dftu_series_data(ph_col);
+        /* Mirrors plugins::Event::has_dur(): "has a duration" is phase() ==
+         * Complete, read off the `ph` column (a DFTU_PH_* code). */
+        if (ph)
+            for (i = 0; i < n; ++i)
+                if (ph[i] == DFTU_PH_COMPLETE) ++with_dur;
+        if (ph_col) dftu_series_free(ph_col);
         p->publish(host->h, p->port_key(host->h, PERBATCH_PORT), &with_dur,
                    (uint32_t)sizeof with_dur);
     }
@@ -65,7 +71,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     g_plugin.self = NULL;
-    g_plugin.needs = needs;
     g_plugin.plan_query = NULL;
     g_plugin.make_slice = make_slice;
     g_plugin.on_batch = on_batch;

@@ -34,7 +34,6 @@ namespace {
 
 constexpr const char* STATS_NAME = "com.example.order_stats";
 
-std::uint32_t no_needs(void*) { return 0; }
 void* make_empty_slice(void*) { return new int(0); }
 void destroy_empty_slice(void* slice) { delete static_cast<int*>(slice); }
 void no_merge(void*, void*) {}
@@ -45,7 +44,6 @@ dftu_plugin make_bare_plugin(void* self) {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     p.self = self;
-    p.needs = no_needs;
     p.make_slice = make_empty_slice;
     p.merge = no_merge;
     p.on_finalize = no_finalize;
@@ -76,8 +74,8 @@ dftu_plugin make_graph_plugin(NameLists* st) {
 
 // The producer: one zero-key accumulator over the whole scan, named
 // STATS_NAME, which the consumer reads back by that name.
-dftu_task* producer_on_batch_columns(void*, const dftu_dataframe* df,
-                                     const dftu_host* host) {
+dftu_task* producer_on_batch(void*, const dftu_dataframe* df,
+                             const dftu_host* host) {
     const auto* agg = static_cast<const dftu_ext_agg*>(
         host->get_extension(host->h, DFTU_EXT_AGG));
     if (!agg || !agg->agg_new) return nullptr;
@@ -93,7 +91,7 @@ const char* const* producer_provides(void*) { return g_produced; }
 
 dftu_plugin make_producer() {
     dftu_plugin p = make_bare_plugin(nullptr);
-    p.on_batch_columns = producer_on_batch_columns;
+    p.on_batch = producer_on_batch;
     p.provides = producer_provides;
     return p;
 }
@@ -113,7 +111,7 @@ dftu_task* consumer_on_finalize(void*, const dftu_host* host) {
     return nullptr;
 }
 
-dftu_task* consumer_on_batch(void*, const dftu_batch*, const dftu_host*) {
+dftu_task* consumer_on_batch(void*, const dftu_dataframe*, const dftu_host*) {
     return nullptr;
 }
 

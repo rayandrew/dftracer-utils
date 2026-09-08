@@ -7,6 +7,7 @@
  *           -o process_counts.so process_counts.c
  */
 
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/abi.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -43,22 +44,24 @@ static void counts_add(Counts* c, uint64_t pid, uint64_t n) {
     ++c->size;
 }
 
-static uint32_t needs(void* self) {
-    (void)self;
-    return 0;
-}
-
 static void* make_slice(void* self) {
     (void)self;
     return calloc(1, sizeof(Counts));
 }
 
-static dftu_task* on_batch(void* slice, const dftu_batch* b,
+static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {
     Counts* c = (Counts*)slice;
-    uint32_t i;
+    int64_t n = dftu_dataframe_num_rows(df);
+    dftu_series* pid_col = dftu_dataframe_column(df, "pid");
+    const uint64_t* pid = NULL;
+    int64_t i;
     (void)host;
-    for (i = 0; i < b->count; ++i) counts_add(c, b->events[i].pid, 1);
+    if (pid_col && dftu_series_type(pid_col) == DFTU_TYPE_UINT64)
+        pid = (const uint64_t*)dftu_series_data(pid_col);
+    if (pid)
+        for (i = 0; i < n; ++i) counts_add(c, pid[i], 1);
+    if (pid_col) dftu_series_free(pid_col);
     return NULL;
 }
 
@@ -116,7 +119,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     g_plugin.self = NULL;
-    g_plugin.needs = needs;
     g_plugin.plan_query = NULL;
     g_plugin.make_slice = make_slice;
     g_plugin.on_batch = on_batch;

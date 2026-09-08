@@ -88,7 +88,6 @@ FoldEvent evt(StringIntern& intern, std::uint64_t pid, std::uint64_t dur,
 dftu_plugin make_wrappers_plugin() {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    p.needs = [](void*) -> std::uint32_t { return 0; };
     p.plan_query = [](void*) -> const char* { return nullptr; };
     p.make_slice = [](void*) -> void* {
         static int sentinel;
@@ -100,7 +99,7 @@ dftu_plugin make_wrappers_plugin() {
     };
     p.destroy_slice = [](void*) {};
     p.destroy = [](void*) {};
-    p.on_batch_columns = wrappers_columns;
+    p.on_batch = wrappers_columns;
     return p;
 }
 
@@ -375,7 +374,7 @@ struct PortProducer {
     explicit PortProducer(const dftracer::utils::plugins::Config&) {}
     void step(const dftracer::utils::plugins::Batch& b,
               dftracer::utils::plugins::Host h) {
-        Edge e{b.size(), 0.0};
+        Edge e{static_cast<std::uint64_t>(b.size()), 0.0};
         for (const dftracer::utils::plugins::Event& ev : b)
             e.sum += static_cast<double>(ev.dur());
         auto port = h.publish_port<Edge>(PORT_CAP);

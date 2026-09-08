@@ -66,12 +66,10 @@ class Plugins {
     /// Drive every plugin as a fold over one fused, pruned scan of `view`.
     coro::CoroTask<Result<PluginRun>> run(const trace::views::View& view) const;
 
-    /// `view` narrowed by the set's prune - the union of the plugins'
-    /// plan_query filters, the weakest predicate that still selects every event
-    /// any plugin keeps - or `view` unchanged when no prune applies. Only
-    /// chunks no plugin wants are skipped, so per-plugin results are the same
-    /// either way. Apply it to the base view of a plugins-only session to give
-    /// that session the pruning run() does.
+    /// `view` narrowed by the union of the plugins' plan_query filters (the
+    /// weakest predicate that still selects every event any plugin keeps), or
+    /// unchanged when no prune applies. Apply to a plugins-only session's base
+    /// view to get the same pruning run() does.
     trace::views::View prune(const trace::views::View& view) const;
 
     /// Attach every plugin to `session` as a fused fold branch, in fold order,

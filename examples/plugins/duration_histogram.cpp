@@ -17,8 +17,6 @@
 using namespace dftracer::utils::plugins;
 
 struct DurationHistogram {
-    static constexpr std::uint32_t needs = 0;
-
     std::array<std::uint64_t, 64> bins{};
 
     explicit DurationHistogram(const Config&) {}

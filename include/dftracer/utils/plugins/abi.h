@@ -34,8 +34,6 @@ typedef enum {
     DFTU_T_F64,
     DFTU_T_I64,
     DFTU_T_STR,
-    DFTU_T_EVENT,
-    DFTU_T_BATCH,
     DFTU_T_BYTES,
     DFTU_T_TABLE,
     /** Fixed-width map-key/column scalar types; appended, never renumbered. */
@@ -67,48 +65,6 @@ typedef enum {
     DFTU_PH_AGGREGATED,
     DFTU_PH_METADATA
 } dftu_phase;
-
-/** OR the flags and return from dftu_plugin.needs to request scan extraction.
- */
-enum {
-    DFTU_NEED_ARGS = 1u << 0,
-    DFTU_NEED_FHASH = 1u << 1,
-    DFTU_NEED_HHASH = 1u << 2
-};
-
-typedef enum {
-    DFTU_ARG_F64 = 0,
-    DFTU_ARG_I64 = 1,
-    DFTU_ARG_STR = 2
-} dftu_arg_kind;
-
-/** A flat, interned arg; nested args are flattened to dotted keys. */
-typedef struct {
-    dftu_str key;
-    dftu_arg_kind kind;
-    union {
-        double f64;
-        int64_t i64;
-        dftu_str str;
-    } v;
-} dftu_arg;
-
-/** One parsed event; strings are interned ids. `args` is NULL unless the plugin
-   declared DFTU_NEED_ARGS, and is valid only for the current on_batch call. */
-typedef struct {
-    dftu_str cat, name, fhash, hhash;
-    uint64_t pid, tid, ts, dur;
-    uint8_t phase;
-    uint8_t has_dur;
-    uint32_t arg_count;
-    const dftu_arg* args;
-} dftu_event;
-
-/** Valid for the on_batch call only; never retain the pointer. */
-typedef struct {
-    const dftu_event* events;
-    uint32_t count;
-} dftu_batch;
 
 typedef struct dftu_host dftu_host;
 typedef struct dftu_task dftu_task;     /**< async node; awaited exactly once */
@@ -257,7 +213,9 @@ typedef struct dftu_ext_coro {
 
 typedef struct dftu_ext_query {
     dftu_query* (*query_compile)(void* h, const char* src, uint32_t len);
-    int (*query_matches)(void* h, const dftu_query* q, const dftu_event* e);
+    /** Evaluate `q` against row `row` of `df` (a batch's columns, by name). */
+    int (*query_matches)(void* h, const dftu_query* q, const dftu_dataframe* df,
+                         int64_t row);
 } dftu_ext_query;
 
 /** A leaf op: transform `in_size` bytes at `in` into `out_size` bytes at `out`,
@@ -321,11 +279,6 @@ typedef struct dftu_ext_sketch {
 } dftu_ext_sketch;
 
 typedef struct dftu_ext_arrow {
-    /** Build an Arrow record batch (cat,name,pid,tid,ts,dur,phase) from the
-       events; the plugin owns the result and must call out->release and
-       out_schema->release. */
-    int (*batch_to_arrow)(void* h, const dftu_batch* b, struct ArrowArray* out,
-                          struct ArrowSchema* out_schema);
     /** Write a plugin-provided Arrow batch to an IPC file. 0 ok, -1 on error.
      */
     int (*arrow_write_ipc)(void* h, struct ArrowArray* a, struct ArrowSchema* s,
@@ -340,12 +293,14 @@ typedef struct dftu_ext_trace {
     /** dftracer trace writer: open a gzip .pfw.gz, append events, then close.
        The index is built lazily on first read, not at close. */
     dftu_trace_writer* (*trace_open_write)(void* h, const char* path);
-    int (*trace_write)(void* h, dftu_trace_writer* w, const dftu_event* evs,
-                       uint32_t n);
+    /** Append every row of `df` (a batch's columns, by name) as a trace event.
+     */
+    int (*trace_write)(void* h, dftu_trace_writer* w, const dftu_dataframe* df);
     int (*trace_close)(void* h, dftu_trace_writer* w);
-    /** Scan a trace file (auto-indexed) and call on_event per event, ids
-       interned into the host scan table. 0 on success. */
-    int (*trace_read)(void* h, const char* path, dftu_stream_item_fn on_event,
+    /** Scan a trace file (auto-indexed) and call on_batch once per scanned
+       batch with a dftu_dataframe* (item), ids interned into the host scan
+       table; the frame is valid only for the call. 0 on success. */
+    int (*trace_read)(void* h, const char* path, dftu_stream_item_fn on_batch,
                       void* ud);
 } dftu_ext_trace;
 
@@ -590,30 +545,31 @@ static inline const char* dftu_as_str(const dftu_value* v, uint32_t* out_len) {
 }
 
 /** A plugin: a data-parallel fold; one slice per worker, merged then finalized.
-   on_batch and on_finalize return NULL when handled synchronously, else a task
-   the host awaits. The dftu_batch b stays valid until that returned task
-   completes (for a synchronous NULL return, only during the call). */
+   on_finalize returns NULL when handled synchronously, else a task the host
+   awaits. */
 typedef struct dftu_plugin {
     uint32_t abi_version;
     void* self; /**< read-only config, shared across slices */
 
-    uint32_t (*needs)(void* self);         /**< OR of DFTU_NEED_* */
-    const char* (*plan_query)(void* self); /**< coarse filter, or NULL = all */
+    /** Coarse filter this plugin's own predicate is a subset of, or NULL to
+       match all; a DSL string (query::Query::from_string), typically rendered
+       from an Expr built with the query builder (F/Field). The host unions
+       every loaded plugin's plan_query into the weakest predicate that still
+       selects every event any plugin keeps, and pushes that union into the
+       shared scan's index prune (Plugins::prune / View::filter) - narrowing
+       one plugin's own predicate here would starve the others of events they
+       are entitled to, since the scan is shared. */
+    const char* (*plan_query)(void* self);
     void* (*make_slice)(void* self);
-    dftu_task* (*on_batch)(void* slice, const dftu_batch* b,
+    /** N rows in scan order = N events, one dftu_dataframe per batch. Must be
+       synchronous (return NULL); `df` is owned by the host and valid only for
+       the call. */
+    dftu_task* (*on_batch)(void* slice, const dftu_dataframe* df,
                            const dftu_host* host);
     void (*merge)(void* into, void* other);
     dftu_task* (*on_finalize)(void* slice, const dftu_host* host);
     void (*destroy_slice)(void* slice); /**< one call per make_slice */
     void (*destroy)(void* self);        /**< plugin teardown; frees self */
-
-    /** Optional vectorized-fold seam: when set, the host hands each batch as a
-       dftu_dataframe (its events materialized into columns) instead of calling
-       on_batch per event, so the fold runs SIMD column ops in-scan. A plugin
-       sets EITHER on_batch OR this. Must be synchronous (return NULL); `df` is
-       owned by the host and valid only for the call. */
-    dftu_task* (*on_batch_columns)(void* slice, const dftu_dataframe* df,
-                                   const dftu_host* host);
 
     /** The names this plugin produces, as a NULL-terminated array that outlives
        the plugin; NULL = none. One namespace covers both edge kinds: a

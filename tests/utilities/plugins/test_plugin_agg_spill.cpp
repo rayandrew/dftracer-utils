@@ -91,7 +91,6 @@ dftu_plugin make_plugin(::dftu_task* (*on_columns)(void*, const dftu_dataframe*,
                                                    const dftu_host*)) {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    p.needs = [](void*) -> std::uint32_t { return 0; };
     p.plan_query = [](void*) -> const char* { return nullptr; };
     p.make_slice = [](void*) -> void* {
         static int sentinel;
@@ -103,7 +102,7 @@ dftu_plugin make_plugin(::dftu_task* (*on_columns)(void*, const dftu_dataframe*,
     };
     p.destroy_slice = [](void*) {};
     p.destroy = [](void*) {};
-    p.on_batch_columns = on_columns;
+    p.on_batch = on_columns;
     return p;
 }
 

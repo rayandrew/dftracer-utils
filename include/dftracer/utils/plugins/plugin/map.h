@@ -1,6 +1,7 @@
 #ifndef DFTRACER_UTILS_PLUGINS_PLUGIN_MAP_H
 #define DFTRACER_UTILS_PLUGINS_PLUGIN_MAP_H
 
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/abi.h>
 #include <dftracer/utils/plugins/arrow_abi.h>
 #include <dftracer/utils/plugins/owned_arrow.h>
@@ -14,7 +15,6 @@
 #include <iterator>
 #include <memory>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -25,6 +25,8 @@ namespace dftracer::utils::plugins {
 
 class Writer;
 class Agg;
+class Batch;
+class Event;
 template <class T>
 class OutPort;
 template <class T>
@@ -122,10 +124,11 @@ class Host {
     dftu_query* query_compile(const Expr& e) const {
         return query_compile(e.to_string());
     }
-    bool query_matches(const dftu_query* q, const dftu_event& e) const {
+    bool query_matches(const dftu_query* q, const dftu_dataframe* df,
+                       std::int64_t row) const {
         const dftu_ext_query* qe = ext(DFTU_EXT_QUERY, query_ext_);
         return q && qe && qe->query_matches &&
-               qe->query_matches(h_->h, q, &e) != 0;
+               qe->query_matches(h_->h, q, df, row) != 0;
     }
     /// Compile and wrap as a non-owning Query bound to this host; see
     /// query_compile for lifetime.
@@ -158,22 +161,6 @@ class Host {
     /// RAII sketch bound to this host; frees the handle in its destructor.
     class Sketch make_sketch() const;
 
-    /// Build an Arrow batch from `b`; the caller owns *out/*out_schema and must
-    /// call their release. 0 on success.
-    int batch_to_arrow(const dftu_batch& b, ArrowArray* out,
-                       ArrowSchema* out_schema) const {
-        const dftu_ext_arrow* e = ext(DFTU_EXT_ARROW, arrow_ext_);
-        return e && e->batch_to_arrow
-                   ? e->batch_to_arrow(h_->h, &b, out, out_schema)
-                   : -1;
-    }
-    /// Owning form of batch_to_arrow; an empty result (`!owned`) signals the
-    /// host lacks the Arrow group or export failed.
-    OwnedArrow batch_to_arrow(const dftu_batch& b) const {
-        OwnedArrow owned;
-        batch_to_arrow(b, &owned.array, &owned.schema);
-        return owned;
-    }
     int arrow_write_ipc(ArrowArray* a, ArrowSchema* s, const char* path) const {
         const dftu_ext_arrow* e = ext(DFTU_EXT_ARROW, arrow_ext_);
         return e && e->arrow_write_ipc ? e->arrow_write_ipc(h_->h, a, s, path)
@@ -204,25 +191,26 @@ class Host {
         return e && e->trace_open_write ? e->trace_open_write(h_->h, path)
                                         : nullptr;
     }
-    int trace_write(dftu_trace_writer* w, const dftu_event* evs,
-                    std::uint32_t n) const {
+    /// Append every row of `df` as a trace event.
+    int trace_write(dftu_trace_writer* w, const dftu_dataframe* df) const {
         const dftu_ext_trace* e = ext(DFTU_EXT_TRACE, trace_ext_);
-        return e && e->trace_write ? e->trace_write(h_->h, w, evs, n) : -1;
+        return e && e->trace_write ? e->trace_write(h_->h, w, df) : -1;
     }
     int trace_close(dftu_trace_writer* w) const {
         const dftu_ext_trace* e = ext(DFTU_EXT_TRACE, trace_ext_);
         return e && e->trace_close ? e->trace_close(h_->h, w) : -1;
     }
-    /// Scan `path` (auto-indexed) and call on_event per event. 0 on success.
-    int trace_read(const char* path, dftu_stream_item_fn on_event,
+    /// Scan `path` (auto-indexed) and call on_batch once per scanned batch with
+    /// a dftu_dataframe*. 0 on success.
+    int trace_read(const char* path, dftu_stream_item_fn on_batch,
                    void* ud) const {
         const dftu_ext_trace* e = ext(DFTU_EXT_TRACE, trace_ext_);
-        return e && e->trace_read ? e->trace_read(h_->h, path, on_event, ud)
+        return e && e->trace_read ? e->trace_read(h_->h, path, on_batch, ud)
                                   : -1;
     }
-    /// Scan `path` (auto-indexed), invoking `fn` once per event as either
-    /// `fn(const Event&)` or `fn(const dftu_event&)`. `fn` is borrowed for the
-    /// call. 0 on success.
+    /// Scan `path` (auto-indexed), invoking `fn` once per scanned batch as
+    /// either `fn(const Batch&)` or `fn(const dftu_dataframe*)`. `fn` is
+    /// borrowed for the call. 0 on success.
     template <class Fn>
     int trace_read(const char* path, Fn&& fn) const;
 
@@ -627,232 +615,319 @@ inline InPort<T> Host::consume_port(const char* name) const {
     return InPort<T>{*this, port_key(name)};
 }
 
-/// Non-owning typed view over one flattened event arg. The value is one of
-/// i64/f64/str selected by kind(); the key and any string value are interned
-/// ids, resolvable to bytes through a Host. Borrowed for the on_batch call.
-class Arg {
-   public:
-    Arg() = default;
-    explicit Arg(const dftu_arg& a) noexcept : a_(&a) {}
+namespace detail {
 
-    StrId key_id() const noexcept { return StrId{a_->key}; }
-    std::string_view key(const Host& h) const { return h.str(key_id()); }
-
-    ArgKind kind() const noexcept { return static_cast<ArgKind>(a_->kind); }
-    bool is_i64() const noexcept { return a_->kind == DFTU_ARG_I64; }
-    bool is_f64() const noexcept { return a_->kind == DFTU_ARG_F64; }
-    bool is_str() const noexcept { return a_->kind == DFTU_ARG_STR; }
-
-    /// Read the accessor matching kind(); another slot holds a stale value.
-    std::int64_t i64() const noexcept { return a_->v.i64; }
-    double f64() const noexcept { return a_->v.f64; }
-    StrId str_id() const noexcept { return StrId{a_->v.str}; }
-    std::string_view str(const Host& h) const { return h.str(str_id()); }
-
-    const dftu_arg& raw() const noexcept { return *a_; }
-
-   private:
-    const dftu_arg* a_ = nullptr;
+/// A resolved column, cached once per Batch. `type` is -1 when the column is
+/// absent from the frame; every accessor treats an absent column as always
+/// null/zero rather than re-resolving it.
+struct ColBuf {
+    dftu_series* handle = nullptr;
+    std::int32_t type = -1;                 // dftu_dtype
+    const void* data = nullptr;
+    const std::int32_t* offsets = nullptr;  // String/Binary only
 };
 
-/// Non-owning iterable over an event's args, yielding typed Arg views for
-/// range-based iteration: `for (const Arg& a : e.args())`. Empty unless the
-/// plugin declared DFTU_NEED_ARGS.
-class ArgRange {
-   public:
-    ArgRange(const dftu_arg* first, std::uint32_t n) noexcept
-        : first_(first), n_(n) {}
+}  // namespace detail
 
-    std::uint32_t size() const noexcept { return n_; }
-    bool empty() const noexcept { return n_ == 0; }
-    Arg operator[](std::uint32_t i) const noexcept { return Arg{first_[i]}; }
-
-    class iterator {
-       public:
-        using iterator_category = std::forward_iterator_tag;
-        using value_type = Arg;
-        using difference_type = std::ptrdiff_t;
-        using pointer = const Arg*;
-        using reference = const Arg&;
-
-        explicit iterator(const dftu_arg* p) noexcept : p_(p) {}
-        const Arg& operator*() const noexcept {
-            cur_ = Arg{*p_};
-            return cur_;
-        }
-        const Arg* operator->() const noexcept {
-            cur_ = Arg{*p_};
-            return &cur_;
-        }
-        iterator& operator++() noexcept {
-            ++p_;
-            return *this;
-        }
-        iterator operator++(int) noexcept {
-            iterator t = *this;
-            ++p_;
-            return t;
-        }
-        bool operator==(const iterator& o) const noexcept { return p_ == o.p_; }
-        bool operator!=(const iterator& o) const noexcept { return p_ != o.p_; }
-
-       private:
-        const dftu_arg* p_;
-        mutable Arg cur_;
-    };
-
-    iterator begin() const noexcept { return iterator{first_}; }
-    iterator end() const noexcept { return iterator{first_ + n_}; }
-
-   private:
-    const dftu_arg* first_;
-    std::uint32_t n_;
-};
-
-/// Non-owning typed view over one parsed event in a batch. Zero-copy and cheap
-/// to copy; valid only for the on_batch call that delivered the batch, since it
-/// borrows the underlying dftu_event. String-valued fields are interned ids;
-/// resolve them to bytes through a Host.
+/// Non-owning typed view over one row of a dftu_dataframe batch: a batch
+/// pointer plus a row index. Zero-copy and cheap to copy; valid only for the
+/// on_batch call that delivered the batch. Every fixed-column accessor reads a
+/// pointer the owning Batch resolved once at construction, so a `for (Event e
+/// : batch)` loop touches no column-name lookup and allocates nothing.
 class Event {
    public:
     Event() = default;
-    explicit Event(const dftu_event& e) noexcept : e_(&e) {}
+    Event(const Batch* b, std::int64_t row) noexcept : b_(b), row_(row) {}
 
-    std::uint64_t pid() const noexcept { return e_->pid; }
-    std::uint64_t tid() const noexcept { return e_->tid; }
-    std::uint64_t ts() const noexcept { return e_->ts; }
-    std::uint64_t dur() const noexcept { return e_->dur; }
-    /// Whether the event carried an explicit duration (a complete-phase event).
-    bool has_dur() const noexcept { return e_->has_dur != 0; }
-    Phase phase() const noexcept {
-        return static_cast<Phase>(static_cast<dftu_phase>(e_->phase));
+    // Forward-iterator interface so Batch::begin()/end() can both return
+    // Event and a range-for works directly over it.
+    const Event& operator*() const noexcept { return *this; }
+    Event& operator++() noexcept {
+        ++row_;
+        return *this;
     }
+    bool operator==(const Event& o) const noexcept { return row_ == o.row_; }
+    bool operator!=(const Event& o) const noexcept { return row_ != o.row_; }
 
-    /// Interned id of a string field; absent() (DFTU_STR_NONE) when not
-    /// present.
-    StrId cat_id() const noexcept { return StrId{e_->cat}; }
-    StrId name_id() const noexcept { return StrId{e_->name}; }
-    StrId fhash_id() const noexcept { return StrId{e_->fhash}; }
-    StrId hhash_id() const noexcept { return StrId{e_->hhash}; }
+    std::int64_t row() const noexcept { return row_; }
+    const dftu_dataframe* frame() const noexcept;
 
-    /// Whether a string field was present on the event, so a plugin never
-    /// compares an id against the raw DFTU_STR_NONE sentinel.
-    bool has_cat() const noexcept { return e_->cat != DFTU_STR_NONE; }
-    bool has_name() const noexcept { return e_->name != DFTU_STR_NONE; }
-    bool has_fhash() const noexcept { return e_->fhash != DFTU_STR_NONE; }
-    bool has_hhash() const noexcept { return e_->hhash != DFTU_STR_NONE; }
+    std::uint64_t pid() const noexcept;
+    std::uint64_t tid() const noexcept;
+    std::uint64_t ts() const noexcept;
+    std::uint64_t dur() const noexcept;
+    /// Whether the event carries a meaningful duration; the row-fold engine
+    /// does not track a per-row null for `dur`, so this is phase() ==
+    /// Complete rather than a true null check.
+    bool has_dur() const noexcept;
+    Phase phase() const noexcept;
 
-    /// Resolve a string field to its bytes via `h`; empty when absent. The
-    /// returned view is stable for the whole scan.
-    std::string_view cat(const Host& h) const { return h.str(cat_id()); }
-    std::string_view name(const Host& h) const { return h.str(name_id()); }
-    std::string_view fhash(const Host& h) const { return h.str(fhash_id()); }
-    std::string_view hhash(const Host& h) const { return h.str(hhash_id()); }
+    bool has_cat() const noexcept;
+    bool has_name() const noexcept;
+    bool has_fhash() const noexcept;
+    bool has_hhash() const noexcept;
 
-    /// Args are present only when the plugin declared DFTU_NEED_ARGS; otherwise
-    /// arg_count() is 0. The views are borrowed for the current on_batch call.
-    std::uint32_t arg_count() const noexcept { return e_->arg_count; }
-    ArgRange args() const noexcept { return ArgRange{e_->args, e_->arg_count}; }
-    Arg arg(std::uint32_t i) const noexcept { return Arg{e_->args[i]}; }
+    /// Zero-copy views into the frame's string buffers; empty when absent.
+    std::string_view cat() const noexcept;
+    std::string_view name() const noexcept;
+    std::string_view fhash() const noexcept;
+    std::string_view hhash() const noexcept;
 
-    /// First arg whose interned key matches `key`, or nullopt if none (and when
-    /// args were not requested). Keys are flattened to dotted paths.
-    std::optional<Arg> find_arg(StrId key) const noexcept {
-        for (std::uint32_t i = 0; i < e_->arg_count; ++i)
-            if (e_->args[i].key == key.raw()) return Arg{e_->args[i]};
-        return std::nullopt;
-    }
-
-    /// Find an arg by its flattened dotted key, given either as one string
-    /// ("args.ret") or as path components joined with '.' ("args", "ret").
-    /// Interns the composed key on `h` and matches by id; nullopt if absent.
-    template <class First, class... Rest>
-    std::optional<Arg> find_arg(const Host& h, First&& first,
-                                Rest&&... rest) const {
-        std::string key{std::string_view{std::forward<First>(first)}};
-        (
-            [&](std::string_view p) {
-                key.push_back('.');
-                key.append(p.data(), p.size());
-            }(std::string_view{std::forward<Rest>(rest)}),
-            ...);
-        return find_arg(h.intern(key));
-    }
-
-    const dftu_event& raw() const noexcept { return *e_; }
+    /// A dyn (per-key) arg column, present when any event in the batch carried
+    /// that flattened dotted key ("args.ret", or the bare key "ret").
+    bool has_arg(std::string_view key) const noexcept;
+    bool arg_is_i64(std::string_view key) const noexcept;
+    bool arg_is_f64(std::string_view key) const noexcept;
+    bool arg_is_str(std::string_view key) const noexcept;
+    std::int64_t arg_i64(std::string_view key) const noexcept;
+    double arg_f64(std::string_view key) const noexcept;
+    std::string_view arg_str(std::string_view key) const noexcept;
 
    private:
-    const dftu_event* e_ = nullptr;
+    const Batch* b_ = nullptr;
+    std::int64_t row_ = 0;
 };
 
-/// Non-owning view over a dftu_batch that yields typed Events for range-based
-/// iteration: `for (const Event& e : batch)`. Lightweight value type; valid
-/// only for the on_batch call that delivered the batch.
+/// Non-owning, zero-copy cursor over a dftu_dataframe batch: resolves the
+/// fixed columns (cat/name/fhash/hhash/pid/tid/ts/dur/ph) and every dyn arg
+/// column once, in the constructor, so a `for (Event e : batch)` loop is a
+/// direct memory read per field with no per-row column-name lookup. Valid only
+/// for the on_batch call that delivered `df`.
 class Batch {
    public:
-    explicit Batch(const dftu_batch& b) noexcept : b_(&b) {}
+    explicit Batch(const dftu_dataframe* df) noexcept;
+    ~Batch();
+    Batch(Batch&&) noexcept;
+    Batch& operator=(Batch&&) noexcept;
+    Batch(const Batch&) = delete;
+    Batch& operator=(const Batch&) = delete;
 
-    std::uint32_t size() const noexcept { return b_->count; }
-    bool empty() const noexcept { return b_->count == 0; }
-    Event operator[](std::uint32_t i) const noexcept {
-        return Event{b_->events[i]};
-    }
+    std::int64_t size() const noexcept { return n_; }
+    bool empty() const noexcept { return n_ == 0; }
 
-    /// Forward iterator over the batch. operator* returns a reference to a
-    /// cached Event owned by the iterator, so `for (const Event& e : batch)`
-    /// binds to a real object rather than a temporary.
-    class iterator {
-       public:
-        using iterator_category = std::forward_iterator_tag;
-        using value_type = Event;
-        using difference_type = std::ptrdiff_t;
-        using pointer = const Event*;
-        using reference = const Event&;
+    Event begin() const noexcept { return Event{this, 0}; }
+    Event end() const noexcept { return Event{this, n_}; }
+    Event operator[](std::int64_t i) const noexcept { return Event{this, i}; }
 
-        explicit iterator(const dftu_event* p) noexcept : p_(p) {}
-        const Event& operator*() const noexcept {
-            cur_ = Event{*p_};
-            return cur_;
-        }
-        const Event* operator->() const noexcept {
-            cur_ = Event{*p_};
-            return &cur_;
-        }
-        iterator& operator++() noexcept {
-            ++p_;
-            return *this;
-        }
-        iterator operator++(int) noexcept {
-            iterator t = *this;
-            ++p_;
-            return t;
-        }
-        bool operator==(const iterator& o) const noexcept { return p_ == o.p_; }
-        bool operator!=(const iterator& o) const noexcept { return p_ != o.p_; }
-
-       private:
-        const dftu_event* p_;
-        mutable Event cur_;
-    };
-
-    iterator begin() const noexcept { return iterator{b_->events}; }
-    iterator end() const noexcept { return iterator{b_->events + b_->count}; }
-
-    const dftu_batch& raw() const noexcept { return *b_; }
+    const dftu_dataframe* raw() const noexcept { return df_; }
 
    private:
-    const dftu_batch* b_;
+    friend class Event;
+
+    static detail::ColBuf resolve(const dftu_dataframe* df, const char* name);
+    static bool is_str(const detail::ColBuf& c) noexcept {
+        return c.type == DFTU_TYPE_STRING;
+    }
+    static std::string_view str_at(const detail::ColBuf& c,
+                                   std::int64_t row) noexcept {
+        if (!c.data || !c.offsets || dftu_series_is_null(c.handle, row))
+            return {};
+        const char* base = static_cast<const char*>(c.data);
+        return {base + c.offsets[row],
+                static_cast<std::size_t>(c.offsets[row + 1] - c.offsets[row])};
+    }
+    const detail::ColBuf* find_dyn(std::string_view key) const noexcept;
+
+    void reset() noexcept;
+
+    const dftu_dataframe* df_ = nullptr;
+    std::int64_t n_ = 0;
+    detail::ColBuf cat_, name_, fhash_, hhash_, pid_, tid_, ts_, dur_, ph_;
+    std::vector<std::pair<std::string, detail::ColBuf>> dyn_;
 };
+
+inline const dftu_dataframe* Event::frame() const noexcept { return b_->raw(); }
+inline std::uint64_t Event::pid() const noexcept {
+    return b_->pid_.data
+               ? static_cast<const std::uint64_t*>(b_->pid_.data)[row_]
+               : 0;
+}
+inline std::uint64_t Event::tid() const noexcept {
+    return b_->tid_.data
+               ? static_cast<const std::uint64_t*>(b_->tid_.data)[row_]
+               : 0;
+}
+inline std::uint64_t Event::ts() const noexcept {
+    return b_->ts_.data ? static_cast<const std::uint64_t*>(b_->ts_.data)[row_]
+                        : 0;
+}
+inline std::uint64_t Event::dur() const noexcept {
+    return b_->dur_.data
+               ? static_cast<const std::uint64_t*>(b_->dur_.data)[row_]
+               : 0;
+}
+inline Phase Event::phase() const noexcept {
+    if (!b_->ph_.data) return Phase::Unknown;
+    return static_cast<Phase>(static_cast<dftu_phase>(
+        static_cast<const std::int64_t*>(b_->ph_.data)[row_]));
+}
+inline bool Event::has_dur() const noexcept {
+    return phase() == Phase::Complete;
+}
+inline bool Event::has_cat() const noexcept { return b_->cat_.data != nullptr; }
+inline bool Event::has_name() const noexcept {
+    return b_->name_.data != nullptr;
+}
+inline bool Event::has_fhash() const noexcept {
+    return b_->fhash_.data != nullptr;
+}
+inline bool Event::has_hhash() const noexcept {
+    return b_->hhash_.data != nullptr;
+}
+inline std::string_view Event::cat() const noexcept {
+    return Batch::str_at(b_->cat_, row_);
+}
+inline std::string_view Event::name() const noexcept {
+    return Batch::str_at(b_->name_, row_);
+}
+inline std::string_view Event::fhash() const noexcept {
+    return Batch::str_at(b_->fhash_, row_);
+}
+inline std::string_view Event::hhash() const noexcept {
+    return Batch::str_at(b_->hhash_, row_);
+}
+inline bool Event::has_arg(std::string_view key) const noexcept {
+    return b_->find_dyn(key) != nullptr;
+}
+inline bool Event::arg_is_i64(std::string_view key) const noexcept {
+    const detail::ColBuf* c = b_->find_dyn(key);
+    return c && c->type == DFTU_TYPE_INT64;
+}
+inline bool Event::arg_is_f64(std::string_view key) const noexcept {
+    const detail::ColBuf* c = b_->find_dyn(key);
+    return c && c->type == DFTU_TYPE_FLOAT64;
+}
+inline bool Event::arg_is_str(std::string_view key) const noexcept {
+    const detail::ColBuf* c = b_->find_dyn(key);
+    return c && c->type == DFTU_TYPE_STRING;
+}
+inline std::int64_t Event::arg_i64(std::string_view key) const noexcept {
+    const detail::ColBuf* c = b_->find_dyn(key);
+    if (!c || c->type != DFTU_TYPE_INT64 || !c->data ||
+        dftu_series_is_null(c->handle, row_))
+        return 0;
+    return static_cast<const std::int64_t*>(c->data)[row_];
+}
+inline double Event::arg_f64(std::string_view key) const noexcept {
+    const detail::ColBuf* c = b_->find_dyn(key);
+    if (!c || c->type != DFTU_TYPE_FLOAT64 || !c->data ||
+        dftu_series_is_null(c->handle, row_))
+        return 0.0;
+    return static_cast<const double*>(c->data)[row_];
+}
+inline std::string_view Event::arg_str(std::string_view key) const noexcept {
+    const detail::ColBuf* c = b_->find_dyn(key);
+    return c ? Batch::str_at(*c, row_) : std::string_view{};
+}
+
+inline detail::ColBuf Batch::resolve(const dftu_dataframe* df,
+                                     const char* name) {
+    detail::ColBuf c;
+    dftu_series* col = dftu_dataframe_column(df, name);
+    if (!col) return c;
+    c.handle = col;
+    c.type = dftu_series_type(col);
+    c.data = dftu_series_data(col);
+    c.offsets = dftu_series_offsets(col);
+    return c;
+}
+
+inline Batch::Batch(const dftu_dataframe* df) noexcept
+    : df_(df), n_(df ? dftu_dataframe_num_rows(df) : 0) {
+    if (!df_) return;
+    cat_ = resolve(df_, "cat");
+    name_ = resolve(df_, "name");
+    fhash_ = resolve(df_, "fhash");
+    hhash_ = resolve(df_, "hhash");
+    pid_ = resolve(df_, "pid");
+    tid_ = resolve(df_, "tid");
+    ts_ = resolve(df_, "ts");
+    dur_ = resolve(df_, "dur");
+    ph_ = resolve(df_, "ph");
+    const std::int32_t ncols = dftu_dataframe_num_columns(df_);
+    static constexpr std::string_view ARGS_PREFIX = "args.";
+    for (std::int32_t i = 0; i < ncols; ++i) {
+        const char* n = dftu_dataframe_column_name(df_, i);
+        if (!n) continue;
+        std::string_view nv{n};
+        if (nv.substr(0, ARGS_PREFIX.size()) != ARGS_PREFIX) continue;
+        std::string bare(nv.substr(ARGS_PREFIX.size()));
+        dyn_.emplace_back(std::move(bare), resolve(df_, n));
+    }
+}
+
+inline void Batch::reset() noexcept {
+    if (cat_.handle) dftu_series_free(cat_.handle);
+    if (name_.handle) dftu_series_free(name_.handle);
+    if (fhash_.handle) dftu_series_free(fhash_.handle);
+    if (hhash_.handle) dftu_series_free(hhash_.handle);
+    if (pid_.handle) dftu_series_free(pid_.handle);
+    if (tid_.handle) dftu_series_free(tid_.handle);
+    if (ts_.handle) dftu_series_free(ts_.handle);
+    if (dur_.handle) dftu_series_free(dur_.handle);
+    if (ph_.handle) dftu_series_free(ph_.handle);
+    for (auto& [name, c] : dyn_)
+        if (c.handle) dftu_series_free(c.handle);
+    dyn_.clear();
+}
+
+inline Batch::~Batch() { reset(); }
+
+inline Batch::Batch(Batch&& o) noexcept
+    : df_(o.df_),
+      n_(o.n_),
+      cat_(o.cat_),
+      name_(o.name_),
+      fhash_(o.fhash_),
+      hhash_(o.hhash_),
+      pid_(o.pid_),
+      tid_(o.tid_),
+      ts_(o.ts_),
+      dur_(o.dur_),
+      ph_(o.ph_),
+      dyn_(std::move(o.dyn_)) {
+    o.cat_ = o.name_ = o.fhash_ = o.hhash_ = {};
+    o.pid_ = o.tid_ = o.ts_ = o.dur_ = o.ph_ = {};
+    o.dyn_.clear();
+}
+inline Batch& Batch::operator=(Batch&& o) noexcept {
+    if (this != &o) {
+        reset();
+        df_ = o.df_;
+        n_ = o.n_;
+        cat_ = o.cat_;
+        name_ = o.name_;
+        fhash_ = o.fhash_;
+        hhash_ = o.hhash_;
+        pid_ = o.pid_;
+        tid_ = o.tid_;
+        ts_ = o.ts_;
+        dur_ = o.dur_;
+        ph_ = o.ph_;
+        dyn_ = std::move(o.dyn_);
+        o.cat_ = o.name_ = o.fhash_ = o.hhash_ = {};
+        o.pid_ = o.tid_ = o.ts_ = o.dur_ = o.ph_ = {};
+        o.dyn_.clear();
+    }
+    return *this;
+}
+
+inline const detail::ColBuf* Batch::find_dyn(
+    std::string_view key) const noexcept {
+    for (const auto& [name, c] : dyn_)
+        if (name == key) return &c;
+    return nullptr;
+}
 
 template <class Fn>
 inline int Host::trace_read(const char* path, Fn&& fn) const {
     auto thunk = [](const void* item, void* ud) {
-        const dftu_event& ev = *static_cast<const dftu_event*>(item);
+        const auto* df = static_cast<const dftu_dataframe*>(item);
         auto& f = *static_cast<std::decay_t<Fn>*>(ud);
-        if constexpr (std::is_invocable_v<std::decay_t<Fn>&, const Event&>)
-            f(Event{ev});
+        if constexpr (std::is_invocable_v<std::decay_t<Fn>&, const Batch&>)
+            f(Batch{df});
         else
-            f(ev);
+            f(df);
     };
     return trace_read(
         path, thunk,
@@ -867,10 +942,10 @@ class Query {
 
     explicit operator bool() const noexcept { return q_ != nullptr; }
 
-    bool matches(const dftu_event& e) const {
-        return host_.query_matches(q_, e);
+    bool matches(const dftu_dataframe* df, std::int64_t row) const {
+        return host_.query_matches(q_, df, row);
     }
-    bool matches(const Event& e) const { return matches(e.raw()); }
+    bool matches(const Event& e) const { return matches(e.frame(), e.row()); }
 
     /// Borrowed handle; the host retains ownership. Null if unsupported.
     dftu_query* raw() const noexcept { return q_; }
@@ -914,15 +989,10 @@ class TraceWriter {
 
     explicit operator bool() const noexcept { return w_ != nullptr; }
 
-    int write(std::span<const dftu_event> evs) const {
-        return w_ ? host_.trace_write(w_, evs.data(),
-                                      static_cast<std::uint32_t>(evs.size()))
-                  : -1;
+    int write(const dftu_dataframe* df) const {
+        return w_ ? host_.trace_write(w_, df) : -1;
     }
-    int write(const Batch& b) const {
-        return write(
-            std::span<const dftu_event>{b.raw().events, b.raw().count});
-    }
+    int write(const Batch& b) const { return write(b.raw()); }
     /// Idempotent: a no-op returning 0 once already closed.
     int close() {
         int rc = w_ ? host_.trace_close(w_) : 0;

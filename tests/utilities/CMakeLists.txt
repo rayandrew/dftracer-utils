@@ -366,18 +366,11 @@ set(cabi_sources plugins/test_plugin_c_abi.cpp
                  plugins/trace_abi_c_consumer.c
                  plugins/io_abi_c_consumer.c
                  plugins/writer_abi_c_consumer.c)
-if(DFTRACER_UTILS_ENABLE_ARROW)
-  list(APPEND cabi_sources plugins/arrow_abi_c_consumer.c)
-endif()
 add_executable(${cabi_target} ${cabi_sources})
 target_include_directories(${cabi_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(${cabi_target} PRIVATE doctest::doctest dftracer_utils
                                              testing_utilities)
 target_enable_coroutine(${cabi_target})
-if(DFTRACER_UTILS_ENABLE_ARROW)
-  target_compile_definitions(${cabi_target} PRIVATE DFTU_TEST_HAS_ARROW)
-  link_nanoarrow(${cabi_target} STATIC)
-endif()
 set_target_properties(${cabi_target} PROPERTIES OUTPUT_NAME test_plugin_c_abi
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins")
 add_test(NAME utilities/plugins/test_plugin_c_abi COMMAND ${cabi_target})

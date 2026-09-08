@@ -13,18 +13,13 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-static uint32_t needs(void* self) {
-    (void)self;
-    return 0;
-}
-
 static void* make_slice(void* self) {
     (void)self;
     return calloc(1, 1);
 }
 
-static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
-                                   const dftu_host* host) {
+static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
+                           const dftu_host* host) {
     const dftu_ext_agg* agg =
         (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
     static const char* const keys[1] = {"pid"};
@@ -62,14 +57,12 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     g_plugin.self = NULL;
-    g_plugin.needs = needs;
     g_plugin.plan_query = NULL;
     g_plugin.make_slice = make_slice;
-    g_plugin.on_batch = NULL;
     g_plugin.merge = merge;
     g_plugin.on_finalize = on_finalize;
     g_plugin.destroy_slice = destroy_slice;
     g_plugin.destroy = destroy;
-    g_plugin.on_batch_columns = on_batch_columns;
+    g_plugin.on_batch = on_batch;
     return &g_plugin;
 }

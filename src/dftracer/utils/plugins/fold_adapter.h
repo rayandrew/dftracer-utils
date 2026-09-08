@@ -156,9 +156,9 @@ class PluginFold : public trace::views::detail::Fold {
     PluginFold& operator=(const PluginFold&) = delete;
 
     bool accepts(const ScanShape&) const override { return true; }
-    bool needs_args() const override {
-        return (plugin_->needs(plugin_->self) & DFTU_NEED_ARGS) != 0;
-    }
+    // The batch materializes every flat arg as a dyn column regardless (see
+    // step()), so a plugin fold always needs args extracted.
+    bool needs_args() const override { return true; }
 
     std::unique_ptr<Fold> slice() const override {
         return std::make_unique<PluginFold>(plugin_, *intern_, results_,
@@ -250,17 +250,17 @@ class PluginFold : public trace::views::detail::Fold {
 
     // Valid until this PluginFold is destroyed; null on parse error.
     ::dftu_query* compile_query(const char* src, std::uint32_t len);
-    int match_query(const query::Query& q, const dftu_event& e);
+    int match_query(const query::Query& q, const dftu_dataframe* df,
+                    std::int64_t row);
 
    private:
     using Query = query::Query;
     using ValueMap = query::ValueMap;
     using FoldEvent = trace::views::detail::FoldEvent;
 
+    // This plugin's own plan_query, finer than the union prune (which only
+    // skips whole chunks no plugin wants); filters events within a batch.
     bool passes_query(const FoldEvent& ev);
-    // Materialize this batch's events into a DataFrame and drive the plugin's
-    // on_batch_columns seam (the vectorized-fold path).
-    void step_columns(const FoldBatch& batch);
     // Publish this fold's merged accumulators into the shared registry so a
     // later plugin's agg_result can find them.
     void publish_aggs();
@@ -282,10 +282,6 @@ class PluginFold : public trace::views::detail::Fold {
     // stable and lets the header forward-declare AggAccum.
     StableRegistry<std::unique_ptr<AggAccum>> aggs_;
 
-    // Backs the dftu_batch passed to a lazy async on_batch; must outlive
-    // pending_, so it lives here not on step()'s stack.
-    dftu_batch cbatch_{};
-
     // unique_ptr keeps each CoroTask address stable so when_all/then can
     // reference them; cleared once the awaited root completes.
     std::vector<std::unique_ptr<coro::CoroTask<void>>> task_arena_;
@@ -294,17 +290,18 @@ class PluginFold : public trace::views::detail::Fold {
     std::vector<std::unique_ptr<PluginWriter>> writers_;
     std::vector<std::unique_ptr<PluginTraceWriter>> trace_writers_;
 
-    // Unset means deliver every event.
+    // This plugin's own plan_query, compiled once from the C string the
+    // plugin's dftu_plugin::plan_query returns. Unset means deliver every
+    // event.
     std::optional<Query> query_;
     ValueMap qmap_;
 
+    // dftu_ext_query::query_compile/query_matches: queries a plugin compiles
+    // itself, independent of plan_query above.
     std::deque<Query> compiled_queries_;
     ValueMap match_qmap_;
 
-    std::vector<std::size_t> kept_scratch_;
-    std::vector<dftu_event> event_scratch_;
-    std::vector<dftu_arg> arg_scratch_;
-    std::vector<FoldEvent> col_scratch_;  // vectorized-fold materialization
+    std::vector<FoldEvent> col_scratch_;  // batch materialization
 };
 
 }  // namespace dftracer::utils::plugins

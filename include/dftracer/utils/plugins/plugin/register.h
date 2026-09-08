@@ -182,14 +182,6 @@ class Config {
 namespace detail {
 
 template <class Slice>
-constexpr std::uint32_t slice_needs() {
-    if constexpr (requires { Slice::needs; })
-        return Slice::needs;
-    else
-        return 0;
-}
-
-template <class Slice>
 struct Holder {
     dftu_plugin vt{};
     Config config;
@@ -201,26 +193,15 @@ Holder<Slice>* holder_of(void* self) {
     return static_cast<Holder<Slice>*>(self);
 }
 
-/// A Slice whose async on_batch takes the ergonomic Batch view.
-template <class Slice>
-concept AsyncBatchView = requires(Slice& s, const Batch& b, Host h) {
-    { s.on_batch(b, h) } -> std::same_as<Task>;
-};
-
-/// A Slice whose async on_batch takes the raw C dftu_batch (legacy signature).
-template <class Slice>
-concept AsyncBatch = requires(Slice& s, const dftu_batch& b, Host h) {
-    { s.on_batch(b, h) } -> std::same_as<Task>;
-};
-
-/// A Slice whose synchronous step takes the ergonomic Batch view.
+/// A Slice whose synchronous step takes the ergonomic Batch cursor over the
+/// batch's dftu_dataframe columns.
 template <class Slice>
 concept BatchViewStep =
     requires(Slice& s, const Batch& b, Host h) { s.step(b, h); };
 
-/// A Slice whose synchronous step takes a column batch. Such a fold is wired to
-/// the vectorized seam (dftu_plugin::on_batch_columns) and never sees rows; it
-/// is the shape that feeds Host::agg, whose accumulator takes column batches.
+/// A Slice whose synchronous step takes the raw dftu_dataframe batch, the
+/// shape that feeds Host::agg directly (its accumulator takes column
+/// batches).
 template <class Slice>
 concept ColumnStep =
     requires(Slice& s, const dftu_dataframe* df, Host h) { s.step(df, h); };
@@ -299,8 +280,8 @@ const char* const* name_list_thunk(void*) {
 }  // namespace detail
 
 /** Build a dftu_plugin from a Slice providing Slice(const Config&), merge, and
-   either sync step/finalize or a Task-returning on_batch/on_finalize coroutine,
-   plus optionally `static constexpr uint32_t needs`. To take part in the fold
+   either a synchronous step(const Batch&, Host) / step(const dftu_dataframe*,
+   Host) and a sync or Task-returning on_finalize. To take part in the fold
    ordering a Slice may also declare `static ... provides()` and `static ...
    consumes()`, each a range of const char* port/accumulator names outliving the
    plugin; make_plugin wires them to dftu_plugin::provides / ::consumes.
@@ -315,10 +296,6 @@ dftu_plugin* make_plugin(const dftu_value* config) {
     vt.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     vt.self = hd;
 
-    vt.needs = [](void*) -> std::uint32_t {
-        return detail::slice_needs<Slice>();
-    };
-
     vt.plan_query = [](void* self) -> const char* {
         auto* h = detail::holder_of<Slice>(self);
         return h->plan.empty() ? nullptr : h->plan.c_str();
@@ -332,43 +309,25 @@ dftu_plugin* make_plugin(const dftu_value* config) {
         }
     };
 
-    // A plugin fills exactly one of the two batch seams; leave the other null.
-    if constexpr (detail::ColumnStep<Slice>) {
-        vt.on_batch_columns = [](void* slice, const dftu_dataframe* df,
-                                 const dftu_host* host) -> dftu_task* {
-            try {
-                static_cast<Slice*>(slice)->step(df, Host{host});
-            } catch (const std::exception& e) {
-                Host{host}.log(DFTU_LOG_ERROR, e.what());
-            } catch (...) {
-                Host{host}.log(DFTU_LOG_ERROR, "plugin step threw");
+    // dftu_plugin::on_batch is synchronous only (must return NULL); the host
+    // frees the dftu_dataframe right after the call.
+    vt.on_batch = [](void* slice, const dftu_dataframe* df,
+                     const dftu_host* host) -> dftu_task* {
+        try {
+            Slice* sl = static_cast<Slice*>(slice);
+            Host h{host};
+            if constexpr (detail::BatchViewStep<Slice>) {
+                sl->step(Batch{df}, h);
+            } else {
+                sl->step(df, h);
             }
-            return nullptr;
-        };
-    } else {
-        vt.on_batch = [](void* slice, const dftu_batch* b,
-                         const dftu_host* host) -> dftu_task* {
-            try {
-                Slice* sl = static_cast<Slice*>(slice);
-                Host h{host};
-                if constexpr (detail::AsyncBatchView<Slice>) {
-                    return detail::drive_coro<Slice>(
-                        host, sl->on_batch(Batch{*b}, h));
-                } else if constexpr (detail::AsyncBatch<Slice>) {
-                    return detail::drive_coro<Slice>(host, sl->on_batch(*b, h));
-                } else if constexpr (detail::BatchViewStep<Slice>) {
-                    sl->step(Batch{*b}, h);
-                } else {
-                    sl->step(*b, h);
-                }
-            } catch (const std::exception& e) {
-                Host{host}.log(DFTU_LOG_ERROR, e.what());
-            } catch (...) {
-                Host{host}.log(DFTU_LOG_ERROR, "plugin step threw");
-            }
-            return nullptr;
-        };
-    }
+        } catch (const std::exception& e) {
+            Host{host}.log(DFTU_LOG_ERROR, e.what());
+        } catch (...) {
+            Host{host}.log(DFTU_LOG_ERROR, "plugin step threw");
+        }
+        return nullptr;
+    };
 
     vt.merge = [](void* into, void* other) {
         try {

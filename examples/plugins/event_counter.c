@@ -6,6 +6,7 @@
  * Run:   dftracer_run -d ./traces --plugin ./event_counter.so
  */
 
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/abi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,29 +17,37 @@ typedef struct {
     uint64_t max_dur;
 } Counter;
 
-static uint32_t needs(void* self) {
-    (void)self;
-    return 0;
-}
-
 static void* make_slice(void* self) {
     (void)self;
     return calloc(1, sizeof(Counter));
 }
 
-static dftu_task* on_batch(void* slice, const dftu_batch* b,
+static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {
     Counter* c = (Counter*)slice;
-    uint32_t i;
+    int64_t n = dftu_dataframe_num_rows(df);
+    dftu_series* dur_col = dftu_dataframe_column(df, "dur");
+    dftu_series* ph_col = dftu_dataframe_column(df, "ph");
+    const uint64_t* dur = NULL;
+    const int64_t* ph = NULL;
+    int64_t i;
     (void)host;
-    for (i = 0; i < b->count; ++i) {
-        const dftu_event* e = &b->events[i];
+    if (dur_col && dftu_series_type(dur_col) == DFTU_TYPE_UINT64)
+        dur = (const uint64_t*)dftu_series_data(dur_col);
+    if (ph_col && dftu_series_type(ph_col) == DFTU_TYPE_INT64)
+        ph = (const int64_t*)dftu_series_data(ph_col);
+    for (i = 0; i < n; ++i) {
         c->events++;
-        if (e->has_dur) {
+        /* Mirrors plugins::Event::has_dur(): the row-fold engine keeps no
+         * per-row null for `dur`, so "has a duration" is phase() == Complete,
+         * read off the `ph` column (a DFTU_PH_* code). */
+        if (dur && ph && ph[i] == DFTU_PH_COMPLETE) {
             c->with_dur++;
-            if (e->dur > c->max_dur) c->max_dur = e->dur;
+            if (dur[i] > c->max_dur) c->max_dur = dur[i];
         }
     }
+    if (dur_col) dftu_series_free(dur_col);
+    if (ph_col) dftu_series_free(ph_col);
     return NULL; /* synchronous */
 }
 
@@ -71,7 +80,6 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(const dftu_value* config) {
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     g_plugin.self = NULL;
-    g_plugin.needs = needs;
     g_plugin.plan_query = NULL;
     g_plugin.make_slice = make_slice;
     g_plugin.on_batch = on_batch;

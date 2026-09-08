@@ -54,7 +54,7 @@ namespace {
 
 struct TrivialSlice {
     explicit TrivialSlice(const dftracer::utils::plugins::Config&) {}
-    void step(const dftu_batch&, dftracer::utils::plugins::Host) {}
+    void step(const dftu_dataframe*, dftracer::utils::plugins::Host) {}
     void merge(TrivialSlice&) {}
     void finalize(dftracer::utils::plugins::Host) {}
 };
@@ -215,126 +215,126 @@ TEST_CASE("plugin cxx: agg:: factories fill only the fields their op takes") {
     CHECK(std::string(act.by) == "dur");
 }
 
+namespace {
+// A Slice that checks the Batch/Event cursor from inside step(), since a
+// dftu_dataframe batch is valid only for the on_batch call that delivers it.
+struct BatchCheckSlice {
+    std::uint32_t seen = 0;
+    explicit BatchCheckSlice(const dftracer::utils::plugins::Config&) {}
+    void step(const dftracer::utils::plugins::Batch& b,
+              dftracer::utils::plugins::Host) {
+        CHECK(b.size() == 3);
+        CHECK(!b.empty());
+
+        std::uint32_t i = 0;
+        std::uint64_t pid_sum = 0, dur_sum = 0;
+        for (const dftracer::utils::plugins::Event& e : b) {
+            CHECK(e.pid() == 100 + i);
+            CHECK(e.tid() == 200 + i);
+            CHECK(e.ts() == 1000 + i);
+            CHECK(e.dur() == 10 * (i + 1));
+            CHECK(e.has_dur());
+            CHECK(e.phase() == dftracer::utils::plugins::Phase::Complete);
+            CHECK(e.cat() == "POSIX");
+            CHECK(e.name() == "read");
+            CHECK(!e.has_arg("ret"));
+            pid_sum += e.pid();
+            dur_sum += e.dur();
+            ++i;
+        }
+        CHECK(i == 3);
+        CHECK(pid_sum == 100 + 101 + 102);
+        CHECK(dur_sum == 10 + 20 + 30);
+
+        // operator[] agrees with iteration.
+        CHECK(b[0].pid() == 100);
+        CHECK(b[2].dur() == 30);
+        seen += static_cast<std::uint32_t>(b.size());
+    }
+    void merge(BatchCheckSlice& o) { seen += o.seen; }
+    void finalize(dftracer::utils::plugins::Host) {}
+};
+}  // namespace
+
 TEST_CASE("plugin cxx: Batch view iterates typed Events") {
-    HostFixture fx;
-    dftracer::utils::plugins::Host h{&fx.host()};
-    dftu_str cat = fx.intern_str("POSIX");
-    dftu_str name = fx.intern_str("read");
+    StringIntern intern;
+    dftu_plugin* p =
+        dftracer::utils::plugins::make_plugin<BatchCheckSlice>(nullptr);
+    {
+        // fold must be destroyed (it calls plugin_->destroy_slice) before
+        // p->destroy frees the plugin's own storage, which the vtable pointed
+        // to by `p` lives inside of.
+        PluginFold fold(p, intern);
 
-    const std::uint32_t N = 3;
-    std::vector<dftu_event> evs(N);
-    for (std::uint32_t i = 0; i < N; ++i) {
-        evs[i] = {};
-        evs[i].cat = cat;
-        evs[i].name = name;
-        evs[i].pid = 100 + i;
-        evs[i].tid = 200 + i;
-        evs[i].ts = 1000 + i;
-        evs[i].dur = 10 * (i + 1);
-        evs[i].phase = DFTU_PH_COMPLETE;
-        evs[i].has_dur = 1;
+        const std::uint32_t N = 3;
+        std::vector<FoldEvent> evs(N);
+        for (std::uint32_t i = 0; i < N; ++i) {
+            evs[i] = FoldEvent{};
+            evs[i].cat_id = intern.get_or_insert("POSIX");
+            evs[i].name_id = intern.get_or_insert("read");
+            evs[i].pid = 100 + i;
+            evs[i].tid = 200 + i;
+            evs[i].ts = 1000 + i;
+            evs[i].dur = 10 * (i + 1);
+            evs[i].phase = dftracer::utils::trace::RecordPhase::COMPLETE;
+            evs[i].has_dur = true;
+        }
+        ScanUnit unit{};
+        fold.step(FoldBatch{std::span<const FoldEvent>(evs), unit, {}});
     }
-    dftu_batch raw{evs.data(), N};
-    dftracer::utils::plugins::Batch batch{raw};
 
-    CHECK(batch.size() == N);
-    CHECK(!batch.empty());
-
-    std::uint32_t i = 0;
-    std::uint64_t pid_sum = 0, dur_sum = 0;
-    for (const dftracer::utils::plugins::Event& e : batch) {
-        CHECK(e.pid() == 100 + i);
-        CHECK(e.tid() == 200 + i);
-        CHECK(e.ts() == 1000 + i);
-        CHECK(e.dur() == 10 * (i + 1));
-        CHECK(e.has_dur());
-        CHECK(e.phase() == dftracer::utils::plugins::Phase::Complete);
-        CHECK(e.cat_id().raw() == cat);
-        CHECK(e.cat(h) == "POSIX");
-        CHECK(e.name(h) == "read");
-        CHECK(e.arg_count() == 0);
-        pid_sum += e.pid();
-        dur_sum += e.dur();
-        ++i;
-    }
-    CHECK(i == N);
-    CHECK(pid_sum == 100 + 101 + 102);
-    CHECK(dur_sum == 10 + 20 + 30);
-
-    // operator[] agrees with iteration.
-    CHECK(batch[0].pid() == 100);
-    CHECK(batch[2].dur() == 30);
+    if (p->destroy) p->destroy(p->self);
 }
 
-TEST_CASE("plugin cxx: Event args expose typed Arg views and dotted lookup") {
-    HostFixture fx;
-    dftracer::utils::plugins::Host h{&fx.host()};
+TEST_CASE("plugin cxx: Event args expose typed values and dotted lookup") {
+    StringIntern intern;
+    struct ArgCheckSlice {
+        explicit ArgCheckSlice(const dftracer::utils::plugins::Config&) {}
+        void step(const dftracer::utils::plugins::Batch& b,
+                  dftracer::utils::plugins::Host) {
+            const dftracer::utils::plugins::Event& e = b[0];
+            CHECK(e.pid() == 7);
+            CHECK(e.has_arg("ret"));
+            CHECK(e.arg_is_i64("ret"));
+            CHECK(e.arg_i64("ret") == 42);
+            CHECK(e.has_arg("fd"));
+            CHECK(e.arg_is_f64("fd"));
+            CHECK(e.arg_f64("fd") == doctest::Approx(2.5));
+            CHECK(e.has_arg("path"));
+            CHECK(e.arg_is_str("path"));
+            CHECK(e.arg_str("path") == "/tmp/a");
+            CHECK(!e.has_arg("missing"));
+        }
+        void merge(ArgCheckSlice&) {}
+        void finalize(dftracer::utils::plugins::Host) {}
+    };
+    dftu_plugin* p =
+        dftracer::utils::plugins::make_plugin<ArgCheckSlice>(nullptr);
+    {
+        // fold must be destroyed (it calls plugin_->destroy_slice) before
+        // p->destroy frees the plugin's own storage, which the vtable pointed
+        // to by `p` lives inside of.
+        PluginFold fold(p, intern);
 
-    dftu_str k_ret = fx.intern_str("args.ret");
-    dftu_str k_fd = fx.intern_str("args.fd");
-    dftu_str k_path = fx.intern_str("args.path");
-    dftu_str v_path = fx.intern_str("/tmp/a");
-
-    dftu_arg args[3];
-    args[0] = {};
-    args[0].key = k_ret;
-    args[0].kind = DFTU_ARG_I64;
-    args[0].v.i64 = 42;
-    args[1] = {};
-    args[1].key = k_fd;
-    args[1].kind = DFTU_ARG_F64;
-    args[1].v.f64 = 2.5;
-    args[2] = {};
-    args[2].key = k_path;
-    args[2].kind = DFTU_ARG_STR;
-    args[2].v.str = v_path;
-
-    dftu_event ev{};
-    ev.pid = 7;
-    ev.arg_count = 3;
-    ev.args = args;
-    dftu_batch raw{&ev, 1};
-    dftracer::utils::plugins::Batch batch{raw};
-
-    const dftracer::utils::plugins::Event& e = batch[0];
-    CHECK(e.arg_count() == 3);
-    CHECK(e.args().size() == 3);
-
-    // Range-for over typed Arg views, resolved through the Host.
-    std::uint32_t n = 0;
-    for (const dftracer::utils::plugins::Arg& a : e.args()) {
-        CHECK(a.key(h).substr(0, 5) == "args.");
-        ++n;
+        FoldEvent fe;
+        fe.pid = 7;
+        fe.phase = dftracer::utils::trace::RecordPhase::COMPLETE;
+        fe.args.emplace_back(intern.get_or_insert("ret"), std::int64_t{42});
+        fe.args.emplace_back(intern.get_or_insert("fd"), 2.5);
+        fe.args.emplace_back(intern.get_or_insert("path"),
+                             intern.get_or_insert("/tmp/a"));
+        std::vector<FoldEvent> evs = {fe};
+        ScanUnit unit{};
+        fold.step(FoldBatch{std::span<const FoldEvent>(evs), unit, {}});
     }
-    CHECK(n == 3);
 
-    // Dotted lookup as one key or as joined components.
-    auto ret = e.find_arg(h, "args.ret");
-    REQUIRE(ret.has_value());
-    CHECK(ret->is_i64());
-    CHECK(ret->i64() == 42);
-
-    auto ret2 = e.find_arg(h, "args", "ret");
-    REQUIRE(ret2.has_value());
-    CHECK(ret2->i64() == 42);
-
-    auto fd = e.find_arg(h, "args", "fd");
-    REQUIRE(fd.has_value());
-    CHECK(fd->is_f64());
-    CHECK(fd->f64() == doctest::Approx(2.5));
-
-    auto path = e.find_arg(h, "args.path");
-    REQUIRE(path.has_value());
-    CHECK(path->is_str());
-    CHECK(path->str(h) == "/tmp/a");
-
-    CHECK(!e.find_arg(h, "args", "missing").has_value());
+    if (p->destroy) p->destroy(p->self);
 }
 
 namespace {
 
 // A Slice authored against the ergonomic Batch view: range-for over typed
-// Events, no hand indexing of the C dftu_batch.
+// Events, no hand indexing of the raw dftu_dataframe columns.
 struct ViewSlice {
     std::uint64_t count = 0;
     std::uint64_t pid_sum = 0;
@@ -365,16 +365,21 @@ TEST_CASE("plugin cxx: make_plugin dispatches a Batch-view step") {
     REQUIRE(slice != nullptr);
 
     const std::uint32_t N = 4;
-    std::vector<dftu_event> evs(N);
+    std::vector<std::uint64_t> pid(N), ts(N);
     for (std::uint32_t i = 0; i < N; ++i) {
-        evs[i] = {};
-        evs[i].pid = 10 + i;
-        evs[i].ts = 500 + i;
-        evs[i].phase = DFTU_PH_COMPLETE;
+        pid[i] = 10 + i;
+        ts[i] = 500 + i;
     }
-    dftu_batch b{evs.data(), N};
+    const char* col_names[2] = {"pid", "ts"};
+    const auto n64 = static_cast<std::int64_t>(N);
+    dftu_series* cols[2] = {
+        dftu_series_new_flat(DFTU_TYPE_UINT64, pid.data(), n64, nullptr),
+        dftu_series_new_flat(DFTU_TYPE_UINT64, ts.data(), n64, nullptr)};
+    dftu_dataframe* df = dftu_dataframe_new(col_names, cols, 2);
+    REQUIRE(df != nullptr);
 
-    dftu_task* t = p->on_batch(slice, &b, &fx.host());
+    dftu_task* t = p->on_batch(slice, df, &fx.host());
+    dftu_dataframe_free(df);
     CHECK(t == nullptr);  // synchronous step returns no task
     CHECK(slice->count == N);
     CHECK(slice->pid_sum == 10 + 11 + 12 + 13);
@@ -383,31 +388,6 @@ TEST_CASE("plugin cxx: make_plugin dispatches a Batch-view step") {
     p->destroy_slice(slice);
     if (p->destroy) p->destroy(p->self);
 }
-
-#ifdef DFTRACER_UTILS_ENABLE_ARROW
-TEST_CASE("plugin cxx: owning batch_to_arrow releases in its destructor") {
-    HostFixture fx;
-    dftracer::utils::plugins::Host h{&fx.host()};
-
-    const std::uint32_t N = 4;
-    std::vector<dftu_event> evs(N);
-    dftu_str cat = fx.intern_str("POSIX");
-    dftu_str name = fx.intern_str("read");
-    for (std::uint32_t i = 0; i < N; ++i) {
-        evs[i] = {};
-        evs[i].cat = cat;
-        evs[i].name = name;
-        evs[i].ts = 1000 + i;
-        evs[i].phase = DFTU_PH_COMPLETE;
-    }
-    dftu_batch b{evs.data(), N};
-
-    dftracer::utils::plugins::OwnedArrow owned = h.batch_to_arrow(b);
-    REQUIRE(owned);
-    CHECK(owned.array.length == static_cast<std::int64_t>(N));
-    // Leaving scope releases both; asan/valgrind would flag a leak otherwise.
-}
-#endif
 
 namespace {
 
@@ -438,7 +418,6 @@ FoldEvent evt(std::uint64_t pid, std::uint64_t dur, std::uint64_t tid) {
 dftu_plugin make_agg_facade_plugin() {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-    p.needs = [](void*) -> std::uint32_t { return 0; };
     p.plan_query = [](void*) -> const char* { return nullptr; };
     p.make_slice = [](void*) -> void* {
         static int sentinel;
@@ -450,7 +429,7 @@ dftu_plugin make_agg_facade_plugin() {
     };
     p.destroy_slice = [](void*) {};
     p.destroy = [](void*) {};
-    p.on_batch_columns = agg_facade_columns;
+    p.on_batch = agg_facade_columns;
     return p;
 }
 

@@ -47,17 +47,6 @@ static_assert(static_cast<dftu_log_level>(LogLevel::Info) == DFTU_LOG_INFO);
 static_assert(static_cast<dftu_log_level>(LogLevel::Warn) == DFTU_LOG_WARN);
 static_assert(static_cast<dftu_log_level>(LogLevel::Error) == DFTU_LOG_ERROR);
 
-/// Scoped mirror of dftu_arg_kind for Arg::kind; each enumerator is its ABI
-/// constant, so static_cast<dftu_arg_kind> recovers the raw value.
-enum class ArgKind : std::int32_t {
-    F64 = DFTU_ARG_F64,
-    I64 = DFTU_ARG_I64,
-    Str = DFTU_ARG_STR
-};
-static_assert(static_cast<dftu_arg_kind>(ArgKind::F64) == DFTU_ARG_F64);
-static_assert(static_cast<dftu_arg_kind>(ArgKind::I64) == DFTU_ARG_I64);
-static_assert(static_cast<dftu_arg_kind>(ArgKind::Str) == DFTU_ARG_STR);
-
 /// Scoped mirror of dftu_value_kind for ConfigValue::kind; each enumerator is
 /// its ABI constant, so static_cast<dftu_value_kind> recovers the raw value.
 enum class ValueKind : std::int32_t {
