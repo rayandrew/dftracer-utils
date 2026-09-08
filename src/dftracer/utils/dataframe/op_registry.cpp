@@ -27,10 +27,18 @@ std::mutex& reg_mutex() {
     return m;
 }
 
-// unique_ptr storage keeps each record's address stable as the vector grows, so
-// a pointer from dftu_op_find stays valid after a later registration.
-std::vector<std::unique_ptr<dftu_op_desc>>& user_ops() {
-    static std::vector<std::unique_ptr<dftu_op_desc>> v;
+// A user op's name must outlive the plugin that supplied it: the registry, not
+// the plugin, owns it. `desc.name` points at `name`, so the two must stay
+// together and `name` must not move once inserted (hence unique_ptr storage,
+// which also keeps a record's address stable as the vector grows, so a
+// pointer from dftu_op_find stays valid after a later registration).
+struct UserOp {
+    std::string name;
+    dftu_op_desc desc;
+};
+
+std::vector<std::unique_ptr<UserOp>>& user_ops() {
+    static std::vector<std::unique_ptr<UserOp>> v;
     return v;
 }
 
@@ -38,7 +46,7 @@ const dftu_op_desc* find_locked(const char* name) {
     for (uint32_t i = 0; i < BUILTIN_COUNT; ++i)
         if (std::strcmp(BUILTINS[i].name, name) == 0) return &BUILTINS[i];
     for (const auto& op : user_ops())
-        if (std::strcmp(op->name, name) == 0) return op.get();
+        if (op->name == name) return &op->desc;
     return nullptr;
 }
 
@@ -156,7 +164,7 @@ const dftu_op_desc* dftu_op_at(uint32_t i) {
     std::lock_guard<std::mutex> lock(reg_mutex());
     if (i < BUILTIN_COUNT) return &BUILTINS[i];
     i -= BUILTIN_COUNT;
-    if (i < user_ops().size()) return user_ops()[i].get();
+    if (i < user_ops().size()) return &user_ops()[i]->desc;
     return nullptr;
 }
 
@@ -164,8 +172,25 @@ int dftu_op_register(const dftu_op_desc* desc) {
     if (!desc || !desc->name) return 1;
     std::lock_guard<std::mutex> lock(reg_mutex());
     if (find_locked(desc->name)) return 1;  // no silent shadowing
-    user_ops().push_back(std::make_unique<dftu_op_desc>(*desc));
+    auto rec = std::make_unique<UserOp>();
+    rec->name = desc->name;
+    rec->desc = *desc;
+    rec->desc.name = rec->name.c_str();
+    user_ops().push_back(std::move(rec));
     return 0;
+}
+
+int dftu_op_unregister(const char* name) {
+    if (!name) return 1;
+    std::lock_guard<std::mutex> lock(reg_mutex());
+    auto& v = user_ops();
+    for (auto it = v.begin(); it != v.end(); ++it) {
+        if ((*it)->name == name) {
+            v.erase(it);
+            return 0;
+        }
+    }
+    return 1;  // not found: a no-op, not an error the caller must react to
 }
 
 dftu_series* dftu_op_run(const dftu_op_desc* op, const dftu_series* const* in,

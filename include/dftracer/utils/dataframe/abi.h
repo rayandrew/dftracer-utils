@@ -895,8 +895,11 @@ typedef int32_t dftu_op_sig;
 
 /** A registry record. `sig` is authoritative: it packs the whole signature, so
  * it selects the fn cast, the operands read, and (via dftu_op_kind_of) the
- * category. `name` is borrowed and must outlive the registration (a literal for
- * built-ins; dftu_op_register copies the record, not the name). */
+ * category. For a built-in, `name` is a literal and must outlive the process;
+ * dftu_op_register copies both the record and the name it points to, so a
+ * caller's own `name` storage need not outlive the call. `fn` is always
+ * borrowed: it is a pointer into the registrant's code, so it stops being
+ * callable once that code unloads (see dftu_op_unregister). */
 typedef struct dftu_op_desc {
     const char* name; /**< registry key, e.g. "add" or "mymod.zscore" */
     dftu_op_sig sig;  /**< the packed signature the runner dispatches on */
@@ -925,10 +928,18 @@ DFTU_EXPORT uint32_t dftu_op_count(void);
  * ordering is unspecified and may change as user ops are registered. */
 DFTU_EXPORT const dftu_op_desc* dftu_op_at(uint32_t i);
 
-/** Register a user op. The record is copied (the string/fn pointers it holds
- * are borrowed, not copied). Returns 0 on success, non-zero if `desc`/its name
- * is NULL or the name is already registered (no silent shadowing). */
+/** Register a user op. The record and its name are copied; `fn` is still
+ * borrowed. Returns 0 on success, non-zero if `desc`/its name is NULL or the
+ * name is already registered (no silent shadowing). A registrant whose code
+ * can unload (a plugin's .so) must call dftu_op_unregister before unloading,
+ * or `fn` dangles in a registry entry no one can remove it from. */
 DFTU_EXPORT int dftu_op_register(const dftu_op_desc* desc);
+
+/** Remove a user op previously added with dftu_op_register. A no-op (returns
+ * non-zero) if `name` is NULL, unregistered, or a built-in - built-ins can
+ * never be removed this way. Safe to call for a name that was never
+ * registered. */
+DFTU_EXPORT int dftu_op_unregister(const char* name);
 
 /** One operand slot. Only the union member the operand's token names is read:
  * SCALAR->scalar, I64->i64, F64->f64, CHAR->ch, an enum token (CMP/PRIM/

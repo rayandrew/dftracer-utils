@@ -6,6 +6,7 @@
 
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace dftracer::utils::plugins {
 
@@ -38,10 +39,20 @@ class BuildHost {
 
     StateRegistry& states() { return states_; }
 
+    /// The op names the factory registered with dftu_op_register, moved out
+    /// once it returns. The loader must unregister each of these before it
+    /// dlcloses the plugin, or the registry keeps a dangling name and fn.
+    std::vector<std::string> take_registered_ops() {
+        return std::move(registered_ops_);
+    }
+
+    std::vector<std::string>& registered_ops() { return registered_ops_; }
+
    private:
     std::string plugin_name_;
     std::string denied_;
     StateRegistry states_;
+    std::vector<std::string> registered_ops_;
     dftu_host host_{};
 };
 

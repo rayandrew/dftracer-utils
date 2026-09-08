@@ -120,6 +120,31 @@ TEST_CASE("an op registered by the factory is live before the scan") {
     CHECK(total == 2 * EVENTS);
 }
 
+TEST_CASE(
+    "an op registered by a destroyed plugin is gone from the registry, and "
+    "the plugin can be reloaded") {
+    {
+        auto set =
+            Plugins::builder().add(FACTORY_REGISTERS_OP_PLUGIN_PATH).build();
+        INFO((set.has_value() ? std::string{} : set.error().message));
+        REQUIRE(set.has_value());
+        REQUIRE(dftu_op_find("factory_registers_op.double_rows") != nullptr);
+    }  // `set` destructs here: destroy() then dlclose unmaps the plugin.
+
+    // A lookup after unload must come back NULL, not strcmp a name that lived
+    // in the now-unmapped .so.
+    CHECK(dftu_op_find("factory_registers_op.double_rows") == nullptr);
+
+    // Reloading the same plugin must not be refused as an existing
+    // registration (a stale entry would otherwise trip "no silent
+    // shadowing").
+    auto set2 =
+        Plugins::builder().add(FACTORY_REGISTERS_OP_PLUGIN_PATH).build();
+    INFO((set2.has_value() ? std::string{} : set2.error().message));
+    REQUIRE(set2.has_value());
+    CHECK(dftu_op_find("factory_registers_op.double_rows") != nullptr);
+}
+
 TEST_CASE("the C++ builder registers a fold, an op and a state at once") {
     auto set = Plugins::builder().add(BUILDER_PLUGIN_PATH).build();
     INFO((set.has_value() ? std::string{} : set.error().message));

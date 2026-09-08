@@ -1,4 +1,5 @@
 #include <dftracer/utils/core/common/logging.h>
+#include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/abi.h>
 #include <dftracer/utils/plugins/build_host.h>
 #include <dftracer/utils/plugins/config.h>
@@ -44,11 +45,19 @@ struct Plugins::Impl {
                               plugins */
         /* State types the factory registered; one instance per fold slice. */
         StateRegistry states;
+        /* Op names the factory registered via dftu_op_register; the op
+           registry outlives the plugin, so these must be unregistered before
+           dlclose or a later lookup strcmps a name in unmapped memory. */
+        std::vector<std::string> registered_ops;
     };
 
     ~Impl() {
-        // destroy() must run before dlclose unmaps the plugin's code.
+        // Unregister every op this plugin added and run destroy(), both
+        // before dlclose unmaps the plugin's code: dftu_op_find and destroy()
+        // may otherwise dereference memory that dlclose just unmapped.
         for (auto& p : plugins) {
+            for (const std::string& name : p.registered_ops)
+                ::dftu_op_unregister(name.c_str());
             if (p.owned && p.plugin && p.plugin->destroy)
                 p.plugin->destroy(p.plugin->self);
             if (p.handle) dlclose(p.handle);
@@ -118,11 +127,21 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
     BuildHost build_host(plugin_name_from_path(path));
     dftu_plugin* plugin = factory(build_host.host(), config);
 
+    // A rejected load never reaches Loaded, so nothing will later walk
+    // registered_ops() and unregister it: a factory can register an op before
+    // hitting any of the failures below, so undo that registration here too or
+    // it dangles the instant dlclose unmaps the plugin's fn/name.
+    auto unregister_all = [&build_host]() {
+        for (const std::string& name : build_host.registered_ops())
+            ::dftu_op_unregister(name.c_str());
+    };
+
     // A factory that reached outside the registration surface built itself on
     // a host that was not there; whether it noticed the NULL or not, the load
     // fails here rather than at the first batch.
     if (!build_host.denied().empty()) {
         if (plugin && plugin->destroy) plugin->destroy(plugin->self);
+        unregister_all();
         dlclose(handle);
         return make_error(
             ErrorCode::INVALID_ARGUMENT,
@@ -133,6 +152,7 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
     }
 
     if (!plugin) {
+        unregister_all();
         dlclose(handle);
         return make_error(ErrorCode::INVALID_ARGUMENT,
                           "plugin '" + path + "' factory returned null");
@@ -141,6 +161,7 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
     if (plugin->abi_version != DFTRACER_PLUGIN_ABI_VERSION) {
         const std::uint32_t got = plugin->abi_version;
         if (plugin->destroy) plugin->destroy(plugin->self);
+        unregister_all();
         dlclose(handle);
         return make_error(ErrorCode::INVALID_ARGUMENT,
                           "plugin '" + path + "' ABI version " +
@@ -148,9 +169,13 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                               std::to_string(DFTRACER_PLUGIN_ABI_VERSION));
     }
 
-    return Plugins::Impl::Loaded{handle, plugin,
-                                 true,   plugin_name_from_path(path),
-                                 path,   build_host.take_states()};
+    return Plugins::Impl::Loaded{handle,
+                                 plugin,
+                                 true,
+                                 plugin_name_from_path(path),
+                                 path,
+                                 build_host.take_states(),
+                                 build_host.take_registered_ops()};
 }
 
 // Kahn topological sort of `n` nodes over `from -> to` edges (from must precede
@@ -418,7 +443,7 @@ Result<Plugins> build_injected_plugins(std::vector<dftu_plugin*> plugins) {
     auto impl = std::make_unique<Plugins::Impl>();
     impl->plugins.reserve(plugins.size());
     for (dftu_plugin* pl : plugins)
-        impl->plugins.push_back({nullptr, pl, false, {}, {}, {}});
+        impl->plugins.push_back({nullptr, pl, false, {}, {}, {}, {}});
     auto ordered = settle_order(*impl);
     if (!ordered) return unexpected(std::move(ordered).error());
     settle_prune(*impl);

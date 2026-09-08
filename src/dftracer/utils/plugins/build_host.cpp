@@ -52,8 +52,10 @@ const ::dftu_op_desc* build_ops_find(void*, const char* name) {
     return ::dftu_op_find(name);
 }
 
-int build_ops_register(void*, const ::dftu_op_desc* desc) {
-    return detail::register_plugin_op(desc);
+int build_ops_register(void* h, const ::dftu_op_desc* desc) {
+    int rc = detail::register_plugin_op(desc);
+    if (rc == 0) self_of(h).registered_ops().emplace_back(desc->name);
+    return rc;
 }
 
 const ::dftu_ext_ops g_build_ops = {build_ops_run, build_ops_run_aggregate,
