@@ -40,9 +40,18 @@ PyObject* op_info(PyObject*, PyObject* args) {
         PyErr_Format(PyExc_KeyError, "no op named '%s'", name);
         return nullptr;
     }
-    const char* kind = dftu_op_kind_of(op->sig) == DFTU_OP_KIND_SERIES
-                           ? "series"
-                           : "aggregate";
+    const char* kind = "series";
+    switch (dftu_op_kind_of(op->sig)) {
+        case DFTU_OP_KIND_SERIES:
+            kind = "series";
+            break;
+        case DFTU_OP_KIND_AGGREGATE:
+            kind = "aggregate";
+            break;
+        case DFTU_OP_KIND_FRAME:
+            kind = "frame";
+            break;
+    }
     return Py_BuildValue("{s:s,s:s,s:I,s:s}", "name", op->name, "kind", kind,
                          "arity", dftu_op_arity(op->sig), "signature",
                          dftu_op_signature(op->sig));
@@ -163,6 +172,7 @@ PyObject* op_run(PyObject*, PyObject* args) {
             }
             case DFTU_TOK_FRAME:
             case DFTU_TOK_STRLIST:
+            case DFTU_TOK_I32LIST:
                 PyErr_Format(PyExc_NotImplementedError,
                              "op '%s' takes a frame/list operand not yet "
                              "runnable via ops.run",

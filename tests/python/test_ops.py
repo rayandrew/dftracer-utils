@@ -21,6 +21,18 @@ def _vals(series):
 
 
 class TestDiscovery:
+    def test_info_kind_covers_all_three(self):
+        """kind must distinguish frame ops, not fold them into aggregate.
+
+        dftu_op_kind_of has three values; a two-way ternary reported every
+        dftu.frame.* op as "aggregate".
+        """
+        assert ops.info("dftu.series.add")["kind"] == "series"
+        frame_ops = [n for n in ops.list() if n.startswith("dftu.frame.")]
+        assert frame_ops, "expected registered dftu.frame.* ops"
+        for n in frame_ops:
+            assert ops.info(n)["kind"] == "frame", n
+
     def test_list_covers_the_surface(self):
         names = ops.list()
         for n in (
