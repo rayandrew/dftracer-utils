@@ -15,8 +15,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -191,10 +193,23 @@ class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
         std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>>
             channel,
         std::shared_ptr<coro::CoroSemaphore> budget,
-        std::shared_future<void> producer)
+        std::shared_future<void> producer,
+        std::shared_ptr<std::atomic<bool>> stop)
         : channel_(std::move(channel)),
           budget_(std::move(budget)),
-          producer_(std::move(producer)) {}
+          producer_(std::move(producer)),
+          stop_(std::move(stop)) {}
+
+    // Abandoning the cursor must stop the scan behind it: the producer holds
+    // its own channel registration, so nothing else ends it, and the byte
+    // budget is released only here - a producer that outlives the cursor parks
+    // in acquire() forever. Setting the flag alone cannot wake a parked
+    // producer (the semaphore has no shutdown), so release enough permits for
+    // it to run to its next is_cancelled() check and unwind.
+    ~StreamViewCursor() override {
+        stop_->store(true, std::memory_order_relaxed);
+        budget_->release(std::numeric_limits<std::uint32_t>::max());
+    }
 
     coro::CoroTask<std::optional<dftracer::utils::dataframe::Morsel>> next(
         std::int64_t max_rows) override {
@@ -233,6 +248,7 @@ class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
     std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>> channel_;
     std::shared_ptr<coro::CoroSemaphore> budget_;
     std::shared_future<void> producer_;
+    std::shared_ptr<std::atomic<bool>> stop_;
     std::optional<dftracer::utils::dataframe::Morsel> pending_;
     std::int64_t offset_ = 0;
     std::uint64_t pending_bytes_ = 0;
@@ -319,6 +335,14 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open_stream(
     auto intern = std::make_shared<dftracer::utils::StringIntern>();
     const double time_scale = v.plan_->time_scale;
 
+    // The cursor's early-out: fuse polls the plan's cancel predicate per unit
+    // and per batch, so the flag is composed into it rather than added beside
+    // it. Composed, never overwritten, so a caller's own cancel_when survives.
+    auto stop = std::make_shared<std::atomic<bool>>(false);
+    View scan_view = v.cancel_when([stop, prev = v.plan_->cancelled] {
+        return stop->load(std::memory_order_relaxed) || (prev && prev());
+    });
+
     // Empty select: each batch discovers its own columns from the actual
     // scanned events, so morsels can differ batch to batch; name_ids lets
     // drain_to_frame reconcile them. A non-empty select instead fixes every
@@ -336,12 +360,13 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open_stream(
                                    emit_dyn);
         std::array<detail::Fold*, 1> folds{&fold};
         co_await vv.run_folds(folds, *iv);
-    }(v, time_scale, channel, budget, intern, emit_dyn_);
+    }(scan_view, time_scale, channel, budget, intern, emit_dyn_);
 
     std::shared_future<void> producer =
         spawn_on_current_executor(std::move(task));
     return std::make_unique<StreamViewCursor>(
-        std::move(channel), std::move(budget), std::move(producer));
+        std::move(channel), std::move(budget), std::move(producer),
+        std::move(stop));
 }
 
 dftracer::utils::dataframe::ScanResult ViewSource::scan(

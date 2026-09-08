@@ -2978,14 +2978,22 @@ LazyFrame LazyFrame::auto_spill() const {
     return LazyFrame(source_, ops_, resolve_spill_budget(0));
 }
 
-coro::AsyncGenerator<DataFrame> LazyFrame::stream(
-    std::int64_t morsel_rows) const {
-    const std::vector<std::string> names = source_->names();
-    auto ops = pushdown_projections(names, pushdown_predicates(names, ops_));
-    // 0 resolves to auto (~1/3 RAM), same policy as View.
-    const std::uint64_t budget = resolve_spill_budget(memory_budget_);
-    const std::int64_t eff_rows =
-        morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
+namespace {
+
+// The pull chain a streaming terminal drives: the source cursor with every
+// op the source did not apply stacked on it, plus the schema at its output.
+struct CursorChain {
+    std::unique_ptr<Cursor> cursor;
+    std::vector<std::string> schema;
+};
+
+// Lower `ops` onto `source`: push a leading projection and the contiguous run
+// of filters after it into the scan, then stack every op the source did not
+// apply exactly. This is the plan's lowering (b); the driver below runs it.
+CursorChain lower_cursor_chain(
+    const Source& source, const std::vector<std::shared_ptr<const LazyOp>>& ops,
+    std::uint64_t budget) {
+    const std::vector<std::string> names = source.names();
 
     // A leading Select is a pure source projection: pushdown_projections emits
     // one with the filter col-refs already remapped into it, and a user's own
@@ -3015,7 +3023,7 @@ coro::AsyncGenerator<DataFrame> LazyFrame::stream(
         cand_pos.push_back(i);
     }
 
-    ScanResult r = source_->scan(req);
+    ScanResult r = source.scan(req);
 
     // Drop every candidate the source applied exactly; the engine re-applies
     // No/Inexact (and any filter deeper in the plan).
@@ -3023,18 +3031,48 @@ coro::AsyncGenerator<DataFrame> LazyFrame::stream(
     for (std::size_t k = 0; k < cand_pos.size() && k < r.filters.size(); ++k)
         if (r.filters[k] == Pushed::Exact) drop[cand_pos[k]] = true;
 
-    std::unique_ptr<Cursor> cur = std::move(r.cursor);
-    std::vector<std::string> sch = projection.empty() ? names : projection;
+    CursorChain chain;
+    chain.cursor = std::move(r.cursor);
+    chain.schema = projection.empty() ? names : projection;
     for (std::size_t i = 0; i < ops.size(); ++i) {
         if (drop[i]) continue;
-        cur = make_cursor(*ops[i], std::move(cur), sch, budget);
-        sch = out_schema(*ops[i], std::move(sch));
+        chain.cursor =
+            make_cursor(*ops[i], std::move(chain.cursor), chain.schema, budget);
+        chain.schema = out_schema(*ops[i], std::move(chain.schema));
     }
-    while (auto m = co_await cur->next(eff_rows)) {
-        DataFrame chunk =
-            frame_from_morsel(std::move(*m), sch, cur->out_names());
-        co_yield std::move(chunk);
+    return chain;
+}
+
+// The pull driver: demand up, data down, one morsel at a time. A stage that
+// must wait co_awaits inside next(), so the worker is never parked. Abandoning
+// this generator drops the chain, and dropping the source cursor is the scan
+// early-out (~StreamViewCursor stops and wakes the producer).
+coro::AsyncGenerator<DataFrame> drive_cursor_chain(CursorChain chain,
+                                                   std::int64_t rows) {
+    while (auto m = co_await chain.cursor->next(rows)) {
+        DataFrame out = frame_from_morsel(std::move(*m), chain.schema,
+                                          chain.cursor->out_names());
+        co_yield std::move(out);
     }
+}
+
+}  // namespace
+
+coro::AsyncGenerator<DataFrame> LazyFrame::stream(
+    std::int64_t morsel_rows) const {
+    const std::vector<std::string> names = source_->names();
+    auto ops = pushdown_projections(names, pushdown_predicates(names, ops_));
+    // 0 resolves to auto (~1/3 RAM), same policy as View.
+    const std::uint64_t budget = resolve_spill_budget(memory_budget_);
+    const std::int64_t eff_rows =
+        morsel_rows > 0 ? morsel_rows : DEFAULT_MORSEL_ROWS;
+
+    // Returned, not re-yielded through: an extra coroutine layer around a
+    // parallel drain has miscompiled frames before (project_coro_threadlocal_
+    // parser_pitfall), and it would delay the chain's destruction past the
+    // consumer's last pull, which is the scan early-out.
+    return drive_cursor_chain(lower_cursor_chain(*source_, ops, budget),
+                              eff_rows);
 }
 
 coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {
