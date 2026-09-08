@@ -94,6 +94,16 @@ PyObject* Series_str_find(PyObject* self, PyObject* arg) {
     if (!as_str_view(arg, &needle)) return nullptr;
     return make_series(a->str_find(needle));
 }
+PyObject* Series_fnv1a(PyObject* self, PyObject*) {
+    Series* a = as_series(self);
+    if (!a) return nullptr;
+    return make_series(a->fnv1a());
+}
+PyObject* Series_hex64_parse(PyObject* self, PyObject*) {
+    Series* a = as_series(self);
+    if (!a) return nullptr;
+    return make_series(a->hex64_parse());
+}
 PyObject* Series_to_lowercase(PyObject* self, PyObject*) {
     Series* a = as_series(self);
     if (!a) return nullptr;

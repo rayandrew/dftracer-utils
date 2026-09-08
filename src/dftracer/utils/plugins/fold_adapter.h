@@ -224,7 +224,6 @@ class PluginFold : public trace::views::detail::Fold {
     // A compose leaf wrapping registered host utility `util_id` (single-value
     // only); null for a stream-only or unknown id. Lets then()/when_all pipe
     // host utilities through the dftu_op engine.
-    ::dftu_op* compose_util_op(std::uint32_t util_id);
 
     dftracer::utils::StringIntern& intern_table() { return *intern_; }
     ::dftu_writer* create_writer(const char* path, std::uint32_t num_workers,

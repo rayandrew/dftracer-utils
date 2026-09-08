@@ -259,6 +259,15 @@ DFTU_EXPORT dftu_series* dftu_series_str_find(const dftu_series* v,
 /** ASCII case fold ('A'-'Z' <-> 'a'-'z'); non-ASCII bytes pass through
  * unchanged. Returns a String column, nulls preserved. FLAT input folds the
  * byte buffer with Highway. */
+/** FNV-1a 64-bit hash of each row's bytes as a UInt64 column; null rows stay
+ * null. Matches the host's own fnv1a over the same bytes, so a plugin can
+ * derive the trace's fhash/hhash columns itself. */
+DFTU_EXPORT dftu_series* dftu_series_fnv1a(const dftu_series* v);
+
+/** Parse each row as dftracer's 16-lowercase-hex-digit 64-bit hash form into a
+ * UInt64 column; a null row, or one not in that exact form, is null. */
+DFTU_EXPORT dftu_series* dftu_series_hex64_parse(const dftu_series* v);
+
 DFTU_EXPORT dftu_series* dftu_series_to_lowercase(const dftu_series* v);
 DFTU_EXPORT dftu_series* dftu_series_to_uppercase(const dftu_series* v);
 /** Trim ASCII whitespace from both/left/right ends. String column, nulls

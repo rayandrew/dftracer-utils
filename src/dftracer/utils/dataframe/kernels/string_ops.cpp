@@ -1,10 +1,14 @@
+#include <dftracer/utils/core/common/hash/fnv1a.h>
+#include <dftracer/utils/core/common/hash/hex64.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/substr_simd.h>
 #include <dftracer/utils/dataframe/kernels/string_ops.h>
 #include <dftracer/utils/dataframe/parallel.h>
 
+#include <cstdint>
 #include <cstring>
+#include <optional>
 #include <regex>
 #include <string>
 #include <string_view>
@@ -162,6 +166,29 @@ dftu_series* make_i64(const dftu_series* v,
     std::size_t bytes = buffer_bytes(TypeId::Int64, v->length);
     out->data = Buffer::allocate(bytes);
     if (bytes != 0) std::memcpy(out->data->data(), vals.data(), bytes);
+    return out;
+}
+
+// UInt64 output column with the same length as `v`. `validity` is a fresh
+// Arrow-layout bitmap the caller owns, or NULL to share `v`'s nulls.
+dftu_series* make_u64(const dftu_series* v,
+                      const std::vector<std::uint64_t>& vals,
+                      const std::uint8_t* validity) {
+    auto* out = new dftu_series();
+    out->type = TypeId::Uint64;
+    out->encoding = Encoding::Flat;
+    out->length = v->length;
+    std::size_t bytes = buffer_bytes(TypeId::Uint64, v->length);
+    out->data = Buffer::allocate(bytes);
+    if (bytes != 0) std::memcpy(out->data->data(), vals.data(), bytes);
+    if (validity) {
+        std::size_t vb = static_cast<std::size_t>((v->length + 7) / 8);
+        out->validity = Buffer::allocate(vb);
+        if (vb != 0) std::memcpy(out->validity->data(), validity, vb);
+    } else {
+        out->null_count = v->null_count;
+        out->validity = v->validity;
+    }
     return out;
 }
 
@@ -597,6 +624,41 @@ dftu_series* dftu_series_str_find(const dftu_series* v, const char* needle,
         return substr_find(s.data(), static_cast<std::int64_t>(s.size()),
                            n.data(), static_cast<std::int64_t>(n.size()));
     });
+}
+
+dftu_series* dftu_series_fnv1a(const dftu_series* v) {
+    RowReader r(v);
+    if (!r.ok()) return nullptr;
+    std::vector<std::uint64_t> vals(static_cast<std::size_t>(v->length), 0);
+    for (std::int64_t i = 0; i < v->length; ++i) {
+        if (r.is_null(i)) continue;
+        vals[static_cast<std::size_t>(i)] =
+            dftracer::utils::hash::fnv1a_hash(r.at(i));
+    }
+    return make_u64(v, vals, nullptr);
+}
+
+dftu_series* dftu_series_hex64_parse(const dftu_series* v) {
+    RowReader r(v);
+    if (!r.ok()) return nullptr;
+    std::vector<std::uint64_t> vals(static_cast<std::size_t>(v->length), 0);
+    std::size_t bitmap_bytes = static_cast<std::size_t>((v->length + 7) / 8);
+    std::vector<std::uint8_t> valid(bitmap_bytes, 0);
+    std::int64_t nulls = 0;
+    for (std::int64_t i = 0; i < v->length; ++i) {
+        std::optional<std::uint64_t> parsed;
+        if (!r.is_null(i)) parsed = dftracer::utils::hash::parse_hex64(r.at(i));
+        if (!parsed) {
+            ++nulls;
+            continue;
+        }
+        vals[static_cast<std::size_t>(i)] = *parsed;
+        valid[static_cast<std::size_t>(i >> 3)] |=
+            static_cast<std::uint8_t>(1u << (i & 7));
+    }
+    dftu_series* out = make_u64(v, vals, valid.data());
+    out->null_count = nulls;
+    return out;
 }
 
 dftu_series* dftu_series_to_lowercase(const dftu_series* v) {

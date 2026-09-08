@@ -98,9 +98,9 @@ finalize hook (``Task on_finalize(Host h)``, detected automatically by
        return dftracer::utils::plugins::make_plugin<MySlice>(config);
    }
 
-A host-provided utility (fnv1a hashing, hex formatting, ...) is also a compose
-leaf: build one with ``c->util_op(host, DFTU_UTIL_FNV1A)`` and pipe it the same
-way. See :doc:`../../plugins` for the plugin lifecycle this op runs inside.
+A host-provided utility is a named op instead: run it through
+``DFTU_EXT_OPS`` (``Host::run_op("dftu.hash.fnv1a", {column})``) on a column the
+plugin already holds. See :doc:`../../plugins` for the plugin lifecycle.
 
 In Python: ``@jit.op``
 ------------------------

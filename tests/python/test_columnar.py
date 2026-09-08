@@ -1117,6 +1117,16 @@ def test_series_str_ops():
     finds = _series_from_arrow(pa.array(["a/b", "x", None], pa.string()))
     assert finds.str_find("/").to_arrow().to_pylist() == [1, -1, None]
 
+    hashed = _series_from_arrow(pa.array(["POSIX", "read"], pa.string()))
+    # FNV-1a 64 of the same bytes the host hashes with.
+    assert hashed.fnv1a().to_arrow().to_pylist() == [
+        0x4CB5D98F4B3E12C8,
+        0x4CE6531FBFDDD605,
+    ]
+    # hex64 is dftracer's fhash/hhash form: exactly 16 hex digits, else null.
+    hexes = _series_from_arrow(pa.array(["00000000deadbeef", "deadbeef", None], pa.string()))
+    assert hexes.hex64_parse().to_arrow().to_pylist() == [0xDEADBEEF, None, None]
+
     # transforms
     cased = _series_from_arrow(pa.array(["Abc", "XY", None], pa.string()))
     assert cased.to_lowercase().to_arrow().to_pylist() == ["abc", "xy", None]

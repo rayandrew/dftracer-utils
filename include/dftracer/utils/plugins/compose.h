@@ -202,19 +202,6 @@ Op<In, Out> make_op(Host host, Fn fn) {
     return {raw, op};
 }
 
-/// A typed leaf wrapping a registered host utility `Tag` (a single-value
-/// utility), so it can be piped with `|` alongside plain make_op leaves. The
-/// value crosses as the utility's generated C in/out struct; an invalid op
-/// (`!valid()`) means the host lacks the compose group or the id is a
-/// stream-only/unknown utility. Runs asynchronously on the executor.
-template <class Tag>
-Op<typename Tag::in, typename Tag::out> util_op(Host host) {
-    const dftu_host* raw = host.raw();
-    const dftu_ext_compose* c = detail::compose_ext(raw);
-    if (!c || !c->util_op) return {raw, nullptr};
-    return {raw, c->util_op(raw->h, static_cast<std::uint32_t>(Tag::id))};
-}
-
 /// Optional early release of an op's resources; ops are otherwise freed at fold
 /// teardown, so this is only needed to reclaim a large op mid-scan.
 template <class In, class Out>

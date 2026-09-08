@@ -1,14 +1,13 @@
 // Exercises the C++ SDK wrappers added over the plugin C ABI's fuller io
 // surface (vectored readv/writev/preadv/pwritev, lseek, sendfile), the
-// ergonomic Writer over the writer extension, the coro spawn/then combinators,
-// and the synchronous util_each streaming form. Each drives a real
-// PluginFold-wired dftu_host, the way a loaded plugin would.
+// ergonomic Writer over the writer extension, and the coro spawn/then
+// combinators. Each drives a real PluginFold-wired dftu_host, the way a loaded
+// plugin would.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/plugins/abi.h>
-#include <dftracer/utils/plugins/dftu_generated_utilities.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/plugin.h>
 // compose.h pulls plugin.h/arrow_abi.h; keep it after fold_adapter.h so
@@ -342,32 +341,4 @@ TEST_CASE("plugin cxx: merge_shards concatenates shard files into a target") {
     });
 
     CHECK(read_all(target) == "AAAABBBB");
-}
-
-TEST_CASE("plugin cxx: util_each drives a streaming utility synchronously") {
-    dftu_utils_test::TestEnvironment env(0);
-    std::string dir = env.get_dir();
-    for (int i = 0; i < 5; ++i) {
-        std::ofstream f(dir + "/f" + std::to_string(i) + ".dat",
-                        std::ios::binary);
-        f << "file-" << i << "\n";
-    }
-
-    HostFixture fx;
-    dftracer::utils::plugins::Host h{&fx.host()};
-    dftu_directory_scanner_utility_input in{};
-    in.path = dftu_bytes{dir.data(), static_cast<std::uint32_t>(dir.size())};
-    in.recursive = 0;
-    in.populate_size = 1;
-
-    int entries = 0;
-    std::uint64_t total = 0;
-    int rc = h.util_each<dftracer::utils::plugins::util::directory_scanner>(
-        in, [&](const dftu_file_entry& e) {
-            entries++;
-            if (e.is_regular_file) total += e.size;
-        });
-    CHECK(rc == 0);
-    CHECK(entries >= 5);
-    CHECK(total > 0);
 }

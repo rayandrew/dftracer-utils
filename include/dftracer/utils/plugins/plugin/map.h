@@ -280,83 +280,6 @@ class Host {
                 : nullptr};
     }
 
-    /// Invoke a host utility by tag; nullopt if absent or run() failed.
-    template <class Tag>
-    std::optional<typename Tag::out> util(const typename Tag::in& in) const {
-        const dftu_ext_util* u = ext(DFTU_EXT_UTIL, util_ext_);
-        const dftu_utility* d =
-            u && u->find_by_id
-                ? u->find_by_id(h_->h, static_cast<std::uint32_t>(Tag::id))
-                : nullptr;
-        if (!d) return std::nullopt;
-        typename Tag::out out{};
-        return d->run(d->self, &in, &out) == 0
-                   ? std::optional<typename Tag::out>{out}
-                   : std::nullopt;
-    }
-
-    /// co_await form of util(): runs the utility on the current executor
-    /// without blocking the caller, writing *out and the status into out_rc. in
-    /// and out are caller-owned and must outlive the await.
-    template <class Tag>
-    AsyncOp util_async(const typename Tag::in& in, typename Tag::out& out,
-                       int& out_rc) const {
-        const dftu_ext_util* u = ext(DFTU_EXT_UTIL, util_ext_);
-        return AsyncOp{
-            u && u->util_run_async
-                ? u->util_run_async(h_->h, static_cast<std::uint32_t>(Tag::id),
-                                    &in, &out, &out_rc)
-                : nullptr};
-    }
-
-    /// co_await form of run_stream: drives the utility on the current executor
-    /// without blocking the caller, firing on_item per yielded item and writing
-    /// the status into out_rc. in, on_item, and ud must outlive the await.
-    template <class Tag>
-    AsyncOp util_stream_async(const typename Tag::in& in,
-                              dftu_stream_item_fn on_item, void* ud,
-                              int& out_rc) const {
-        const dftu_ext_util* u = ext(DFTU_EXT_UTIL, util_ext_);
-        return AsyncOp{u && u->util_run_stream_async
-                           ? u->util_run_stream_async(
-                                 h_->h, static_cast<std::uint32_t>(Tag::id),
-                                 &in, on_item, ud, &out_rc)
-                           : nullptr};
-    }
-
-    /// Synchronous push form of a streaming utility: block the calling thread,
-    /// invoking `fn(const Tag::element&)` once per yielded item. Prefer the
-    /// co_await forms (util_stream_async / util_stream) on an executor; this is
-    /// the direct wrapper over the ABI's run_stream. Returns 0 on success, -1
-    /// on failure or when the util group is absent.
-    template <class Tag, class Fn>
-    int util_each(const typename Tag::in& in, Fn&& fn) const {
-        const dftu_ext_util* u = ext(DFTU_EXT_UTIL, util_ext_);
-        if (!u || !u->run_stream) return -1;
-        using element = typename detail::stream_elem<Tag>::type;
-        auto thunk = [](const void* item, void* ud) {
-            (*static_cast<std::decay_t<Fn>*>(ud))(
-                *static_cast<const element*>(item));
-        };
-        return u->run_stream(
-            h_->h, static_cast<std::uint32_t>(Tag::id), &in, thunk,
-            const_cast<void*>(static_cast<const void*>(std::addressof(fn))));
-    }
-
-    /// Open a pull-model stream; `in` is copied at open and need not outlive
-    /// the returned Stream. A non-stream tag yields a Stream that ends
-    /// immediately.
-    template <class Tag>
-    Stream<Tag> util_stream(const typename Tag::in& in) const {
-        const dftu_ext_util* u = ext(DFTU_EXT_UTIL, util_ext_);
-        dftu_stream* s =
-            u && u->util_stream_open
-                ? u->util_stream_open(h_->h,
-                                      static_cast<std::uint32_t>(Tag::id), &in)
-                : nullptr;
-        return Stream<Tag>{h_, u, s};
-    }
-
     /// Batch-scoped ports: a producer publishes a derived value a later
     /// consumer reads for the same batch. consume returns NULL (and 0 len) when
     /// the producer has not published this batch; the borrow is valid only
@@ -520,7 +443,6 @@ class Host {
     mutable const dftu_ext_query* query_ext_ = nullptr;
     mutable const dftu_ext_comms* comms_ext_ = nullptr;
     mutable const dftu_ext_writer* writer_ext_ = nullptr;
-    mutable const dftu_ext_util* util_ext_ = nullptr;
     mutable const dftu_ext_sketch* sketch_ext_ = nullptr;
     mutable const dftu_ext_arrow* arrow_ext_ = nullptr;
     mutable const dftu_ext_trace* trace_ext_ = nullptr;

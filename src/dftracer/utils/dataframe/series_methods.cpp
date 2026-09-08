@@ -243,6 +243,10 @@ Series Series::str_find(std::string_view needle) const {
     return Series{dftu_series_str_find(
         handle_, needle.data(), static_cast<std::int32_t>(needle.size()))};
 }
+Series Series::fnv1a() const { return Series{dftu_series_fnv1a(handle_)}; }
+Series Series::hex64_parse() const {
+    return Series{dftu_series_hex64_parse(handle_)};
+}
 Series Series::to_lowercase() const {
     return Series{dftu_series_to_lowercase(handle_)};
 }

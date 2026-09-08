@@ -33,9 +33,9 @@ int dftu_test_query_match(const ::dftu_host*, const char*, std::uint32_t,
 int dftu_test_query_null_is_safe(const ::dftu_host*, const ::dftu_event*);
 int dftu_test_sketch(const ::dftu_host*, double*, std::uint64_t*);
 int dftu_test_sketch_merge(const ::dftu_host*, std::uint64_t*);
-int dftu_test_util_fnv1a(const ::dftu_host*, const char*, std::uint32_t,
-                         std::uint64_t*);
-int dftu_test_util_find(const ::dftu_host*);
+int dftu_test_ops_fnv1a(const ::dftu_host*, const char*, std::uint32_t,
+                        std::uint64_t*);
+int dftu_test_ops_find(const ::dftu_host*);
 int dftu_test_trace_roundtrip(const ::dftu_host*, const char*,
                               const ::dftu_event*, std::uint32_t, int*);
 ::dftu_task* dftu_test_io_open(const ::dftu_host*, const char*, int*);
@@ -160,21 +160,21 @@ TEST_CASE("C ABI: dftu_ext_sketch add/result/merge from C") {
     CHECK(merged == 100);  // 50 + 50
 }
 
-TEST_CASE("C ABI: dftu_ext_util runs a host utility from C") {
+TEST_CASE("C ABI: dftu_ext_ops runs a host utility op from C") {
     HostFixture fx;
     std::uint64_t hash = 0;
     std::string data = "hello-world";
-    REQUIRE(dftu_test_util_fnv1a(&fx.host(), data.data(),
-                                 static_cast<std::uint32_t>(data.size()),
-                                 &hash) == 0);
+    REQUIRE(dftu_test_ops_fnv1a(&fx.host(), data.data(),
+                                static_cast<std::uint32_t>(data.size()),
+                                &hash) == 0);
     CHECK(hash != 0);
     // Deterministic: the same input hashes the same.
     std::uint64_t again = 0;
-    REQUIRE(dftu_test_util_fnv1a(&fx.host(), data.data(),
-                                 static_cast<std::uint32_t>(data.size()),
-                                 &again) == 0);
+    REQUIRE(dftu_test_ops_fnv1a(&fx.host(), data.data(),
+                                static_cast<std::uint32_t>(data.size()),
+                                &again) == 0);
     CHECK(hash == again);
-    CHECK(dftu_test_util_find(&fx.host()) == 1);
+    CHECK(dftu_test_ops_find(&fx.host()) == 1);
 }
 
 TEST_CASE("C ABI: dftu_ext_trace write then read round-trips from C") {

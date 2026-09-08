@@ -75,8 +75,7 @@ set(UTILITIES_TEST_SOURCES
     # Text
     text/test_line_filter.cpp
 
-    # Plugins (reflected utility ABI)
-    plugins/test_reflected_utilities.cpp
+    # Plugins
     plugins/test_plugin_host_services.cpp
     plugins/test_plugin_io_writer.cpp
     plugins/test_plugin_cxx_ergonomics.cpp
@@ -363,7 +362,7 @@ set(cabi_sources plugins/test_plugin_c_abi.cpp
                  plugins/compose_abi_c_consumer.c
                  plugins/query_abi_c_consumer.c
                  plugins/sketch_abi_c_consumer.c
-                 plugins/util_abi_c_consumer.c
+                 plugins/ops_abi_c_consumer.c
                  plugins/trace_abi_c_consumer.c
                  plugins/io_abi_c_consumer.c
                  plugins/writer_abi_c_consumer.c)

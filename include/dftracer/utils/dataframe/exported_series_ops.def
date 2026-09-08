@@ -2,7 +2,14 @@
  * APPEND ONLY - a name is a stable public key; never rename or repurpose one.
  *
  *   DFTU_SERIES_OP(name, fn, ret, o0, o1, o2)
- *     name        - registry key (lower_snake), unprefixed for a built-in.
+ *     name        - registry key (lower_snake). A built-in column op is
+ *                   unprefixed; a host utility a plugin calls through
+ *                   dftu.ext.ops is `dftu.<family>.<op>`, where <family> is
+ *                   the source module the utility comes from (hash ->
+ *                   core/common/hash, hex -> the scalar hex codecs, text ->
+ *                   utilities/text, fs -> utilities/filesystem, file ->
+ *                   utilities/fileio). A leaf drops the family word when it
+ *                   would repeat it (hex64_parse -> dftu.hex.parse64).
  *     fn          - the dftu_* C ABI function implementing it.
  *     ret,o0..o2  - the signature tokens (DFTU_TOK_* suffixes): the return
  *                   token then up to three operand tokens, packed by
@@ -162,5 +169,11 @@ DFTU_SERIES_OP(ewm_std, dftu_series_ewm_std, SERIES, SERIES, F64, NONE)
 /* Clamp / range (series + two scalars -> series). */
 DFTU_SERIES_OP(clip, dftu_series_clip, SERIES, SERIES, SCALAR, SCALAR)
 DFTU_SERIES_OP(is_between, dftu_series_is_between, SERIES, SERIES, SCALAR, SCALAR)
+
+/* Host utilities a plugin calls by name through dftu.ext.ops; the reserved
+   dftu. namespace marks them host-owned. */
+DFTU_SERIES_OP(dftu.hash.fnv1a, dftu_series_fnv1a, SERIES, SERIES, NONE, NONE)
+DFTU_SERIES_OP(dftu.hex.parse64, dftu_series_hex64_parse, SERIES, SERIES, NONE,
+               NONE)
 
 #undef DFTU_SERIES_OP

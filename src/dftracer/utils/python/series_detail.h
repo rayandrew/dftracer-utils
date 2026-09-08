@@ -141,6 +141,8 @@ PyObject* Series_str_like(PyObject* self, PyObject* arg);
 PyObject* Series_str_len_bytes(PyObject* self, PyObject*);
 PyObject* Series_str_len_chars(PyObject* self, PyObject*);
 PyObject* Series_str_find(PyObject* self, PyObject* arg);
+PyObject* Series_fnv1a(PyObject* self, PyObject*);
+PyObject* Series_hex64_parse(PyObject* self, PyObject*);
 PyObject* Series_to_lowercase(PyObject* self, PyObject*);
 PyObject* Series_to_uppercase(PyObject* self, PyObject*);
 PyObject* Series_str_strip(PyObject* self, PyObject*);

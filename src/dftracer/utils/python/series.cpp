@@ -367,6 +367,11 @@ PyMethodDef Series_methods[] = {
      "str_len_chars() -> Int64 Series of per-row UTF-8 codepoint count."},
     {"str_find", Series_str_find, METH_O,
      "str_find(needle) -> Int64 Series of the first byte index, or -1."},
+    {"fnv1a", Series_fnv1a, METH_NOARGS,
+     "fnv1a() -> UInt64 Series of the FNV-1a 64 hash of each row's bytes."},
+    {"hex64_parse", Series_hex64_parse, METH_NOARGS,
+     "hex64_parse() -> UInt64 Series parsing each row as hex64; unparsable "
+     "rows are null."},
     {"to_lowercase", Series_to_lowercase, METH_NOARGS,
      "to_lowercase() -> String Series, ASCII case fold (non-ASCII unchanged)."},
     {"to_uppercase", Series_to_uppercase, METH_NOARGS,

@@ -6,7 +6,6 @@
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/plugins/abi.h>
-#include <dftracer/utils/plugins/dftu_generated_utilities.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 // After fold_adapter.h so nanoarrow is set up before dataframe/abi.h's
 // arrow_abi.

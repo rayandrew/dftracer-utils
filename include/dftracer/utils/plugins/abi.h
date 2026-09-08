@@ -118,8 +118,6 @@ typedef struct dftu_sketch
     dftu_sketch;                /**< quantile accumulator; plugin-owned */
 typedef struct dftu_trace_writer
     dftu_trace_writer;          /**< trace output; host-owned */
-typedef struct dftu_stream
-    dftu_stream;                /**< pulled utility stream; plugin-owned */
 typedef struct dftu_op dftu_op; /**< composable async op node; scan-lifetime */
 /** A columnar batch/table handle for the vectorized fold seam. The concrete
    type is the dataframe engine's (dftracer/utils/dataframe/abi.h); a plugin
@@ -167,23 +165,11 @@ typedef struct {
     char c[16];
 } dftu_hex16;
 
-/** A registered host utility; `run` reads *in (in_tag), writes *out (out_tag),
-   returns 0 on success. Call via the typed wrappers in utilities.h. Any
-   borrowed pointers in *out (strings, spans) stay valid only until the next
-   run() of the same utility on the same thread; copy them out to keep them. */
-typedef struct {
-    const char* name;
-    uint32_t name_len;
-    dftu_type in_tag, out_tag;
-    int (*run)(void* self, const void* in, void* out);
-    void* self;
-} dftu_utility;
-
 /** Work function for spawn()/then(); arg is plugin-owned. */
 typedef void (*dftu_work_fn)(void* arg);
 
-/** Per-item sink for run_stream; `item` points at the utility's generated C
-   output struct, borrowed for the call only. `ud` is plugin-owned. */
+/** Per-item sink; `item` points at the producer's item struct, borrowed for the
+   call only. `ud` is plugin-owned. */
 typedef void (*dftu_stream_item_fn)(const void* item, void* ud);
 
 /** Each call returns a dftu_task to compose/await; the out-slot must outlive
@@ -244,7 +230,6 @@ typedef struct dftu_io {
 #define DFTU_EXT_CORO "dftu.ext.coro@1"
 #define DFTU_EXT_QUERY "dftu.ext.query@1"
 #define DFTU_EXT_COMPOSE "dftu.ext.compose@1"
-#define DFTU_EXT_UTIL "dftu.ext.util@1"
 #define DFTU_EXT_WRITER "dftu.ext.writer@1"
 #define DFTU_EXT_SKETCH "dftu.ext.sketch@1"
 #define DFTU_EXT_ARROW "dftu.ext.arrow@1"
@@ -275,45 +260,6 @@ typedef struct dftu_ext_query {
     dftu_query* (*query_compile)(void* h, const char* src, uint32_t len);
     int (*query_matches)(void* h, const dftu_query* q, const dftu_event* e);
 } dftu_ext_query;
-
-typedef struct dftu_ext_util {
-    const dftu_utility* (*find_by_id)(void* h, uint32_t util_id);
-
-    /** Run a streaming utility: calls on_item once per yielded item, in_data
-       host-owned. 0 on success, -1 on failure. Single-value utilities deliver
-       exactly one item. */
-    int (*run_stream)(void* h, uint32_t util_id, const void* in_data,
-                      dftu_stream_item_fn on_item, void* ud);
-
-    /** Lazy dftu_task running a single-output utility on the current executor;
-       marshals in_data in and out_data out and writes *out_rc. in_data and
-       out_data must outlive the await. A stream or unknown util_id sets
-       *out_rc = -1. */
-    dftu_task* (*util_run_async)(void* h, uint32_t util_id, const void* in_data,
-                                 void* out_data, int* out_rc);
-
-    /** Lazy dftu_task driving a streaming utility on the current executor,
-       firing on_item per item as produced; *out_rc set on completion. in_data,
-       on_item, and ud must outlive the await. */
-    dftu_task* (*util_run_stream_async)(void* h, uint32_t util_id,
-                                        const void* in_data,
-                                        dftu_stream_item_fn on_item, void* ud,
-                                        int* out_rc);
-
-    /** Instantiate a utility's stream; NULL if util_id is not a stream utility.
-       The plugin owns the handle and must util_stream_close it exactly once,
-       within the same scan it was opened in. */
-    dftu_stream* (*util_stream_open)(void* h, uint32_t util_id,
-                                     const void* in_data);
-    /** Task resuming the stream one step. *out_item is the marshalled C item,
-       BORROWED and valid only until the next util_stream_next or
-       util_stream_close, NULL at end-of-stream; *out_rc is status. Await from
-       the same executor context; no concurrent next on one stream. */
-    dftu_task* (*util_stream_next)(void* h, dftu_stream* s,
-                                   const void** out_item, int* out_rc);
-    /** Safe only between completed next() calls, never with one in flight. */
-    void (*util_stream_close)(void* h, dftu_stream* s);
-} dftu_ext_util;
 
 /** A leaf op: transform `in_size` bytes at `in` into `out_size` bytes at `out`,
    returning a dftu_task the host drives to completion (NULL = ran inline).
@@ -350,12 +296,6 @@ typedef struct dftu_ext_compose {
     /** Run `op` over `in`, writing `out` and *rc. `in`/`out` must outlive the
        await; sized by op's in_size/out_size. */
     dftu_task* (*run)(void* h, dftu_op* op, const void* in, void* out, int* rc);
-    /** A leaf op wrapping registered host utility `util_id` (a single-value
-       utility, id < DFTU_UTIL__COUNT), so then()/when_all can pipe host
-       utilities. The value crosses as the utility's generated C in/out struct;
-       NULL for a stream-only or unknown id. Runs the utility asynchronously on
-       the executor (co_await), never blocking a worker. */
-    dftu_op* (*util_op)(void* h, uint32_t util_id);
     /** Optional early release; ops are otherwise freed at fold teardown. */
     void (*free_op)(void* h, dftu_op* op);
 } dftu_ext_compose;

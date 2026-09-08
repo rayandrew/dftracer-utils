@@ -22,7 +22,6 @@ need_tl_expected()
 need_unordered_dense()
 need_boost_math()
 need_yaml_cpp()
-need_pfr()
 
 if(DFTRACER_UTILS_ENABLE_ARROW)
   need_nanoarrow()
@@ -211,7 +210,6 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/result.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/ops.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/plugins.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/plugin_exports.cpp
 
     # DFT Comparator
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/comparator/comparison_aggregation.cpp
@@ -525,69 +523,8 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/kernels/substr_simd.cpp
     PROPERTIES COMPILE_OPTIONS -Wno-missing-declarations)
 
-# GCC flags the marshalling coroutine frames' anonymous-namespace lambda fields
-# as having no linkage; it is internal to the frame and harmless.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  set_source_files_properties(
-      ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/plugin_exports.cpp
-      PROPERTIES COMPILE_OPTIONS -Wno-subobject-linkage)
-endif()
-
 # The columnar engine (DFTRACER_UTILS_VEC_SOURCES) is built as part of the
 # single dftracer_utils_dataframe target below, not its own library.
-
-# +++++++++++++++++++++++++++++++++++++++++
-# Reflected plugin ABI code generator (host tool)
-# +++++++++++++++++++++++++++++++++++++++++
-#
-# gen_plugin_abi reflects the native utility I/O types and emits the
-# plugin-facing dftu_generated_utilities.h (typed C structs + wrappers + tags).
-# It is header-only against the library (reflection only; it never runs a
-# utility), so it links just pfr and needs the public + generated include dirs.
-#
-# TODO(cross): when CMAKE_CROSSCOMPILING, this host tool must be built with the
-# host toolchain (e.g. an ExternalProject sub-build or an imported prebuilt
-# gen_plugin_abi). For a native build host==target and the custom command below
-# runs the just-built tool directly.
-set(DFTU_GENERATED_HEADER
-    ${CMAKE_BINARY_DIR}/include/dftracer/utils/plugins/dftu_generated_utilities.h)
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/include/dftracer/utils/plugins)
-
-# GCC emits the reflected utilities' inline coroutine bodies even unused at -O0,
-# so the tool needs the gzip codec they call; compile it in (libdeflate only, no
-# cycle).
-add_executable(gen_plugin_abi
-  ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/codegen/gen_plugin_abi.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/utilities/fileio/compress/libdeflate_gzip.cpp)
-target_include_directories(gen_plugin_abi PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../include
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_BINARY_DIR}/include)
-# Reflecting the native I/O types pulls in the utility header's transitive core
-# includes (tl::expected, unordered_dense, ...). Link core for its header
-# include dirs only; core does not depend on the generated header, so no cycle.
-if(TARGET dftracer_utils_core::static)
-  target_link_libraries(gen_plugin_abi PRIVATE dftracer_utils_core::static)
-elseif(TARGET dftracer_utils_core::shared)
-  target_link_libraries(gen_plugin_abi PRIVATE dftracer_utils_core::shared)
-endif()
-link_pfr(gen_plugin_abi)
-link_libdeflate(gen_plugin_abi)
-add_stdfs_if_needed(gen_plugin_abi)
-# Reflecting the domain I/O types transitively includes headers that reference
-# nanoarrow (Arrow-gated members); the tool needs only the headers, never the
-# symbols.
-if(DFTRACER_UTILS_ENABLE_ARROW)
-  link_nanoarrow(gen_plugin_abi STATIC)
-endif()
-
-add_custom_command(
-  OUTPUT ${DFTU_GENERATED_HEADER}
-  COMMAND gen_plugin_abi ${DFTU_GENERATED_HEADER}
-  DEPENDS gen_plugin_abi
-  COMMENT "Generating reflected plugin ABI header (dftu_generated_utilities.h)"
-  VERBATIM)
-add_custom_target(dftu_generated_abi DEPENDS ${DFTU_GENERATED_HEADER})
 
 # +++++++++++++++++++++++++++++++++++++++++
 # JSON Library (leaf: simdjson-backed value + parser)
@@ -849,15 +786,6 @@ set_source_files_properties(
 foreach(variant shared static)
   if(TARGET dftracer_utils_utilities_${variant})
     # No need to link dependencies here - they're inherited from core
-
-    # plugin_exports.cpp includes the generated reflected-ABI header and the
-    # pfr-based reflection layer. pfr is header-only and only used in this .cpp,
-    # so add its include dir privately rather than linking the target (which
-    # would drag pfr into the utilities export set).
-    add_dependencies(dftracer_utils_utilities_${variant} dftu_generated_abi)
-    get_target_property(_dft_pfr_inc pfr::pfr INTERFACE_INCLUDE_DIRECTORIES)
-    target_include_directories(dftracer_utils_utilities_${variant} SYSTEM
-                               PRIVATE ${_dft_pfr_inc})
 
     # Link tl::expected for C++20/23 expected shim
     link_tl_expected(dftracer_utils_utilities_${variant})

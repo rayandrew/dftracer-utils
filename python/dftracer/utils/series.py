@@ -664,6 +664,12 @@ class Series(_Wrapper["_ext._Series"]):
     def str_find(self, needle: str) -> "Series":
         return _wrap(self._native.str_find(_unwrap(needle)))
 
+    def fnv1a(self) -> "Series":
+        return _wrap(self._native.fnv1a())
+
+    def hex64_parse(self) -> "Series":
+        return _wrap(self._native.hex64_parse())
+
     def to_lowercase(self) -> "Series":
         return _wrap(self._native.to_lowercase())
 

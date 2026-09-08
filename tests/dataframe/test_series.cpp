@@ -1,5 +1,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/config.h>
+#include <dftracer/utils/core/common/hash/fnv1a.h>
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/agg_expr.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
@@ -765,6 +766,21 @@ TEST_SUITE("vec") {
         Series find = Series::strings({"hello/world", "nope"}).str_find("/");
         CHECK(find.data<std::int64_t>()[0] == 5);
         CHECK(find.data<std::int64_t>()[1] == -1);
+
+        Series hashed = Series::strings({"POSIX", "read"}).fnv1a();
+        CHECK(hashed.type() == TypeId::Uint64);
+        CHECK(hashed.data<std::uint64_t>()[0] ==
+              dftracer::utils::hash::fnv1a_hash(std::string_view{"POSIX"}));
+        CHECK(hashed.data<std::uint64_t>()[1] ==
+              dftracer::utils::hash::fnv1a_hash(std::string_view{"read"}));
+
+        Series parsed = Series::strings({"00000000000000ff", "00000000deadbeef",
+                                         "deadbeef"})
+                            .hex64_parse();
+        CHECK(parsed.type() == TypeId::Uint64);
+        CHECK(parsed.data<std::uint64_t>()[0] == 0xffull);
+        CHECK(parsed.data<std::uint64_t>()[1] == 0xdeadbeefull);
+        CHECK(parsed.is_null(2));  // not the 16-digit form
 
         // transforms
         Series lo = s.to_lowercase();

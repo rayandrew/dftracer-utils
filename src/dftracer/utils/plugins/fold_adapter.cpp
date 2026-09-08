@@ -14,7 +14,6 @@
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/fold_adapter/ext.h>
-#include <dftracer/utils/plugins/utility_registry.h>
 #include <dftracer/utils/trace/schema.h>
 #include <dftracer/utils/trace/views/event_source.h>
 #include <dftracer/utils/trace/views/fold_event.h>
@@ -407,56 +406,8 @@ void host_run_blocking(void* /*h*/, dftu_work_fn fn, void* arg) {
                               int* rc) {
     return static_cast<PluginFold*>(h)->compose_run(op, in, out, rc);
 }
-::dftu_op* host_compose_util_op(void* h, std::uint32_t util_id) {
-    return static_cast<PluginFold*>(h)->compose_util_op(util_id);
-}
 // Ops are arena-owned (scan-lifetime); early release is a no-op.
 void host_compose_free_op(void* /*h*/, ::dftu_op* /*op*/) {}
-
-::dftu_task* host_util_run_async(void* h, std::uint32_t util_id,
-                                 const void* in_data, void* out_data,
-                                 int* out_rc) {
-    return static_cast<PluginFold*>(h)->emplace_task(
-        [](std::uint32_t id, const void* in, void* out,
-           int* orc) -> coro::CoroTask<void> {
-            int rc = co_await registry_run_async(id, in, out);
-            if (orc) *orc = rc;
-        }(util_id, in_data, out_data, out_rc));
-}
-
-::dftu_task* host_util_run_stream_async(void* h, std::uint32_t util_id,
-                                        const void* in_data,
-                                        dftu_stream_item_fn on_item, void* ud,
-                                        int* out_rc) {
-    return static_cast<PluginFold*>(h)->emplace_task(
-        [](std::uint32_t id, const void* in, dftu_stream_item_fn oi, void* u,
-           int* orc) -> coro::CoroTask<void> {
-            int rc = co_await registry_run_stream_async(id, in, oi, u);
-            if (orc) *orc = rc;
-        }(util_id, in_data, on_item, ud, out_rc));
-}
-
-::dftu_stream* host_util_stream_open(void* h, std::uint32_t util_id,
-                                     const void* in_data) {
-    (void)h;
-    return reinterpret_cast<::dftu_stream*>(
-        registry_stream_open(util_id, in_data));
-}
-
-::dftu_task* host_util_stream_next(void* h, ::dftu_stream* s,
-                                   const void** out_item, int* out_rc) {
-    return static_cast<PluginFold*>(h)->emplace_task(
-        [](StreamDriver* d, const void** oi, int* orc) -> coro::CoroTask<void> {
-            int rc = co_await d->next(d, oi);
-            if (orc) *orc = rc;
-        }(reinterpret_cast<StreamDriver*>(s), out_item, out_rc));
-}
-
-void host_util_stream_close(void*, ::dftu_stream* s) {
-    if (!s) return;
-    auto* d = reinterpret_cast<StreamDriver*>(s);
-    d->destroy(d);
-}
 
 ::dftu_task* host_merge_shards(void* h, const char* target,
                                const char* const* shards, std::uint32_t n) {
@@ -835,15 +786,6 @@ int host_trace_read(void* h, const char* path, dftu_stream_item_fn on_event,
 const dftu_ext_trace g_trace = {host_trace_open_write, host_trace_write,
                                 host_trace_close, host_trace_read};
 
-const dftu_utility* host_find_by_id(void*, std::uint32_t id) {
-    return registry_find(id);
-}
-
-int host_run_stream(void*, std::uint32_t id, const void* in,
-                    dftu_stream_item_fn on_item, void* ud) {
-    return registry_run_stream(id, in, on_item, ud);
-}
-
 dftu_query* host_query_compile(void* h, const char* src, std::uint32_t len) {
     return static_cast<PluginFold*>(h)->compile_query(src, len);
 }
@@ -882,13 +824,7 @@ const dftu_ext_query g_query = {host_query_compile, host_query_matches};
 
 const dftu_ext_compose g_compose = {
     host_compose_make,     host_compose_then, host_compose_when_all,
-    host_compose_when_any, host_compose_run,  host_compose_util_op,
-    host_compose_free_op};
-
-const dftu_ext_util g_util = {host_find_by_id,       host_run_stream,
-                              host_util_run_async,   host_util_run_stream_async,
-                              host_util_stream_open, host_util_stream_next,
-                              host_util_stream_close};
+    host_compose_when_any, host_compose_run,  host_compose_free_op};
 
 // Stateless ext tables share one instance across all folds (each fn takes h).
 const void* host_get_extension(void*, const char* ext_id) {
@@ -897,7 +833,6 @@ const void* host_get_extension(void*, const char* ext_id) {
     if (std::strcmp(ext_id, DFTU_EXT_CORO) == 0) return &g_coro;
     if (std::strcmp(ext_id, DFTU_EXT_QUERY) == 0) return &g_query;
     if (std::strcmp(ext_id, DFTU_EXT_COMPOSE) == 0) return &g_compose;
-    if (std::strcmp(ext_id, DFTU_EXT_UTIL) == 0) return &g_util;
     if (std::strcmp(ext_id, DFTU_EXT_WRITER) == 0) return &g_writer;
     if (std::strcmp(ext_id, DFTU_EXT_SKETCH) == 0) return &g_sketch;
     if (std::strcmp(ext_id, DFTU_EXT_ARROW) == 0) return &g_arrow;
@@ -971,18 +906,6 @@ coro::CoroTask<int> eval_compose(PluginFold* self, ComposeOp* op,
     co_return winner.result;
 }
 
-// A compose leaf wrapping a registered host utility. Runs it through the async
-// util path so it co_awaits cooperatively on the executor rather than blocking
-// a worker like the synchronous run() would.
-struct UtilLeafState {
-    PluginFold* self;
-    std::uint32_t util_id;
-};
-::dftu_task* util_leaf_thunk(void* state, const void* in, void* out, int* rc) {
-    auto* s = static_cast<UtilLeafState*>(state);
-    return host_util_run_async(s->self, s->util_id, in, out, rc);
-}
-void util_leaf_free(void* state) { delete static_cast<UtilLeafState*>(state); }
 }  // namespace
 
 ::dftu_op* PluginFold::compose_make(dftu_op_fn fn, void* state,
@@ -1116,17 +1039,6 @@ void util_leaf_free(void* state) { delete static_cast<UtilLeafState*>(state); }
         int res = co_await eval_compose(self, g, i, o);
         if (r) *r = res;
     }(this, graph, in, out, rc));
-}
-
-::dftu_op* PluginFold::compose_util_op(std::uint32_t util_id) {
-    const dftu_utility* u = registry_find(util_id);
-    std::uint32_t in_sz = 0, out_sz = 0;
-    if (!u || !u->run || !registry_run_sizes(util_id, &in_sz, &out_sz))
-        return nullptr;
-    // compose_make frees the state via util_leaf_free on its own failure path.
-    auto* st = new UtilLeafState{this, util_id};
-    return compose_make(&util_leaf_thunk, st, &util_leaf_free, u->in_tag, in_sz,
-                        u->out_tag, out_sz);
 }
 
 ::dftu_writer* PluginFold::create_writer(const char* path,

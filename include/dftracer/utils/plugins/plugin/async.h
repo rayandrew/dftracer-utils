@@ -6,8 +6,6 @@
 #include <coroutine>
 #include <cstdint>
 #include <exception>
-#include <optional>
-#include <type_traits>
 
 namespace dftracer::utils::plugins {
 
@@ -68,79 +66,6 @@ struct AsyncOp {
     }
     void await_resume() const noexcept {}
     operator dftu_task*() const noexcept { return task; }
-};
-
-namespace detail {
-/// A stream tag carries its element as `item`; a single-value-as-stream tag as
-/// `out`.
-template <class Tag, class = void>
-struct stream_elem {
-    using type = typename Tag::out;
-};
-template <class Tag>
-struct stream_elem<Tag, std::void_t<typename Tag::item>> {
-    using type = typename Tag::item;
-};
-}  // namespace detail
-
-/// RAII pull-model utility stream. co_await next() to pull one element and do
-/// the plugin's own async work between pulls; a returned element's
-/// dftu_bytes/span fields stay borrowed only until the next next() or
-/// destruction. Move-only; the destructor closes the stream if still open.
-template <class Tag>
-class Stream {
-   public:
-    using element = typename detail::stream_elem<Tag>::type;
-
-    Stream(const dftu_host* h, const dftu_ext_util* u, dftu_stream* s)
-        : h_(h), u_(u), s_(s) {}
-    Stream(Stream&& o) noexcept : h_(o.h_), u_(o.u_), s_(o.s_) {
-        o.s_ = nullptr;
-    }
-    Stream& operator=(Stream&& o) noexcept {
-        if (this != &o) {
-            close();
-            h_ = o.h_;
-            u_ = o.u_;
-            s_ = o.s_;
-            o.s_ = nullptr;
-        }
-        return *this;
-    }
-    Stream(const Stream&) = delete;
-    Stream& operator=(const Stream&) = delete;
-    ~Stream() { close(); }
-
-    struct NextOp {
-        const dftu_host* h;
-        const dftu_ext_util* u;
-        dftu_stream* s;
-        const void* item = nullptr;
-        int rc = 0;
-        bool await_ready() const noexcept {
-            return s == nullptr || u == nullptr;
-        }
-        void await_suspend(
-            std::coroutine_handle<Task::promise_type> co) noexcept {
-            co.promise().pending = u->util_stream_next(h->h, s, &item, &rc);
-        }
-        std::optional<element> await_resume() const {
-            if (!item) return std::nullopt;
-            return std::optional<element>{*static_cast<const element*>(item)};
-        }
-    };
-    NextOp next() { return NextOp{h_, u_, s_}; }
-
-    explicit operator bool() const { return s_ != nullptr; }
-
-   private:
-    void close() {
-        if (s_ && u_ && u_->util_stream_close) u_->util_stream_close(h_->h, s_);
-        s_ = nullptr;
-    }
-    const dftu_host* h_;
-    const dftu_ext_util* u_ = nullptr;
-    dftu_stream* s_ = nullptr;
 };
 
 /// Thin typed wrapper over the io ext; each call returns an AsyncOp to

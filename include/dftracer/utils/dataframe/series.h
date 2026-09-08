@@ -450,6 +450,10 @@ class Series {
     Series str_len_chars() const;  ///< Int64 per-row UTF-8 codepoint count.
     /// Int64 byte index of the first `needle`, or -1.
     Series str_find(std::string_view needle) const;
+    Series fnv1a() const;  ///< UInt64 FNV-1a 64 of each row's bytes.
+    /// UInt64 parse of each row as dftracer's 16-hex-digit hash form;
+    /// a row not in that form is null.
+    Series hex64_parse() const;
     Series to_lowercase() const;  ///< ASCII case fold (non-ASCII unchanged).
     Series to_uppercase() const;  ///< ASCII case fold (non-ASCII unchanged).
     Series str_strip() const;     ///< Trim ASCII whitespace both ends.

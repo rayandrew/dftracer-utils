@@ -835,10 +835,10 @@ or ``run_blocking``.
                              O_WRONLY | O_CREAT | O_TRUNC, 0644, &fd);
          }
 
-The SDK also offers a pull-model ``Stream<Tag>`` (from ``Host::util_stream``)
-and ``util`` / ``util_async`` / ``util_each`` for host utilities. Every
-``dftu_ext_coro`` combinator now has an SDK method (``spawn`` / ``then`` /
-``all`` / ``any`` / ``run_blocking``), so async composition needs no raw ABI.
+A host utility is reached as a named op instead
+(``Host::run_op("dftu.hash.fnv1a", {column})``, ``DFTU_EXT_OPS``). Every
+``dftu_ext_coro`` combinator has an SDK method (``spawn`` / ``then`` / ``all``
+/ ``any`` / ``run_blocking``), so async composition needs no raw ABI.
 See :doc:`guides/plugins/compose-ops` for composing reusable typed ops inside a
 plugin.
 
@@ -1052,8 +1052,8 @@ that covers it:
    * - ``Host::all`` / ``any`` / ``run_blocking``
      - ``DFTU_EXT_CORO``
      - `9. Async work and I/O`_
-   * - ``Host::io()`` (typed ``Io``), ``util_stream`` (``Stream``)
-     - ``DFTU_EXT_IO`` / ``DFTU_EXT_UTIL``
+   * - ``Host::io()`` (typed ``Io``)
+     - ``DFTU_EXT_IO``
      - `9. Async work and I/O`_
    * - typed compose ops (``dftracer::utils::plugins::make_op`` / ``run``)
      - ``DFTU_EXT_COMPOSE``

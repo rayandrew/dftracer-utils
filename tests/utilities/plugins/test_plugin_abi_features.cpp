@@ -1,13 +1,11 @@
-// In-process coverage for the plugin ABI surface the reflected-utility and
-// host-service suites leave untested: the config tree, query compile/match and
-// plan_query event routing, the coroutine control ops, the async on_batch
-// take_pending/drive path, and the scalar functors.
+// In-process coverage for the plugin ABI surface the host-service suite leaves
+// untested: the config tree, query compile/match and plan_query event routing,
+// the coroutine control ops, and the async on_batch take_pending/drive path.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/string_intern.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/plugins/config.h>
-#include <dftracer/utils/plugins/dftu_generated_utilities.h>
 #include <dftracer/utils/plugins/fold_adapter.h>
 #include <dftracer/utils/plugins/plugin.h>
 
@@ -48,10 +46,6 @@ namespace {
 
 coro::CoroTask<void>* as_coro(::dftu_task* t) {
     return reinterpret_cast<coro::CoroTask<void>*>(t);
-}
-
-dftu_bytes bytes_of(const std::string& s) {
-    return dftu_bytes{s.data(), static_cast<std::uint32_t>(s.size())};
 }
 
 struct ConfigSlice {
@@ -255,20 +249,6 @@ dftracer::utils::plugins::Task series_pipe(dftracer::utils::plugins::Host h,
     co_await dftracer::utils::plugins::run(a | b, src, out, rc);
     dftu_series_free(src);
     *result = (rc == 0) ? out : nullptr;
-}
-
-// A registered host utility as a compose leaf: pipe fnv1a (bytes -> u64) into
-// hex64_format (u64 -> hex16), so `then` chains two host utilities.
-dftracer::utils::plugins::Task util_pipe(dftracer::utils::plugins::Host h,
-                                         dftu_hex16* result, int* rc) {
-    const dftu_ext_compose* c = compose_ext(h);
-    void* hh = h.raw()->h;
-    ::dftu_op* hash = c->util_op(hh, DFTU_UTIL_FNV1A);
-    ::dftu_op* fmt = c->util_op(hh, DFTU_UTIL_HEX64_FORMAT);
-    ::dftu_op* pipe = c->then(hh, hash, fmt);
-    std::string data = "hello-world";
-    dftu_bytes in{data.data(), static_cast<std::uint32_t>(data.size())};
-    co_await h.await(c->run(hh, pipe, &in, result, rc));
 }
 
 // when_any: both racers compute the same value, so the winner is deterministic.
@@ -699,33 +679,6 @@ TEST_CASE(
     CHECK(c->then(hh, col_out, col_in) != nullptr);  // SERIES out -> SERIES in
 }
 
-TEST_CASE("plugin ABI: compose util_op pipes two host utilities") {
-    FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
-
-    // Expected: fnv1a("hello-world") formatted as 16 hex digits.
-    std::string data = "hello-world";
-    dftu_bytes bin{data.data(), static_cast<std::uint32_t>(data.size())};
-    std::uint64_t hash = 0;
-    REQUIRE(dftu_util_fnv1a(&host, &bin, &hash) == 0);
-    dftu_hex16 expected{};
-    REQUIRE(dftu_util_hex64_format(&host, &hash, &expected) == 0);
-
-    Runtime rt(1);
-    dftu_hex16 got{};
-    int rc = -1;
-    rt.scope("caller", [&](CoroScope&) -> coro::CoroTask<void> {
-          ::dftu_task* d = dftracer::utils::plugins::detail::drive_coro<int>(
-              &host,
-              util_pipe(dftracer::utils::plugins::Host{&host}, &got, &rc));
-          co_await *as_coro(d);
-      }).wait();
-    rt.shutdown();
-
-    CHECK(rc == 0);
-    CHECK(std::string(got.c, 16) == std::string(expected.c, 16));
-}
-
 TEST_CASE("plugin ABI: compose dftu_op then rejects a type mismatch") {
     FoldFixture<CountSlice> fx(nullptr);
     dftracer::utils::plugins::Host h{&fx.host()};
@@ -784,39 +737,35 @@ TEST_CASE("plugin ABI: async on_batch drives to completion via take_pending") {
     CHECK(g_async.done.load() == 1);
 }
 
-TEST_CASE("plugin ABI: scalar functors fnv1a and hex64 round-trip") {
+TEST_CASE("plugin ABI: host utility ops fnv1a and hex64_parse") {
     FoldFixture<CountSlice> fx(nullptr);
     dftu_host& host = fx.host();
+    dftracer::utils::plugins::Host h{&host};
 
-    std::string posix = "POSIX";
-    dftu_bytes in = bytes_of(posix);
-    std::uint64_t h = 0;
-    CHECK(dftu_util_fnv1a(&host, &in, &h) == 0);
-    CHECK(h == 5527563327133061832ULL);
+    const char data[] = "POSIXabc0123456789abcdefnothexnothex1234";
+    const std::int32_t offsets[] = {0, 5, 8, 24, 40};
+    dftu_series* in =
+        dftu_series_new_string(DFTU_TYPE_STRING, offsets, data, 4, nullptr);
+    REQUIRE(in != nullptr);
 
-    std::string empty;
-    dftu_bytes ein = bytes_of(empty);
-    std::uint64_t he = 0;
-    CHECK(dftu_util_fnv1a(&host, &ein, &he) == 0);
-    CHECK(he == 14695981039346656037ULL);  // FNV-1a offset basis
+    dftu_series* hashed = h.run_op("dftu.hash.fnv1a", {in});
+    REQUIRE(hashed != nullptr);
+    const auto* hv =
+        static_cast<const std::uint64_t*>(dftu_series_data(hashed));
+    REQUIRE(hv != nullptr);
+    CHECK(hv[0] == 5527563327133061832ULL);  // fnv1a("POSIX")
 
-    std::uint64_t v = 0x0123456789abcdefULL;
-    dftu_hex16 hx{};
-    CHECK(dftu_util_hex64_format(&host, &v, &hx) == 0);
-    std::string hex(hx.c, 16);
-    CHECK(hex == "0123456789abcdef");
+    dftu_series* parsed = h.run_op("dftu.hex.parse64", {in});
+    REQUIRE(parsed != nullptr);
+    const auto* pv =
+        static_cast<const std::uint64_t*>(dftu_series_data(parsed));
+    REQUIRE(pv != nullptr);
+    CHECK(pv[2] == 0x0123456789abcdefULL);
+    CHECK(dftu_series_is_null(parsed, 0));  // "POSIX" is not 16 hex digits
+    CHECK(dftu_series_is_null(parsed, 1));  // "abc" is too short
+    CHECK(dftu_series_is_null(parsed, 3));  // 16 chars, not all hex
 
-    dftu_bytes hb = bytes_of(hex);
-    std::uint64_t back = 0;
-    CHECK(dftu_util_hex64_parse(&host, &hb, &back) == 0);
-    CHECK(back == v);
-
-    std::string bad = "nothexnothex1234";
-    dftu_bytes badb = bytes_of(bad);
-    std::uint64_t bo = 123;
-    CHECK(dftu_util_hex64_parse(&host, &badb, &bo) == -1);
-
-    std::string short_hex = "abc";
-    dftu_bytes sb = bytes_of(short_hex);
-    CHECK(dftu_util_hex64_parse(&host, &sb, &bo) == -1);
+    dftu_series_free(parsed);
+    dftu_series_free(hashed);
+    dftu_series_free(in);
 }
