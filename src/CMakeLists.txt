@@ -864,17 +864,27 @@ foreach(variant shared static)
     endif()
 
     # The host ops (dftu.fs.*, dftu.file.*, dftu.text.*) register from a static
-    # initializer. Nothing references that translation unit, so a static link
-    # drops the archive member and the ops silently do not exist; force it in
-    # through its unmangled anchor. Mach-O prefixes an underscore.
-    if(variant STREQUAL "static")
-      if(APPLE)
-        set(host_ops_anchor "_dftu_register_host_ops")
-      else()
-        set(host_ops_anchor "dftu_register_host_ops")
-      endif()
-      target_link_options(dftracer_utils_utilities_static
-                          INTERFACE "LINKER:-u,${host_ops_anchor}")
+    # initializer that nothing references, so a linker drops it and the ops
+    # silently do not exist. A static link drops the archive member; a shared
+    # link under GNU ld drops the whole DT_NEEDED entry, since --as-needed is
+    # the default on most Linux distros and no symbol of ours is referenced.
+    # Force a reference through the unmangled anchor in both cases. Mach-O
+    # prefixes an underscore, and does not default to --as-needed, which is why
+    # the shared half only ever failed on Linux.
+    if(APPLE)
+      set(host_ops_anchor "_dftu_register_host_ops")
+    else()
+      set(host_ops_anchor "dftu_register_host_ops")
+    endif()
+    target_link_options(dftracer_utils_utilities_${variant}
+                        INTERFACE "LINKER:-u,${host_ops_anchor}")
+    # GNU ld does not count -u as a reference when deciding --as-needed, so the
+    # shared library is still dropped from DT_NEEDED and its initializer never
+    # runs. Keep the dependency explicitly; Mach-O has no --as-needed and needs
+    # only the -u above.
+    if(NOT APPLE AND variant STREQUAL "shared")
+      target_link_options(dftracer_utils_utilities_shared INTERFACE
+                          "LINKER:--no-as-needed")
     endif()
   endif()
 endforeach()
