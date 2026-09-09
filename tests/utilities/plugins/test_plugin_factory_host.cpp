@@ -128,8 +128,13 @@ TEST_CASE("describe() lists the ops a plugin's factory registered") {
 
     auto info = set->describe();
     REQUIRE(info.size() == 1);
-    CHECK(std::find(info[0].ops.begin(), info[0].ops.end(),
-                    "factory_registers_op.double_rows") != info[0].ops.end());
+    // The signature comes from the registry, not from the plugin: an author
+    // reading --describe needs to know how to call the op, not just that it
+    // is there.
+    REQUIRE(info[0].ops.size() == 1);
+    // series in, scalar out, so the registry classes it as an aggregate.
+    CHECK(info[0].ops[0] ==
+          "factory_registers_op.double_rows(series) -> i64 [aggregate]");
 }
 
 TEST_CASE(

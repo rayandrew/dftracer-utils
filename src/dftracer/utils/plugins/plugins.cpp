@@ -127,6 +127,33 @@ const char* value_kind_name(std::int32_t kind) {
     return "?";
 }
 
+const char* op_kind_name(dftu_op_sig sig) {
+    switch (dftu_op_kind_of(sig)) {
+        case DFTU_OP_KIND_SERIES:
+            return "series";
+        case DFTU_OP_KIND_AGGREGATE:
+            return "aggregate";
+        case DFTU_OP_KIND_FRAME:
+            return "frame";
+    }
+    return "?";
+}
+
+// `name(arg, ...) -> ret [kind]` for a registered op, or the bare name when it
+// is not in the registry (it cannot be, while its plugin is loaded, but a
+// describe() that silently dropped an op would be worse than one that says
+// less about it).
+std::string op_summary(const std::string& name) {
+    const dftu_op_desc* desc = ::dftu_op_find(name.c_str());
+    if (!desc) return name;
+    // dftu_op_signature returns a thread_local buffer reused by the next call.
+    std::string out = name + ::dftu_op_signature(desc->sig);
+    out += " [";
+    out += op_kind_name(desc->sig);
+    out += "]";
+    return out;
+}
+
 bool is_numeric(std::int32_t kind) {
     return kind == DFTU_VAL_BOOL || kind == DFTU_VAL_I64 ||
            kind == DFTU_VAL_F64;
@@ -466,7 +493,8 @@ std::vector<Plugins::PluginInfo> Plugins::describe() const {
         info.has_plan_query = p.plugin->plan_query != nullptr;
         info.provides = name_list(p.plugin->provides, p.plugin->self);
         info.consumes = name_list(p.plugin->consumes, p.plugin->self);
-        info.ops = p.registered_ops;
+        for (const std::string& op : p.registered_ops)
+            info.ops.push_back(op_summary(op));
         if (p.plugin->config_keys) {
             const dftu_config_key* keys = p.plugin->config_keys(p.plugin->self);
             for (; keys && keys->name; ++keys) {

@@ -76,7 +76,8 @@ class Plugins {
             false;         ///< true if the plugin declares a plan_query
         std::vector<std::string> provides;
         std::vector<std::string> consumes;
-        /// Op names the plugin's factory added to the host op registry.
+        /// One entry per op the plugin's factory added to the host op
+        /// registry: `name(arg, ...) -> ret [kind]`.
         std::vector<std::string> ops;
         /// One entry per declared config key: `name (kind[, required]) - doc`.
         /// Empty when the plugin declares none, in which case its config is
