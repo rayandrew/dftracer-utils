@@ -6,7 +6,7 @@ set(DATAFRAME_TEST_SOURCES test_mask.cpp test_series.cpp test_result_batch.cpp t
                            test_arrow.cpp test_field.cpp test_op_registry.cpp test_lazyframe.cpp
                            test_lazyframe_abi.cpp test_spill.cpp test_agg_state.cpp
                            test_agg_extended_ops.cpp test_host_ops.cpp
-                           test_host_ops_autoregister.cpp)
+                           test_host_ops_autoregister.cpp test_expr_string.cpp)
 
 foreach(test_file ${DATAFRAME_TEST_SOURCES})
   string(REPLACE ".cpp" "" bin_exec ${test_file})
@@ -48,3 +48,13 @@ foreach(test_file ${DATAFRAME_TEST_SOURCES})
   set_tests_properties(dataframe/${bin_exec} PROPERTIES
                        WORKING_DIRECTORY "${test_working_directory}")
 endforeach()
+
+# ##############################################################################
+# DFTU_SCALAR_* C macros (guarded #ifndef __cplusplus in abi.h; needs a C TU)
+# ##############################################################################
+
+add_executable(dataframe_test_scalar_macros_c test_scalar_macros_c.c)
+target_include_directories(dataframe_test_scalar_macros_c PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_link_libraries(dataframe_test_scalar_macros_c PRIVATE dftracer_utils)
+set_target_properties(dataframe_test_scalar_macros_c PROPERTIES OUTPUT_NAME test_scalar_macros_c)
+add_test(NAME dataframe/test_scalar_macros_c COMMAND dataframe_test_scalar_macros_c)

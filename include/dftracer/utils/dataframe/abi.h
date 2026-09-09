@@ -24,18 +24,27 @@ typedef struct dftu_series dftu_series;
 typedef enum {
     DFTU_SCALAR_TAG_I64 = 0,
     DFTU_SCALAR_TAG_U64 = 1,
-    DFTU_SCALAR_TAG_F64 = 2
+    DFTU_SCALAR_TAG_F64 = 2,
+    DFTU_SCALAR_TAG_STR = 3
 } dftu_scalar_tag;
 
 /** A scalar operand, tagged by its domain so a kernel converts it to the
  * column's element type. Pass a signed integer as I64, an unsigned integer as
- * U64, a float as F64 (see dftu_scalar_tag). */
+ * U64, a float as F64, a string as STR (see dftu_scalar_tag).
+ *
+ * A STR scalar BORROWS `value.s` for the duration of the call: nothing stores a
+ * dftu_scalar past the call it was passed to, and the owner of the text (an
+ * ExprNode, a caller's std::string) outlives it. `len` sits in the padding
+ * after `kind`, so the struct is 16 bytes and 8-aligned exactly as before and
+ * no by-value call site changes. */
 typedef struct dftu_scalar {
     int32_t kind;
+    uint32_t len; /**< STR only: byte length of `value.s`; 0 otherwise */
     union {
         int64_t i;
         uint64_t u;
         double d;
+        const char* s;
     } value;
 } dftu_scalar;
 
@@ -566,12 +575,22 @@ DFTU_EXPORT dftu_scalar dftu_series_dot(const dftu_series* v,
 /** C convenience: build a tagged scalar from a value, e.g.
  * dftu_series_compare(col, DFTU_CMP_GT, DFTU_SCALAR_I64(100)). (C++ callers
  * pass a plain value to the typed templates; these are for C.) */
+/* Designated, not positional: `len` sits between `kind` and `value`, so a
+ * positional form would bind the second initializer to `len`. */
 #define DFTU_SCALAR_I64(v) \
-    ((dftu_scalar){DFTU_SCALAR_TAG_I64, {.i = (int64_t)(v)}})
+    ((dftu_scalar){        \
+        .kind = DFTU_SCALAR_TAG_I64, .len = 0, .value = {.i = (int64_t)(v)}})
 #define DFTU_SCALAR_U64(v) \
-    ((dftu_scalar){DFTU_SCALAR_TAG_U64, {.u = (uint64_t)(v)}})
+    ((dftu_scalar){        \
+        .kind = DFTU_SCALAR_TAG_U64, .len = 0, .value = {.u = (uint64_t)(v)}})
 #define DFTU_SCALAR_F64(v) \
-    ((dftu_scalar){DFTU_SCALAR_TAG_F64, {.d = (double)(v)}})
+    ((dftu_scalar){        \
+        .kind = DFTU_SCALAR_TAG_F64, .len = 0, .value = {.d = (double)(v)}})
+/** `s` is BORROWED for the call; it must outlive the call it is passed to. */
+#define DFTU_SCALAR_STR(p, n)                   \
+    ((dftu_scalar){.kind = DFTU_SCALAR_TAG_STR, \
+                   .len = (uint32_t)(n),        \
+                   .value = {.s = (p)}})
 #endif
 
 /** Evaluate `q` as a bit-packed Bool mask over a materialized batch of `n`

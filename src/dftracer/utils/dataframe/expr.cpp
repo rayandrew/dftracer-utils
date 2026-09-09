@@ -36,6 +36,11 @@ struct ExprNode {
                             // cast type / binary op
     dftu_scalar scalar{};   // literal value / cmp rhs / clip lo
     dftu_scalar scalar2{};  // clip hi
+    // Owns the text of a STR-tagged `scalar`, which borrows it. The node is
+    // built once and never copied (it lives behind shared_ptr<const>), and
+    // eval_many holds the roots for the whole evaluation, so the borrow is
+    // valid for as long as the compiled program can read it.
+    std::string text;
     std::shared_ptr<const ExprNode> a;  // first child
     std::shared_ptr<const ExprNode> b;  // second child
 };
@@ -177,8 +182,18 @@ Expr expr_fillna(const Expr& a, Scalar fill) {
     return make(ExprKind::Fillna, 0, fill, a.node(), nullptr);
 }
 Expr expr_cmp(CmpOp cmp, const Expr& a, Scalar rhs) {
-    return make(ExprKind::Cmp, static_cast<std::int32_t>(cmp), rhs, a.node(),
-                nullptr);
+    Expr e = make(ExprKind::Cmp, static_cast<std::int32_t>(cmp), rhs, a.node(),
+                  nullptr);
+    // A STR rhs only borrows its text, and the caller's buffer may die before
+    // the Expr is evaluated. Take a copy the node owns and repoint at it.
+    const dftu_scalar raw = rhs;
+    if (raw.kind == DFTU_SCALAR_TAG_STR) {
+        auto* n = const_cast<ExprNode*>(e.node().get());
+        n->text.assign(raw.value.s != nullptr ? raw.value.s : "", raw.len);
+        n->scalar.value.s = n->text.data();
+        n->scalar.len = static_cast<std::uint32_t>(n->text.size());
+    }
+    return e;
 }
 Expr expr_logical(LogicalOp op, const Expr& a, const Expr& b) {
     return make(ExprKind::Logical, static_cast<std::int32_t>(op), {}, a.node(),
@@ -463,8 +478,12 @@ class Compiler {
                        ? std::bit_cast<std::int64_t>(x.value.d)
                        : x.value.i;
         };
+        // len is part of the key: a STR scalar's `bits` is its pointer, and
+        // two scalars can share a pointer with different lengths (a prefix),
+        // which would otherwise hash-cons to the same slot.
         auto key = std::make_tuple(opcode, a, b, static_cast<int>(param),
-                                   static_cast<int>(s.kind), bits(s), bits(s2));
+                                   static_cast<int>(s.kind), bits(s), bits(s2),
+                                   s.len, s2.len);
         auto it = memo_.find(key);
         if (it != memo_.end()) return it->second;
         int slot = static_cast<int>(program.size());
@@ -474,7 +493,8 @@ class Compiler {
     }
 
     const std::vector<const Series*>& inputs_;
-    std::map<std::tuple<int, int, int, int, int, std::int64_t, std::int64_t>,
+    std::map<std::tuple<int, int, int, int, int, std::int64_t, std::int64_t,
+                        std::uint32_t, std::uint32_t>,
              int>
         memo_;
 };

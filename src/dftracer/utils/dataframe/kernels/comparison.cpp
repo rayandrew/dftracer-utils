@@ -55,6 +55,21 @@ dftu_series* dftu_series_compare(const dftu_series* v, dftu_cmp_op op,
     using dftracer::utils::dataframe::compare_impl;
     using dftracer::utils::dataframe::Encoding;
     using dftracer::utils::dataframe::TypeId;
+    // A STR rhs is a string comparison, which is a different kernel: equality
+    // only, and dictionary-aware (dftu_series_str_eq tests each dictionary
+    // entry once and then compares codes, rather than resolving per row).
+    if (rhs.kind == DFTU_SCALAR_TAG_STR) {
+        if (op != static_cast<int32_t>(CmpOp::Eq) &&
+            op != static_cast<int32_t>(CmpOp::Ne))
+            return nullptr;
+        dftu_series* eq =
+            dftu_series_str_eq(v, rhs.value.s, static_cast<int32_t>(rhs.len));
+        if (eq == nullptr || op == static_cast<int32_t>(CmpOp::Eq)) return eq;
+        dftu_series* ne = dftu_series_logical_not(eq);
+        dftu_series_free(eq);
+        return ne;
+    }
+
     if (v->encoding != Encoding::Flat) return nullptr;
     if (v->type == TypeId::Bool || v->type == TypeId::String ||
         v->type == TypeId::Binary)
