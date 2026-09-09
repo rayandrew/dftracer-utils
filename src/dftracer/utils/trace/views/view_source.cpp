@@ -66,15 +66,22 @@ namespace {
 namespace df = dftracer::utils::dataframe;
 namespace q = dftracer::utils::query;
 
+// What a source can push for one predicate: the query, plus whether it is the
+// predicate exactly or merely a superset of it (a superset prunes I/O but must
+// be re-applied by the engine).
+struct Pushable {
+    q::Expr expr;
+    bool exact;
+};
+
 // Translate a `col <cmp> scalar` LazyFrame predicate into an index-pushable
-// query on the named event field, so the View filters events during the scan
-// (an Exact push). `fnames[col]` is the column the predicate reads; nullopt for
-// anything else (compound exprs, col-vs-col), which the engine applies itself.
-// ts/dur carry a time_scale in the streamed morsel but the query matches the
-// raw field, so those are only pushable when the scale is the identity.
-std::optional<q::Query> translate_filter(const df::Expr& e,
-                                         const std::vector<std::string>& fnames,
-                                         double time_scale) {
+// query on the named event field. nullopt for anything else (col-vs-col,
+// arithmetic), which the engine applies itself. ts/dur carry a time_scale in
+// the streamed morsel but the query matches the raw field, so those are only
+// pushable when the scale is the identity.
+std::optional<q::Expr> translate_leaf(const df::Expr& e,
+                                      const std::vector<std::string>& fnames,
+                                      double time_scale) {
     std::int32_t ci = -1;
     df::CmpOp op{};
     df::Scalar rhs;
@@ -122,10 +129,50 @@ std::optional<q::Query> translate_filter(const df::Expr& e,
             break;
     }
 
-    q::Expr qe = q::field_cmp(field, qop, std::move(lit));
-    auto built = qe.build();
-    if (!built.has_value()) return std::nullopt;
-    return std::move(built.value());
+    return q::field_cmp(field, qop, std::move(lit));
+}
+
+// The whole predicate tree, pushing as much of it as is sound:
+//
+//   AND - one untranslatable side does not sink the other; pushing just the
+//         translatable conjunct selects a SUPERSET, which prunes I/O and is
+//         re-applied by the engine (Inexact).
+//   OR  - both sides must translate. Pushing one alone would drop rows the
+//         other side keeps.
+//   NOT - the operand must translate EXACTLY. Negating a superset yields a
+//         subset, which drops rows.
+std::optional<Pushable> translate_pred(const df::Expr& e,
+                                       const std::vector<std::string>& fnames,
+                                       double time_scale) {
+    df::LogicalOp lop{};
+    df::Expr lhs, rhs;
+    if (df::expr_as_logical(e, &lop, &lhs, &rhs)) {
+        std::optional<Pushable> a = translate_pred(lhs, fnames, time_scale);
+        std::optional<Pushable> b = translate_pred(rhs, fnames, time_scale);
+        if (lop == df::LogicalOp::And) {
+            if (a && b)
+                return Pushable{
+                    q::all_of(std::move(a->expr), std::move(b->expr)),
+                    a->exact && b->exact};
+            if (a) return Pushable{std::move(a->expr), false};
+            if (b) return Pushable{std::move(b->expr), false};
+            return std::nullopt;
+        }
+        if (!a || !b) return std::nullopt;
+        return Pushable{q::any_of(std::move(a->expr), std::move(b->expr)),
+                        a->exact && b->exact};
+    }
+
+    df::Expr inner;
+    if (df::expr_as_not(e, &inner)) {
+        std::optional<Pushable> a = translate_pred(inner, fnames, time_scale);
+        if (!a || !a->exact) return std::nullopt;
+        return Pushable{q::negate(std::move(a->expr)), true};
+    }
+
+    std::optional<q::Expr> leaf = translate_leaf(e, fnames, time_scale);
+    if (!leaf) return std::nullopt;
+    return Pushable{std::move(*leaf), true};
 }
 
 coro::Coro run_detached(coro::CoroTask<void> task,
@@ -395,12 +442,17 @@ dftracer::utils::dataframe::ScanResult ViewSource::scan(
         req.projection.empty() ? names() : req.projection;
     const double time_scale = view_.plan_->time_scale;
     View v = view_;
-    for (std::size_t i = 0; i < req.filters.size(); ++i)
-        if (auto pushed =
-                translate_filter(req.filters[i], fnames, time_scale)) {
-            v = v.filter(std::move(*pushed));
-            r.filters[i] = dftracer::utils::dataframe::Pushed::Exact;
-        }
+    for (std::size_t i = 0; i < req.filters.size(); ++i) {
+        std::optional<Pushable> pushed =
+            translate_pred(req.filters[i], fnames, time_scale);
+        if (!pushed) continue;
+        auto built = std::move(pushed->expr).build();
+        if (!built.has_value()) continue;
+        v = v.filter(std::move(built.value()));
+        r.filters[i] = pushed->exact
+                           ? dftracer::utils::dataframe::Pushed::Exact
+                           : dftracer::utils::dataframe::Pushed::Inexact;
+    }
     if (!req.projection.empty()) v = v.select(req.projection);
 
     r.cursor = open_stream(v, req.memory_budget);

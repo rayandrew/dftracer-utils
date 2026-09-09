@@ -293,6 +293,122 @@ TEST_SUITE("View - streaming row query") {
             CHECK(2 * bnum(got, i, "dur") > 50);
     }
 
+    TEST_CASE("ViewSource pushdown: AND/OR/NOT of col filters") {
+        namespace df = dftracer::utils::dataframe;
+        const auto& s = shared_trace();
+        View v = View::from_file(s.gz, s.idx).metadata(false);
+        auto src = std::make_shared<ViewSource>(v);
+
+        const std::vector<std::string> names = src->names();
+        int di = -1, ti = -1;
+        for (int i = 0; i < static_cast<int>(names.size()); ++i) {
+            if (names[i] == "dur") di = i;
+            if (names[i] == "ts") ti = i;
+        }
+        REQUIRE(di >= 0);
+        REQUIRE(ti >= 0);
+
+        df::DataFrame all = run(v.collect().collect());
+
+        auto pushed_as = [&](const df::Expr& pred) {
+            df::ScanRequest req;
+            req.filters.push_back(pred);
+            df::ScanResult sr = src->scan(req);
+            REQUIRE(sr.filters.size() == 1);
+            return sr.filters[0];
+        };
+        auto rows_matching = [&](auto keep) {
+            std::int64_t n = 0;
+            for (std::int64_t i = 0; i < all.num_rows(); ++i)
+                if (keep(bnum(all, i, "dur"), bnum(all, i, "ts"))) ++n;
+            return n;
+        };
+        auto scanned = [&](const df::Expr& pred) {
+            return run(df::LazyFrame::scan(src).filter(pred).collect())
+                .num_rows();
+        };
+
+        SUBCASE("both conjuncts translate, so the AND is Exact") {
+            df::Expr pred = (df::col(di) > std::int64_t{25}) &
+                            (df::col(di) < std::int64_t{45});
+            CHECK(pushed_as(pred) == df::Pushed::Exact);
+            const std::int64_t want = rows_matching(
+                [](double d, double) { return d > 25 && d < 45; });
+            CHECK(want > 0);
+            CHECK(scanned(pred) == want);
+        }
+
+        SUBCASE(
+            "one untranslatable conjunct leaves the other pushed, Inexact") {
+            // The pushed half selects a superset, so the engine must re-apply
+            // the predicate; marking this Exact would return the superset.
+            df::Expr pred = (df::col(di) > std::int64_t{25}) &
+                            ((df::col(di) + df::col(di)) > std::int64_t{70});
+            CHECK(pushed_as(pred) == df::Pushed::Inexact);
+            const std::int64_t want = rows_matching(
+                [](double d, double) { return d > 25 && 2 * d > 70; });
+            CHECK(want > 0);
+            CHECK(scanned(pred) == want);
+        }
+
+        SUBCASE("both disjuncts translate, so the OR is Exact") {
+            df::Expr pred = (df::col(di) < std::int64_t{15}) |
+                            (df::col(di) > std::int64_t{45});
+            CHECK(pushed_as(pred) == df::Pushed::Exact);
+            const std::int64_t want = rows_matching(
+                [](double d, double) { return d < 15 || d > 45; });
+            CHECK(want > 0);
+            CHECK(scanned(pred) == want);
+        }
+
+        SUBCASE("one untranslatable disjunct sinks the whole OR") {
+            // Pushing only the translatable side would drop every row the
+            // other side keeps, so nothing is pushed at all.
+            df::Expr pred = (df::col(di) > std::int64_t{45}) |
+                            ((df::col(di) + df::col(di)) < std::int64_t{30});
+            CHECK(pushed_as(pred) == df::Pushed::No);
+            const std::int64_t want = rows_matching(
+                [](double d, double) { return d > 45 || 2 * d < 30; });
+            CHECK(want > 0);
+            CHECK(scanned(pred) == want);
+        }
+
+        SUBCASE("NOT of an exact predicate is Exact") {
+            df::Expr pred = ~(df::col(di) > std::int64_t{25});
+            CHECK(pushed_as(pred) == df::Pushed::Exact);
+            // Regression: the chunk pruner used to answer a NotNode with the
+            // set-difference complement of its operand's may-match chunks,
+            // which dropped every chunk holding events on both sides of the
+            // comparison. This came back empty.
+            const std::int64_t want =
+                rows_matching([](double d, double) { return !(d > 25); });
+            CHECK(want > 0);
+            CHECK(scanned(pred) == want);
+        }
+
+        SUBCASE("NOT of a merely-superset predicate is not pushed") {
+            // Negating a superset yields a SUBSET, which would drop rows the
+            // predicate keeps, so the whole NOT falls back to the engine.
+            df::Expr pred = ~((df::col(di) > std::int64_t{25}) &
+                              ((df::col(di) + df::col(di)) > std::int64_t{70}));
+            CHECK(pushed_as(pred) == df::Pushed::No);
+            const std::int64_t want = rows_matching(
+                [](double d, double) { return !(d > 25 && 2 * d > 70); });
+            CHECK(want > 0);
+            CHECK(scanned(pred) == want);
+        }
+
+        SUBCASE("two columns combine") {
+            df::Expr pred = (df::col(di) > std::int64_t{25}) &
+                            (df::col(ti) > std::int64_t{0});
+            CHECK(pushed_as(pred) == df::Pushed::Exact);
+            const std::int64_t want = rows_matching(
+                [](double d, double t) { return d > 25 && t > 0; });
+            CHECK(want > 0);
+            CHECK(scanned(pred) == want);
+        }
+    }
+
     TEST_CASE(
         "ViewSource pushdown: projection harvests only selected columns") {
         namespace df = dftracer::utils::dataframe;

@@ -86,6 +86,22 @@ bool expr_as_col_binary(const Expr& e, BinaryOp* op, std::int32_t* a,
     return true;
 }
 
+bool expr_as_logical(const Expr& e, LogicalOp* op, Expr* a, Expr* b) {
+    const auto& n = e.node();
+    if (!n || n->kind != ExprKind::Logical || !n->a || !n->b) return false;
+    *op = static_cast<LogicalOp>(n->i);
+    *a = Expr{n->a};
+    *b = Expr{n->b};
+    return true;
+}
+
+bool expr_as_not(const Expr& e, Expr* a) {
+    const auto& n = e.node();
+    if (!n || n->kind != ExprKind::Not || !n->a) return false;
+    *a = Expr{n->a};
+    return true;
+}
+
 namespace {
 bool node_references(const std::shared_ptr<const ExprNode>& n,
                      std::int32_t index) {

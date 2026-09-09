@@ -60,6 +60,13 @@ bool expr_as_col_cmp(const Expr& e, std::int32_t* col, CmpOp* op, Scalar* rhs);
 bool expr_as_col_binary(const Expr& e, BinaryOp* op, std::int32_t* a,
                         std::int32_t* b);
 
+/// If `e` is `a <logical> b`, fill *op/*a/*b and return true. Lets a source
+/// walk a compound predicate to decide how much of it it can push.
+bool expr_as_logical(const Expr& e, LogicalOp* op, Expr* a, Expr* b);
+
+/// If `e` is `not a`, fill *a and return true.
+bool expr_as_not(const Expr& e, Expr* a);
+
 /// Rewrite every column reference `col(i)` to `col(old_to_new[i])`, leaving an
 /// out-of-range index unchanged. Lets the planner renumber a predicate after
 /// columns are dropped or reordered (projection pushdown). Returns a new Expr;
