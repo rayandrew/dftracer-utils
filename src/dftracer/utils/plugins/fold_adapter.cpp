@@ -1200,6 +1200,16 @@ PluginFold::PluginFold(const dftu_plugin* plugin,
             DFTRACER_UTILS_LOG_ERROR("Plugin query '%s' is invalid: %s", q,
                                      r.error().message.c_str());
     }
+
+    // Registered states are handed the SAME frame as the slice, and what they
+    // read is invisible from the slice that declared the projection. A state
+    // whose column was projected away would just see a NULL lookup and answer
+    // wrongly, so a plugin with states keeps every column: a projection is an
+    // optimisation, and losing it must never cost correctness.
+    if (plugin_->reads && state_accums_.empty()) {
+        const char* const* cols = plugin_->reads(plugin_->self);
+        for (; cols && *cols; ++cols) projection_.emplace_back(*cols);
+    }
 }
 
 PluginFold::~PluginFold() {
@@ -1330,8 +1340,10 @@ void PluginFold::step(const FoldBatch& batch) {
     }
     if (col_scratch_.empty()) return;
 
-    dataframe::DataFrame df =
-        views::build_row_frame(col_scratch_, *intern_, {}, 1.0, nullptr);
+    // An empty projection_ is build_row_frame's "every column", which for a
+    // batch with many arg keys is a Series per key.
+    dataframe::DataFrame df = views::build_row_frame(col_scratch_, *intern_,
+                                                     projection_, 1.0, nullptr);
 
     // dftu_dataframe_new takes ownership of the column handles, so pass shared
     // copies (a refcount bump, no data copy); df keeps its own.

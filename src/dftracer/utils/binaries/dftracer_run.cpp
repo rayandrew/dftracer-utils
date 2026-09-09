@@ -244,6 +244,11 @@ static int describe_plugins(const PluginArgs& plugin_args) {
         std::fprintf(stderr, "  consumes: %s\n",
                      join_or_none(info.consumes).c_str());
         std::fprintf(stderr, "  ops: %s\n", join_or_none(info.ops).c_str());
+        // "(none)" here means the plugin declared no projection, so it is
+        // handed every batch column - not that it reads nothing.
+        std::fprintf(stderr, "  reads: %s\n",
+                     info.reads.empty() ? "(all columns)"
+                                        : join_or_none(info.reads).c_str());
         if (info.config_keys.empty()) {
             std::fprintf(stderr, "  config: (undeclared)\n");
         } else {

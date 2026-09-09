@@ -72,6 +72,25 @@ typedef struct dftu_plugin {
        required key each fail the load, so a typo is reported instead of
        silently doing nothing. An undeclared plugin is validated not at all. */
     const dftu_config_key* (*config_keys)(void* self);
+    /** The batch COLUMNS this plugin reads, as a NULL-terminated array of
+       column names that outlives the plugin; NULL = every column.
+
+       Undeclared, the host materializes the whole batch for this plugin: seven
+       fixed columns, fhash/hhash, and one column per distinct arg key in the
+       batch. That last part is unbounded - a trace with fifty arg keys builds
+       fifty Series per batch even for a plugin that reads `dur`. Declaring
+       what it reads is the projection that avoids them.
+
+       Names are batch column names as on_batch sees them: "dur", "cat",
+       "fhash", an arg as "args.<key>", a virtual field as "resolved.fpath". A
+       column that is not listed is absent from the frame, so a lookup for it
+       returns NULL.
+
+       Ignored for a plugin that registered states: they are handed the same
+       frame, and what they read cannot be seen from the slice that declared
+       this, so such a plugin keeps every column. A projection is an
+       optimisation and must never cost correctness. */
+    const char* const* (*reads)(void* self);
 } dftu_plugin;
 
 /** The one symbol the loader resolves via dlsym; the plugin's init. `config` is

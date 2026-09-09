@@ -79,6 +79,9 @@ class Plugins {
         /// One entry per op the plugin's factory added to the host op
         /// registry: `name(arg, ...) -> ret [kind]`.
         std::vector<std::string> ops;
+        /// The batch columns the plugin declared it reads. Empty means it
+        /// declared none, so it is handed every column.
+        std::vector<std::string> reads;
         /// One entry per declared config key: `name (kind[, required]) - doc`.
         /// Empty when the plugin declares none, in which case its config is
         /// not validated either.

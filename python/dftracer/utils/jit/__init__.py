@@ -192,9 +192,6 @@ __all__ = [
     "f32",
     "f64",
     "NONE",
-    "NEED_ARGS",
-    "NEED_FHASH",
-    "NEED_HHASH",
 ]
 
 
@@ -274,21 +271,6 @@ class _Sentinel:
 
 
 NONE = _Sentinel()
-
-
-class _Need:
-    __slots__ = ("dft",)
-
-    def __init__(self, dft: str) -> None:
-        self.dft = dft
-
-
-# Inert no-op sentinels kept for source compatibility with `jit.plugin(needs=
-# (...))`. The columnar ABI resolves every fixed/dyn-arg batch column
-# unconditionally, so there is no needs() negotiation left for these to drive.
-NEED_ARGS = _Need("DFTU_NEED_ARGS")
-NEED_FHASH = _Need("DFTU_NEED_FHASH")
-NEED_HHASH = _Need("DFTU_NEED_HHASH")
 
 
 class _Monoid:
@@ -1342,13 +1324,11 @@ class JitPackage:
         namespace to fall back on - :meth:`build` refuses those."""
         return not (_module_of(cls) == "__main__" and self.namespace is None)
 
-    def plugin(
-        self, cls: "type | None" = None, *, needs: Tuple[object, ...] | None = None
-    ) -> "type | Callable[[type], type]":
+    def plugin(self, cls: "type | None" = None) -> "type | Callable[[type], type]":
         """Like :func:`plugin`, but names every map/port under this package."""
         if cls is None:
-            return lambda c: _build_plugin(c, needs, self)
-        return _build_plugin(cls, needs, self)
+            return lambda c: _build_plugin(c, self)
+        return _build_plugin(cls, self)
 
     def series(
         self, fn: "Callable[..., object] | None" = None, *, module: "str | None" = None
@@ -2630,6 +2610,27 @@ def _emit(
             "}",
             "",
         ]
+    # The batch columns this plugin reads are exactly the ones on_batch
+    # resolves, which the compiler already knows. Declaring them projects the
+    # batch, so a trace with many arg keys does not build a Series per key for
+    # a plugin that never looks at them. A raw body is not AST-analyzable, so
+    # it declares nothing and keeps the whole batch.
+    read_cols = [] if raw_event else sorted(fields_used) + [f"args.{a}" for a in sorted(arg_keys)]
+    if read_cols:
+        out.append("static const char* const g_reads[] = {")
+        for col in read_cols:
+            out.append(f"    {_c_str_literal(col)},")
+        out += [
+            "    NULL,",
+            "};",
+            "",
+            "static const char* const* reads(void* self) {",
+            "    (void)self;",
+            "    return g_reads;",
+            "}",
+            "",
+        ]
+
     name_defs, name_assigns = _emit_name_lists(
         sorted([_wire_id(p) for _, p in pub_ports] + [map_ids[attr] for attr in maps]),
         sorted(_wire_id(p) for _, p in sub_ports),
@@ -2730,6 +2731,7 @@ def _emit(
             "    g_plugin.destroy = destroy;",
         ]
         + (["    g_plugin.config_keys = config_keys;"] if cfgs else [])
+        + (["    g_plugin.reads = reads;"] if read_cols else [])
         + name_assigns
     )
     out.extend(
@@ -2740,17 +2742,6 @@ def _emit(
         ]
     )
     return "\n".join(out)
-
-
-def _resolve_needs(needs: Tuple[object, ...] | None) -> builtins.set[str]:
-    if needs is None:
-        return builtins.set()
-    out: builtins.set[str] = builtins.set()
-    for n in needs:
-        if not isinstance(n, _Need):
-            raise JitError("needs must be jit.NEED_ARGS / jit.NEED_FHASH / jit.NEED_HHASH flags")
-        out.add(n.dft)
-    return out
 
 
 # Row budget per event per accumulator for a raw each_event body; the emitted
@@ -2778,9 +2769,7 @@ def _referenced_ops(fn: Callable[..., object]) -> Dict[str, Op]:
     return {name: val for name, val in scope.items() if isinstance(val, Op)}
 
 
-def _build_plugin(
-    cls: type, needs: Tuple[object, ...] | None, package: "JitPackage | None" = None
-) -> type:
+def _build_plugin(cls: type, package: "JitPackage | None" = None) -> type:
     pkg = package if package is not None else _DEFAULT_PACKAGE
     maps: Dict[str, _MapDecl] = {}
     ports: Dict[str, _Port] = {}
@@ -2818,10 +2807,6 @@ def _build_plugin(
     plan_query = getattr(cls, "plan_query", None)
     if plan_query is not None and not isinstance(plan_query, str):
         raise JitError("@jit.plugin plan_query must be a query DSL string")
-    # Validated for API compat only: the host resolves every fixed/dyn-arg
-    # column unconditionally now, so there is no needs() negotiation left to
-    # feed.
-    _resolve_needs(needs)
     # {name: is_f64} for config fields, read into a body-visible static.
     config_f64 = {n: c.dft in ("DFTU_T_F64", "DFTU_T_F32") for n, c in configs.items()}
     op_defs: List[str] = []
@@ -3285,23 +3270,19 @@ def series(fn: "Callable[..., object] | None" = None, *, module: "str | None" = 
 @overload
 def plugin(cls: type[_C]) -> type[_C]: ...
 @overload
-def plugin(
-    cls: None = None, *, needs: Tuple[object, ...] | None = None
-) -> Callable[[type[_C]], type[_C]]: ...
-def plugin(
-    cls: type | None = None, *, needs: Tuple[object, ...] | None = None
-) -> type | Callable[[type], type]:
+def plugin(cls: None = None) -> Callable[[type[_C]], type[_C]]: ...
+def plugin(cls: type | None = None) -> type | Callable[[type], type]:
     """Class decorator: AST-compile the map decls + ``each_event`` to a C plugin.
 
     Attaches the emitted source under ``cls._jit_plugin``; the native ``.so`` is
-    built lazily on first load. ``needs=(jit.NEED_FHASH, ...)`` is accepted for
-    source compatibility but is a no-op: every batch column (fixed and dyn arg)
-    is resolved unconditionally now, there is nothing left to negotiate. Raises
-    :class:`JitError` for any construct outside the supported subset.
+    built lazily on first load. The batch columns the body reads are declared
+    for you, from the same AST pass that emits it, so the scan materializes
+    only those. Raises :class:`JitError` for any construct outside the
+    supported subset.
     """
     if cls is None:
-        return lambda c: _build_plugin(c, needs)
-    return _build_plugin(cls, needs)
+        return lambda c: _build_plugin(c)
+    return _build_plugin(cls)
 
 
 def plugin_result_names(obj: object) -> Dict[str, str]:

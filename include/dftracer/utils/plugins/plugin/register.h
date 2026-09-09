@@ -263,16 +263,30 @@ concept DeclaresConsumes = requires {
     { std::end(Slice::consumes()) };
 };
 
+/// A Slice naming the batch columns it reads via a static `reads()` returning
+/// a range of const char*. Declaring them projects the batch: only those
+/// columns are materialized, instead of every fixed column plus one per arg
+/// key in the batch.
+template <class Slice>
+concept DeclaresReads = requires {
+    { std::begin(Slice::reads()) };
+    { std::end(Slice::reads()) };
+};
+
+enum class NameList { Provides, Consumes, Reads };
+
 // The declared range copied into a NULL-terminated array with static storage,
-// which is the lifetime dftu_plugin::provides/consumes require.
-template <class Slice, bool Produced>
+// which is the lifetime dftu_plugin::provides/consumes/reads require.
+template <class Slice, NameList Which>
 const char* const* name_list_thunk(void*) {
     static const std::vector<const char*> names = [] {
         std::vector<const char*> v;
-        if constexpr (Produced) {
+        if constexpr (Which == NameList::Provides) {
             for (const char* n : Slice::provides()) v.push_back(n);
-        } else {
+        } else if constexpr (Which == NameList::Consumes) {
             for (const char* n : Slice::consumes()) v.push_back(n);
+        } else {
+            for (const char* n : Slice::reads()) v.push_back(n);
         }
         v.push_back(nullptr);
         return v;
@@ -313,8 +327,10 @@ const dftu_config_key* config_key_thunk(void*) {
    Host) and a sync or Task-returning on_finalize. To take part in the fold
    ordering a Slice may also declare `static ... provides()` and `static ...
    consumes()`, each a range of const char* port/accumulator names outliving the
-   plugin; make_plugin wires them to dftu_plugin::provides / ::consumes.
-   Exceptions must not escape the ABI boundary, so every callback catches. */
+   plugin; make_plugin wires them to dftu_plugin::provides / ::consumes. A
+   `static ... reads()` of batch column names becomes dftu_plugin::reads, which
+   projects the batch down to those columns. Exceptions must not escape the ABI
+   boundary, so every callback catches. */
 template <class Slice>
 dftu_plugin* make_plugin(const dftu_value* config) {
     auto* hd = new detail::Holder<Slice>();
@@ -385,9 +401,13 @@ dftu_plugin* make_plugin(const dftu_value* config) {
     vt.destroy = [](void* self) { delete detail::holder_of<Slice>(self); };
 
     if constexpr (detail::DeclaresProvides<Slice>)
-        vt.provides = &detail::name_list_thunk<Slice, true>;
+        vt.provides =
+            &detail::name_list_thunk<Slice, detail::NameList::Provides>;
     if constexpr (detail::DeclaresConsumes<Slice>)
-        vt.consumes = &detail::name_list_thunk<Slice, false>;
+        vt.consumes =
+            &detail::name_list_thunk<Slice, detail::NameList::Consumes>;
+    if constexpr (detail::DeclaresReads<Slice>)
+        vt.reads = &detail::name_list_thunk<Slice, detail::NameList::Reads>;
     if constexpr (detail::DeclaresConfigKeys<Slice>)
         vt.config_keys = &detail::config_key_thunk<Slice>;
 

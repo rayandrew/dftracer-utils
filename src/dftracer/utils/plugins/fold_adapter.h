@@ -323,6 +323,11 @@ class PluginFold : public trace::views::detail::Fold {
     ValueMap match_qmap_;
 
     std::vector<FoldEvent> col_scratch_;  // batch materialization
+
+    // The columns dftu_plugin::reads declared, snapshotted once at
+    // construction. Empty means the plugin declared none, which build_row_frame
+    // reads as "every column".
+    std::vector<std::string> projection_;
 };
 
 }  // namespace dftracer::utils::plugins

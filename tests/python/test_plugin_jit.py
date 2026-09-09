@@ -10,6 +10,7 @@ event count.
 
 import builtins
 import gzip
+import re
 import shutil
 import statistics
 
@@ -722,7 +723,7 @@ def test_jit_accepts_large_in_range_literal(tmp_path):
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
 def test_jit_raw_body_reproduces_name_edges(tmp_path):
-    @jit.plugin(needs=(jit.NEED_FHASH,))
+    @jit.plugin
     class RawEdges:
         edges = jit.map(key=(jit.i64, jit.str_), value=jit.count())
 
@@ -1885,7 +1886,7 @@ def _write_file_dur_trace(path: str, rows) -> None:
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
 def test_jit_argmax_argmin_str_payload(tmp_path):
-    @jit.plugin(needs=(jit.NEED_FHASH,))
+    @jit.plugin
     class HotCold:
         hot = jit.map(key=(jit.i64,), value=jit.argmax(of=jit.str_))
         cold = jit.map(key=(jit.i64,), value=jit.argmin(of=jit.str_))
@@ -2021,7 +2022,7 @@ _ROWS = [
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
 def test_jit_topk_keeps_extreme_payloads_in_order(tmp_path):
-    @jit.plugin(needs=(jit.NEED_FHASH,))
+    @jit.plugin
     class Hot:
         hot = jit.map(key=jit.i64, value=jit.topk(2, of=jit.str_))
         low = jit.map(key=jit.i64, value=jit.bottomk(2, of=jit.i64))
@@ -2060,7 +2061,7 @@ def test_jit_topk_keeps_extreme_payloads_in_order(tmp_path):
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
 def test_jit_approx_topk_exact_when_k_ge_distinct(tmp_path):
-    @jit.plugin(needs=(jit.NEED_FHASH,))
+    @jit.plugin
     class Freq:
         freq = jit.map(key=jit.i64, value=jit.approx_topk(8, of=jit.str_))
 
@@ -2126,7 +2127,7 @@ def test_jit_sample_keeps_items_from_input(tmp_path):
 
 @pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
 def test_jit_argmax_keeps_each_winning_field(tmp_path):
-    @jit.plugin(needs=(jit.NEED_FHASH,))
+    @jit.plugin
     class Slow:
         who = jit.map(key=jit.i64, value=jit.argmax(of=jit.str_))
         tid = jit.map(key=jit.i64, value=jit.argmax(of=jit.i64))
@@ -2336,3 +2337,135 @@ def test_session_attach_same_set_twice_raises(tmp_path):
     s.attach(plugins)
     with pytest.raises(ValueError, match="already attached"):
         s.attach(plugins)
+
+
+def _reads_and_resolved(src: str) -> "tuple[builtins.set[str], builtins.set[str]]":
+    """The declared g_reads[] entries and the columns on_batch actually resolves.
+
+    These must be exactly the same set: a column resolved but not declared gets
+    projected away by the host and silently reads back NULL.
+    """
+    m = re.search(r"g_reads\[\] = \{(.*?)\};", src, re.S)
+    reads = builtins.set(re.findall(r'"([^"]+)",', m.group(1))) if m else builtins.set()
+    resolved = builtins.set(re.findall(r'dftu_jit_resolve\(df, "([^"]+)"', src))
+    return reads, resolved
+
+
+def test_jit_reads_declares_only_the_fields_the_body_uses():
+    @jit.plugin
+    class DurOnly:
+        tot = jit.map(key=(jit.i64,), value=jit.sum())
+
+        @jit.each_event
+        def step(self, e):
+            self.tot[(0,)] += e.dur
+
+    src = DurOnly._jit_plugin.source
+    assert 'static const char* const g_reads[] = {\n    "dur",\n    NULL,\n};' in src
+    assert "g_plugin.reads = reads;" in src
+    for absent in ("cat", "name", "pid"):
+        assert f'"{absent}",' not in src
+    reads, resolved = _reads_and_resolved(src)
+    assert reads == resolved == {"dur"}
+
+
+def test_jit_reads_lists_only_the_arg_key_the_body_uses():
+    @jit.plugin
+    class SizeOnly:
+        tot = jit.map(key=(jit.i64,), value=jit.sum())
+
+        @jit.each_event
+        def step(self, e):
+            self.tot[(0,)] += e.arg_i64("size")
+
+    src = SizeOnly._jit_plugin.source
+    reads, resolved = _reads_and_resolved(src)
+    assert reads == resolved == {"args.size"}
+
+
+def test_jit_reads_lists_a_field_and_an_arg_key():
+    @jit.plugin
+    class PidAndSize:
+        tot = jit.map(key=(jit.i64,), value=jit.count())
+
+        @jit.each_event
+        def step(self, e):
+            self.tot[(e.pid,)] += e.arg_i64("size")
+
+    src = PidAndSize._jit_plugin.source
+    i = src.index("g_reads[] = {")
+    reads_block = src[i : src.index("};", i)]
+    assert '"pid",' in reads_block
+    assert '"args.size",' in reads_block
+    assert "g_plugin.reads = reads;" in src
+    reads, resolved = _reads_and_resolved(src)
+    assert reads == resolved == {"pid", "args.size"}
+
+
+def test_jit_raw_body_declares_no_reads():
+    @jit.plugin
+    class RawNoReads:
+        edges = jit.map(key=(jit.i64, jit.str_), value=jit.count())
+
+        @jit.each_event(raw=True)
+        def step(self):
+            return """
+            uint32_t _r = _n_edges++;
+            _k0_edges[_r] = (int64_t)e->pid;
+            _k1_edges[_r] = e->name;
+            _v0_edges[_r] = 1;
+            """
+
+    src = RawNoReads._jit_plugin.source
+    assert "g_reads[]" not in src
+    assert "g_plugin.reads" not in src
+
+
+def _write_multi_arg_trace(path: str, rows) -> None:
+    """rows: (pid, dur, size, rank) with several distinct arg keys per event."""
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        for i, (pid, dur, size, rank) in enumerate(rows):
+            f.write(
+                f'{{"name":"read","cat":"POSIX","pid":{pid},"tid":1,'
+                f'"ts":{1000 + i},"dur":{dur},"ph":"X",'
+                f'"args":{{"size":{size},"rank":{rank},"mode":"r","tag":"x"}}}}\n'
+            )
+
+
+@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
+def test_jit_projected_plugin_matches_expected_over_many_arg_keys(tmp_path):
+    # The batch carries four arg columns (size, rank, mode, tag); the plugin's
+    # g_reads lists only "pid" and "args.size", so the projection must not drop
+    # the one arg column the body actually needs.
+    @jit.plugin
+    class SizeSum:
+        tot = jit.map(key=(jit.i64,), value=jit.sum())
+
+        @jit.each_event
+        def step(self, e):
+            self.tot[(e.pid,)] += e.arg_i64("size")
+
+    src = SizeSum._jit_plugin.source
+    assert '"pid",' in src
+    assert '"args.size",' in src
+    for absent in ("args.rank", "args.mode", "args.tag"):
+        assert f'"{absent}",' not in src
+
+    rows = [
+        (1, 10, 100, 1),
+        (1, 20, 200, 2),
+        (2, 30, 300, 3),
+        (2, 40, 400, 4),
+        (1, 50, 500, 5),
+    ]
+    _write_multi_arg_trace(str(tmp_path / "trace.pfw.gz"), rows)
+
+    plugins = Plugins([SizeSum])
+    run = plugins.run(str(tmp_path))
+
+    tbl = pa.table(run.results["tot"])
+    by_pid = {k: v for k, v in zip(tbl.column("k0").to_pylist(), tbl.column("value").to_pylist())}
+    expected: dict = {}
+    for pid, _dur, size, _rank in rows:
+        expected[pid] = expected.get(pid, 0) + size
+    assert {k: float(v) for k, v in by_pid.items()} == {k: float(v) for k, v in expected.items()}

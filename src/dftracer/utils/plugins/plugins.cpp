@@ -513,6 +513,7 @@ std::vector<Plugins::PluginInfo> Plugins::describe() const {
         info.has_plan_query = p.plugin->plan_query != nullptr;
         info.provides = name_list(p.plugin->provides, p.plugin->self);
         info.consumes = name_list(p.plugin->consumes, p.plugin->self);
+        info.reads = name_list(p.plugin->reads, p.plugin->self);
         for (const std::string& op : p.registered_ops)
             info.ops.push_back(op_summary(op));
         if (p.plugin->config_keys) {
