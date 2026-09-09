@@ -41,7 +41,7 @@ consumer reads it back during the same batch.
 
       ``T`` must be trivially copyable; the host copies ``sizeof(T)`` bytes per
       publish. A producer built with ``dftracer::utils::plugins::make_plugin<Slice>``
-      publishes from its ``step``:
+      publishes from its ``step`` and names the port in a static ``provides()``:
 
       .. code-block:: cpp
 
@@ -50,6 +50,10 @@ consumer reads it back during the same batch.
          constexpr const char* PORT_CAP = "com.example.perbatch";
 
          struct ProducerSlice {
+             static auto provides() {
+                 return std::array<const char*, 1>{PORT_CAP};
+             }
+
              explicit ProducerSlice(const dftracer::utils::plugins::Config&) {}
              void step(const dftracer::utils::plugins::Batch& b, dftracer::utils::plugins::Host h) {
                  std::uint64_t with_dur = 0;
@@ -61,15 +65,21 @@ consumer reads it back during the same batch.
              void finalize(dftracer::utils::plugins::Host) {}
          };
 
-         dftu_plugin* dftracer_plugin(const dftu_value* config) {
+         dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+             (void)h;
              return dftracer::utils::plugins::make_plugin<ProducerSlice>(config);
          }
 
-      A consumer reads it back with the same port name:
+      A consumer reads it back with the same port name, named in its own
+      static ``consumes()`` so the host runs the producer first:
 
       .. code-block:: cpp
 
          struct ConsumerSlice {
+             static auto consumes() {
+                 return std::array<const char*, 1>{PORT_CAP};
+             }
+
              explicit ConsumerSlice(const dftracer::utils::plugins::Config&) {}
              void step(const dftracer::utils::plugins::Batch&, dftracer::utils::plugins::Host h) {
                  if (auto with_dur = h.consume_port<std::uint64_t>(PORT_CAP).recv()) {
@@ -97,20 +107,28 @@ consumer reads it back during the same batch.
       ``uint64_t``); ``publish`` copies ``len`` bytes into the batch-scoped
       slot; ``consume`` returns a borrowed pointer valid only until the
       current ``on_batch`` returns (NULL if nothing was published this batch).
-      A producer's ``on_batch`` looks like:
+      A producer's ``on_batch`` reads the ``ph`` column to mirror
+      ``Event::has_dur()`` (a duration means ``phase() == Complete``):
 
       .. code-block:: c
 
-         static dftu_task* on_batch(void* slice, const dftu_batch* b,
+         static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                                     const dftu_host* host) {
              MyState* s = (MyState*)slice;
              const dftu_ext_ports* ports =
                  (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);
              if (!s->port_key) s->port_key = ports->port_key(host->h, "com.example.perbatch");
 
+             int64_t n = dftu_dataframe_num_rows(df);
+             dftu_series* ph_col = dftu_dataframe_column(df, "ph");
+             const int64_t* ph = (ph_col && dftu_series_type(ph_col) == DFTU_TYPE_INT64)
+                 ? (const int64_t*)dftu_series_data(ph_col) : NULL;
              uint64_t with_dur = 0;
-             for (uint32_t i = 0; i < b->count; ++i)
-                 if (b->events[i].has_dur) ++with_dur;
+             int64_t i;
+             if (ph)
+                 for (i = 0; i < n; ++i)
+                     if (ph[i] == DFTU_PH_COMPLETE) ++with_dur;
+             if (ph_col) dftu_series_free(ph_col);
              ports->publish(host->h, s->port_key, &with_dur, sizeof(with_dur));
              return NULL;  /* synchronous */
          }
@@ -119,13 +137,14 @@ consumer reads it back during the same batch.
 
       .. code-block:: c
 
-         static dftu_task* on_batch(void* slice, const dftu_batch* b,
+         static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                                     const dftu_host* host) {
              MyState* s = (MyState*)slice;
              const dftu_ext_ports* ports =
                  (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);
              if (!s->port_key) s->port_key = ports->port_key(host->h, "com.example.perbatch");
 
+             (void)df;
              uint32_t len = 0;
              const void* v = ports->consume(host->h, s->port_key, &len);
              if (v && len == sizeof(uint64_t)) {
@@ -180,10 +199,13 @@ The ordering rule
 
 A consumer sees nothing published (``std::nullopt`` in C++, NULL in C, ``0``
 in JIT) whenever the producer has not published for the current batch - most
-commonly because it runs after the consumer. A producer must run before its
-consumer in the fold order, which is the order plugins were registered
-(``--plugin a --plugin b`` on the command line, or the injection order into
-``PluginHost``). Order your ``--plugin`` flags accordingly.
+commonly because it runs after the consumer. Name the port in the consumer's
+``consumes`` and the producer's ``provides`` (a single NULL-terminated name
+array per plugin, one namespace shared with accumulator names, section 6 of
+:doc:`../../plugins`): the host orders the fold from that declaration, running
+every provider of a consumed name first, and refuses to run the set at all if
+no loaded plugin provides it. There is no ``--plugin`` flag order to get
+right.
 
 A value published in one batch does not carry over to the next: the host
 clears every port between batches, so a consumer sees nothing published until

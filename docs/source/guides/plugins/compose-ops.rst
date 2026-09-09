@@ -134,9 +134,8 @@ see :doc:`../../jit` for that authoring surface.
 See also
 --------
 
-- :doc:`../../concepts/compose` for the ``AsyncOpFor`` contract, the full
-  operator set (``&&``, ``||``, ``map``, ``fold``), and why this replaced the
-  old ``Utility`` base class.
+- :doc:`../../concepts/compose` for the ``AsyncOpFor`` contract and the full
+  operator set (``&&``, ``||``, ``map``, ``fold``).
 - :doc:`../../plugins` for the plugin lifecycle (``step``/``merge``/``finalize``)
   a compose op runs inside.
 - :doc:`../../jit` for ``@jit.plugin`` and ``@jit.each_event``, the Python

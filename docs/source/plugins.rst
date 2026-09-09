@@ -18,9 +18,10 @@ There are two co-equal ways to author one:
 
 - **The C++ SDK** (``<dftracer/utils/plugins/plugin.h>``, namespace
   ``dftracer::utils::plugins``): a plain ``Slice`` struct with ``step`` / ``merge`` /
-  ``finalize`` methods, registered with ``make_plugin<Slice>()``. Typed
-  ``Batch`` / ``Event`` views, host-owned ``Agg`` accumulators, and an RAII
-  ``Host`` read like ordinary C++.
+  ``finalize`` methods, assembled with ``plugin(h, config).fold<Slice>().build()``
+  (or ``make_plugin<Slice>(config)`` directly, what ``fold`` calls underneath).
+  Typed ``Batch`` / ``Event`` views, host-owned ``Agg`` accumulators, and an
+  RAII ``Host`` read like ordinary C++.
 - **The raw C ABI** (``<dftracer/utils/plugins/abi.h>``): a small set of C
   structs you fill by hand. This is the stable boundary the SDK compiles down
   to, and the path for a C-only toolchain.
@@ -43,9 +44,11 @@ Overview
 - **State is host-owned where it can be**: a mergeable aggregation accumulator
   is owned and merged by the host, so parallelism and the final materialization
   are free and ``merge`` stays empty.
-- **Strings cross as interned ids**: an ``Event``'s string fields are
-  ``dftu_str`` ids, resolved to bytes on demand through the ``Host``, so nothing
-  is copied on the hot path.
+- **The fold is columnar**: each batch arrives as one ``dftu_dataframe`` (N
+  rows in scan order is N events); the ``Batch``/``Event`` row cursor resolves
+  every fixed column once per batch, so a string field is a zero-copy
+  ``string_view`` into the frame's own buffer with nothing copied on the hot
+  path.
 - **Services are optional extension groups**: aggregation, async I/O, the query DSL,
   Arrow, writers, sketches, and inter-plugin channels are fetched by id; a
   missing group degrades gracefully to a null/no-op.
@@ -91,26 +94,27 @@ Each stage maps one-to-one between the SDK and the ABI:
    * - destructor
      - ``destroy_slice`` / ``destroy``
      - teardown
-   * - ``static constexpr needs``
-     - ``needs``
+   * - ``static ... reads()``
+     - ``reads``
      - queried before the scan (section 2)
    * - config ``"query"`` key
      - ``plan_query``
      - queried before the scan (section 3)
 
-``on_batch`` / ``on_finalize`` return ``NULL`` (or nothing, for the sync SDK
-``step`` / ``finalize``) when handled synchronously, or a ``dftu_task`` the host
-awaits for async work (section 9). The delivered ``dftu_batch`` is valid until
-that returned task completes, or only during the call for a synchronous return -
-never retain the pointer.
+``on_batch`` returns ``NULL`` (or nothing, for the sync SDK ``step``) since it
+is always synchronous; ``on_finalize`` returns ``NULL`` when handled
+synchronously, or a ``dftu_task`` the host awaits for async work (section 9).
+The delivered ``dftu_dataframe`` is owned by the host and valid only for the
+call - N rows in scan order is N events, never retain the pointer.
 
 .. tab-set::
 
    .. tab-item:: C++ (SDK)
 
-      A ``Slice`` provides the constructor and methods; ``make_plugin<Slice>``
-      fills the ``dftu_plugin`` struct and adapts exceptions at the boundary
-      (every callback catches and logs). ``abi_version`` is set for you.
+      A ``Slice`` provides the constructor and methods; ``plugin(h,
+      config).fold<Slice>().build()`` fills the ``dftu_plugin`` struct and
+      adapts exceptions at the boundary (every callback catches and logs).
+      ``abi_version`` is set for you.
 
       .. code-block:: cpp
 
@@ -128,8 +132,9 @@ never retain the pointer.
              void finalize(Host) {}                 // emit output
          };
 
-         extern "C" dftu_plugin* dftracer_plugin(const dftu_value* config) {
-             return make_plugin<MyPlugin>(config);
+         extern "C" dftu_plugin* dftracer_plugin(dftu_host* h,
+                                                 const dftu_value* config) {
+             return plugin(h, config).fold<MyPlugin>().build();
          }
 
    .. tab-item:: C (raw ABI)
@@ -143,12 +148,11 @@ never retain the pointer.
          #include <dftracer/utils/plugins/abi.h>
          #include <stdlib.h>
 
-         static uint32_t needs(void* self) { (void)self; return 0; }
          static const char* plan_query(void* self) { (void)self; return NULL; }
          static void* make_slice(void* self) { (void)self; return calloc(1, 1); }
-         static dftu_task* on_batch(void* slice, const dftu_batch* b,
+         static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                                    const dftu_host* host) {
-             (void)slice; (void)b; (void)host; return NULL;  /* synchronous */
+             (void)slice; (void)df; (void)host; return NULL;  /* synchronous */
          }
          static void merge(void* into, void* other) { (void)into; (void)other; }
          static dftu_task* on_finalize(void* s, const dftu_host* h) {
@@ -159,11 +163,10 @@ never retain the pointer.
 
          static dftu_plugin g_plugin;
 
-         dftu_plugin* dftracer_plugin(const dftu_value* config) {
-             (void)config;
+         dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+             (void)h; (void)config;
              g_plugin.abi_version   = DFTRACER_PLUGIN_ABI_VERSION;
              g_plugin.self          = NULL;
-             g_plugin.needs         = needs;
              g_plugin.plan_query    = plan_query;
              g_plugin.make_slice    = make_slice;
              g_plugin.on_batch      = on_batch;
@@ -171,52 +174,41 @@ never retain the pointer.
              g_plugin.on_finalize   = on_finalize;
              g_plugin.destroy_slice = destroy_slice;
              g_plugin.destroy       = destroy;
-             g_plugin.get_extension = NULL;   /* optional (section 8) */
              return &g_plugin;
          }
 
-2. Declaring field needs
-------------------------
+2. Declaring the batch columns you read (reads)
+------------------------------------------------
 
-An event always carries ``cat``, ``name``, ``pid``, ``tid``, ``ts``, ``dur``,
-``phase`` and ``has_dur``. Three optional fields cost extra to extract, so the
-scan only pays for them when a plugin declares it needs them. ``needs`` returns
-the OR of these flags:
-
-.. list-table::
-   :header-rows: 1
-   :widths: 24 76
-
-   * - Flag
-     - Enables
-   * - ``DFTU_NEED_ARGS``
-     - ``Event::args()`` / ``arg_count()`` (the flattened, interned arg list);
-       ``args`` is NULL otherwise.
-   * - ``DFTU_NEED_FHASH``
-     - ``Event::fhash_id()`` (the file-name hash).
-   * - ``DFTU_NEED_HHASH``
-     - ``Event::hhash_id()`` (the host-name hash).
-
-These three (``abi.h``) are the complete set; there is no other ``DFTU_NEED_*``
-flag.
+Undeclared, the host materializes the whole batch for every plugin: the seven
+fixed columns, ``fhash`` / ``hhash``, and one column per distinct arg key seen
+in the batch - unbounded, since a trace with fifty arg keys builds fifty
+columns even for a plugin that only reads ``dur``. A plugin that declares
+``reads`` gets only those columns; every other column is simply absent from the
+frame, so a lookup for it returns NULL. Names are batch column names as
+``on_batch`` sees them: ``"dur"``, ``"cat"``, ``"fhash"``, an arg as
+``"args.<key>"``, a virtual field as ``"resolved.fpath"``. A plugin that
+registers a state (section 6) is exempt - its state is handed the same frame
+regardless, so it always keeps every column.
 
 .. tab-set::
 
    .. tab-item:: C++ (SDK)
 
-      Add a ``static constexpr std::uint32_t needs``; ``make_plugin`` detects
-      and reports it. Omit it for 0 (no optional fields).
+      Add a ``static ... reads()`` returning a range of ``const char*`` column
+      names outliving the plugin; the SDK wires it to ``dftu_plugin::reads``.
+      Omit it to keep every column.
 
       .. code-block:: cpp
 
          struct MyPlugin {
-             static constexpr std::uint32_t needs =
-                 DFTU_NEED_ARGS | DFTU_NEED_FHASH;
+             static auto reads() {
+                 return std::array<const char*, 2>{"dur", "cat"};
+             }
 
              explicit MyPlugin(const Config&) {}
-             void step(const Batch& b, Host h) {
-                 for (const Event& e : b)
-                     for (const Arg& a : e.args()) { /* args now populated */ }
+             void step(const Batch& b, Host) {
+                 for (const Event& e : b) { /* e.dur(), e.cat() are populated */ }
              }
              void merge(MyPlugin&) {}
              void finalize(Host) {}
@@ -226,10 +218,10 @@ flag.
 
       .. code-block:: c
 
-         static uint32_t needs(void* self) {
-             (void)self;
-             return DFTU_NEED_ARGS | DFTU_NEED_FHASH;
-         }
+         static const char* const g_reads[] = {"dur", "cat", NULL};
+         static const char* const* reads(void* self) { (void)self; return g_reads; }
+
+         /* g_plugin.reads = reads; */
 
 3. Coarse predicate pushdown (plan_query)
 -----------------------------------------
@@ -323,7 +315,8 @@ block args (later wins). A plugin reads the resulting tree from its factory.
 
       .. code-block:: c
 
-         dftu_plugin* dftracer_plugin(const dftu_value* config) {
+         dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+             (void)h;
              int64_t threshold = dftu_as_i64(dftu_obj_get(config, "threshold"), 0);
              /* stash `threshold` in a static/self the slices can read */
              (void)threshold;
@@ -331,20 +324,29 @@ block args (later wins). A plugin reads the resulting tree from its factory.
              return &g_plugin;
          }
 
+      Declaring ``config_keys`` (a ``dftu_config_key`` array terminated by a
+      NULL-name entry, or a Slice's ``static ... config_keys()`` in the SDK)
+      makes the host validate the config before the plugin runs: an undeclared
+      key, a key of the wrong kind, or a missing required key each fail the
+      load, instead of a typo silently doing nothing. An undeclared plugin's
+      config is not validated at all.
+
 5. Events and batches
 ---------------------
 
-``on_batch`` / ``step`` receives a batch of parsed events. The SDK's ``Batch``
-and ``Event`` are zero-copy typed views valid only for that call. String fields
-are interned ``dftu_str`` ids; resolve them to bytes through the ``Host``. Every
-event field:
+``on_batch`` / ``step`` receives one batch as a ``dftu_dataframe`` - N rows in
+scan order is N events, one column per field. The SDK's ``Batch`` and ``Event``
+are a zero-copy row cursor over that frame, valid only for the call that
+delivered it; string fields resolve to ``std::string_view``\ s straight from the
+frame's own buffers, no interned-id round trip needed at the row level. Every
+``Event`` accessor:
 
 .. list-table::
    :header-rows: 1
-   :widths: 26 20 54
+   :widths: 30 15 55
 
    * - ``Event`` (SDK)
-     - ``dftu_event`` (C)
+     - Batch column
      - Meaning
    * - ``pid()`` / ``tid()``
      - ``pid`` / ``tid``
@@ -353,33 +355,30 @@ event field:
      - ``ts`` / ``dur``
      - start timestamp / duration
    * - ``has_dur()``
-     - ``has_dur``
-     - whether a duration was present (a complete-phase event)
+     - -
+     - ``phase() == Phase::Complete`` (the row-fold engine tracks no per-row
+       null for ``dur``)
    * - ``phase()``
-     - ``phase``
-     - ``dftu_phase``: ``UNKNOWN`` / ``COMPLETE`` / ``COUNTER`` /
-       ``AGGREGATED`` / ``METADATA``
-   * - ``cat_id()`` / ``name_id()``
-     - ``cat`` / ``name``
-     - interned category / event-name id
-   * - ``fhash_id()`` / ``hhash_id()``
-     - ``fhash`` / ``hhash``
-     - interned file / host hash (need ``DFTU_NEED_FHASH`` / ``HHASH``)
-   * - ``cat(h)`` / ``name(h)`` / ``fhash(h)`` / ``hhash(h)``
-     - ``resolve``
-     - resolve the id to a ``string_view`` (empty when absent)
-   * - ``arg_count()`` / ``args()`` / ``arg(i)``
-     - ``arg_count`` / ``args``
-     - flattened args (need ``DFTU_NEED_ARGS``); ``args()`` is range-for-able
-   * - ``find_arg(key)`` / ``find_arg(h, "a", "b")``
-     - iterate ``args``
-     - first arg by interned or dotted key
+     - ``ph``
+     - ``Phase``: ``Unknown`` / ``Complete`` / ``Counter`` / ``Aggregated`` /
+       ``Metadata``
+   * - ``has_cat()`` / ``has_name()`` / ``has_fhash()`` / ``has_hhash()``
+     - ``cat`` / ``name`` / ``fhash`` / ``hhash``
+     - whether the column is present in this batch for this row
+   * - ``cat()`` / ``name()`` / ``fhash()`` / ``hhash()``
+     - ``cat`` / ``name`` / ``fhash`` / ``hhash``
+     - zero-copy ``string_view`` into the frame; empty when absent
+   * - ``has_arg(key)`` / ``arg_is_i64/f64/str(key)``
+     - ``args.<key>``
+     - whether a dyn arg column exists and its type, by dotted key
+   * - ``arg_i64/f64/str(key)``
+     - ``args.<key>``
+     - the arg value for this row
 
-There is no per-event severity/level field; the ABI exposes exactly the fields
-above. An ``Arg`` carries an interned ``key_id()`` and a value selected by
-``kind()``: ``is_i64()`` / ``i64()``, ``is_f64()`` / ``f64()``, or ``is_str()``
-/ ``str_id()`` / ``str(h)`` (``DFTU_ARG_I64`` / ``DFTU_ARG_F64`` /
-``DFTU_ARG_STR``).
+A plugin working straight off the columns (no per-row cursor) reads the
+``dftu_dataframe`` with the dataframe C ABI
+(``dftracer/utils/dataframe/abi.h``) - ``dftu_dataframe_column`` by name,
+``dftu_series_type`` / ``dftu_series_data``.
 
 .. tab-set::
 
@@ -387,13 +386,12 @@ above. An ``Arg`` carries an interned ``key_id()`` and a value selected by
 
       .. code-block:: cpp
 
-         void step(const Batch& b, Host h) {
+         void step(const Batch& b, Host) {
              for (const Event& e : b) {
                  if (!e.has_name()) continue;
-                 std::string_view cat = e.cat(h);        // resolve id -> bytes
+                 std::string_view cat = e.cat();          // zero-copy view
                  std::uint64_t dur = e.has_dur() ? e.dur() : 0;
-                 for (const Arg& a : e.args())
-                     if (a.is_i64()) { /* a.key(h), a.i64() */ }
+                 if (e.arg_is_i64("ret")) { /* e.arg_i64("ret") */ }
              }
          }
 
@@ -401,20 +399,19 @@ above. An ``Arg`` carries an interned ``key_id()`` and a value selected by
 
       .. code-block:: c
 
-         static dftu_task* on_batch(void* slice, const dftu_batch* b,
+         static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                                    const dftu_host* host) {
              (void)slice;
-             for (uint32_t i = 0; i < b->count; ++i) {
-                 const dftu_event* e = &b->events[i];
-                 if (e->name == DFTU_STR_NONE) continue;
-                 uint32_t n = 0;
-                 const char* cat = host->resolve(host->h, e->cat, &n);
-                 (void)cat;
-                 for (uint32_t j = 0; j < e->arg_count; ++j) {
-                     const dftu_arg* a = &e->args[j];
-                     if (a->kind == DFTU_ARG_I64) { /* a->v.i64 */ }
-                 }
-             }
+             int64_t n = dftu_dataframe_num_rows(df);
+             dftu_series* ph_col = dftu_dataframe_column(df, "ph");
+             const int64_t* ph = (ph_col && dftu_series_type(ph_col) == DFTU_TYPE_INT64)
+                 ? (const int64_t*)dftu_series_data(ph_col) : NULL;
+             int64_t i;
+             if (ph)
+                 for (i = 0; i < n; ++i)
+                     if (ph[i] == DFTU_PH_COMPLETE) { /* row i has a duration */ }
+             if (ph_col) dftu_series_free(ph_col);
+             (void)host;
              return NULL;
          }
 
@@ -432,13 +429,12 @@ host-merged, ``merge`` stays empty and there is nothing to free.
 This is the one accumulator surface: a keyed map is an accumulator **with** key
 columns, and a scalar handle is one with **zero** key columns.
 
-**The seam.** The accumulator eats columns, so it is fed from the vectorized
-fold seam ``dftu_plugin::on_batch_columns``, which hands each batch across as a
-``dftu_dataframe`` instead of calling ``on_batch`` per event. A plugin sets
-either ``on_batch`` or ``on_batch_columns``, never both. The batch carries
-``name``, ``cat``, ``pid``, ``tid``, ``ts``, ``dur``, ``ph``, ``fhash`` /
-``hhash`` when any event has one, and one ``args.<key>`` column per arg key
-present.
+**The seam.** ``on_batch`` already hands each batch across as a
+``dftu_dataframe``, so an accumulator that eats columns is fed straight from
+it - no separate per-event callback to opt into. The batch carries ``name``,
+``cat``, ``pid``, ``tid``, ``ts``, ``dur``, ``ph``, ``fhash`` / ``hhash`` when
+any event has one, and one ``args.<key>`` column per arg key present (or only
+the columns a plugin declared via ``reads``, section 2).
 
 **The spec.** One aggregate is a ``dftu_agg_col``: an op code (a ``DFTU_AGG_*``
 value of ``dftu_agg_op``), the ``value`` column read in each batch (NULL for
@@ -486,15 +482,11 @@ Count events and total their duration per ``(pid, event-name)``:
 
       .. code-block:: cpp
 
-         static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
-                                            const dftu_host* host) {
-             (void)slice;
-             Host h(host);
+         void step(const Batch& b, Host h) {
              const auto edges = h.agg("name_edges", {"pid", "name"},
                                       {agg::count("edges"),
                                        agg::sum("dur", "dur_sum")});
-             if (edges) edges.accumulate(df);
-             return nullptr;
+             if (edges) edges.accumulate(b.raw());
          }
 
    .. tab-item:: C (raw ABI)
@@ -505,8 +497,8 @@ Count events and total their duration per ``(pid, event-name)``:
 
       .. code-block:: c
 
-         static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
-                                            const dftu_host* host) {
+         static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
+                                   const dftu_host* host) {
              (void)slice;
              const dftu_ext_agg* agg =
                  (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
@@ -544,9 +536,11 @@ Reading another plugin's result
 ``agg_result(name)`` returns the cross-worker-merged, finalized result of any
 plugin's accumulator as a new owned dataframe (free it with
 ``dftu_dataframe_free``; the SDK's ``Host::agg_result`` returns an
-``OwnedDataFrame`` that does it for you). Call it at ``on_finalize``, and
-register the producing plugin first: an accumulator whose fold has not
-finalized reads back NULL.
+``OwnedDataFrame`` that does it for you). Call it at ``on_finalize``. Name the
+accumulator in the reading plugin's ``consumes`` (section 8): the host orders
+the fold so every producer of a consumed name finalizes first, and refuses to
+run at all if no loaded plugin provides it - there is no manual ordering to get
+right.
 
 .. code-block:: c
 
@@ -619,8 +613,11 @@ mechanisms, each its own extension group. See
 **Ports (DFTU_EXT_PORTS)** are a batch-scoped slot keyed by a port name: a
 producer publishes during a batch, a consumer reads it back during the same
 batch (NULL if the producer has not published, or runs after the consumer). The
-bus resets between batches. A producer must run before its consumer in fold
-order (``--plugin`` / registration order).
+bus resets between batches. Name the port in the consumer's ``consumes`` and
+the producer's ``provides`` (both a single NULL-terminated name array, one
+namespace shared with accumulator names): the host orders the fold so a
+producer always runs before its consumers, and refuses to run if no loaded
+plugin provides a consumed name.
 
 .. tab-set::
 
@@ -666,10 +663,9 @@ the cross-worker-merged, finalized result by that name at ``on_finalize``.
 
       .. code-block:: cpp
 
-         // producer, in on_batch_columns:
-         Host h(host);
+         // producer, in step (or on_batch):
          const auto a = h.agg("com.example.total", {}, {agg::count("count")});
-         if (a) a.accumulate(df);
+         if (a) a.accumulate(b.raw());
 
          // consumer, in on_finalize:
          const OwnedDataFrame res = h.agg_result("com.example.total");
@@ -683,10 +679,10 @@ the cross-worker-merged, finalized result by that name at ``on_finalize``.
              (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
          static const dftu_agg_col specs[1] =
              {{DFTU_AGG_COUNT, NULL, "count", 0.0, NULL}};
-         /* during on_batch_columns */
+         /* during on_batch */
          dftu_agg* a = agg->agg_new(host->h, "com.example.total", NULL, 0, specs, 1);
          agg->agg_accumulate(host->h, a, df);
-         /* at on_finalize, in a plugin registered after the producer */
+         /* at on_finalize, in a plugin naming "com.example.total" in consumes */
          dftu_dataframe* res = agg->agg_result(host->h, "com.example.total");
          if (res) dftu_dataframe_free(res);
 
@@ -698,18 +694,19 @@ on ``dftu_ext_result``), best called at finalize.
 9. Async work and I/O
 ---------------------
 
-For overlapped I/O or a custom fan-out, return a task instead of running
-synchronously; the host awaits it before considering the batch done. ``step`` /
-``on_batch`` must stay CPU-bound - offload real blocking through the async path
-or ``run_blocking``.
+``on_batch`` / ``step`` is always synchronous - it must return ``NULL`` (or
+nothing, for ``step``) and stay CPU-bound. Only ``on_finalize`` may return a
+task for overlapped I/O or a custom fan-out; the host awaits it before
+considering the fold done. Offload real blocking work through the async path
+or ``run_blocking``, never inside ``on_batch``.
 
 .. tab-set::
 
    .. tab-item:: C++ (SDK)
 
-      Name the hook ``on_batch`` / ``on_finalize`` and return a
-      ``dftracer::utils::plugins::Task`` coroutine; ``make_plugin`` detects the signature.
-      Inside it, ``co_await`` the async accessors. ``Io`` (from ``Host::io()``)
+      Give the Slice an ``on_finalize(Host) -> Task`` method (instead of
+      ``finalize``) and the SDK detects the coroutine signature. Inside it,
+      ``co_await`` the async accessors. ``Io`` (from ``Host::io()``)
       wraps the full backend surface: ``open`` / ``close`` / ``read`` /
       ``write`` / ``pread`` / ``pwrite`` / ``fsync`` / ``ftruncate`` /
       ``fstat``, the vectored ``readv`` / ``writev`` / ``preadv`` / ``pwritev``,
@@ -744,8 +741,9 @@ or ``run_blocking``.
              }
          };
 
-         extern "C" dftu_plugin* dftracer_plugin(const dftu_value* config) {
-             return make_plugin<Writer>(config);
+         extern "C" dftu_plugin* dftracer_plugin(dftu_host* h,
+                                                 const dftu_value* config) {
+             return plugin(h, config).fold<Writer>().build();
          }
 
    .. tab-item:: C (raw ABI)
@@ -754,7 +752,8 @@ or ``run_blocking``.
       to compose or await; the out-slot must outlive it) and ``DFTU_EXT_CORO``
       for the combinators ``spawn`` / ``when_all`` / ``when_any`` / ``then`` /
       ``run_blocking``, plus ``drive`` (which the SDK's coroutine adapter uses).
-      Return the root task from ``on_batch`` / ``on_finalize``.
+      Return the root task from ``on_finalize`` only - ``on_batch`` must return
+      NULL.
 
       .. code-block:: c
 
@@ -801,8 +800,8 @@ scan; do not free it.
              void step(const Batch& b, Host h) {
                  if (!q_) q_ = h.query_compile(F("dur") > 1000);
                  // Equivalent: h.query_compile("dur > 1000");
-                 for (const Event& e : b)
-                     if (h.query_matches(q_, e.raw())) { /* ... */ }
+                 for (std::int64_t row = 0; row < b.size(); ++row)
+                     if (h.query_matches(q_, b.raw(), row)) { /* ... */ }
              }
              void merge(Filtered&) {}
              void finalize(Host) {}
@@ -815,15 +814,16 @@ scan; do not free it.
          const dftu_ext_query* Q =
              (const dftu_ext_query*)host->get_extension(host->h, DFTU_EXT_QUERY);
          dftu_query* q = Q->query_compile(host->h, "dur > 1000", 10);
-         if (Q->query_matches(host->h, q, e)) { /* ... */ }
+         if (Q->query_matches(host->h, q, df, row)) { /* ... */ }
 
 11. Arrow interchange (DFTU_EXT_ARROW)
 --------------------------------------
 
-Materialize a batch as an Arrow record batch (``cat``, ``name``, ``pid``,
-``tid``, ``ts``, ``dur``, ``phase``), or read and write Arrow IPC files. The
-caller owns the exported array/schema and must release them; the SDK's
-``OwnedArrow`` does that in its destructor.
+Read and write Arrow IPC files for an ``ArrowArray`` / ``ArrowSchema`` pair the
+plugin already holds (built with the dataframe engine's own Arrow bridge, or
+read back from a previous IPC file). This group is file I/O only - it does not
+convert a batch to Arrow for you. The caller owns the exported array/schema and
+must release them; the SDK's ``OwnedArrow`` does that in its destructor.
 
 .. tab-set::
 
@@ -831,9 +831,9 @@ caller owns the exported array/schema and must release them; the SDK's
 
       .. code-block:: cpp
 
-         void step(const Batch& b, Host h) {
-             OwnedArrow a = h.batch_to_arrow(b.raw());
-             if (a) h.arrow_write_ipc(a, "/tmp/batch.arrow");
+         void finalize(Host h) {
+             OwnedArrow a = h.arrow_read_ipc("/tmp/in.arrow");
+             if (a) h.arrow_write_ipc(a, "/tmp/out.arrow");
          }
 
    .. tab-item:: C (raw ABI)
@@ -843,8 +843,8 @@ caller owns the exported array/schema and must release them; the SDK's
          const dftu_ext_arrow* A =
              (const dftu_ext_arrow*)host->get_extension(host->h, DFTU_EXT_ARROW);
          struct ArrowArray arr; struct ArrowSchema sch;
-         if (A->batch_to_arrow(host->h, b, &arr, &sch) == 0) {
-             A->arrow_write_ipc(host->h, &arr, &sch, "/tmp/batch.arrow");
+         if (A->arrow_read_ipc(host->h, "/tmp/in.arrow", &arr, &sch) == 0) {
+             A->arrow_write_ipc(host->h, &arr, &sch, "/tmp/out.arrow");
              arr.release(&arr); sch.release(&sch);   /* caller owns */
          }
 
@@ -864,9 +864,9 @@ on first read, not at close.
 
       .. code-block:: cpp
 
-         void finalize(Host h) {
+         void step(const Batch& b, Host h) {
              dftu_trace_writer* w = h.trace_open_write("/tmp/out.pfw.gz");
-             if (w) { /* h.trace_write(w, evs, n); */ h.trace_close(w); }
+             if (w) { h.trace_write(w, b.raw()); h.trace_close(w); }
          }
 
    .. tab-item:: C (raw ABI)
@@ -876,7 +876,7 @@ on first read, not at close.
          const dftu_ext_trace* T =
              (const dftu_ext_trace*)host->get_extension(host->h, DFTU_EXT_TRACE);
          dftu_trace_writer* w = T->trace_open_write(host->h, "/tmp/out.pfw.gz");
-         T->trace_write(host->h, w, evs, n);
+         T->trace_write(host->h, w, df);   /* every row of df, by column name */
          T->trace_close(host->h, w);
 
 The **parallel writer (DFTU_EXT_WRITER)** is a sharded, multi-worker gzip-member
@@ -921,30 +921,35 @@ interned string ids are resolved to their labels once, so a string key column is
 a real ``string``. Named results (section 8) surface the same way, keyed by their
 emit name.
 
-**From Python**, load one or more plugins and run them over a single fused scan;
-each result comes back as a ``pyarrow.Table``:
+**From Python**, build a fixed set of plugins and run them over a single fused
+scan; each result comes back shaped by its emit kind (a native
+:class:`~dftracer.utils.DataFrame`, a ``pyarrow.Table``, a
+:class:`~dftracer.utils.LazyFrame`, or ``bytes``):
 
 .. code-block:: python
 
-   from dftracer.utils.plugins import PluginHost
+   from dftracer.utils.plugins import Plugins
 
-   host = PluginHost()
-   host.load("./name_edges.so")          # a compiled .so, or a @jit.plugin class
-   results = host.run("./traces")        # a directory or list of .pfw.gz traces
-   table = results["name_edges"]         # pyarrow.Table[pid, name, edges, dur_sum]
+   plugins = Plugins(["./name_edges.so"])   # .so paths, or @jit.plugin classes
+   run = plugins.run("./traces")            # a directory or list of .pfw.gz traces
+   table = run.results["name_edges"]        # DataFrame[pid, name, edges, dur_sum]
    df = table.to_pandas()
+   print(run.stats["events_scanned"])
 
-The output tables cross to NumPy or pandas cheaply (zero-copy where the dtype
-allows); the fold itself runs in compiled code, so aggregate in the native scan
-and do NumPy / pandas analysis on the (much smaller) result tables:
+Construction (``Plugins(...)``) builds the set immediately - dlopen, the ABI
+gate, and the fold order are all resolved in ``__init__``, so a bad path or an
+ABI mismatch raises there rather than from ``run()``. The output tables cross
+to NumPy or pandas cheaply (zero-copy where the dtype allows); the fold itself
+runs in compiled code, so aggregate in the native scan and do NumPy / pandas
+analysis on the (much smaller) result tables:
 
 .. code-block:: python
 
-   values = table.column("edges").to_numpy(zero_copy_only=False)   # np.ndarray
+   values = table.to_arrow().column("edges").to_numpy(zero_copy_only=False)
 
 **From the command line**, ``dftracer_run`` folds every ``--plugin`` over one
 shared, index-pruned scan and reports the scan on stderr (it does not print
-result tables - read those through ``PluginHost``):
+result tables - read those through :class:`~dftracer.utils.plugins.Plugins`):
 
 .. code-block:: bash
 
@@ -992,7 +997,7 @@ that covers it:
    * - ``Host::query_compile`` / ``query_matches``
      - ``DFTU_EXT_QUERY``
      - `10. Query DSL against events (DFTU_EXT_QUERY)`_
-   * - ``Host::batch_to_arrow`` / ``arrow_read_ipc`` / ``arrow_write_ipc``
+   * - ``Host::arrow_read_ipc`` / ``arrow_write_ipc``
      - ``DFTU_EXT_ARROW``
      - `11. Arrow interchange (DFTU_EXT_ARROW)`_
    * - ``Host::trace_open_write`` / ``trace_write`` / ``trace_read``

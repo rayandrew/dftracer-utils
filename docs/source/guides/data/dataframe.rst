@@ -45,7 +45,8 @@ From a query, via :doc:`TraceViewer <../../trace-viewer>`:
                        .group_by({GroupKey::cat()})
                        .agg({{AggOp::Count, "", "count"},
                              {AggOp::Sum, "dur", "sum_dur"}})
-                       .collect()
+                       .collect()   // -> LazyFrame
+                       .collect()   // -> coro::CoroTask<DataFrame>
                        .get();
 
       See :doc:`../analysis/aggregation` for the full group-key and aggregate
@@ -227,10 +228,10 @@ out}`` where ``op`` is an ``Agg`` enumerator: ``Agg::Count`` (column ignored),
 Relational
 -----------
 
-Equi-join two frames on their leading key column(s); both frames must already
-share that leading key-column schema (same names, in order). See
-:doc:`joins` for the full join surface (join kinds, output layout, joining
-aggregated queries).
+Equi-join two frames on a shared key column or columns (by name). See
+:doc:`joins` for the full join surface - the exact key-matching rule and output
+column naming differ between the C++ ``join_batches`` and the Python ``join``
+below, join kinds, and joining aggregated queries.
 
 .. tab-set::
 

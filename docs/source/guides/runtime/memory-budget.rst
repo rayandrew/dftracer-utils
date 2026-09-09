@@ -70,10 +70,11 @@ unset to rely on the always-on scan-decode default.
              tv.memory_budget(2 * 1024**3)   # 2 GiB per worker
                .group_by("cat")
                .agg("sum:dur")
-               .collect()
+               .collect()                    # -> LazyFrame
+               .collect()                    # -> DataFrame
          )
 
-         spilled = tv.auto_spill().group_by("cat").agg("count").collect()
+         spilled = tv.auto_spill().group_by("cat").agg("count").collect().collect()
 
 Check a footprint before you run
 --------------------------------

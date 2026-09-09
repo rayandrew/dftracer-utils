@@ -71,9 +71,9 @@ reduce or threading code.
 
    .. tab-item:: C++
 
-      An accumulator eats columns, so the C++ plugin takes each batch through
-      the vectorized seam ``on_batch_columns`` and folds the whole batch in one
-      call. Save this as ``events_per_pid.cpp``:
+      A batch arrives as one ``dftu_dataframe`` - N rows in scan order is N
+      events - and an accumulator eats columns straight from it. Save this as
+      ``events_per_pid.cpp``:
 
       .. code-block:: cpp
 
@@ -81,30 +81,22 @@ reduce or threading code.
 
          using namespace dftracer::utils::plugins;
 
-         static dftu_task* on_batch_columns(void* slice, const dftu_dataframe* df,
-                                            const dftu_host* host) {
-             (void)slice;
-             Host h(host);
-             const auto hits = h.agg("hits", {"pid"}, {agg::count("hits")});
-             if (hits) hits.accumulate(df);
-             return nullptr;
-         }
+         struct EventsPerPid {
+             explicit EventsPerPid(const Config&) {}
 
-         static dftu_plugin g_plugin;
+             void step(const dftu_dataframe* df, Host h) {
+                 const auto hits = h.agg("hits", {"pid"}, {agg::count("hits")});
+                 if (hits) hits.accumulate(df);
+             }
 
-         extern "C" dftu_plugin* dftracer_plugin(const dftu_value* config) {
-             (void)config;
-             g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
-             g_plugin.needs = [](void*) -> std::uint32_t { return 0; };
-             g_plugin.make_slice = [](void*) -> void* { return &g_plugin; };
-             g_plugin.merge = [](void*, void*) {};
-             g_plugin.on_finalize = [](void*, const dftu_host*) -> dftu_task* {
-                 return nullptr;
-             };
-             g_plugin.destroy_slice = [](void*) {};
-             g_plugin.destroy = [](void*) {};
-             g_plugin.on_batch_columns = on_batch_columns;
-             return &g_plugin;
+             void merge(EventsPerPid&) {}
+             void finalize(Host) {}
+         };
+
+         extern "C" dftu_plugin* dftracer_plugin(dftu_host* h,
+                                                 const dftu_value* config) {
+             (void)h;
+             return make_plugin<EventsPerPid>(config);
          }
 
       ``Host::agg`` names the accumulator, its key columns, and its aggregates;
@@ -123,31 +115,30 @@ reduce or threading code.
 
    .. tab-item:: Python
 
-      ``PluginHost`` compiles the class to a cached ``.so``, loads it, and folds
-      it over one scan of your traces. ``run()`` wires up the aggregation
-      service and returns the emitted results keyed by accumulator name:
+      ``Plugins`` compiles the class to a cached ``.so`` and loads it in
+      ``__init__``; ``run()`` folds it over one scan of your traces and
+      returns a ``PluginRun`` holding the emitted results keyed by accumulator
+      name plus the scan counters:
 
       .. code-block:: python
 
-         import pyarrow as pa
-         from dftracer.utils.plugins import PluginHost
+         from dftracer.utils.plugins import Plugins
 
-         host = PluginHost()
-         host.load(EventsPerPid)
-         results = host.run("plugin_trace.pfw.gz")
+         plugins = Plugins([EventsPerPid])
+         run = plugins.run("plugin_trace.pfw.gz")
 
-         table = pa.table(results["hits"])
-         print(table.to_pandas().sort_values("k0").reset_index(drop=True))
-         print("scanned:", host.stats["events_scanned"])
+         table = run.results["hits"].to_pandas()
+         print(table.sort_values("pid").reset_index(drop=True))
+         print("scanned:", run.stats["events_scanned"])
 
-      Expected output. The key column is ``k0`` (the ``pid``) and the
-      aggregate column is ``value`` (the count):
+      Expected output. The key column is ``pid`` and the aggregate column is
+      ``hits`` (the count):
 
       .. code-block:: text
 
-              k0  value
-           0   1    200
-           1   2    100
+              pid  hits
+           0    1   200
+           1    2   100
            scanned: 300
 
       Pass a directory to ``run()`` and it folds over every ``.pfw.gz`` beneath
@@ -175,8 +166,8 @@ reduce or threading code.
       The 300 scanned events are the fold's input; the per-``pid`` accumulator
       is merged in-process by the host. Use ``-d <directory>`` in place of
       ``--files`` to fold over a whole tree. To consume the merged values
-      programmatically (as the Python tab does), drive the same ``.so`` through a ``PluginHost``;
-      see :doc:`../plugins`.
+      programmatically (as the Python tab does), load the same ``.so`` through
+      Python's ``Plugins``; see :doc:`../plugins`.
 
 What you learned
 ----------------
@@ -184,10 +175,11 @@ What you learned
 - A plugin is a **fold over the one fused scan**: see each event once, keep
   mergeable state.
 - Author it in Python with ``@jit.plugin`` + ``jit.map`` + ``@jit.each_event``,
-  or in C++ against the ABI with an ``on_batch_columns`` seam and ``Host::agg``,
-  exported by the ``dftracer_plugin`` factory - both compile to the same ABI.
-- Run it in Python with ``PluginHost.load`` / ``run``, or compile
-  the ``.so`` and fold it with ``dftracer_run --plugin``.
+  or in C++ against the ABI with a ``step``/``on_batch`` over the batch's
+  ``dftu_dataframe`` and ``Host::agg``, exported by the ``dftracer_plugin``
+  factory - both compile to the same ABI.
+- Run it in Python with ``Plugins([...]).run(...)``, or compile the ``.so`` and
+  fold it with ``dftracer_run --plugin``.
 
 To go further, see the Extending the engine section of the
 :doc:`../guides/index` and the plugin reference in :doc:`../plugins`.

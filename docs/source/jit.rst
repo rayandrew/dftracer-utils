@@ -10,8 +10,8 @@ JIT Plugins
 The JIT layer lets you author a plugin in Python and get a native one. A class
 decorated with ``@jit.plugin`` is AST-compiled to a C plugin against the stable
 :doc:`plugins` ABI, built to a cached shared library, and loaded through
-``PluginHost`` exactly like a hand-written plugin - so a Python-authored plugin
-runs at native speed inside the same fused scan.
+:class:`~dftracer.utils.plugins.Plugins` exactly like a hand-written plugin -
+so a Python-authored plugin runs at native speed inside the same fused scan.
 
 Overview
 --------
@@ -71,32 +71,31 @@ type checker validates the subscript and the ``+= 1``.
 Running it
 ----------
 
-There is no build step to run yourself - loading the class compiles it to a
-cached native ``.so`` and runs it through
-:class:`~dftracer.utils.plugins.PluginHost`, exactly like a hand-written plugin.
-Each map comes back as a ``pyarrow.Table`` under its attribute name:
+There is no build step to run yourself - passing the class to
+:class:`~dftracer.utils.plugins.Plugins` compiles it to a cached native ``.so``
+and loads it, exactly like a hand-written plugin. Each map comes back keyed by
+its attribute name in the run's results:
 
 .. code-block:: python
 
-   from dftracer.utils.plugins import PluginHost
+   from dftracer.utils.plugins import Plugins
 
-   host = PluginHost()
-   host.load(NameEdges)                  # compiles + caches the .so, then loads
-   results = host.run("./traces")
-   df = results["edges"].to_pandas()     # columns: pid, name, value
+   plugins = Plugins([NameEdges])        # compiles + caches the .so, then loads
+   run = plugins.run("./traces")
+   df = run.results["edges"].to_pandas()  # columns: pid, name, value
 
 Working with results (NumPy / pandas)
 -------------------------------------
 
 The per-event fold runs in compiled C, not Python - there is no NumPy in the hot
-loop, which is the point. The interop happens on the *output*: each map is a
-small ``pyarrow.Table`` that crosses to NumPy or pandas cheaply (zero-copy where
-the dtype allows).
+loop, which is the point. The interop happens on the *output*: each map comes
+back as a small :class:`~dftracer.utils.DataFrame` that crosses to NumPy,
+pandas, or Arrow cheaply (zero-copy where the dtype allows).
 
 .. code-block:: python
 
-   tbl = results["edges"]                       # pyarrow.Table
-   values = tbl.column("value").to_numpy(zero_copy_only=False)   # np.ndarray
+   tbl = run.results["edges"]                    # DataFrame
+   values = tbl.to_arrow().column("value").to_numpy(zero_copy_only=False)
    df = tbl.to_pandas()                          # pandas.DataFrame
 
    # from here it is ordinary NumPy / pandas
@@ -211,8 +210,9 @@ Two JIT plugins loaded in the same run can pass a batch-scoped value between
 them: ``jit.publish`` declares a port this plugin writes, ``jit.consume`` one
 it reads - both keyed by a port name, the same mechanism the hand-written C++
 ``Host::publish_port`` / ``consume_port`` API uses (see
-:doc:`guides/plugins/inter-plugin-comms`). Load the producer before the
-consumer.
+:doc:`guides/plugins/inter-plugin-comms`). Declaring a port compiles to a name
+in the plugin's ``provides`` / ``consumes``, so the host orders the fold
+itself; there is no load order to get right.
 
 A publish port is written with ``self.<port> += <expr>`` inside
 ``each_event``: the host sums the per-event contributions into one per-batch
@@ -249,9 +249,10 @@ time) and a publish port is write-only (reading it likewise raises). A missing
 producer degrades to reading ``0``.
 
 The ordering rule matters here exactly as it does in C++: a producer's
-``step`` must run before the consumer's for the same batch, so register the
-producer first. A JIT plugin can publish for a hand-written C++ consumer and
-vice versa; both sides go through the same ``DFTU_EXT_PORTS`` machinery.
+``step`` must run before the consumer's for the same batch, which the declared
+``provides`` / ``consumes`` guarantee regardless of load order. A JIT plugin
+can publish for a hand-written C++ consumer and vice versa; both sides go
+through the same ``DFTU_EXT_PORTS`` machinery.
 
 Raw bodies: the full ABI without leaving JIT
 --------------------------------------------

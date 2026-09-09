@@ -478,9 +478,9 @@ Avoid querying the database for every event. Use bloom filters and per-chunk sta
     }
     
     // CORRECT: batch statistics with bloom filters
-    BloomIndex bloom;
+    ScalableBloomFilter bloom;
     for (const auto& chunk : chunks) {
-        bloom.add_chunk_stats(chunk);
+        bloom.add(chunk.key);
     }
 
 **Concurrency**

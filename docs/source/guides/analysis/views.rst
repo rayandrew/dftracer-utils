@@ -67,10 +67,10 @@ and ``filter`` throws. Plugins instead use the predicate-only ``query::F``
 (``<dftracer/utils/query/builder.h>``) finished with ``Expr::build()``, which
 links no dataframe engine. See :doc:`../core/query-dsl` for the builder surface.
 
-Row-shaping builders: ``.phase(Phase::Events | Phase::Counters |
-Phase::Aggregated | Phase::Metadata | Phase::Any)`` restricts to ``ph="X"``
-events, ``ph="C"`` counters, rollup (``Aggregated``) records, ``ph="M"``
-metadata, or any; ``.time_range(begin,
+Row-shaping builders: ``.phase(p)`` restricts to one ``Phase`` value -
+``Phase::Events`` (``ph="X"`` events), ``Phase::Counters`` (``ph="C"``
+counters), ``Phase::Aggregated`` (rollup records), ``Phase::Metadata``
+(``ph="M"``), or ``Phase::Any``; ``.time_range(begin,
 end)`` and ``.time_bucket(interval_us, origin)`` window and bucket by timestamp
 (``origin`` anchors the windows; ``"min"`` anchors on the first event's
 timestamp instead of ``0``);
@@ -120,12 +120,16 @@ terminal that runs everything built so far is ``.collect()``:
              .filter('cat == "POSIX"')
              .group_by("name")
              .agg("count", "sum:dur")
+             .collect()               # -> LazyFrame
              .collect()               # -> DataFrame
          )
 
-``collect()`` returns a native ``dftracer::utils::dataframe::DataFrame``; see
+In C++, ``collect()`` returns a native ``dftracer::utils::dataframe::DataFrame``
+directly. In Python, ``TraceViewer.collect()`` builds the query plan and
+returns a lazy ``LazyFrame``; nothing scans until you call its own
+``.collect()``, which runs the plan and returns the ``DataFrame``. See
 :doc:`../data/dataframe` and :doc:`../core/columnar-ops` for what to do with
-it next.
+the frame next.
 
 Inspecting the schema
 ---------------------

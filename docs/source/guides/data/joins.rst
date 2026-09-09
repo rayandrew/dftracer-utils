@@ -41,17 +41,24 @@ Join two DataFrames
          joined = df.join(other, on="fid", how="left")
          joined = df.join(other, on=["pid", "tid"], how="inner")
 
-      ``on`` is either an int count of leading key columns (both frames must
-      carry them first, in order, with the same names) or the shared key column
-      name(s). ``how`` is one of ``inner`` / ``left`` / ``right`` / ``full`` /
-      ``semi`` / ``anti`` (use ``full``, not ``outer``). ``on`` defaults to
-      ``1``.
+      ``on`` is either an int count of leading key columns in **this** frame
+      (their names are then looked up by name in ``other``, wherever they fall
+      there) or the shared key column name(s) directly - either way, a key
+      column just needs to exist under the same name on both sides, not be
+      leading or in the same position on the ``other`` side. ``how`` is one of
+      ``inner`` / ``left`` / ``right`` / ``full`` / ``semi`` / ``anti`` (use
+      ``full``, not ``outer``). ``on`` defaults to ``1``. Python's ``join`` is
+      the Arrow-native join (a separate implementation from the C++
+      ``join_batches`` below): the result keeps the key columns and the left
+      frame's other columns under their own names, then (unless the join is
+      ``semi`` / ``anti``) the right frame's other columns, with a colliding
+      right name suffixed ``_right``. A missing key column raises ``KeyError``.
 
-The result keeps the key columns under their own names, then the non-key
-**left** columns prefixed ``l_``, then (unless the join is ``SEMI`` / ``ANTI``)
-the non-key **right** columns prefixed ``r_``. An outer join (``LEFT`` /
-``RIGHT`` / ``FULL``) nulls the absent side. If the two frames do not share the
-leading key schema the result is an empty frame.
+The C++ ``join_batches`` result keeps the key columns under their own names,
+then the non-key **left** columns prefixed ``l_``, then (unless the join is
+``SEMI`` / ``ANTI``) the non-key **right** columns prefixed ``r_``. An outer
+join (``LEFT`` / ``RIGHT`` / ``FULL``) nulls the absent side. If the two frames
+do not share the leading key schema the result is an empty frame.
 
 There is no ``dftu_dataframe_join`` in the C ABI; from C, drive the join through
 the C++ or Python surface above.

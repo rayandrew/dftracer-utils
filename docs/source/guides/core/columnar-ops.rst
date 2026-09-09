@@ -19,7 +19,8 @@ Get a DataFrame
 
          from dftracer.utils import TraceViewer
 
-         df = TraceViewer("traces/").group_by("cat").agg("count", "sum:dur").collect()
+         df = TraceViewer("traces/").group_by("cat").agg("count", "sum:dur").collect().collect()
+         # collect() builds the plan (-> LazyFrame); its own .collect() runs it (-> DataFrame)
          # or ingest one: DataFrame.from_pandas(pdf) / from_arrow(tbl) / from_numpy(a, columns=...)
 
    .. tab-item:: C++
@@ -33,7 +34,8 @@ Get a DataFrame
                        .group_by({GroupKey::cat()})
                        .agg({{AggOp::Count, "", "count"},
                              {AggOp::Sum, "dur", "sum_dur"}})
-                       .collect()
+                       .collect()   // -> LazyFrame
+                       .collect()   // -> coro::CoroTask<DataFrame>
                        .get();
 
 Derived columns
