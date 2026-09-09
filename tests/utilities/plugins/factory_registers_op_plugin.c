@@ -28,8 +28,8 @@ static void* make_slice(void* self) {
 
 static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {
-    const dftu_ext_ops* ops =
-        (const dftu_ext_ops*)host->get_extension(host->h, DFTU_EXT_OPS);
+    const dftu_svc_ops* ops =
+        (const dftu_svc_ops*)host->get_service(host->h, DFTU_SVC_OPS);
     dftu_series* dur = dftu_dataframe_column(df, "dur");
     dftu_result_scalar r;
     if (!ops || !dur) return NULL;
@@ -45,8 +45,8 @@ static void merge(void* into, void* other) {
 }
 
 static dftu_task* on_finalize(void* slice, const dftu_host* host) {
-    const dftu_ext_result* res =
-        (const dftu_ext_result*)host->get_extension(host->h, DFTU_EXT_RESULT);
+    const dftu_svc_result* res =
+        (const dftu_svc_result*)host->get_service(host->h, DFTU_SVC_RESULT);
     dftu_result_value v;
     g_total = *(int64_t*)slice;
     if (!res) return NULL;
@@ -65,9 +65,9 @@ static dftu_plugin g_plugin;
 
 DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_host* h,
                                                 const dftu_value* config) {
-    const dftu_ext_ops* ops;
+    const dftu_svc_ops* ops;
     (void)config;
-    ops = (const dftu_ext_ops*)h->get_extension(h->h, DFTU_EXT_OPS);
+    ops = (const dftu_svc_ops*)h->get_service(h->h, DFTU_SVC_OPS);
     if (!ops || !ops->register_op) return NULL;
     /* The op registry is process-global, so a second load of this plugin in
        the same process finds the name taken; either way it is registered. */

@@ -2,9 +2,9 @@
 #define DFTRACER_UTILS_PLUGINS_ABI_AGG_H
 
 /** @file
- * dftu.ext.agg: the host-owned cross-batch aggregation accumulator lent to a
+ * dftu.svc.agg: the host-owned cross-batch aggregation accumulator lent to a
  * plugin. Optional service group, fetched via
- * dftu_host::get_extension(DFTU_EXT_AGG). Include
+ * dftu_host::get_service(DFTU_SVC_AGG). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 
@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define DFTU_EXT_AGG "dftu.ext.agg@1"
+#define DFTU_SVC_AGG "dftu.svc.agg@1"
 
 /** Host-owned cross-batch aggregation accumulator. This is the ONE
    accumulator a plugin gets: it wraps the dataframe engine's mergeable
@@ -28,7 +28,7 @@ extern "C" {
    columns, then one column per aggregate), returned to run() under `name`. */
 typedef struct dftu_agg dftu_agg;
 
-/** One aggregate for a dftu_ext_agg accumulator. `op` is a DFTU_AGG_* code (the
+/** One aggregate for a dftu_svc_agg accumulator. `op` is a DFTU_AGG_* code (the
    dftu_agg_op enum, kept a fixed-width int at the seam for ABI stability); a
    code outside the DFTU_AGG_* range makes agg_new return NULL. `value` names
    the value column in each accumulated batch dataframe (NULL for
@@ -55,7 +55,7 @@ typedef struct dftu_agg_col {
    finalize once on the merged state, destroy for every state it created.
 
    These callbacks run INTO the plugin, the opposite direction from
-   dftu_ext_ops::run*, so update/merge/serialize/finalize report failure as 0 ok
+   dftu_svc_ops::run*, so update/merge/serialize/finalize report failure as 0 ok
    / non-zero with `err` filled rather than as a value-or-error union: they
    produce no value, so the success side would be empty. `err`'s message is
    borrowed by the host for the duration of the call only. */
@@ -82,14 +82,14 @@ typedef struct dftu_state_desc {
        deserialize returns a new state the host owns. */
     int (*serialize)(const void* state, dftu_bytes* out, dftu_error* err);
     void* (*deserialize)(void* self, dftu_bytes in, dftu_error* err);
-    /** The whole-scan result, filled into `out` (see dftu_ext_result::emit for
+    /** The whole-scan result, filled into `out` (see dftu_svc_result::emit for
        ownership per kind). Called once, on the merged state. */
     int (*finalize)(void* state, dftu_result_value* out, dftu_error* err);
     /** Release a state from init or deserialize; one call per state. */
     void (*destroy)(void* state);
 } dftu_state_desc;
 
-typedef struct dftu_ext_agg {
+typedef struct dftu_svc_agg {
     /** Get-or-create a named accumulator grouping by the `key_n` columns named
        in `key_names` and computing each of `spec_n` aggregates. Returns a
        stable handle owned by the host (freed at fold teardown, never by the
@@ -122,7 +122,7 @@ typedef struct dftu_ext_agg {
        already registered, a missing init/update/merge/finalize/destroy, or a
        serialize/deserialize pair given only half. */
     int (*register_state)(void* h, const dftu_state_desc* desc, void* self);
-} dftu_ext_agg;
+} dftu_svc_agg;
 
 #ifdef __cplusplus
 }

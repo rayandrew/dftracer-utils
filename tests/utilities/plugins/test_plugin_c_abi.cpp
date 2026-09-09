@@ -88,7 +88,7 @@ dftu_series* string_column(const std::vector<std::string>& vals) {
                                   nullptr);
 }
 
-// A [cat, name] string-column frame; only the columns dftu_ext_query's tests
+// A [cat, name] string-column frame; only the columns dftu_svc_query's tests
 // need.
 TestFrame cat_name_frame(const std::vector<std::string>& cats,
                          const std::vector<std::string>& names) {
@@ -156,7 +156,7 @@ void drive(::dftu_task* t) {
 
 }  // namespace
 
-TEST_CASE("C ABI: dftu_ext_compose pipe threads a value from C") {
+TEST_CASE("C ABI: dftu_svc_compose pipe threads a value from C") {
     HostFixture fx;
     std::int64_t in = 5, out = 0;
     int rc = -1;
@@ -167,7 +167,7 @@ TEST_CASE("C ABI: dftu_ext_compose pipe threads a value from C") {
     CHECK(out == 20);  // (5*2)+10
 }
 
-TEST_CASE("C ABI: dftu_ext_compose when_all concatenates from C") {
+TEST_CASE("C ABI: dftu_svc_compose when_all concatenates from C") {
     HostFixture fx;
     std::int64_t in = 5;
     std::int64_t out[2] = {0, 0};
@@ -179,12 +179,12 @@ TEST_CASE("C ABI: dftu_ext_compose when_all concatenates from C") {
     CHECK(out[1] == 15);  // 5+10
 }
 
-TEST_CASE("C ABI: dftu_ext_compose type-checks a pipe from C") {
+TEST_CASE("C ABI: dftu_svc_compose type-checks a pipe from C") {
     HostFixture fx;
     CHECK(dftu_test_compose_typecheck(&fx.host()) == 1);
 }
 
-TEST_CASE("C ABI: dftu_ext_query compile + match from C") {
+TEST_CASE("C ABI: dftu_svc_query compile + match from C") {
     HostFixture fx;
     dftu_host& host = fx.host();
 
@@ -207,7 +207,7 @@ TEST_CASE("C ABI: dftu_ext_query compile + match from C") {
           0);                                         // null query is safe
 }
 
-TEST_CASE("C ABI: dftu_ext_sketch add/result/merge from C") {
+TEST_CASE("C ABI: dftu_svc_sketch add/result/merge from C") {
     HostFixture fx;
     double p50 = 0;
     std::uint64_t count = 0;
@@ -220,7 +220,7 @@ TEST_CASE("C ABI: dftu_ext_sketch add/result/merge from C") {
     CHECK(merged == 100);  // 50 + 50
 }
 
-TEST_CASE("C ABI: dftu_ext_ops runs a host utility op from C") {
+TEST_CASE("C ABI: dftu_svc_ops runs a host utility op from C") {
     HostFixture fx;
     std::uint64_t hash = 0;
     std::string data = "hello-world";
@@ -237,7 +237,7 @@ TEST_CASE("C ABI: dftu_ext_ops runs a host utility op from C") {
     CHECK(dftu_test_ops_find(&fx.host()) == 1);
 }
 
-TEST_CASE("C ABI: dftu_ext_trace write then read round-trips from C") {
+TEST_CASE("C ABI: dftu_svc_trace write then read round-trips from C") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
     dftu_host& host = fx.host();
@@ -287,7 +287,7 @@ TEST_CASE("C ABI: dftu_io write/read round-trips from C") {
     CHECK(crc == 0);
 }
 
-TEST_CASE("C ABI: dftu_ext_writer create/open/chunk/close from C") {
+TEST_CASE("C ABI: dftu_svc_writer create/open/chunk/close from C") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
     dftu_host& host = fx.host();

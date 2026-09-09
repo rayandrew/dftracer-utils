@@ -19,7 +19,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
-// dftu_ext_arrow::batch_to_arrow was removed with the row ABI; the dataframe
+// dftu_svc_arrow::batch_to_arrow was removed with the row ABI; the dataframe
 // engine's own Arrow bridge (DataFrame::to_arrow) now builds the test arrays
 // arrow_write_ipc round-trips.
 #ifdef DFTRACER_UTILS_ENABLE_ARROW_IPC
@@ -100,8 +100,8 @@ TEST_CASE("plugin host: arrow_write_ipc writes a non-empty IPC file") {
     dfd::OwnedArrow owned = df.to_arrow();
     REQUIRE(owned);
 
-    const auto* arrow = static_cast<const dftu_ext_arrow*>(
-        host.get_extension(host.h, DFTU_EXT_ARROW));
+    const auto* arrow = static_cast<const dftu_svc_arrow*>(
+        host.get_service(host.h, DFTU_SVC_ARROW));
     REQUIRE(arrow != nullptr);
 
     std::string ipc = env.get_dir() + "/x.arrow";
@@ -136,8 +136,8 @@ TEST_CASE("plugin host: DDSketch handle add/merge/result round-trips") {
     HostFixture fx;
     dftu_host& host = fx.host();
 
-    const auto* sk = static_cast<const dftu_ext_sketch*>(
-        host.get_extension(host.h, DFTU_EXT_SKETCH));
+    const auto* sk = static_cast<const dftu_svc_sketch*>(
+        host.get_service(host.h, DFTU_SVC_SKETCH));
     REQUIRE(sk != nullptr);
 
     dftu_sketch* a = sk->sketch_create(host.h);
@@ -175,8 +175,8 @@ TEST_CASE("plugin host: trace write then read round-trips events") {
     HostFixture fx;
     dftu_host& host = fx.host();
 
-    const auto* tr = static_cast<const dftu_ext_trace*>(
-        host.get_extension(host.h, DFTU_EXT_TRACE));
+    const auto* tr = static_cast<const dftu_svc_trace*>(
+        host.get_service(host.h, DFTU_SVC_TRACE));
     REQUIRE(tr != nullptr);
 
     std::string trace = env.get_dir() + "/out.pfw.gz";

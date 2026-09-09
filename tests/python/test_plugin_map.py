@@ -2,7 +2,7 @@
 """End-to-end tests for keyed accumulators.
 
 A jit-authored plugin declares a keyed accumulator; the host folds each batch
-into the engine's AggState through DFTU_EXT_AGG, merges the same-named
+into the engine's AggState through DFTU_SVC_AGG, merges the same-named
 accumulator across workers and finalizes it to a frame surfaced to Python. The
 graph below is then built in bulk from the columns (numpy + scipy), no per-edge
 Python.

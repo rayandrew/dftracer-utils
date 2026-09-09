@@ -33,8 +33,8 @@ static void* make_slice(void* self) {
 
 static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {
-    const dftu_ext_ops* ops =
-        (const dftu_ext_ops*)host->get_extension(host->h, DFTU_EXT_OPS);
+    const dftu_svc_ops* ops =
+        (const dftu_svc_ops*)host->get_service(host->h, DFTU_SVC_OPS);
     (void)df;
     if (ops && ops->register_op && ops->register_op(host->h, &g_op) != 0)
         *(int64_t*)slice = 1;
@@ -46,8 +46,8 @@ static void merge(void* into, void* other) {
 }
 
 static dftu_task* on_finalize(void* slice, const dftu_host* host) {
-    const dftu_ext_result* res =
-        (const dftu_ext_result*)host->get_extension(host->h, DFTU_EXT_RESULT);
+    const dftu_svc_result* res =
+        (const dftu_svc_result*)host->get_service(host->h, DFTU_SVC_RESULT);
     dftu_result_value v;
     g_refused = *(int64_t*)slice;
     if (!res) return NULL;

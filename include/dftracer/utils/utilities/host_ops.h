@@ -7,7 +7,7 @@ namespace dftracer::utils::utilities {
  * @brief Register the utilities-layer host ops into the dataframe op registry.
  *
  * Adds the file, filesystem and text utilities a plugin reaches by name
- * through dftu.ext.ops: dftu.fs.scan_dir, dftu.fs.scan_dir_pattern,
+ * through dftu.svc.ops: dftu.fs.scan_dir, dftu.fs.scan_dir_pattern,
  * dftu.file.compress, dftu.file.decompress and dftu.text.line_filter. Each is
  * synchronous and materializes its result, unlike the async utility it wraps.
  *

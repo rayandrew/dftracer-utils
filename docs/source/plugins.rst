@@ -415,7 +415,7 @@ A plugin working straight off the columns (no per-row cursor) reads the
              return NULL;
          }
 
-6. Mergeable aggregation (DFTU_EXT_AGG)
+6. Mergeable aggregation (DFTU_SVC_AGG)
 ---------------------------------------
 
 A host-owned accumulator is the usual way a plugin accumulates a result. It
@@ -491,7 +491,7 @@ Count events and total their duration per ``(pid, event-name)``:
 
    .. tab-item:: C (raw ABI)
 
-      Fetch ``DFTU_EXT_AGG``, ``agg_new`` with the key names and the spec
+      Fetch ``DFTU_SVC_AGG``, ``agg_new`` with the key names and the spec
       array, then ``agg_accumulate`` the batch. ``agg_new`` is get-or-create,
       so calling it every batch is the normal shape.
 
@@ -500,8 +500,8 @@ Count events and total their duration per ``(pid, event-name)``:
          static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                                    const dftu_host* host) {
              (void)slice;
-             const dftu_ext_agg* agg =
-                 (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
+             const dftu_svc_agg* agg =
+                 (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);
              static const char* const keys[2] = {"pid", "name"};
              static const dftu_agg_col specs[2] = {
                  {DFTU_AGG_COUNT, NULL, "edges", 0.0, NULL},
@@ -553,7 +553,7 @@ links the engine rather than headers alone. ``examples/plugins/dur_stats_produce
 and ``dur_stats_consumer.c`` are the pair end to end.
 
 
-7. Quantile sketches (DFTU_EXT_SKETCH)
+7. Quantile sketches (DFTU_SVC_SKETCH)
 --------------------------------------
 
 A plugin-owned DDSketch accumulates values and reports mergeable quantiles
@@ -591,8 +591,8 @@ across slices.
 
       .. code-block:: c
 
-         const dftu_ext_sketch* sk =
-             (const dftu_ext_sketch*)host->get_extension(host->h, DFTU_EXT_SKETCH);
+         const dftu_svc_sketch* sk =
+             (const dftu_svc_sketch*)host->get_service(host->h, DFTU_SVC_SKETCH);
          dftu_sketch* s = sk->sketch_create(host->h);
          sk->sketch_add(host->h, s, (double)e->dur, 1.0);
          /* sk->sketch_merge(host->h, into, other) in merge */
@@ -610,7 +610,7 @@ Within the one shared scan, one plugin can hand values to another. Two
 mechanisms, each its own extension group. See
 :doc:`guides/plugins/inter-plugin-comms` for the full treatment.
 
-**Ports (DFTU_EXT_PORTS)** are a batch-scoped slot keyed by a port name: a
+**Ports (DFTU_SVC_PORTS)** are a batch-scoped slot keyed by a port name: a
 producer publishes during a batch, a consumer reads it back during the same
 batch (NULL if the producer has not published, or runs after the consumer). The
 bus resets between batches. Name the port in the consumer's ``consumes`` and
@@ -645,15 +645,15 @@ plugin provides a consumed name.
 
       .. code-block:: c
 
-         const dftu_ext_ports* p =
-             (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);
+         const dftu_svc_ports* p =
+             (const dftu_svc_ports*)host->get_service(host->h, DFTU_SVC_PORTS);
          uint64_t key = p->port_key(host->h, "com.example.perbatch");
          uint64_t n = 42;
          p->publish(host->h, key, &n, sizeof(n));         /* producer */
          uint32_t len = 0;
          const void* got = p->consume(host->h, key, &len); /* consumer */
 
-**Cross-worker accumulators (DFTU_EXT_AGG)** are the whole-scan channel: a
+**Cross-worker accumulators (DFTU_SVC_AGG)** are the whole-scan channel: a
 producer accumulates into a named accumulator (section 6) and any plugin reads
 the cross-worker-merged, finalized result by that name at ``on_finalize``.
 
@@ -675,8 +675,8 @@ the cross-worker-merged, finalized result by that name at ``on_finalize``.
 
       .. code-block:: c
 
-         const dftu_ext_agg* agg =
-             (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
+         const dftu_svc_agg* agg =
+             (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);
          static const dftu_agg_col specs[1] =
              {{DFTU_AGG_COUNT, NULL, "count", 0.0, NULL}};
          /* during on_batch */
@@ -686,10 +686,10 @@ the cross-worker-merged, finalized result by that name at ``on_finalize``.
          dftu_dataframe* res = agg->agg_result(host->h, "com.example.total");
          if (res) dftu_dataframe_free(res);
 
-**Named results (DFTU_EXT_RESULT)** emit an opaque blob or a user-schema Arrow
+**Named results (DFTU_SVC_RESULT)** emit an opaque blob or a user-schema Arrow
 array under a name; both surface from ``Plugins::run`` keyed by that name.
 Use ``Host::emit_result`` / ``emit_result_arrow`` (C: ``emit`` / ``emit_arrow``
-on ``dftu_ext_result``), best called at finalize.
+on ``dftu_svc_result``), best called at finalize.
 
 9. Async work and I/O
 ---------------------
@@ -748,8 +748,8 @@ or ``run_blocking``, never inside ``on_batch``.
 
    .. tab-item:: C (raw ABI)
 
-      Fetch ``DFTU_EXT_IO`` for the ``dftu_io`` calls (each returns a ``dftu_task``
-      to compose or await; the out-slot must outlive it) and ``DFTU_EXT_CORO``
+      Fetch ``DFTU_SVC_IO`` for the ``dftu_io`` calls (each returns a ``dftu_task``
+      to compose or await; the out-slot must outlive it) and ``DFTU_SVC_CORO``
       for the combinators ``spawn`` / ``when_all`` / ``when_any`` / ``then`` /
       ``run_blocking``, plus ``drive`` (which the SDK's coroutine adapter uses).
       Return the root task from ``on_finalize`` only - ``on_batch`` must return
@@ -760,22 +760,22 @@ or ``run_blocking``, never inside ``on_batch``.
          static dftu_task* on_finalize(void* slice, const dftu_host* host) {
              (void)slice;
              const dftu_io* io =
-                 (const dftu_io*)host->get_extension(host->h, DFTU_EXT_IO);
+                 (const dftu_io*)host->get_service(host->h, DFTU_SVC_IO);
              if (!io) return NULL;
              static int fd = -1;
-             /* returns a task the host awaits; compose with dftu_ext_coro */
+             /* returns a task the host awaits; compose with dftu_svc_coro */
              return io->open(host->h, "/tmp/out.bin",
                              O_WRONLY | O_CREAT | O_TRUNC, 0644, &fd);
          }
 
 A host utility is reached as a named op instead
-(``Host::run_op("dftu.hash.fnv1a", {column})``, ``DFTU_EXT_OPS``). Every
-``dftu_ext_coro`` combinator has an SDK method (``spawn`` / ``then`` / ``all``
+(``Host::run_op("dftu.hash.fnv1a", {column})``, ``DFTU_SVC_OPS``). Every
+``dftu_svc_coro`` combinator has an SDK method (``spawn`` / ``then`` / ``all``
 / ``any`` / ``run_blocking``), so async composition needs no raw ABI.
 See :doc:`guides/plugins/compose-ops` for composing reusable typed ops inside a
 plugin.
 
-10. Query DSL against events (DFTU_EXT_QUERY)
+10. Query DSL against events (DFTU_SVC_QUERY)
 ---------------------------------------------
 
 Beyond coarse pushdown (section 3), a plugin can compile a query once and test
@@ -811,12 +811,12 @@ scan; do not free it.
 
       .. code-block:: c
 
-         const dftu_ext_query* Q =
-             (const dftu_ext_query*)host->get_extension(host->h, DFTU_EXT_QUERY);
+         const dftu_svc_query* Q =
+             (const dftu_svc_query*)host->get_service(host->h, DFTU_SVC_QUERY);
          dftu_query* q = Q->query_compile(host->h, "dur > 1000", 10);
          if (Q->query_matches(host->h, q, df, row)) { /* ... */ }
 
-11. Arrow interchange (DFTU_EXT_ARROW)
+11. Arrow interchange (DFTU_SVC_ARROW)
 --------------------------------------
 
 Read and write Arrow IPC files for an ``ArrowArray`` / ``ArrowSchema`` pair the
@@ -840,8 +840,8 @@ must release them; the SDK's ``OwnedArrow`` does that in its destructor.
 
       .. code-block:: c
 
-         const dftu_ext_arrow* A =
-             (const dftu_ext_arrow*)host->get_extension(host->h, DFTU_EXT_ARROW);
+         const dftu_svc_arrow* A =
+             (const dftu_svc_arrow*)host->get_service(host->h, DFTU_SVC_ARROW);
          struct ArrowArray arr; struct ArrowSchema sch;
          if (A->arrow_read_ipc(host->h, "/tmp/in.arrow", &arr, &sch) == 0) {
              A->arrow_write_ipc(host->h, &arr, &sch, "/tmp/out.arrow");
@@ -851,7 +851,7 @@ must release them; the SDK's ``OwnedArrow`` does that in its destructor.
 12. Output writers
 ------------------
 
-Two writer groups exist. The **trace writer (DFTU_EXT_TRACE)** appends events to
+Two writer groups exist. The **trace writer (DFTU_SVC_TRACE)** appends events to
 a gzip ``.pfw.gz`` and has an SDK wrapper on ``Host``; the index is built lazily
 on first read, not at close.
 
@@ -873,13 +873,13 @@ on first read, not at close.
 
       .. code-block:: c
 
-         const dftu_ext_trace* T =
-             (const dftu_ext_trace*)host->get_extension(host->h, DFTU_EXT_TRACE);
+         const dftu_svc_trace* T =
+             (const dftu_svc_trace*)host->get_service(host->h, DFTU_SVC_TRACE);
          dftu_trace_writer* w = T->trace_open_write(host->h, "/tmp/out.pfw.gz");
          T->trace_write(host->h, w, df);   /* every row of df, by column name */
          T->trace_close(host->h, w);
 
-The **parallel writer (DFTU_EXT_WRITER)** is a sharded, multi-worker gzip-member
+The **parallel writer (DFTU_SVC_WRITER)** is a sharded, multi-worker gzip-member
 output (``writer_create`` / ``writer_open`` / ``writer_chunk`` / ``writer_close``
 / ``merge_shards``).
 
@@ -906,8 +906,8 @@ output (``writer_create`` / ``writer_open`` / ``writer_chunk`` / ``writer_close`
 
       .. code-block:: c
 
-         const dftu_ext_writer* W =
-             (const dftu_ext_writer*)host->get_extension(host->h, DFTU_EXT_WRITER);
+         const dftu_svc_writer* W =
+             (const dftu_svc_writer*)host->get_service(host->h, DFTU_SVC_WRITER);
          dftu_writer* w = W->writer_create(host->h, "/tmp/out.pfw.gz",
                                           /*num_workers=*/4, /*gzip=*/1);
          /* co-await W->writer_open / writer_chunk / writer_close (tasks) */
@@ -962,7 +962,7 @@ Host services index
 --------------------
 
 Every service is an optional extension group fetched by id
-(``host->get_extension``); the SDK ``Host`` memoizes each group and degrades a
+(``host->get_service``); the SDK ``Host`` memoizes each group and degrades a
 missing one to a null/no-op. The map from SDK accessor to group to the section
 that covers it:
 
@@ -974,37 +974,37 @@ that covers it:
      - Extension group
      - Covered in
    * - ``Host::agg`` / ``agg_result`` (``Agg``, the ``agg::`` col factories)
-     - ``DFTU_EXT_AGG``
-     - `6. Mergeable aggregation (DFTU_EXT_AGG)`_
+     - ``DFTU_SVC_AGG``
+     - `6. Mergeable aggregation (DFTU_SVC_AGG)`_
    * - ``Host::make_sketch`` (RAII ``Sketch``)
-     - ``DFTU_EXT_SKETCH``
-     - `7. Quantile sketches (DFTU_EXT_SKETCH)`_
+     - ``DFTU_SVC_SKETCH``
+     - `7. Quantile sketches (DFTU_SVC_SKETCH)`_
    * - ``Host::publish_port`` / ``consume_port`` (``OutPort`` / ``InPort``)
-     - ``DFTU_EXT_PORTS``
+     - ``DFTU_SVC_PORTS``
      - `8. Inter-plugin communication`_
    * - ``Host::emit_result`` / ``emit_result_arrow``
-     - ``DFTU_EXT_RESULT``
+     - ``DFTU_SVC_RESULT``
      - `8. Inter-plugin communication`_
    * - ``Host::all`` / ``any`` / ``run_blocking``
-     - ``DFTU_EXT_CORO``
+     - ``DFTU_SVC_CORO``
      - `9. Async work and I/O`_
    * - ``Host::io()`` (typed ``Io``)
-     - ``DFTU_EXT_IO``
+     - ``DFTU_SVC_IO``
      - `9. Async work and I/O`_
    * - typed compose ops (``dftracer::utils::plugins::make_op`` / ``run``)
-     - ``DFTU_EXT_COMPOSE``
+     - ``DFTU_SVC_COMPOSE``
      - :doc:`guides/plugins/compose-ops`
    * - ``Host::query_compile`` / ``query_matches``
-     - ``DFTU_EXT_QUERY``
-     - `10. Query DSL against events (DFTU_EXT_QUERY)`_
+     - ``DFTU_SVC_QUERY``
+     - `10. Query DSL against events (DFTU_SVC_QUERY)`_
    * - ``Host::arrow_read_ipc`` / ``arrow_write_ipc``
-     - ``DFTU_EXT_ARROW``
-     - `11. Arrow interchange (DFTU_EXT_ARROW)`_
+     - ``DFTU_SVC_ARROW``
+     - `11. Arrow interchange (DFTU_SVC_ARROW)`_
    * - ``Host::trace_open_write`` / ``trace_write`` / ``trace_read``
-     - ``DFTU_EXT_TRACE``
+     - ``DFTU_SVC_TRACE``
      - `12. Output writers`_
-   * - none (raw ``get_extension``)
-     - ``DFTU_EXT_WRITER``
+   * - none (raw ``get_service``)
+     - ``DFTU_SVC_WRITER``
      - `12. Output writers`_
 
 Building and scaffolding

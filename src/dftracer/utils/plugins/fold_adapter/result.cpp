@@ -11,7 +11,7 @@ int host_result_emit(void* h, const char* name, ::dftu_result_value* v) {
     return static_cast<PluginFold*>(h)->result_emit(name, v);
 }
 
-const dftu_ext_result g_result = {host_result_emit};
+const dftu_svc_result g_result = {host_result_emit};
 
 }  // namespace
 

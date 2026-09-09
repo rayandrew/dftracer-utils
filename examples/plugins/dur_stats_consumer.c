@@ -75,8 +75,8 @@ static double cell(const dftu_dataframe* df, const char* name, int* ok) {
 
 static dftu_task* on_finalize(void* slice, const dftu_host* host) {
     (void)slice;
-    const dftu_ext_agg* agg =
-        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
+    const dftu_svc_agg* agg =
+        (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);
     dftu_dataframe* res = NULL;
     char line[192];
     int n = 0;

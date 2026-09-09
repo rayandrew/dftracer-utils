@@ -113,14 +113,14 @@ void inc_fn(void* p) { static_cast<std::atomic<int>*>(p)->fetch_add(1); }
 void append1_fn(void* p) { static_cast<std::vector<int>*>(p)->push_back(1); }
 void append2_fn(void* p) { static_cast<std::vector<int>*>(p)->push_back(2); }
 
-const dftu_ext_coro* coro_ext(dftracer::utils::plugins::Host h) {
-    return static_cast<const dftu_ext_coro*>(
-        h.raw()->get_extension(h.raw()->h, DFTU_EXT_CORO));
+const dftu_svc_coro* coro_ext(dftracer::utils::plugins::Host h) {
+    return static_cast<const dftu_svc_coro*>(
+        h.raw()->get_service(h.raw()->h, DFTU_SVC_CORO));
 }
 
 dftracer::utils::plugins::Task fanout_all(dftracer::utils::plugins::Host h,
                                           std::atomic<int>* ran, int n) {
-    const dftu_ext_coro* c = coro_ext(h);
+    const dftu_svc_coro* c = coro_ext(h);
     std::vector<::dftu_task*> kids;
     for (int i = 0; i < n; ++i)
         kids.push_back(c->spawn(h.raw()->h, inc_fn, ran));
@@ -131,7 +131,7 @@ dftracer::utils::plugins::Task fanout_all(dftracer::utils::plugins::Host h,
 
 dftracer::utils::plugins::Task fanout_any(dftracer::utils::plugins::Host h,
                                           std::atomic<int>* ran) {
-    const dftu_ext_coro* c = coro_ext(h);
+    const dftu_svc_coro* c = coro_ext(h);
     ::dftu_task* a = c->spawn(h.raw()->h, inc_fn, ran);
     ::dftu_task* b = c->spawn(h.raw()->h, inc_fn, ran);
     ::dftu_task* kids[2] = {a, b};
@@ -140,14 +140,14 @@ dftracer::utils::plugins::Task fanout_any(dftracer::utils::plugins::Host h,
 
 dftracer::utils::plugins::Task chain(dftracer::utils::plugins::Host h,
                                      std::vector<int>* order) {
-    const dftu_ext_coro* c = coro_ext(h);
+    const dftu_svc_coro* c = coro_ext(h);
     ::dftu_task* t = c->spawn(h.raw()->h, append1_fn, order);
     co_await h.await(c->then(h.raw()->h, t, append2_fn, order));
 }
 
 dftracer::utils::plugins::Task compose_all(dftracer::utils::plugins::Host h,
                                            std::atomic<int>* ran) {
-    const dftu_ext_coro* c = coro_ext(h);
+    const dftu_svc_coro* c = coro_ext(h);
     ::dftu_task* a = c->spawn(h.raw()->h, inc_fn, ran);
     ::dftu_task* b = c->spawn(h.raw()->h, inc_fn, ran);
     co_await (dftracer::utils::plugins::compose(h.raw(), a) &&
@@ -156,7 +156,7 @@ dftracer::utils::plugins::Task compose_all(dftracer::utils::plugins::Host h,
 
 dftracer::utils::plugins::Task compose_any(dftracer::utils::plugins::Host h,
                                            std::atomic<int>* ran) {
-    const dftu_ext_coro* c = coro_ext(h);
+    const dftu_svc_coro* c = coro_ext(h);
     ::dftu_task* a = c->spawn(h.raw()->h, inc_fn, ran);
     ::dftu_task* b = c->spawn(h.raw()->h, inc_fn, ran);
     co_await (dftracer::utils::plugins::compose(h.raw(), a) ||
@@ -165,17 +165,17 @@ dftracer::utils::plugins::Task compose_any(dftracer::utils::plugins::Host h,
 
 dftracer::utils::plugins::Task compose_map(dftracer::utils::plugins::Host h,
                                            std::atomic<int>* ran) {
-    const dftu_ext_coro* c = coro_ext(h);
+    const dftu_svc_coro* c = coro_ext(h);
     std::vector<int> items = {0, 1, 2, 3};
     co_await dftracer::utils::plugins::map(
         h.raw(), items, [&](int) { return c->spawn(h.raw()->h, inc_fn, ran); });
 }
 
-// dftu_op / dftu_ext_compose: leaf value transforms (int64 -> int64), run
+// dftu_op / dftu_svc_compose: leaf value transforms (int64 -> int64), run
 // inline.
-const dftu_ext_compose* compose_ext(dftracer::utils::plugins::Host h) {
-    return static_cast<const dftu_ext_compose*>(
-        h.raw()->get_extension(h.raw()->h, DFTU_EXT_COMPOSE));
+const dftu_svc_compose* compose_ext(dftracer::utils::plugins::Host h) {
+    return static_cast<const dftu_svc_compose*>(
+        h.raw()->get_service(h.raw()->h, DFTU_SVC_COMPOSE));
 }
 ::dftu_task* op_double(void*, const void* in, void* out, int* rc) {
     *static_cast<std::int64_t*>(out) =
@@ -193,7 +193,7 @@ const dftu_ext_compose* compose_ext(dftracer::utils::plugins::Host h) {
 // (in*2) then (+10): value threaded through the pipe.
 dftracer::utils::plugins::Task op_pipe(dftracer::utils::plugins::Host h,
                                        std::int64_t* result) {
-    const dftu_ext_compose* c = compose_ext(h);
+    const dftu_svc_compose* c = compose_ext(h);
     void* hh = h.raw()->h;
     ::dftu_op* a = c->make_op(hh, op_double, nullptr, nullptr, DFTU_T_I64, 8,
                               DFTU_T_I64, 8);
@@ -254,7 +254,7 @@ dftracer::utils::plugins::Task series_pipe(dftracer::utils::plugins::Host h,
 // when_any: both racers compute the same value, so the winner is deterministic.
 dftracer::utils::plugins::Task op_any(dftracer::utils::plugins::Host h,
                                       std::int64_t* result) {
-    const dftu_ext_compose* c = compose_ext(h);
+    const dftu_svc_compose* c = compose_ext(h);
     void* hh = h.raw()->h;
     ::dftu_op* ops[2] = {c->make_op(hh, op_plus10, nullptr, nullptr, DFTU_T_I64,
                                     8, DFTU_T_I64, 8),
@@ -271,7 +271,7 @@ dftracer::utils::plugins::Task op_any(dftracer::utils::plugins::Host h,
 // concatenated.
 dftracer::utils::plugins::Task op_all(dftracer::utils::plugins::Host h,
                                       std::int64_t* out0, std::int64_t* out1) {
-    const dftu_ext_compose* c = compose_ext(h);
+    const dftu_svc_compose* c = compose_ext(h);
     void* hh = h.raw()->h;
     ::dftu_op* ops[2] = {c->make_op(hh, op_double, nullptr, nullptr, DFTU_T_I64,
                                     8, DFTU_T_I64, 8),
@@ -336,7 +336,7 @@ const char* col_plan_query(void*) { return nullptr; }
 }
 
 // Owning wrapper for a hand-built [cat, name] test dataframe (freed on scope
-// exit), for dftu_ext_query::query_matches tests outside an on_batch call.
+// exit), for dftu_svc_query::query_matches tests outside an on_batch call.
 struct QueryFrame {
     dftu_dataframe* df = nullptr;
     ~QueryFrame() {
@@ -426,8 +426,8 @@ TEST_CASE("plugin ABI: query_compile then query_matches on known events") {
     FoldFixture<CountSlice> fx(nullptr);
     dftu_host& host = fx.host();
 
-    const auto* qx = static_cast<const dftu_ext_query*>(
-        host.get_extension(host.h, DFTU_EXT_QUERY));
+    const auto* qx = static_cast<const dftu_svc_query*>(
+        host.get_service(host.h, DFTU_SVC_QUERY));
     REQUIRE(qx != nullptr);
 
     std::string src = "cat == \"POSIX\"";
@@ -667,7 +667,7 @@ TEST_CASE(
     "plugin ABI: DFTU_T_SERIES and DFTU_T_TABLE are distinct handle tags") {
     FoldFixture<CountSlice> fx(nullptr);
     dftracer::utils::plugins::Host h{&fx.host()};
-    const dftu_ext_compose* c = compose_ext(h);
+    const dftu_svc_compose* c = compose_ext(h);
     void* hh = h.raw()->h;
     // Both are 8-byte handle values; as opaque DFTU_T_BYTES they would have
     // piped. A distinct tag makes a column-out reject a table-in, and accept a
@@ -685,7 +685,7 @@ TEST_CASE(
 TEST_CASE("plugin ABI: compose dftu_op then rejects a type mismatch") {
     FoldFixture<CountSlice> fx(nullptr);
     dftracer::utils::plugins::Host h{&fx.host()};
-    const dftu_ext_compose* c = compose_ext(h);
+    const dftu_svc_compose* c = compose_ext(h);
     void* hh = h.raw()->h;
     ::dftu_op* a = c->make_op(hh, op_double, nullptr, nullptr, DFTU_T_I64, 8,
                               DFTU_T_I64, 8);

@@ -2,8 +2,8 @@
 #define DFTRACER_UTILS_PLUGINS_ABI_IO_H
 
 /** @file
- * dftu.ext.io: async POSIX file/socket I/O lent to a plugin. Optional service
- * group, fetched via dftu_host::get_extension(DFTU_EXT_IO). Include
+ * dftu.svc.io: async POSIX file/socket I/O lent to a plugin. Optional service
+ * group, fetched via dftu_host::get_service(DFTU_SVC_IO). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 
@@ -23,7 +23,7 @@ typedef struct {
     uint32_t mode;
 } dftu_stat;
 
-#define DFTU_EXT_IO "dftu.ext.io@1"
+#define DFTU_SVC_IO "dftu.svc.io@1"
 
 /** Each call returns a dftu_task to compose/await; the out-slot must outlive
  * it.

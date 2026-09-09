@@ -1,5 +1,5 @@
 // The OwnedLazyFrame fluent facade: every method reaches the host through
-// DFTU_EXT_OPS::run_lazy (dftu.lazy.* in the op registry), never by linking
+// DFTU_SVC_OPS::run_lazy (dftu.lazy.* in the op registry), never by linking
 // dftu_lazyframe_* directly, so this exercises the run_lazy dispatch path
 // end to end through a real fold_adapter host.
 
@@ -52,8 +52,8 @@ struct HostFixture {
 /// the starting point of a plan (dftu_dataframe_lazy is a direct, unregistred
 /// ABI call - only the plan-building steps ride the registry).
 OwnedLazyFrame make_lazy(HostFixture& fx, dftu_dataframe** keep_source) {
-    const auto* ops = static_cast<const dftu_ext_ops*>(
-        fx.host().get_extension(fx.host().h, DFTU_EXT_OPS));
+    const auto* ops = static_cast<const dftu_svc_ops*>(
+        fx.host().get_service(fx.host().h, DFTU_SVC_OPS));
     REQUIRE(ops);
     REQUIRE(ops->run_lazy);
 

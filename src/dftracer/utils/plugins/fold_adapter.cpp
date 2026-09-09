@@ -742,15 +742,15 @@ int host_trace_close(void* h, ::dftu_trace_writer* w) {
     return static_cast<PluginFold*>(h)->close_trace_writer(w);
 }
 
-const dftu_ext_writer g_writer = {host_merge_shards, host_writer_create,
+const dftu_svc_writer g_writer = {host_merge_shards, host_writer_create,
                                   host_writer_open, host_writer_chunk,
                                   host_writer_close};
 
-const dftu_ext_sketch g_sketch = {host_sketch_create, host_sketch_add,
+const dftu_svc_sketch g_sketch = {host_sketch_create, host_sketch_add,
                                   host_sketch_merge, host_sketch_result,
                                   host_sketch_free};
 
-const dftu_ext_arrow g_arrow = {host_arrow_write_ipc, host_arrow_read_ipc};
+const dftu_svc_arrow g_arrow = {host_arrow_write_ipc, host_arrow_read_ipc};
 
 int host_trace_read(void* h, const char* path, dftu_stream_item_fn on_batch,
                     void* ud) {
@@ -803,7 +803,7 @@ int host_trace_read(void* h, const char* path, dftu_stream_item_fn on_batch,
     }
 }
 
-const dftu_ext_trace g_trace = {host_trace_open_write, host_trace_write,
+const dftu_svc_trace g_trace = {host_trace_open_write, host_trace_write,
                                 host_trace_close, host_trace_read};
 
 dftu_query* host_query_compile(void* h, const char* src, std::uint32_t len) {
@@ -835,34 +835,34 @@ const void* host_port_consume(void* h, std::uint64_t key,
     return static_cast<PluginFold*>(h)->port_consume(key, out_len);
 }
 
-const dftu_ext_ports g_ports = {host_port_key, host_port_publish,
+const dftu_svc_ports g_ports = {host_port_key, host_port_publish,
                                 host_port_consume};
 
-const dftu_ext_coro g_coro = {host_spawn, host_when_all, host_when_any,
+const dftu_svc_coro g_coro = {host_spawn, host_when_all, host_when_any,
                               host_then,  host_drive,    host_run_blocking};
 
-const dftu_ext_query g_query = {host_query_compile, host_query_matches};
+const dftu_svc_query g_query = {host_query_compile, host_query_matches};
 
-const dftu_ext_compose g_compose = {
+const dftu_svc_compose g_compose = {
     host_compose_make,     host_compose_then, host_compose_when_all,
     host_compose_when_any, host_compose_run,  host_compose_free_op};
 
 // Stateless ext tables share one instance across all folds (each fn takes h).
-const void* host_get_extension(void*, const char* ext_id) {
+const void* host_get_service(void*, const char* ext_id) {
     if (!ext_id) return nullptr;
-    if (std::strcmp(ext_id, DFTU_EXT_IO) == 0) return &g_io;
-    if (std::strcmp(ext_id, DFTU_EXT_CORO) == 0) return &g_coro;
-    if (std::strcmp(ext_id, DFTU_EXT_QUERY) == 0) return &g_query;
-    if (std::strcmp(ext_id, DFTU_EXT_COMPOSE) == 0) return &g_compose;
-    if (std::strcmp(ext_id, DFTU_EXT_WRITER) == 0) return &g_writer;
-    if (std::strcmp(ext_id, DFTU_EXT_SKETCH) == 0) return &g_sketch;
-    if (std::strcmp(ext_id, DFTU_EXT_ARROW) == 0) return &g_arrow;
-    if (std::strcmp(ext_id, DFTU_EXT_TRACE) == 0) return &g_trace;
-    if (std::strcmp(ext_id, DFTU_EXT_PORTS) == 0) return &g_ports;
-    if (std::strcmp(ext_id, DFTU_EXT_RESULT) == 0)
+    if (std::strcmp(ext_id, DFTU_SVC_IO) == 0) return &g_io;
+    if (std::strcmp(ext_id, DFTU_SVC_CORO) == 0) return &g_coro;
+    if (std::strcmp(ext_id, DFTU_SVC_QUERY) == 0) return &g_query;
+    if (std::strcmp(ext_id, DFTU_SVC_COMPOSE) == 0) return &g_compose;
+    if (std::strcmp(ext_id, DFTU_SVC_WRITER) == 0) return &g_writer;
+    if (std::strcmp(ext_id, DFTU_SVC_SKETCH) == 0) return &g_sketch;
+    if (std::strcmp(ext_id, DFTU_SVC_ARROW) == 0) return &g_arrow;
+    if (std::strcmp(ext_id, DFTU_SVC_TRACE) == 0) return &g_trace;
+    if (std::strcmp(ext_id, DFTU_SVC_PORTS) == 0) return &g_ports;
+    if (std::strcmp(ext_id, DFTU_SVC_RESULT) == 0)
         return detail::result_ext_vtable();
-    if (std::strcmp(ext_id, DFTU_EXT_AGG) == 0) return detail::agg_ext_vtable();
-    if (std::strcmp(ext_id, DFTU_EXT_OPS) == 0) return detail::ops_ext_vtable();
+    if (std::strcmp(ext_id, DFTU_SVC_AGG) == 0) return detail::agg_ext_vtable();
+    if (std::strcmp(ext_id, DFTU_SVC_OPS) == 0) return detail::ops_ext_vtable();
     return nullptr;
 }
 
@@ -1184,7 +1184,7 @@ PluginFold::PluginFold(const dftu_plugin* plugin,
 
     host_.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     host_.h = this;
-    host_.get_extension = host_get_extension;
+    host_.get_service = host_get_service;
     host_.resolve = host_resolve;
     host_.intern = host_intern;
     host_.log = host_log;
@@ -1229,7 +1229,7 @@ PluginFold::~PluginFold() {
 }
 
 namespace {
-// One-shot column lookup for dftu_ext_query::query_matches: this is called at
+// One-shot column lookup for dftu_svc_query::query_matches: this is called at
 // most a few times per fold (a plugin testing an ad hoc predicate), not in the
 // hot per-row loop, so resolving by name per call is fine here (contrast
 // plugins::Batch, which caches columns once per batch for the on_batch loop).

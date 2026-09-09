@@ -1,4 +1,4 @@
-// DFTU_EXT_AGG: a columnar fold accumulates each batch's key + value columns
+// DFTU_SVC_AGG: a columnar fold accumulates each batch's key + value columns
 // into the dataframe engine's cross-batch AggState, merged across worker slices
 // and finalized to a native dataframe result (no Arrow hop).
 
@@ -64,8 +64,8 @@ FoldEvent evt(StringIntern& intern, const char* cat, const char* name,
 ::dftu_task* agg_on_batch(void* slice, const dftu_dataframe* df,
                           const dftu_host* host) {
     (void)slice;
-    const auto* agg = static_cast<const dftu_ext_agg*>(
-        host->get_extension(host->h, DFTU_EXT_AGG));
+    const auto* agg = static_cast<const dftu_svc_agg*>(
+        host->get_service(host->h, DFTU_SVC_AGG));
     if (!agg) return nullptr;
     const dftu_agg_col specs[] = {
         {DFTU_AGG_SUM, "dur", "sum_dur", 0.0, nullptr},
@@ -326,8 +326,8 @@ void run_slices(PluginFold& master,
 ::dftu_task* appended_ops_columns(void* slice, const dftu_dataframe* df,
                                   const dftu_host* host) {
     (void)slice;
-    const auto* ext = static_cast<const dftu_ext_agg*>(
-        host->get_extension(host->h, DFTU_EXT_AGG));
+    const auto* ext = static_cast<const dftu_svc_agg*>(
+        host->get_service(host->h, DFTU_SVC_AGG));
     if (!ext) return nullptr;
     const dftu_agg_col specs[] = {
         {DFTU_AGG_ARGMIN, "name", "name_at_min", 0.0, "dur"},
@@ -376,7 +376,7 @@ bool g_unknown_is_null = false;
 
 }  // namespace
 
-TEST_CASE("DFTU_EXT_AGG: cross-batch grouped aggregation, engine-backed") {
+TEST_CASE("DFTU_SVC_AGG: cross-batch grouped aggregation, engine-backed") {
     StringIntern intern;
     dftu_plugin p = make_agg_plugin();
     NamedResultRegistry named;
@@ -570,7 +570,7 @@ TEST_CASE(
     dftu_series_free(p50_dur);
 }
 
-TEST_CASE("DFTU_EXT_AGG: several key columns and several aggregates") {
+TEST_CASE("DFTU_SVC_AGG: several key columns and several aggregates") {
     StringIntern intern;
     dftu_plugin p = make_columns_plugin(multi_key_columns);
     NamedResultRegistry named;
@@ -631,7 +631,7 @@ TEST_CASE("DFTU_EXT_AGG: several key columns and several aggregates") {
     dftu_series_free(nvalid);
 }
 
-TEST_CASE("DFTU_EXT_AGG: a zero-key accumulator is one whole-scan row") {
+TEST_CASE("DFTU_SVC_AGG: a zero-key accumulator is one whole-scan row") {
     StringIntern intern;
     dftu_plugin p = make_columns_plugin(scalar_columns);
     NamedResultRegistry named;
@@ -664,7 +664,7 @@ TEST_CASE("DFTU_EXT_AGG: a zero-key accumulator is one whole-scan row") {
     dftu_series_free(mx);
 }
 
-TEST_CASE("DFTU_EXT_AGG: the appended op codes reduce across merged slices") {
+TEST_CASE("DFTU_SVC_AGG: the appended op codes reduce across merged slices") {
     StringIntern intern;
     dftu_plugin p = make_columns_plugin(appended_ops_columns);
     NamedResultRegistry named;
@@ -792,7 +792,7 @@ TEST_CASE("DFTU_EXT_AGG: the appended op codes reduce across merged slices") {
     dftu_series_free(r2);
 }
 
-TEST_CASE("DFTU_EXT_AGG: agg_result reads another plugin's merged result") {
+TEST_CASE("DFTU_SVC_AGG: agg_result reads another plugin's merged result") {
     StringIntern intern;
     SharedResultRegistry shared;
     NamedResultRegistry named;

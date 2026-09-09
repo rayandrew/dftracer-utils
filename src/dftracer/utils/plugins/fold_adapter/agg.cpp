@@ -42,7 +42,7 @@ int host_register_state(void* h, const ::dftu_state_desc* desc, void*) {
     return -1;
 }
 
-const dftu_ext_agg g_agg = {host_agg_new, host_agg_accumulate, host_agg_result,
+const dftu_svc_agg g_agg = {host_agg_new, host_agg_accumulate, host_agg_result,
                             host_register_state};
 
 // Finalize `acc` and move its columns into a dftu_dataframe handle (the

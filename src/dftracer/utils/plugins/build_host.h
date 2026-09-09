@@ -11,7 +11,7 @@
 namespace dftracer::utils::plugins {
 
 /// The host a plugin factory receives. It answers only the registration
-/// groups - DFTU_EXT_OPS, DFTU_EXT_AGG, DFTU_EXT_PORTS - and, inside those,
+/// groups - DFTU_SVC_OPS, DFTU_SVC_AGG, DFTU_SVC_PORTS - and, inside those,
 /// only the registration slots. Anything that needs a scan (a fold, a batch,
 /// the intern table, the runtime) does not exist yet at load, so every other
 /// service returns NULL and records the denial: the loader then fails the load

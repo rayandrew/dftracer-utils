@@ -210,7 +210,7 @@ TEST_CASE("a factory reaching past the registration surface fails the load") {
     auto set = Plugins::builder().add(FACTORY_ESCAPES_PLUGIN_PATH).build();
 
     REQUIRE_FALSE(set.has_value());
-    CHECK(set.error().message.find(DFTU_EXT_IO) != std::string::npos);
+    CHECK(set.error().message.find(DFTU_SVC_IO) != std::string::npos);
     CHECK(set.error().message.find("build-phase host") != std::string::npos);
     CHECK(set.error().message.find(FACTORY_ESCAPES_PLUGIN_PATH) !=
           std::string::npos);

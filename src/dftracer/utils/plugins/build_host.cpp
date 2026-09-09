@@ -27,7 +27,7 @@ BuildHost& self_of(void* h) { return *static_cast<BuildHost*>(h); }
 ::dftu_result_series build_ops_run(void* h, const char*,
                                    const ::dftu_series* const*, std::uint32_t,
                                    const ::dftu_op_arg*) {
-    self_of(h).deny(DFTU_EXT_OPS "::run");
+    self_of(h).deny(DFTU_SVC_OPS "::run");
     return ::dftu_result_series{0, {.err = denied_error()}};
 }
 
@@ -35,14 +35,14 @@ BuildHost& self_of(void* h) { return *static_cast<BuildHost*>(h); }
                                              const ::dftu_series* const*,
                                              std::uint32_t,
                                              const ::dftu_op_arg*) {
-    self_of(h).deny(DFTU_EXT_OPS "::run_aggregate");
+    self_of(h).deny(DFTU_SVC_OPS "::run_aggregate");
     return ::dftu_result_scalar{0, {.err = denied_error()}};
 }
 
 ::dftu_result_frame build_ops_run_frame(void* h, const char*,
                                         const ::dftu_dataframe* const*,
                                         std::uint32_t, const ::dftu_op_arg*) {
-    self_of(h).deny(DFTU_EXT_OPS "::run_frame");
+    self_of(h).deny(DFTU_SVC_OPS "::run_frame");
     return ::dftu_result_frame{0, {.err = denied_error()}};
 }
 
@@ -62,26 +62,26 @@ int build_ops_register(void* h, const ::dftu_op_desc* desc) {
                                            const ::dftu_lazyframe* const*,
                                            std::uint32_t,
                                            const ::dftu_op_arg*) {
-    self_of(h).deny(DFTU_EXT_OPS "::run_lazy");
+    self_of(h).deny(DFTU_SVC_OPS "::run_lazy");
     return ::dftu_result_lazyframe{0, {.err = denied_error()}};
 }
 
-const ::dftu_ext_ops g_build_ops = {
+const ::dftu_svc_ops g_build_ops = {
     build_ops_run,  build_ops_run_aggregate, build_ops_run_frame,
     build_ops_find, build_ops_register,      build_ops_run_lazy};
 
 ::dftu_agg* build_agg_new(void* h, const char*, const char* const*,
                           std::uint32_t, const ::dftu_agg_col*, std::uint32_t) {
-    self_of(h).deny(DFTU_EXT_AGG "::agg_new");
+    self_of(h).deny(DFTU_SVC_AGG "::agg_new");
     return nullptr;
 }
 
 void build_agg_accumulate(void* h, ::dftu_agg*, const ::dftu_dataframe*) {
-    self_of(h).deny(DFTU_EXT_AGG "::agg_accumulate");
+    self_of(h).deny(DFTU_SVC_AGG "::agg_accumulate");
 }
 
 ::dftu_dataframe* build_agg_result(void* h, const char*) {
-    self_of(h).deny(DFTU_EXT_AGG "::agg_result");
+    self_of(h).deny(DFTU_SVC_AGG "::agg_result");
     return nullptr;
 }
 
@@ -90,7 +90,7 @@ int build_register_state(void* h, const ::dftu_state_desc* desc, void* self) {
     return register_state_into(bh.states(), desc, self, bh.plugin_name());
 }
 
-const ::dftu_ext_agg g_build_agg = {build_agg_new, build_agg_accumulate,
+const ::dftu_svc_agg g_build_agg = {build_agg_new, build_agg_accumulate,
                                     build_agg_result, build_register_state};
 
 // A port key is a pure hash of the name, so wiring a port up is available at
@@ -100,23 +100,23 @@ std::uint64_t build_port_key(void*, const char* name) {
 }
 
 void build_port_publish(void* h, std::uint64_t, const void*, std::uint32_t) {
-    self_of(h).deny(DFTU_EXT_PORTS "::publish");
+    self_of(h).deny(DFTU_SVC_PORTS "::publish");
 }
 
 const void* build_port_consume(void* h, std::uint64_t, std::uint32_t* out_len) {
-    self_of(h).deny(DFTU_EXT_PORTS "::consume");
+    self_of(h).deny(DFTU_SVC_PORTS "::consume");
     if (out_len) *out_len = 0;
     return nullptr;
 }
 
-const ::dftu_ext_ports g_build_ports = {build_port_key, build_port_publish,
+const ::dftu_svc_ports g_build_ports = {build_port_key, build_port_publish,
                                         build_port_consume};
 
-const void* build_get_extension(void* h, const char* ext_id) {
+const void* build_get_service(void* h, const char* ext_id) {
     if (!ext_id) return nullptr;
-    if (std::string_view{ext_id} == DFTU_EXT_OPS) return &g_build_ops;
-    if (std::string_view{ext_id} == DFTU_EXT_AGG) return &g_build_agg;
-    if (std::string_view{ext_id} == DFTU_EXT_PORTS) return &g_build_ports;
+    if (std::string_view{ext_id} == DFTU_SVC_OPS) return &g_build_ops;
+    if (std::string_view{ext_id} == DFTU_SVC_AGG) return &g_build_agg;
+    if (std::string_view{ext_id} == DFTU_SVC_PORTS) return &g_build_ports;
     self_of(h).deny(ext_id);
     return nullptr;
 }
@@ -161,7 +161,7 @@ BuildHost::BuildHost(std::string plugin_name)
     : plugin_name_(plugin_name.empty() ? "plugin" : std::move(plugin_name)) {
     host_.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     host_.h = this;
-    host_.get_extension = build_get_extension;
+    host_.get_service = build_get_service;
     host_.resolve = build_resolve;
     host_.intern = build_intern;
     host_.log = build_log;

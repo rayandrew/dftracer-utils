@@ -99,7 +99,7 @@ finalize hook (``Task on_finalize(Host h)``, detected automatically by
    }
 
 A host-provided utility is a named op instead: run it through
-``DFTU_EXT_OPS`` (``Host::run_op("dftu.hash.fnv1a", {column})``) on a column the
+``DFTU_SVC_OPS`` (``Host::run_op("dftu.hash.fnv1a", {column})``) on a column the
 plugin already holds. See :doc:`../../plugins` for the plugin lifecycle.
 
 In Python: ``@jit.op``

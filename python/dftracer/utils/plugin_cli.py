@@ -31,8 +31,8 @@ static void* make_slice(void* self) {{
 
 static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {{
-    const dftu_ext_agg* agg =
-        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
+    const dftu_svc_agg* agg =
+        (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);
     static const char* keys[1] = {{"pid"}};
     static const dftu_agg_col specs[1] = {{
         {{DFTU_AGG_COUNT, NULL, "value", 0.0, NULL}}}};
@@ -224,7 +224,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
 def _cmd_ops(args: argparse.Namespace) -> int:
     """List the host ops a plugin may call by name, with their signatures.
 
-    A C plugin author reaching dftu.ext.ops otherwise has to read
+    A C plugin author reaching dftu.svc.ops otherwise has to read
     exported_series_ops.def to learn what is callable and with what.
     """
     from .jit import ops as _ops

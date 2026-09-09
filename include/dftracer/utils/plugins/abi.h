@@ -3,7 +3,7 @@
 
 /** @file
  * Stable C ABI for dftracer-utils plugins; include only this header. Each
- * DFTU_EXT_* service group lives in its own dftracer/utils/plugins/abi/*.h
+ * DFTU_SVC_* service group lives in its own dftracer/utils/plugins/abi/*.h
  * part header, included below; abi/core.h holds the fundamentals every part
  * shares (value types, opaque handles, the error/result channel, the host
  * descriptor) and abi/plugin.h the plugin descriptor itself.

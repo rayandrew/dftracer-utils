@@ -239,10 +239,10 @@ dftu_task* drive_coro(const dftu_host* host, Coro&& coro) {
     Task t = std::forward<Coro>(coro);
     auto h = t.release();
     h.promise().host = host;
-    const dftu_ext_coro* c =
-        host->get_extension ? static_cast<const dftu_ext_coro*>(
-                                  host->get_extension(host->h, DFTU_EXT_CORO))
-                            : nullptr;
+    const dftu_svc_coro* c =
+        host->get_service ? static_cast<const dftu_svc_coro*>(
+                                host->get_service(host->h, DFTU_SVC_CORO))
+                          : nullptr;
     return c && c->drive ? c->drive(host->h, &step_thunk, h.address())
                          : nullptr;
 }
@@ -579,7 +579,7 @@ class PluginBuilder {
 
     /// Register a dataframe op, which must be named `<plugin>.<name>`.
     PluginBuilder& op(const dftu_op_desc& desc) {
-        const dftu_ext_ops* ops = ext<dftu_ext_ops>(DFTU_EXT_OPS);
+        const dftu_svc_ops* ops = ext<dftu_svc_ops>(DFTU_SVC_OPS);
         if (!ops || !ops->register_op) return fail("no op registry at load");
         if (ops->register_op(host_->h, &desc) != 0)
             return fail("op registration refused");
@@ -593,7 +593,7 @@ class PluginBuilder {
     /// deserialize(std::string_view) -> State*.
     template <class State>
     PluginBuilder& state(const char* name) {
-        const dftu_ext_agg* agg = ext<dftu_ext_agg>(DFTU_EXT_AGG);
+        const dftu_svc_agg* agg = ext<dftu_svc_agg>(DFTU_SVC_AGG);
         if (!agg || !agg->register_state)
             return fail("no state registry at load");
         if (agg->register_state(host_->h, &detail::state_desc_of<State>(name),
@@ -613,8 +613,8 @@ class PluginBuilder {
    private:
     template <class Ext>
     const Ext* ext(const char* id) const {
-        if (!host_ || !host_->get_extension) return nullptr;
-        return static_cast<const Ext*>(host_->get_extension(host_->h, id));
+        if (!host_ || !host_->get_service) return nullptr;
+        return static_cast<const Ext*>(host_->get_service(host_->h, id));
     }
 
     PluginBuilder& fail(const char* why) {

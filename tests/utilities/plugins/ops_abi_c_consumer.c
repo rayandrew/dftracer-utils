@@ -1,4 +1,4 @@
-/* A real C consumer of the dftu_ext_ops ABI: call a host utility that is now a
+/* A real C consumer of the dftu_svc_ops ABI: call a host utility that is now a
  * named op (dftu.hash.fnv1a) on a column the consumer builds itself - the same
  * path a C plugin uses to reach the host's call-host registry. */
 #include <dftracer/utils/dataframe/abi.h>
@@ -8,8 +8,8 @@
 /* Hash `data` with the host's dftu.hash.fnv1a op; 0 ok, -1 on failure. */
 int dftu_test_ops_fnv1a(const dftu_host* h, const char* data, uint32_t len,
                         uint64_t* out) {
-    const dftu_ext_ops* ops =
-        (const dftu_ext_ops*)h->get_extension(h->h, DFTU_EXT_OPS);
+    const dftu_svc_ops* ops =
+        (const dftu_svc_ops*)h->get_service(h->h, DFTU_SVC_OPS);
     int32_t offsets[2];
     dftu_series* in;
     dftu_series* hashed;
@@ -33,8 +33,8 @@ int dftu_test_ops_fnv1a(const dftu_host* h, const char* data, uint32_t len,
 
 /* The registry is reachable by name, and find exposes the op's signature. */
 int dftu_test_ops_find(const dftu_host* h) {
-    const dftu_ext_ops* ops =
-        (const dftu_ext_ops*)h->get_extension(h->h, DFTU_EXT_OPS);
+    const dftu_svc_ops* ops =
+        (const dftu_svc_ops*)h->get_service(h->h, DFTU_SVC_OPS);
     const dftu_op_desc* desc;
     if (!ops || !ops->find) return -1;
     desc = ops->find(h->h, "dftu.hex.parse64");

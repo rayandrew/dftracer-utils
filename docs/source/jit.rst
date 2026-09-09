@@ -26,7 +26,7 @@ Overview
   ``argmax``, ``topk`` / ``bottomk`` / ``approx_topk``, ``sample``,
   ``distinct``, ``set``, ``list``, and ``record`` (several aggregates on one
   key). A ``jit.map`` lowers to a host aggregation accumulator keyed by its key
-  columns - the same ``DFTU_EXT_AGG`` surface a C plugin uses.
+  columns - the same ``DFTU_SVC_AGG`` surface a C plugin uses.
 - **Statically checked**: the structured ``each_event`` body is a deliberately
   small subset (an optional ``if`` guard around one map update); anything outside
   it raises ``JitError`` at decoration time - never a silent miscompile - and
@@ -252,7 +252,7 @@ The ordering rule matters here exactly as it does in C++: a producer's
 ``step`` must run before the consumer's for the same batch, which the declared
 ``provides`` / ``consumes`` guarantee regardless of load order. A JIT plugin
 can publish for a hand-written C++ consumer and vice versa; both sides go
-through the same ``DFTU_EXT_PORTS`` machinery.
+through the same ``DFTU_SVC_PORTS`` machinery.
 
 Raw bodies: the full ABI without leaving JIT
 --------------------------------------------

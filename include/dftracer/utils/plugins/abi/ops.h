@@ -2,8 +2,8 @@
 #define DFTRACER_UTILS_PLUGINS_ABI_OPS_H
 
 /** @file
- * dftu.ext.ops: the dataframe engine's op registry lent to a plugin by name.
- * Optional service group, fetched via dftu_host::get_extension(DFTU_EXT_OPS).
+ * dftu.svc.ops: the dataframe engine's op registry lent to a plugin by name.
+ * Optional service group, fetched via dftu_host::get_service(DFTU_SVC_OPS).
  * Include dftracer/utils/plugins/abi.h rather than this file directly.
  */
 
@@ -24,14 +24,14 @@ DFTU_RESULT_DECL(dftu_result_scalar, dftu_scalar);
 #ifdef __cplusplus
 #endif
 
-#define DFTU_EXT_OPS "dftu.ext.ops@1"
+#define DFTU_SVC_OPS "dftu.svc.ops@1"
 
 /** Host-service group exposing the dataframe engine's op registry. Each slot
    is a thin name-keyed forwarder to the matching dftu_op_run / dftu_op_find /
    dftu_op_register function (dftracer/utils/dataframe/abi.h): a plugin looks
    an op up by name and runs it on Series/DataFrame handles it already holds,
    with no need to link the dataframe C ABI itself. */
-typedef struct dftu_ext_ops {
+typedef struct dftu_svc_ops {
     /** find(name) then dftu_op_run: `in` are `n_in` borrowed input columns,
        `args` supplies the op's other operands (NULL if none). On success
        carries a new owned column (free with dftu_series_free); on failure
@@ -69,7 +69,7 @@ typedef struct dftu_ext_ops {
     DFTU_RESULT_MUST_CHECK dftu_result_lazyframe (*run_lazy)(
         void* h, const char* name, const dftu_lazyframe* const* in,
         uint32_t n_in, const dftu_op_arg* args);
-} dftu_ext_ops;
+} dftu_svc_ops;
 
 #ifdef __cplusplus
 }

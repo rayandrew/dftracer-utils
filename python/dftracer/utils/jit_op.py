@@ -2,7 +2,7 @@
 plugin.
 
 ``@op`` turns a typed value transform into a compose leaf; ``|`` pipes them,
-mirroring the C++ typed ``Op<In,Out>`` over the ``dftu_ext_compose`` ABI. Calling
+mirroring the C++ typed ``Op<In,Out>`` over the ``dftu_svc_compose`` ABI. Calling
 an op JIT-compiles it and drives the ``dftu_op`` graph on a standalone compose
 host (no plugin, no scan); the same op referenced from a ``@jit.each_event``
 body is inlined into the plugin as a static C function instead.
@@ -184,8 +184,8 @@ def _emit(op_obj: Op) -> str:
         'extern "C"',
         "#endif",
         "dftu_op* dftracer_build_op(const dftu_host* host) {",
-        "    const dftu_ext_compose* c = (const dftu_ext_compose*)"
-        "host->get_extension(host->h, DFTU_EXT_COMPOSE);",
+        "    const dftu_svc_compose* c = (const dftu_svc_compose*)"
+        "host->get_service(host->h, DFTU_SVC_COMPOSE);",
         "    if (!c) return 0;",
     ]
     for i, st in enumerate(op_obj.stages):

@@ -84,7 +84,7 @@ int host_ops_register(void*, const ::dftu_op_desc* desc) {
     return -1;
 }
 
-const ::dftu_ext_ops g_ops = {host_ops_run,       host_ops_run_aggregate,
+const ::dftu_svc_ops g_ops = {host_ops_run,       host_ops_run_aggregate,
                               host_ops_run_frame, host_ops_find,
                               host_ops_register,  host_ops_run_lazy};
 

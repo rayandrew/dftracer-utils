@@ -185,9 +185,9 @@ struct dftu_host {
     uint32_t abi_version;
     void* h;
 
-    /** Fetch an optional host-service group by id (DFTU_EXT_*); NULL if absent.
+    /** Fetch an optional host-service group by id (DFTU_SVC_*); NULL if absent.
      */
-    const void* (*get_extension)(void* h, const char* ext_id);
+    const void* (*get_service)(void* h, const char* ext_id);
 
     const char* (*resolve)(void* h, dftu_str id, uint32_t* out_len);
     dftu_str (*intern)(void* h, const char* s, uint32_t len);

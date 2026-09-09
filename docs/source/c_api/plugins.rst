@@ -1,4 +1,4 @@
-:description: The stable plugin C ABI: fill a dftu_plugin struct and reach host services through dftu_host and its dftu_ext_* extension groups.
+:description: The stable plugin C ABI: fill a dftu_plugin struct and reach host services through dftu_host and its dftu_svc_* extension groups.
 
 Plugins
 =======
@@ -10,10 +10,10 @@ Plugins
 
 The stable plugin C ABI. A plugin includes only ``abi.h`` and fills a
 ``dftu_plugin`` struct; host services are reached through ``dftu_host`` and its
-optional extension groups (``dftu_ext_coro``, ``dftu_ext_compose``,
-``dftu_ext_query``, ``dftu_ext_writer``, ``dftu_ext_sketch``,
-``dftu_ext_arrow``, ``dftu_ext_trace``, ``dftu_ext_ports``,
-``dftu_ext_result``, ``dftu_ext_agg``, ``dftu_ext_ops``).
+optional extension groups (``dftu_svc_coro``, ``dftu_svc_compose``,
+``dftu_svc_query``, ``dftu_svc_writer``, ``dftu_svc_sketch``,
+``dftu_svc_arrow``, ``dftu_svc_trace``, ``dftu_svc_ports``,
+``dftu_svc_result``, ``dftu_svc_agg``, ``dftu_svc_ops``).
 
 .. code-block:: c
 
@@ -23,7 +23,7 @@ Core ABI
 --------
 
 Every type, extension group, and entry point of the ABI. ``dftu_plugin`` is the
-Fold a plugin fills; ``dftu_host`` and the ``dftu_ext_*`` structs are the
+Fold a plugin fills; ``dftu_host`` and the ``dftu_svc_*`` structs are the
 services the host lends back.
 
 .. doxygenfile:: dftracer/utils/plugins/abi.h

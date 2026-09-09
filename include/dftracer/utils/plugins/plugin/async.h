@@ -74,9 +74,9 @@ class Io {
    public:
     explicit Io(const dftu_host* h)
         : h_(h),
-          io_(h && h->get_extension ? static_cast<const dftu_io*>(
-                                          h->get_extension(h->h, DFTU_EXT_IO))
-                                    : nullptr) {}
+          io_(h && h->get_service ? static_cast<const dftu_io*>(
+                                        h->get_service(h->h, DFTU_SVC_IO))
+                                  : nullptr) {}
     AsyncOp open(const char* path, int flags, int mode, int* out_fd) const {
         return AsyncOp{io_ ? io_->open(h_->h, path, flags, mode, out_fd)
                            : nullptr};

@@ -5,7 +5,7 @@
  *     name        - registry key (lower_snake), under the host namespace:
  *                   `dftu.series.<op>` for a built-in column op, or
  *                   `dftu.<family>.<op>` for a host utility a plugin calls
- *                   through dftu.ext.ops. The `dftu.` prefix is ours: a
+ *                   through dftu.svc.ops. The `dftu.` prefix is ours: a
  *                   plugin registering one is refused at the plugin seam, so
  *                   a plugin can never shadow a host op. <family> is the
  *                   source module the utility comes from (hash ->
@@ -179,7 +179,7 @@ DFTU_SERIES_OP(dftu.series.ewm_std, dftu_series_ewm_std, SERIES, SERIES, F64, NO
 DFTU_SERIES_OP(dftu.series.clip, dftu_series_clip, SERIES, SERIES, SCALAR, SCALAR)
 DFTU_SERIES_OP(dftu.series.is_between, dftu_series_is_between, SERIES, SERIES, SCALAR, SCALAR)
 
-/* Host utilities a plugin calls by name through dftu.ext.ops; the reserved
+/* Host utilities a plugin calls by name through dftu.svc.ops; the reserved
    dftu. namespace marks them host-owned. */
 DFTU_SERIES_OP(dftu.hash.fnv1a, dftu_series_fnv1a, SERIES, SERIES, NONE, NONE)
 DFTU_SERIES_OP(dftu.hex.parse64, dftu_series_hex64_parse, SERIES, SERIES, NONE,

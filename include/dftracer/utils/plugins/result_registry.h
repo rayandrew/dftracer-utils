@@ -64,8 +64,8 @@ struct OwnedDataFrame {
 ///
 /// Also a fluent plan builder over the registered "dftu.lazy.*" ops (see
 /// exported_lazy_ops.def): every method below reaches the host through the op
-/// registry (dftu_ext_ops::run_lazy) rather than linking the dataframe
-/// dftu_lazyframe_* ABI directly, the same indirection dftu_ext_ops already
+/// registry (dftu_svc_ops::run_lazy) rather than linking the dataframe
+/// dftu_lazyframe_* ABI directly, the same indirection dftu_svc_ops already
 /// uses for column/frame ops. Every method BORROWS `*this` and returns a new
 /// plan, leaving this one usable - the same contract as the layers beneath,
 /// where dftu_lazyframe_* takes a const handle and LazyFrame's own methods are
@@ -79,7 +79,7 @@ struct OwnedDataFrame {
 struct OwnedLazyFrame {
     OwnedLazyFrame() = default;
     explicit OwnedLazyFrame(dftu_lazyframe* h) noexcept : handle(h) {}
-    OwnedLazyFrame(dftu_lazyframe* h, const dftu_ext_ops* ops,
+    OwnedLazyFrame(dftu_lazyframe* h, const dftu_svc_ops* ops,
                    void* host) noexcept
         : handle(h), ops_(ops), host_(host) {}
     OwnedLazyFrame(OwnedLazyFrame&& o) noexcept
@@ -300,7 +300,7 @@ struct OwnedLazyFrame {
         return OwnedLazyFrame{DFTU_RESULT_VALUE(res), ops_, host_};
     }
 
-    const dftu_ext_ops* ops_ = nullptr;
+    const dftu_svc_ops* ops_ = nullptr;
     void* host_ = nullptr;
 };
 

@@ -12,7 +12,7 @@
 namespace dataframe = dftracer::utils::dataframe;
 
 // The shared C ABI op codes (dftu_agg_op, used by both the dataframe agg C ABI
-// and the plugin DFTU_EXT_AGG seam) must stay bit-identical to
+// and the plugin DFTU_SVC_AGG seam) must stay bit-identical to
 // dataframe::AggOp, since both seams reinterpret the int as an AggOp.
 #define DFTU_AGG_OP(id, code, name) \
     static_assert(code == static_cast<int>(dataframe::AggOp::id));

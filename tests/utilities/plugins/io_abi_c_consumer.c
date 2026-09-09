@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 static const dftu_io* io_of(const dftu_host* h) {
-    return (const dftu_io*)h->get_extension(h->h, DFTU_EXT_IO);
+    return (const dftu_io*)h->get_service(h->h, DFTU_SVC_IO);
 }
 
 dftu_task* dftu_test_io_open(const dftu_host* h, const char* path, int* fd) {

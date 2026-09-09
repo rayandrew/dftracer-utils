@@ -1,4 +1,4 @@
-/* A real C consumer of the dftu_ext_trace ABI: open a .pfw.gz, append events,
+/* A real C consumer of the dftu_svc_trace ABI: open a .pfw.gz, append events,
  * close, then scan it back - all through the raw vtable from C. */
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/plugins/abi.h>
@@ -15,8 +15,8 @@ static void count_cb(const void* item, void* ud) {
  * count. */
 int dftu_test_trace_roundtrip(const dftu_host* h, const char* path,
                               const dftu_dataframe* df, int* out_read) {
-    const dftu_ext_trace* t =
-        (const dftu_ext_trace*)h->get_extension(h->h, DFTU_EXT_TRACE);
+    const dftu_svc_trace* t =
+        (const dftu_svc_trace*)h->get_service(h->h, DFTU_SVC_TRACE);
     if (!t) return -1;
     dftu_trace_writer* w = t->trace_open_write(h->h, path);
     if (!w) return -1;

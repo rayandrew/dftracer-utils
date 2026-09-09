@@ -58,7 +58,7 @@ def test_jit_scalar_accumulator_emits_keyless_agg():
     src = Stats._jit_plugin.source
     rn = Stats._jit_plugin.result_names
     wire = {attr: wid for wid, attr in rn.items()}
-    assert "DFTU_EXT_AGG" in src
+    assert "DFTU_SVC_AGG" in src
     # A keyed accumulator passes its key columns; a scalar one passes none.
     assert f'agg_new(host->h, "{wire["per_pid"]}", _keys, 1u,' in src
     assert f'agg_new(host->h, "{wire["total_dur"]}", NULL, 0u,' in src

@@ -1452,7 +1452,7 @@ def test_query_F_shorthand_and_callable():
 
 
 def test_host_ops_registered_by_name(tmp_path):
-    """The utilities a plugin reaches by name through dftu.ext.ops, run through
+    """The utilities a plugin reaches by name through dftu.svc.ops, run through
     the same registry the plugin uses."""
     names = set(_ext.op_list())
     assert {

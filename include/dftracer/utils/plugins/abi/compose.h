@@ -2,8 +2,8 @@
 #define DFTRACER_UTILS_PLUGINS_ABI_COMPOSE_H
 
 /** @file
- * dftu.ext.compose: first-class async op handles lent to a plugin. Optional
- * service group, fetched via dftu_host::get_extension(DFTU_EXT_COMPOSE).
+ * dftu.svc.compose: first-class async op handles lent to a plugin. Optional
+ * service group, fetched via dftu_host::get_service(DFTU_SVC_COMPOSE).
  * Include dftracer/utils/plugins/abi.h rather than this file directly.
  */
 
@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define DFTU_EXT_COMPOSE "dftu.ext.compose@1"
+#define DFTU_SVC_COMPOSE "dftu.svc.compose@1"
 
 /** A leaf op: transform `in_size` bytes at `in` into `out_size` bytes at `out`,
    returning a dftu_task the host drives to completion (NULL = ran inline).
@@ -25,12 +25,12 @@ typedef dftu_task* (*dftu_op_fn)(void* state, const void* in, void* out,
                                  int* rc);
 
 /** Compose async ops as first-class handles, the value-typed tier over
-   dftu_ext_coro's task combinators. An op transforms a POD input value into a
+   dftu_svc_coro's task combinators. An op transforms a POD input value into a
    POD output value; the byte sizes are carried on the handle so `then` can
    thread an intermediate and check out_size(a) == in_size(b). Ops are
    scan-lifetime (freed at fold teardown); free_op is an optional early release.
    Values cross as void*+size, the same erasure the util registry uses. */
-typedef struct dftu_ext_compose {
+typedef struct dftu_svc_compose {
     /** A leaf op wrapping `fn` with owned `state` (freed via free_state at op
        teardown). in_ty/out_ty are the value types (DFTU_T_BYTES for an opaque
        POD); in_size/out_size are their byte sizes, sized so `then` can thread
@@ -53,7 +53,7 @@ typedef struct dftu_ext_compose {
     dftu_task* (*run)(void* h, dftu_op* op, const void* in, void* out, int* rc);
     /** Optional early release; ops are otherwise freed at fold teardown. */
     void (*free_op)(void* h, dftu_op* op);
-} dftu_ext_compose;
+} dftu_svc_compose;
 
 #ifdef __cplusplus
 }

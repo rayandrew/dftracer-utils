@@ -57,14 +57,14 @@ class Host {
     Io io() const { return Io{h_}; }
     AsyncOp await(dftu_task* t) const { return AsyncOp{t}; }
     AsyncOp all(std::initializer_list<dftu_task*> ts) const {
-        const dftu_ext_coro* c = ext(DFTU_EXT_CORO, coro_ext_);
+        const dftu_svc_coro* c = ext(DFTU_SVC_CORO, coro_ext_);
         return AsyncOp{c && c->when_all
                            ? c->when_all(h_->h, ts.begin(),
                                          static_cast<std::uint32_t>(ts.size()))
                            : nullptr};
     }
     AsyncOp any(std::initializer_list<dftu_task*> ts) const {
-        const dftu_ext_coro* c = ext(DFTU_EXT_CORO, coro_ext_);
+        const dftu_svc_coro* c = ext(DFTU_SVC_CORO, coro_ext_);
         return AsyncOp{c && c->when_any
                            ? c->when_any(h_->h, ts.begin(),
                                          static_cast<std::uint32_t>(ts.size()))
@@ -74,7 +74,7 @@ class Host {
     /// Spawn `fn(arg)` onto a pool worker and get an AsyncOp to co_await (or
     /// feed to all()/any()); `arg` is plugin-owned and must outlive the await.
     AsyncOp spawn(dftu_work_fn fn, void* arg) const {
-        const dftu_ext_coro* c = ext(DFTU_EXT_CORO, coro_ext_);
+        const dftu_svc_coro* c = ext(DFTU_SVC_CORO, coro_ext_);
         return AsyncOp{c && c->spawn ? c->spawn(h_->h, fn, arg) : nullptr};
     }
     /// Spawn any callable onto a pool worker; `fn` is borrowed for the await,
@@ -86,7 +86,7 @@ class Host {
     /// Sequence: run `fn(arg)` after `t` completes; returns an AsyncOp to
     /// co_await. `arg` is plugin-owned and must outlive the await.
     AsyncOp then(dftu_task* t, dftu_work_fn fn, void* arg) const {
-        const dftu_ext_coro* c = ext(DFTU_EXT_CORO, coro_ext_);
+        const dftu_svc_coro* c = ext(DFTU_SVC_CORO, coro_ext_);
         return AsyncOp{c && c->then ? c->then(h_->h, t, fn, arg) : nullptr};
     }
     /// Sequence a callable after `t`; `fn` is borrowed for the await.
@@ -101,7 +101,7 @@ class Host {
     /// none.
     template <typename Fn>
     void run_blocking(Fn fn) const {
-        const dftu_ext_coro* c = ext(DFTU_EXT_CORO, coro_ext_);
+        const dftu_svc_coro* c = ext(DFTU_SVC_CORO, coro_ext_);
         if (c && c->run_blocking)
             c->run_blocking(
                 h_->h, [](void* p) { (*static_cast<Fn*>(p))(); }, &fn);
@@ -111,7 +111,7 @@ class Host {
 
     /// Valid for the whole scan; null on parse error. Do not free.
     dftu_query* query_compile(std::string_view src) const {
-        const dftu_ext_query* e = ext(DFTU_EXT_QUERY, query_ext_);
+        const dftu_svc_query* e = ext(DFTU_SVC_QUERY, query_ext_);
         return e && e->query_compile
                    ? e->query_compile(h_->h, src.data(),
                                       static_cast<std::uint32_t>(src.size()))
@@ -126,7 +126,7 @@ class Host {
     }
     bool query_matches(const dftu_query* q, const dftu_dataframe* df,
                        std::int64_t row) const {
-        const dftu_ext_query* qe = ext(DFTU_EXT_QUERY, query_ext_);
+        const dftu_svc_query* qe = ext(DFTU_SVC_QUERY, query_ext_);
         return q && qe && qe->query_matches &&
                qe->query_matches(h_->h, q, df, row) != 0;
     }
@@ -138,31 +138,31 @@ class Host {
 
     /// Caller owns the handle and must sketch_free it.
     dftu_sketch* sketch_create() const {
-        const dftu_ext_sketch* e = ext(DFTU_EXT_SKETCH, sketch_ext_);
+        const dftu_svc_sketch* e = ext(DFTU_SVC_SKETCH, sketch_ext_);
         return e && e->sketch_create ? e->sketch_create(h_->h) : nullptr;
     }
     void sketch_add(dftu_sketch* s, double v, double w = 1.0) const {
-        const dftu_ext_sketch* e = ext(DFTU_EXT_SKETCH, sketch_ext_);
+        const dftu_svc_sketch* e = ext(DFTU_SVC_SKETCH, sketch_ext_);
         if (e && e->sketch_add) e->sketch_add(h_->h, s, v, w);
     }
     void sketch_merge(dftu_sketch* into, const dftu_sketch* other) const {
-        const dftu_ext_sketch* e = ext(DFTU_EXT_SKETCH, sketch_ext_);
+        const dftu_svc_sketch* e = ext(DFTU_SVC_SKETCH, sketch_ext_);
         if (e && e->sketch_merge) e->sketch_merge(h_->h, into, other);
     }
     dftu_quantiles sketch_result(const dftu_sketch* s) const {
         dftu_quantiles q{};
-        const dftu_ext_sketch* e = ext(DFTU_EXT_SKETCH, sketch_ext_);
+        const dftu_svc_sketch* e = ext(DFTU_SVC_SKETCH, sketch_ext_);
         return e && e->sketch_result ? e->sketch_result(h_->h, s) : q;
     }
     void sketch_free(dftu_sketch* s) const {
-        const dftu_ext_sketch* e = ext(DFTU_EXT_SKETCH, sketch_ext_);
+        const dftu_svc_sketch* e = ext(DFTU_SVC_SKETCH, sketch_ext_);
         if (e && e->sketch_free) e->sketch_free(h_->h, s);
     }
     /// RAII sketch bound to this host; frees the handle in its destructor.
     class Sketch make_sketch() const;
 
     int arrow_write_ipc(ArrowArray* a, ArrowSchema* s, const char* path) const {
-        const dftu_ext_arrow* e = ext(DFTU_EXT_ARROW, arrow_ext_);
+        const dftu_svc_arrow* e = ext(DFTU_SVC_ARROW, arrow_ext_);
         return e && e->arrow_write_ipc ? e->arrow_write_ipc(h_->h, a, s, path)
                                        : -1;
     }
@@ -170,7 +170,7 @@ class Host {
     /// *out_schema and must call their release. 0 on success.
     int arrow_read_ipc(const char* path, ArrowArray* out,
                        ArrowSchema* out_schema) const {
-        const dftu_ext_arrow* e = ext(DFTU_EXT_ARROW, arrow_ext_);
+        const dftu_svc_arrow* e = ext(DFTU_SVC_ARROW, arrow_ext_);
         return e && e->arrow_read_ipc
                    ? e->arrow_read_ipc(h_->h, path, out, out_schema)
                    : -1;
@@ -187,24 +187,24 @@ class Host {
         return owned;
     }
     dftu_trace_writer* trace_open_write(const char* path) const {
-        const dftu_ext_trace* e = ext(DFTU_EXT_TRACE, trace_ext_);
+        const dftu_svc_trace* e = ext(DFTU_SVC_TRACE, trace_ext_);
         return e && e->trace_open_write ? e->trace_open_write(h_->h, path)
                                         : nullptr;
     }
     /// Append every row of `df` as a trace event.
     int trace_write(dftu_trace_writer* w, const dftu_dataframe* df) const {
-        const dftu_ext_trace* e = ext(DFTU_EXT_TRACE, trace_ext_);
+        const dftu_svc_trace* e = ext(DFTU_SVC_TRACE, trace_ext_);
         return e && e->trace_write ? e->trace_write(h_->h, w, df) : -1;
     }
     int trace_close(dftu_trace_writer* w) const {
-        const dftu_ext_trace* e = ext(DFTU_EXT_TRACE, trace_ext_);
+        const dftu_svc_trace* e = ext(DFTU_SVC_TRACE, trace_ext_);
         return e && e->trace_close ? e->trace_close(h_->h, w) : -1;
     }
     /// Scan `path` (auto-indexed) and call on_batch once per scanned batch with
     /// a dftu_dataframe*. 0 on success.
     int trace_read(const char* path, dftu_stream_item_fn on_batch,
                    void* ud) const {
-        const dftu_ext_trace* e = ext(DFTU_EXT_TRACE, trace_ext_);
+        const dftu_svc_trace* e = ext(DFTU_SVC_TRACE, trace_ext_);
         return e && e->trace_read ? e->trace_read(h_->h, path, on_batch, ud)
                                   : -1;
     }
@@ -227,7 +227,7 @@ class Host {
     /// Merge worker shard files into `target`; co_await the returned AsyncOp.
     AsyncOp merge_shards(const char* target,
                          std::initializer_list<const char*> shards) const {
-        const dftu_ext_writer* e = ext(DFTU_EXT_WRITER, writer_ext_);
+        const dftu_svc_writer* e = ext(DFTU_SVC_WRITER, writer_ext_);
         return AsyncOp{
             e && e->merge_shards
                 ? e->merge_shards(h_->h, target, shards.begin(),
@@ -240,33 +240,33 @@ class Host {
     /// the producer has not published this batch; the borrow is valid only
     /// until the current on_batch returns.
     std::uint64_t port_key(const char* name) const {
-        const dftu_ext_ports* e = ext(DFTU_EXT_PORTS, ports_ext_);
+        const dftu_svc_ports* e = ext(DFTU_SVC_PORTS, ports_ext_);
         return e && e->port_key ? e->port_key(h_->h, name) : 0;
     }
     void publish(std::uint64_t key, const void* data, std::uint32_t len) const {
-        const dftu_ext_ports* e = ext(DFTU_EXT_PORTS, ports_ext_);
+        const dftu_svc_ports* e = ext(DFTU_SVC_PORTS, ports_ext_);
         if (e && e->publish) e->publish(h_->h, key, data, len);
     }
     const void* consume(std::uint64_t key, std::uint32_t* out_len) const {
-        const dftu_ext_ports* e = ext(DFTU_EXT_PORTS, ports_ext_);
+        const dftu_svc_ports* e = ext(DFTU_SVC_PORTS, ports_ext_);
         return e && e->consume ? e->consume(h_->h, key, out_len) : nullptr;
     }
     dftu_agg* agg_new(const char* name, const char* const* key_names,
                       std::uint32_t key_n, const dftu_agg_col* specs,
                       std::uint32_t spec_n) const {
-        const dftu_ext_agg* e = ext(DFTU_EXT_AGG, agg_ext_);
+        const dftu_svc_agg* e = ext(DFTU_SVC_AGG, agg_ext_);
         return e && e->agg_new
                    ? e->agg_new(h_->h, name, key_names, key_n, specs, spec_n)
                    : nullptr;
     }
     void agg_accumulate(dftu_agg* a, const dftu_dataframe* df) const {
-        const dftu_ext_agg* e = ext(DFTU_EXT_AGG, agg_ext_);
+        const dftu_svc_agg* e = ext(DFTU_SVC_AGG, agg_ext_);
         if (e && e->agg_accumulate) e->agg_accumulate(h_->h, a, df);
     }
     /// Get-or-create a named cross-batch aggregation accumulator grouping by
     /// `key_names` and computing each of `cols`; empty (`!agg`) if the host
     /// lacks the agg group or agg_new rejects the spec (a bad op code or
-    /// missing output name). See dftu_ext_agg::agg_new; a name seen before
+    /// missing output name). See dftu_svc_agg::agg_new; a name seen before
     /// returns the existing accumulator and ignores `cols`.
     Agg agg(const char* name, std::initializer_list<const char*> key_names,
             std::initializer_list<AggCol> cols) const;
@@ -278,13 +278,13 @@ class Host {
     OwnedDataFrame agg_result(const char* name) const;
 
     /// Look up and run a registered dataframe column op by name on `in` (see
-    /// dftu_ext_ops::run); NULL if the host lacks the ops group, `name` is
+    /// dftu_svc_ops::run); NULL if the host lacks the ops group, `name` is
     /// unregistered, or the call mismatches the op's kind/arity/shape. The
     /// result is newly owned by the caller (free with dftu_series_free).
     dftu_series* run_op(const char* name,
                         std::initializer_list<const dftu_series*> in,
                         const dftu_op_arg* args = nullptr) const {
-        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        const dftu_svc_ops* e = ext(DFTU_SVC_OPS, ops_ext_);
         if (!e || !e->run) return nullptr;
         std::vector<const dftu_series*> vin(in);
         dftu_result_series res =
@@ -297,7 +297,7 @@ class Host {
     dftu_dataframe* run_op_frame(
         const char* name, std::initializer_list<const dftu_dataframe*> in,
         const dftu_op_arg* args = nullptr) const {
-        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        const dftu_svc_ops* e = ext(DFTU_SVC_OPS, ops_ext_);
         if (!e || !e->run_frame) return nullptr;
         std::vector<const dftu_dataframe*> vin(in);
         dftu_result_frame res =
@@ -311,7 +311,7 @@ class Host {
     dftu_scalar run_op_aggregate(const char* name, const dftu_series* in,
                                  const dftu_op_arg* args = nullptr,
                                  bool* ok = nullptr) const {
-        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        const dftu_svc_ops* e = ext(DFTU_SVC_OPS, ops_ext_);
         if (!e || !e->run_aggregate) {
             if (ok) *ok = false;
             return dftu_scalar{};
@@ -323,7 +323,7 @@ class Host {
     /// The registered op named `name` (built-in or user), or NULL if none or
     /// the host lacks the ops group. See dftu_op_find.
     const dftu_op_desc* find_op(const char* name) const {
-        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        const dftu_svc_ops* e = ext(DFTU_SVC_OPS, ops_ext_);
         return e && e->find ? e->find(h_->h, name) : nullptr;
     }
     /// Register a user op in the host's shared registry; see dftu_op_register.
@@ -331,7 +331,7 @@ class Host {
     /// are the host's. Returns non-zero on a NULL desc/name, a name the host
     /// keeps, an already-registered name, or if the host lacks the ops group.
     int register_op(const dftu_op_desc* desc) const {
-        const dftu_ext_ops* e = ext(DFTU_EXT_OPS, ops_ext_);
+        const dftu_svc_ops* e = ext(DFTU_SVC_OPS, ops_ext_);
         return e && e->register_op ? e->register_op(h_->h, desc) : -1;
     }
 
@@ -403,27 +403,27 @@ class Host {
     /// fn-pointer did.
     template <class T>
     const T* ext(const char* id, const T*& slot) const {
-        if (!slot && h_->get_extension)
-            slot = static_cast<const T*>(h_->get_extension(h_->h, id));
+        if (!slot && h_->get_service)
+            slot = static_cast<const T*>(h_->get_service(h_->h, id));
         return slot;
     }
 
     int emit(const char* name, dftu_result_value* v) const {
-        const dftu_ext_result* e = ext(DFTU_EXT_RESULT, result_ext_);
+        const dftu_svc_result* e = ext(DFTU_SVC_RESULT, result_ext_);
         return e && e->emit ? e->emit(h_->h, name, v) : -1;
     }
 
     const dftu_host* h_;
-    mutable const dftu_ext_coro* coro_ext_ = nullptr;
-    mutable const dftu_ext_query* query_ext_ = nullptr;
-    mutable const dftu_ext_writer* writer_ext_ = nullptr;
-    mutable const dftu_ext_sketch* sketch_ext_ = nullptr;
-    mutable const dftu_ext_arrow* arrow_ext_ = nullptr;
-    mutable const dftu_ext_trace* trace_ext_ = nullptr;
-    mutable const dftu_ext_ports* ports_ext_ = nullptr;
-    mutable const dftu_ext_result* result_ext_ = nullptr;
-    mutable const dftu_ext_agg* agg_ext_ = nullptr;
-    mutable const dftu_ext_ops* ops_ext_ = nullptr;
+    mutable const dftu_svc_coro* coro_ext_ = nullptr;
+    mutable const dftu_svc_query* query_ext_ = nullptr;
+    mutable const dftu_svc_writer* writer_ext_ = nullptr;
+    mutable const dftu_svc_sketch* sketch_ext_ = nullptr;
+    mutable const dftu_svc_arrow* arrow_ext_ = nullptr;
+    mutable const dftu_svc_trace* trace_ext_ = nullptr;
+    mutable const dftu_svc_ports* ports_ext_ = nullptr;
+    mutable const dftu_svc_result* result_ext_ = nullptr;
+    mutable const dftu_svc_agg* agg_ext_ = nullptr;
+    mutable const dftu_svc_ops* ops_ext_ = nullptr;
 };
 
 /// Move-only RAII owner of a host sketch handle; frees it in the destructor.
@@ -507,7 +507,7 @@ inline Agg Host::agg(const char* name,
 }
 
 inline OwnedDataFrame Host::agg_result(const char* name) const {
-    const dftu_ext_agg* e = ext(DFTU_EXT_AGG, agg_ext_);
+    const dftu_svc_agg* e = ext(DFTU_SVC_AGG, agg_ext_);
     return OwnedDataFrame{e && e->agg_result ? e->agg_result(h_->h, name)
                                              : nullptr};
 }
@@ -548,18 +548,18 @@ class Writer {
 
    private:
     friend class Host;
-    Writer(Host host, const dftu_ext_writer* e, dftu_writer* w)
+    Writer(Host host, const dftu_svc_writer* e, dftu_writer* w)
         : host_(host), e_(e), w_(w) {}
     void* h() const noexcept { return host_.raw()->h; }
 
     Host host_{nullptr};
-    const dftu_ext_writer* e_ = nullptr;
+    const dftu_svc_writer* e_ = nullptr;
     dftu_writer* w_ = nullptr;
 };
 
 inline Writer Host::writer(const char* path, std::uint32_t num_workers,
                            bool gzip) const {
-    const dftu_ext_writer* e = ext(DFTU_EXT_WRITER, writer_ext_);
+    const dftu_svc_writer* e = ext(DFTU_SVC_WRITER, writer_ext_);
     dftu_writer* w =
         e && e->writer_create
             ? e->writer_create(h_->h, path, num_workers, gzip ? 1 : 0)

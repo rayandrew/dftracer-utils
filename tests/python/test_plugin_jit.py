@@ -629,7 +629,7 @@ def test_jit_each_map_gets_its_own_accumulator():
     src = Stats._jit_plugin.source
     b = _body(Stats)
     wire = {attr: wid for wid, attr in Stats._jit_plugin.result_names.items()}
-    # Each declared map is its own named DFTU_EXT_AGG accumulator, fed by its own
+    # Each declared map is its own named DFTU_SVC_AGG accumulator, fed by its own
     # per-batch row buffer.
     for name, op in (("n", "DFTU_AGG_SUM"), ("tot", "DFTU_AGG_SUM"), ("avg", "DFTU_AGG_MEAN")):
         assert f'agg_new(host->h, "{wire[name]}"' in src

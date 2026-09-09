@@ -74,8 +74,8 @@ constexpr std::uint64_t TINY_BUDGET = 4096;
 ::dftu_task* spill_nested_columns(void* slice, const dftu_dataframe* df,
                                   const dftu_host* host) {
     (void)slice;
-    const auto* ext = static_cast<const dftu_ext_agg*>(
-        host->get_extension(host->h, DFTU_EXT_AGG));
+    const auto* ext = static_cast<const dftu_svc_agg*>(
+        host->get_service(host->h, DFTU_SVC_AGG));
     if (!ext) return nullptr;
     const dftu_agg_col specs[] = {
         {DFTU_AGG_SUM, "dur", "sum_dur", 0.0, nullptr},

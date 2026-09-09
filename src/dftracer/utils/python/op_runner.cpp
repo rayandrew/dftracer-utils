@@ -70,8 +70,8 @@ PyObject* jit_run_op(PyObject*, PyObject* args) {
             PluginFold fold(plugin, intern);
             ::dftu_host& host = fold.host();
             ::dftu_op* op = build(&host);
-            const auto* compose = static_cast<const ::dftu_ext_compose*>(
-                host.get_extension(host.h, DFTU_EXT_COMPOSE));
+            const auto* compose = static_cast<const ::dftu_svc_compose*>(
+                host.get_service(host.h, DFTU_SVC_COMPOSE));
             if (op && compose && compose->run) {
                 ::dftu_task* task =
                     compose->run(host.h, op, in_data, out_buf.data(), &rc);

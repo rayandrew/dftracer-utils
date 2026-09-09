@@ -11,7 +11,7 @@ inline constexpr std::string_view HOST_NAME_PREFIX = "dftu.";
 /// True when `name` is in the host's own namespace. The plugin ABI is the only
 /// way into the op, port and accumulator registries, so this is checked on
 /// every name a plugin supplies: its provides/consumes lists,
-/// dftu_ext_agg::agg_new and dftu_ext_ops::register_op. A plugin naming
+/// dftu_svc_agg::agg_new and dftu_svc_ops::register_op. A plugin naming
 /// anything here would shadow a host entry and silently change what every other
 /// plugin and the planner resolve. constexpr so a host-registered literal can
 /// be checked where it is written.

@@ -13,7 +13,7 @@
 // Private seam shared by the fold_adapter extension translation units
 // (fold_adapter.cpp core plus fold_adapter/{agg,result,ops}.cpp). Each ext TU
 // defines its own file-static g_* vtable and exposes it through the detail::
-// accessor below; host_get_extension in the core TU calls the accessors. The
+// accessor below; host_get_service in the core TU calls the accessors. The
 // remaining declarations are the free helpers referenced across more than one
 // of those TUs.
 namespace dftracer::utils::plugins {
@@ -47,7 +47,7 @@ const void* agg_ext_vtable();
 const void* result_ext_vtable();
 const void* ops_ext_vtable();
 
-/// dftu_ext_ops::register_op with the plugin-name gate applied. Shared with
+/// dftu_svc_ops::register_op with the plugin-name gate applied. Shared with
 /// the build-phase host, whose op registration is the same call.
 int register_plugin_op(const ::dftu_op_desc* desc);
 

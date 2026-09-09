@@ -56,12 +56,12 @@ typedef struct dftu_plugin {
 
     /** The names this plugin produces, as a NULL-terminated array that outlives
        the plugin; NULL = none. One namespace covers both edge kinds: a
-       dftu_ext_ports port it publishes and a dftu_ext_agg accumulator it
+       dftu_svc_ports port it publishes and a dftu_svc_agg accumulator it
        creates. Two plugins providing the same name is a load error. */
     const char* const* (*provides)(void* self);
     /** The names this plugin reads, as a NULL-terminated array that outlives
        the plugin; NULL = none: ports it consumes and accumulators it fetches
-       with dftu_ext_agg::agg_result. The host runs every provider of a
+       with dftu_svc_agg::agg_result. The host runs every provider of a
        consumed name first, and rejects the set when no loaded plugin provides
        one or when the resulting graph has a cycle. */
     const char* const* (*consumes)(void* self);
@@ -96,8 +96,8 @@ typedef struct dftu_plugin {
 /** The one symbol the loader resolves via dlsym; the plugin's init. `config` is
    NULL when none was given.
 
-   `h` is a BUILD-PHASE host: its get_extension answers only the registration
-   groups (DFTU_EXT_OPS, DFTU_EXT_AGG, DFTU_EXT_PORTS) and, within those, only
+   `h` is a BUILD-PHASE host: its get_service answers only the registration
+   groups (DFTU_SVC_OPS, DFTU_SVC_AGG, DFTU_SVC_PORTS) and, within those, only
    the registration slots - register_op, register_state and port_key. Every
    other group, every non-registration slot, and resolve/intern return
    NULL/failure, and the host fails the load naming what was denied. Scanning,

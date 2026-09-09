@@ -20,8 +20,8 @@ static void* make_slice(void* self) {
 
 static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {
-    const dftu_ext_agg* agg =
-        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);
+    const dftu_svc_agg* agg =
+        (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);
     static const char* const keys[1] = {"pid"};
     static const dftu_agg_col specs[4] = {
         {DFTU_AGG_ARGMAX, "name", "slowest", 0.0, "dur"},

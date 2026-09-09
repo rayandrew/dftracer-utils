@@ -76,8 +76,8 @@ dftu_plugin make_graph_plugin(NameLists* st) {
 // STATS_NAME, which the consumer reads back by that name.
 dftu_task* producer_on_batch(void*, const dftu_dataframe* df,
                              const dftu_host* host) {
-    const auto* agg = static_cast<const dftu_ext_agg*>(
-        host->get_extension(host->h, DFTU_EXT_AGG));
+    const auto* agg = static_cast<const dftu_svc_agg*>(
+        host->get_service(host->h, DFTU_SVC_AGG));
     if (!agg || !agg->agg_new) return nullptr;
     const dftu_agg_col specs[1] = {
         {DFTU_AGG_COUNT, nullptr, "count", 0.0, nullptr}};
@@ -101,8 +101,8 @@ dftu_plugin make_producer() {
 std::atomic<std::int64_t> g_seen_rows{-1};
 
 dftu_task* consumer_on_finalize(void*, const dftu_host* host) {
-    const auto* agg = static_cast<const dftu_ext_agg*>(
-        host->get_extension(host->h, DFTU_EXT_AGG));
+    const auto* agg = static_cast<const dftu_svc_agg*>(
+        host->get_service(host->h, DFTU_SVC_AGG));
     dftu_dataframe* res =
         agg && agg->agg_result ? agg->agg_result(host->h, STATS_NAME) : nullptr;
     g_seen_rows.store(
@@ -262,11 +262,11 @@ TEST_SUITE("PluginFoldOrder") {
 
     TEST_CASE("a dftu.-prefixed consumed name fails the build") {
         NameLists a;
-        a.consumes = {"dftu.ext.agg", nullptr};
+        a.consumes = {"dftu.svc.agg", nullptr};
         dftu_plugin pa = make_graph_plugin(&a);
         auto set = build_injected_plugins({&pa});
         REQUIRE_FALSE(set.has_value());
-        CHECK(set.error().message.find("dftu.ext.agg") != std::string::npos);
+        CHECK(set.error().message.find("dftu.svc.agg") != std::string::npos);
         CHECK(set.error().message.find("belongs to the host") !=
               std::string::npos);
     }

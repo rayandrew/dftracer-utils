@@ -4,7 +4,7 @@
 A jit plugin declares a batch-scoped publish port with jit.publish (its wire id
 is package-derived, see JitPackage) and a consume port wired to it with
 jit.consume(Producer.port); the host hands the per-batch published value across
-via DFTU_EXT_PORTS, running the producer first from the provides/consumes the
+via DFTU_SVC_PORTS, running the producer first from the provides/consumes the
 JIT derives from the two bodies. These tests cover the generated C
 (publish/consume scaffolding and the derived name lists) without a compiler,
 and the end-to-end data crossing - in either load order, plus the
@@ -60,7 +60,7 @@ def test_jit_publish_emits_flush():
     assert Producer.sig.name in src  # the derived wire id, e.g. "<pkg>/...producer.sig"
     assert "_pub_sig += (uint64_t)" in src
     assert "_ports->publish(" in src
-    assert "DFTU_EXT_PORTS" in src
+    assert "DFTU_SVC_PORTS" in src
 
 
 def test_jit_consume_emits_read():

@@ -2,8 +2,8 @@
 #define DFTRACER_UTILS_PLUGINS_ABI_TRACE_H
 
 /** @file
- * dftu.ext.trace: dftracer trace file I/O lent to a plugin. Optional service
- * group, fetched via dftu_host::get_extension(DFTU_EXT_TRACE). Include
+ * dftu.svc.trace: dftracer trace file I/O lent to a plugin. Optional service
+ * group, fetched via dftu_host::get_service(DFTU_SVC_TRACE). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 
@@ -13,9 +13,9 @@
 extern "C" {
 #endif
 
-#define DFTU_EXT_TRACE "dftu.ext.trace@1"
+#define DFTU_SVC_TRACE "dftu.svc.trace@1"
 
-typedef struct dftu_ext_trace {
+typedef struct dftu_svc_trace {
     /** dftracer trace writer: open a gzip .pfw.gz, append events, then close.
        The index is built lazily on first read, not at close. */
     dftu_trace_writer* (*trace_open_write)(void* h, const char* path);
@@ -28,7 +28,7 @@ typedef struct dftu_ext_trace {
        table; the frame is valid only for the call. 0 on success. */
     int (*trace_read)(void* h, const char* path, dftu_stream_item_fn on_batch,
                       void* ud);
-} dftu_ext_trace;
+} dftu_svc_trace;
 
 #ifdef __cplusplus
 }

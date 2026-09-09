@@ -10,7 +10,7 @@ How to communicate between plugins
    consume it, within the one shared scan ``--plugin a --plugin b`` already
    runs. See :doc:`../../plugins` for the plugin model this builds on.
 
-**Ports** (``DFTU_EXT_PORTS``) are the one mechanism: a producer publishes a
+**Ports** (``DFTU_SVC_PORTS``) are the one mechanism: a producer publishes a
 value during a batch and a consumer reads it back in the same batch. A port is
 a name, and the two ends are wired by naming the same one. The ``dftu.``
 prefix is reserved for the host; a port that ever needs a version carries it
@@ -93,15 +93,15 @@ consumer reads it back during the same batch.
    .. tab-item:: C (raw ABI)
 
       A plugin fetches the raw port channel from the host through
-      ``host->get_extension(host->h, DFTU_EXT_PORTS)``:
+      ``host->get_service(host->h, DFTU_SVC_PORTS)``:
 
       .. code-block:: c
 
-         typedef struct dftu_ext_ports {
+         typedef struct dftu_svc_ports {
              uint64_t (*port_key)(void* h, const char* cap_id);
              void (*publish)(void* h, uint64_t key, const void* data, uint32_t len);
              const void* (*consume)(void* h, uint64_t key, uint32_t* out_len);
-         } dftu_ext_ports;
+         } dftu_svc_ports;
 
       ``port_key`` interns a port name once (cache the returned
       ``uint64_t``); ``publish`` copies ``len`` bytes into the batch-scoped
@@ -115,8 +115,8 @@ consumer reads it back during the same batch.
          static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                                     const dftu_host* host) {
              MyState* s = (MyState*)slice;
-             const dftu_ext_ports* ports =
-                 (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);
+             const dftu_svc_ports* ports =
+                 (const dftu_svc_ports*)host->get_service(host->h, DFTU_SVC_PORTS);
              if (!s->port_key) s->port_key = ports->port_key(host->h, "com.example.perbatch");
 
              int64_t n = dftu_dataframe_num_rows(df);
@@ -140,8 +140,8 @@ consumer reads it back during the same batch.
          static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                                     const dftu_host* host) {
              MyState* s = (MyState*)slice;
-             const dftu_ext_ports* ports =
-                 (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);
+             const dftu_svc_ports* ports =
+                 (const dftu_svc_ports*)host->get_service(host->h, DFTU_SVC_PORTS);
              if (!s->port_key) s->port_key = ports->port_key(host->h, "com.example.perbatch");
 
              (void)df;
@@ -192,7 +192,7 @@ consumer reads it back during the same batch.
       decoration time. A missing producer degrades to reading ``0``. A JIT
       producer and a hand-written C++ or C consumer (or
       vice versa) interoperate freely: all three compile down to the same
-      ``DFTU_EXT_PORTS`` machinery.
+      ``DFTU_SVC_PORTS`` machinery.
 
 The ordering rule
 -------------------

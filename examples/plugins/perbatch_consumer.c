@@ -29,8 +29,8 @@ static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
                            const dftu_host* host) {
     (void)df;
     Slice* s = (Slice*)slice;
-    const dftu_ext_ports* p =
-        (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);
+    const dftu_svc_ports* p =
+        (const dftu_svc_ports*)host->get_service(host->h, DFTU_SVC_PORTS);
     if (p) {
         uint32_t len = 0;
         const void* d =

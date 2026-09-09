@@ -11,7 +11,7 @@ Anything outside it raises :class:`JitError` at decoration time, pointing at the
 raw-C++ escape hatch, never a silent miscompile.
 
 Every :func:`map` is one named accumulator on the dataframe engine's ``AggState``,
-reached through the host's ``DFTU_EXT_AGG`` service: the key tuple names its
+reached through the host's ``DFTU_SVC_AGG`` service: the key tuple names its
 grouping columns (an empty tuple makes it a whole-scan scalar) and each value
 reduction is one aggregate. Per-event contributions buffer into per-batch columns
 that are folded into that accumulator at the end of each batch; the host merges
@@ -2064,7 +2064,7 @@ class _Compiler:
         by: ast.expr | None,
     ) -> List[str]:
         """Append one contribution row to ``attr``'s per-batch column buffers;
-        the buffers are folded into the DFTU_EXT_AGG accumulator after the loop."""
+        the buffers are folded into the DFTU_SVC_AGG accumulator after the loop."""
         decl = self.maps[attr]
         self.rows_per_event[attr] = self.rows_per_event.get(attr, 0) + 1
         lines = ["{", f"    uint32_t _r = _n_{attr}++;"]
@@ -2261,8 +2261,8 @@ def _emit_port_pre(
     extension, read each consume port's value for this batch, and zero each
     publish port's per-batch accumulator."""
     out: List[str] = [
-        "    const dftu_ext_ports* _ports =",
-        "        (const dftu_ext_ports*)host->get_extension(host->h, DFTU_EXT_PORTS);",
+        "    const dftu_svc_ports* _ports =",
+        "        (const dftu_svc_ports*)host->get_service(host->h, DFTU_SVC_PORTS);",
         "    (void)_ports;",
     ]
     for name, port in sub_ports:
@@ -2408,7 +2408,7 @@ def _emit_buffers(attr: str, decl: _MapDecl, rows: int) -> List[str]:
 
 def _emit_flush(attr: str, decl: _MapDecl, wire_name: str) -> List[str]:
     """Build one batch frame from the row buffers and fold it into the
-    DFTU_EXT_AGG accumulator named ``wire_name`` (the package-qualified id;
+    DFTU_SVC_AGG accumulator named ``wire_name`` (the package-qualified id;
     ``attr`` only ever names local C buffers)."""
     cols: List[Tuple[str, List[str]]] = []
     for idx, kt in enumerate(decl.key_types):
@@ -2645,8 +2645,8 @@ def _emit(
         "static dftu_task* on_batch(void* slice, const dftu_dataframe* df,",
         "                          const dftu_host* host) {",
         "    (void)slice;",
-        "    const dftu_ext_agg* _agg =",
-        "        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);",
+        "    const dftu_svc_agg* _agg =",
+        "        (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);",
     ]
     if maps:
         out.append("    if (!_agg || !_agg->agg_new || !_agg->agg_accumulate) return NULL;")
@@ -3066,8 +3066,8 @@ def _emit_vfold(
         "                          const dftu_dataframe* df,",
         "                          const dftu_host* host) {",
         "    (void)slice;",
-        "    const dftu_ext_agg* agg =",
-        "        (const dftu_ext_agg*)host->get_extension(host->h, DFTU_EXT_AGG);",
+        "    const dftu_svc_agg* agg =",
+        "        (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);",
         "    if (!agg || !agg->agg_new || !agg->agg_accumulate) return NULL;",
     ]
     for opd in ops:
@@ -3181,7 +3181,7 @@ def vfold(cls: type) -> type:
     occupancy ops and the co-moments - takes a ``(value, by)`` pair written
     ``self.<map>[df["k"]] += df["v"], df["by"]``.
 
-    Every accumulator folds through the engine's DFTU_EXT_AGG AggState: a keyed
+    Every accumulator folds through the engine's DFTU_SVC_AGG AggState: a keyed
     map is one with key columns, a scalar accumulator one with none. The host
     merges same-named accumulators across worker slices and finalizes each to a
     native DataFrame; run it through

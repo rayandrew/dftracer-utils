@@ -1,4 +1,4 @@
-// DFTU_EXT_OPS: exposes the dataframe engine's op registry to a plugin by
+// DFTU_SVC_OPS: exposes the dataframe engine's op registry to a plugin by
 // name, so it can run any registered column/aggregate/frame op on a
 // Series/DataFrame it already holds without linking the dataframe C ABI.
 
@@ -86,8 +86,8 @@ TEST_CASE("plugin ops: run_op reports unknown names and bad arity") {
 
 TEST_CASE("plugin ops: unknown op and a failed op are distinguishable") {
     HostFixture fx;
-    const auto* ops = static_cast<const dftu_ext_ops*>(
-        fx.host().get_extension(fx.host().h, DFTU_EXT_OPS));
+    const auto* ops = static_cast<const dftu_svc_ops*>(
+        fx.host().get_service(fx.host().h, DFTU_SVC_OPS));
     REQUIRE(ops);
     REQUIRE(ops->run);
 
@@ -122,8 +122,8 @@ TEST_CASE("plugin ops: find_op resolves a built-in by name") {
 
 TEST_CASE("plugin ops: a dftu. op name is refused") {
     HostFixture fx;
-    const auto* ops = static_cast<const dftu_ext_ops*>(
-        fx.host().get_extension(fx.host().h, DFTU_EXT_OPS));
+    const auto* ops = static_cast<const dftu_svc_ops*>(
+        fx.host().get_service(fx.host().h, DFTU_SVC_OPS));
     REQUIRE(ops);
     REQUIRE(ops->register_op);
 
@@ -145,8 +145,8 @@ TEST_CASE("plugin ops: a dftu. op name is refused") {
 
 TEST_CASE("plugin ops: a bare op name is refused") {
     HostFixture fx;
-    const auto* ops = static_cast<const dftu_ext_ops*>(
-        fx.host().get_extension(fx.host().h, DFTU_EXT_OPS));
+    const auto* ops = static_cast<const dftu_svc_ops*>(
+        fx.host().get_service(fx.host().h, DFTU_SVC_OPS));
     REQUIRE(ops);
 
     // The bare namespace has no dot, so it fails the <plugin>.<name>
@@ -160,8 +160,8 @@ TEST_CASE("plugin ops: a bare op name is refused") {
 
 TEST_CASE("plugin agg: a dftu. accumulator name is refused") {
     HostFixture fx;
-    const auto* agg = static_cast<const dftu_ext_agg*>(
-        fx.host().get_extension(fx.host().h, DFTU_EXT_AGG));
+    const auto* agg = static_cast<const dftu_svc_agg*>(
+        fx.host().get_service(fx.host().h, DFTU_SVC_AGG));
     REQUIRE(agg);
 
     const dftu_agg_col specs[1] = {

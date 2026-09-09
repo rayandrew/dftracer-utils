@@ -236,7 +236,7 @@ class PluginFold : public trace::views::detail::Fold {
     // address as an opaque dftu_task*; null if allocation throws.
     ::dftu_task* emplace_task(coro::CoroTask<void>&& task);
 
-    // dftu_ext_compose backing. Ops are arena-owned (scan-lifetime); the
+    // dftu_svc_compose backing. Ops are arena-owned (scan-lifetime); the
     // combinators validate value sizes and return null on a mismatch.
     ::dftu_op* compose_make(dftu_op_fn fn, void* state,
                             void (*free_state)(void*), dftu_type in_ty,
@@ -317,7 +317,7 @@ class PluginFold : public trace::views::detail::Fold {
     std::optional<Query> query_;
     ValueMap qmap_;
 
-    // dftu_ext_query::query_compile/query_matches: queries a plugin compiles
+    // dftu_svc_query::query_compile/query_matches: queries a plugin compiles
     // itself, independent of plan_query above.
     std::deque<Query> compiled_queries_;
     ValueMap match_qmap_;

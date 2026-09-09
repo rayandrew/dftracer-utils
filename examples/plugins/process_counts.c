@@ -76,8 +76,8 @@ static void merge(void* into, void* other) {
  * so the output is deterministic regardless of worker interleaving. */
 static dftu_task* on_finalize(void* slice, const dftu_host* host) {
     Counts* c = (Counts*)slice;
-    const dftu_ext_result* res =
-        (const dftu_ext_result*)host->get_extension(host->h, DFTU_EXT_RESULT);
+    const dftu_svc_result* res =
+        (const dftu_svc_result*)host->get_service(host->h, DFTU_SVC_RESULT);
     char* buf;
     size_t cap, len;
     if (!res || !res->emit) return NULL;

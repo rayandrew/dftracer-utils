@@ -12,7 +12,7 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_host* h,
                                                 const dftu_value* config) {
     const dftu_io* io;
     (void)config;
-    io = (const dftu_io*)h->get_extension(h->h, DFTU_EXT_IO);
+    io = (const dftu_io*)h->get_service(h->h, DFTU_SVC_IO);
     if (!io) {
         h->log(h->h, DFTU_LOG_ERROR, "no I/O service at load", 22);
         return NULL;

@@ -30,7 +30,7 @@ def _value(result, name):
 
 
 def _keyed(result, name, key):
-    # A keyed vfold now crosses as a native _DataFrame (DFTU_EXT_AGG finalizes to
+    # A keyed vfold now crosses as a native _DataFrame (DFTU_SVC_AGG finalizes to
     # a native frame); read it at the edge as pandas.
     pdf = result[name].to_pandas()
     return dict(zip(pdf[key].tolist(), pdf["value"].tolist()))
@@ -148,7 +148,7 @@ def test_vfold_keyed_count_per_pid(tmp_path):
 
 @_needs_cxx
 def test_vfold_keyed_pct_per_pid(tmp_path):
-    # A per-key percentile through DFTU_EXT_AGG's DDSketch quantile.
+    # A per-key percentile through DFTU_SVC_AGG's DDSketch quantile.
     @jit.vfold
     class Median:
         p50 = jit.map(key=jit.i64, value=jit.quantiles((0.5,)))
@@ -179,7 +179,7 @@ _MOM_PIDS = [1, 1, 1, 1, 1, 2, 2, 2]
 
 @_needs_cxx
 def test_vfold_keyed_moments(tmp_path):
-    # var/std/skew/sumsq/count_valid reach vfold through DFTU_EXT_AGG; none was
+    # var/std/skew/sumsq/count_valid reach vfold through DFTU_SVC_AGG; none was
     # expressible on the legacy group_by/row-fold map path.
     @jit.vfold
     class Moments:
