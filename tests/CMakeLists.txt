@@ -63,6 +63,7 @@ add_test(NAME c_abi_guard
 set(TEST_CPP_SOURCES
     # Core tests
     core/test_runtime.cpp
+    core/test_runtime_abi.cpp
     core/test_task_abi.cpp
     core/test_logging.cpp
     core/test_string_intern.cpp
