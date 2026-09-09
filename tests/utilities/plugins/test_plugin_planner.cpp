@@ -57,7 +57,7 @@ void* count_make_slice(void* self) {
     return s;
 }
 dftu_task* count_on_batch(void* slice, const dftu_dataframe* df,
-                          const dftu_host*) {
+                          const dftu_plugin_host*) {
     static_cast<CountSlice*>(slice)->n +=
         static_cast<std::uint64_t>(dftu_dataframe_num_rows(df));
     return nullptr;
@@ -65,7 +65,7 @@ dftu_task* count_on_batch(void* slice, const dftu_dataframe* df,
 void count_merge(void* into, void* other) {
     static_cast<CountSlice*>(into)->n += static_cast<CountSlice*>(other)->n;
 }
-dftu_task* count_on_finalize(void* slice, const dftu_host*) {
+dftu_task* count_on_finalize(void* slice, const dftu_plugin_host*) {
     auto* s = static_cast<CountSlice*>(slice);
     s->st->total.store(s->n);
     return nullptr;

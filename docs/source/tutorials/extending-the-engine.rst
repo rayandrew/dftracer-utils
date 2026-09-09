@@ -93,7 +93,7 @@ reduce or threading code.
              void finalize(Host) {}
          };
 
-         extern "C" dftu_plugin* dftracer_plugin(dftu_host* h,
+         extern "C" dftu_plugin* dftracer_plugin(dftu_plugin_host* h,
                                                  const dftu_value* config) {
              (void)h;
              return make_plugin<EventsPerPid>(config);

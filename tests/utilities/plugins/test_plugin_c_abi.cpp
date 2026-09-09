@@ -26,33 +26,33 @@ using dftracer::utils::plugins::PluginFold;
 namespace coro = dftracer::utils::coro;
 
 extern "C" {
-::dftu_task* dftu_test_compose_pipe(const ::dftu_host*, const std::int64_t*,
-                                    std::int64_t*, int*);
-::dftu_task* dftu_test_compose_all(const ::dftu_host*, const std::int64_t*,
-                                   std::int64_t*, int*);
-int dftu_test_compose_typecheck(const ::dftu_host*);
-int dftu_test_query_match(const ::dftu_host*, const char*, std::uint32_t,
+::dftu_task* dftu_test_compose_pipe(const ::dftu_plugin_host*,
+                                    const std::int64_t*, std::int64_t*, int*);
+::dftu_task* dftu_test_compose_all(const ::dftu_plugin_host*,
+                                   const std::int64_t*, std::int64_t*, int*);
+int dftu_test_compose_typecheck(const ::dftu_plugin_host*);
+int dftu_test_query_match(const ::dftu_plugin_host*, const char*, std::uint32_t,
                           const ::dftu_dataframe*, std::int64_t);
-int dftu_test_query_null_is_safe(const ::dftu_host*, const ::dftu_dataframe*,
-                                 std::int64_t);
-int dftu_test_sketch(const ::dftu_host*, double*, std::uint64_t*);
-int dftu_test_sketch_merge(const ::dftu_host*, std::uint64_t*);
-int dftu_test_ops_fnv1a(const ::dftu_host*, const char*, std::uint32_t,
+int dftu_test_query_null_is_safe(const ::dftu_plugin_host*,
+                                 const ::dftu_dataframe*, std::int64_t);
+int dftu_test_sketch(const ::dftu_plugin_host*, double*, std::uint64_t*);
+int dftu_test_sketch_merge(const ::dftu_plugin_host*, std::uint64_t*);
+int dftu_test_ops_fnv1a(const ::dftu_plugin_host*, const char*, std::uint32_t,
                         std::uint64_t*);
-int dftu_test_ops_find(const ::dftu_host*);
-int dftu_test_trace_roundtrip(const ::dftu_host*, const char*,
+int dftu_test_ops_find(const ::dftu_plugin_host*);
+int dftu_test_trace_roundtrip(const ::dftu_plugin_host*, const char*,
                               const ::dftu_dataframe*, int*);
-::dftu_task* dftu_test_io_open(const ::dftu_host*, const char*, int*);
-::dftu_task* dftu_test_io_write(const ::dftu_host*, int, const void*,
+::dftu_task* dftu_test_io_open(const ::dftu_plugin_host*, const char*, int*);
+::dftu_task* dftu_test_io_write(const ::dftu_plugin_host*, int, const void*,
                                 std::uint64_t, std::int64_t*);
-::dftu_task* dftu_test_io_pread(const ::dftu_host*, int, void*, std::uint64_t,
-                                std::uint64_t, std::int64_t*);
-::dftu_task* dftu_test_io_close(const ::dftu_host*, int, int*);
-::dftu_writer* dftu_test_writer_create(const ::dftu_host*, const char*);
-::dftu_task* dftu_test_writer_open(const ::dftu_host*, ::dftu_writer*);
-::dftu_task* dftu_test_writer_chunk(const ::dftu_host*, ::dftu_writer*,
+::dftu_task* dftu_test_io_pread(const ::dftu_plugin_host*, int, void*,
+                                std::uint64_t, std::uint64_t, std::int64_t*);
+::dftu_task* dftu_test_io_close(const ::dftu_plugin_host*, int, int*);
+::dftu_writer* dftu_test_writer_create(const ::dftu_plugin_host*, const char*);
+::dftu_task* dftu_test_writer_open(const ::dftu_plugin_host*, ::dftu_writer*);
+::dftu_task* dftu_test_writer_chunk(const ::dftu_plugin_host*, ::dftu_writer*,
                                     const void*, std::uint64_t);
-::dftu_task* dftu_test_writer_close(const ::dftu_host*, ::dftu_writer*);
+::dftu_task* dftu_test_writer_close(const ::dftu_plugin_host*, ::dftu_writer*);
 }
 
 namespace {
@@ -139,7 +139,7 @@ struct HostFixture {
         fold.reset();
         if (plugin && plugin->destroy) plugin->destroy(plugin->self);
     }
-    dftu_host& host() { return fold->host(); }
+    dftu_plugin_host& host() { return fold->host(); }
 };
 
 coro::CoroTask<void>* as_coro(::dftu_task* t) {
@@ -186,7 +186,7 @@ TEST_CASE("C ABI: dftu_svc_compose type-checks a pipe from C") {
 
 TEST_CASE("C ABI: dftu_svc_query compile + match from C") {
     HostFixture fx;
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     std::string src = "cat == \"POSIX\"";
     auto len = static_cast<std::uint32_t>(src.size());
@@ -240,7 +240,7 @@ TEST_CASE("C ABI: dftu_svc_ops runs a host utility op from C") {
 TEST_CASE("C ABI: dftu_svc_trace write then read round-trips from C") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     const std::uint32_t N = 20;
     TestFrame frame = trace_test_frame(N);
@@ -255,7 +255,7 @@ TEST_CASE("C ABI: dftu_svc_trace write then read round-trips from C") {
 TEST_CASE("C ABI: dftu_io write/read round-trips from C") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
     std::string path = env.get_dir() + "/io_c.bin";
     std::string data = "hello-io";
     char buf[16] = {0};
@@ -290,7 +290,7 @@ TEST_CASE("C ABI: dftu_io write/read round-trips from C") {
 TEST_CASE("C ABI: dftu_svc_writer create/open/chunk/close from C") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
     std::string path = env.get_dir() + "/writer_c.out";
     std::string data = "chunk-from-c";
 

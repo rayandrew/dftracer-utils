@@ -3,7 +3,7 @@
 
 /** @file
  * dftu.svc.compose: first-class async op handles lent to a plugin. Optional
- * service group, fetched via dftu_host::get_service(DFTU_SVC_COMPOSE).
+ * service group, fetched via dftu_plugin_host::get_service(DFTU_SVC_COMPOSE).
  * Include dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

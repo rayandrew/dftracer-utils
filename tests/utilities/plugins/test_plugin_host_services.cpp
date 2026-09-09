@@ -1,7 +1,7 @@
 // Exercises the host services a plugin calls synchronously: Arrow batch export,
 // Arrow IPC write, the DDSketch handle, and the dftracer trace write/read
-// round-trip. Drives them through a real PluginFold-wired dftu_host, the way a
-// loaded plugin would.
+// round-trip. Drives them through a real PluginFold-wired dftu_plugin_host, the
+// way a loaded plugin would.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/config.h>
@@ -62,7 +62,7 @@ struct HostFixture {
         dftracer::utils::plugins::make_plugin<TrivialSlice>(nullptr);
     std::unique_ptr<PluginFold> fold =
         std::make_unique<PluginFold>(plugin, intern);
-    dftu_host& host() { return fold->host(); }
+    dftu_plugin_host& host() { return fold->host(); }
     dftu_str intern_str(const char* s) {
         return host().intern(host().h, s,
                              static_cast<std::uint32_t>(strlen(s)));
@@ -88,7 +88,7 @@ namespace dfti = dftracer::utils::trace::internal;
 TEST_CASE("plugin host: arrow_write_ipc writes a non-empty IPC file") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     namespace dfd = dftracer::utils::dataframe;
     const std::uint64_t ts0[3] = {500, 501, 502};
@@ -134,7 +134,7 @@ TEST_CASE("plugin host: arrow_write_ipc writes a non-empty IPC file") {
 
 TEST_CASE("plugin host: DDSketch handle add/merge/result round-trips") {
     HostFixture fx;
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     const auto* sk = static_cast<const dftu_svc_sketch*>(
         host.get_service(host.h, DFTU_SVC_SKETCH));
@@ -173,7 +173,7 @@ TEST_CASE("plugin host: DDSketch handle add/merge/result round-trips") {
 TEST_CASE("plugin host: trace write then read round-trips events") {
     dftu_utils_test::TestEnvironment env(0);
     HostFixture fx;
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     const auto* tr = static_cast<const dftu_svc_trace*>(
         host.get_service(host.h, DFTU_SVC_TRACE));

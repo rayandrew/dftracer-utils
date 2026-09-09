@@ -4,7 +4,7 @@
 /** @file
  * dftu.svc.sketch: a mergeable quantile accumulator lent to a plugin.
  * Optional service group, fetched via
- * dftu_host::get_service(DFTU_SVC_SKETCH). Include
+ * dftu_plugin_host::get_service(DFTU_SVC_SKETCH). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

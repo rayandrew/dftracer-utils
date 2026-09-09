@@ -39,11 +39,11 @@ namespace dftracer::utils::plugins {
 /// immediately.
 class Composed {
    public:
-    Composed(const dftu_host* host, dftu_task* task)
+    Composed(const dftu_plugin_host* host, dftu_task* task)
         : host_(host), task_(task) {}
 
     dftu_task* task() const noexcept { return task_; }
-    const dftu_host* host() const noexcept { return host_; }
+    const dftu_plugin_host* host() const noexcept { return host_; }
 
     bool await_ready() const noexcept { return task_ == nullptr; }
     void await_suspend(
@@ -53,17 +53,17 @@ class Composed {
     void await_resume() const noexcept {}
 
    private:
-    const dftu_host* host_;
+    const dftu_plugin_host* host_;
     dftu_task* task_;
 };
 
 namespace detail {
-inline const dftu_svc_coro* coro_ext(const dftu_host* h) {
+inline const dftu_svc_coro* coro_ext(const dftu_plugin_host* h) {
     return h && h->get_service ? static_cast<const dftu_svc_coro*>(
                                      h->get_service(h->h, DFTU_SVC_CORO))
                                : nullptr;
 }
-inline const dftu_svc_compose* compose_ext(const dftu_host* h) {
+inline const dftu_svc_compose* compose_ext(const dftu_plugin_host* h) {
     return h && h->get_service ? static_cast<const dftu_svc_compose*>(
                                      h->get_service(h->h, DFTU_SVC_COMPOSE))
                                : nullptr;
@@ -71,7 +71,7 @@ inline const dftu_svc_compose* compose_ext(const dftu_host* h) {
 }  // namespace detail
 
 /// Lift a task into the composable wrapper.
-inline Composed compose(const dftu_host* host, dftu_task* task) {
+inline Composed compose(const dftu_plugin_host* host, dftu_task* task) {
     return Composed{host, task};
 }
 
@@ -94,7 +94,7 @@ inline Composed operator||(Composed a, Composed b) {
 /// map: build one task per item with `make_task(item) -> dftu_task*` and join
 /// them all concurrently (when_all). Mirrors compose.h's map over the C ABI.
 template <class Range, class MakeTask>
-Composed map(const dftu_host* host, Range&& items, MakeTask make_task) {
+Composed map(const dftu_plugin_host* host, Range&& items, MakeTask make_task) {
     const dftu_svc_coro* c = detail::coro_ext(host);
     std::vector<dftu_task*> ts;
     for (auto&& item : items) ts.push_back(make_task(item));
@@ -155,13 +155,13 @@ constexpr dftu_type type_tag() {
 template <class In, class Out>
 class Op {
    public:
-    Op(const dftu_host* host, dftu_op* op) : host_(host), op_(op) {}
-    const dftu_host* host() const noexcept { return host_; }
+    Op(const dftu_plugin_host* host, dftu_op* op) : host_(host), op_(op) {}
+    const dftu_plugin_host* host() const noexcept { return host_; }
     dftu_op* raw() const noexcept { return op_; }
     bool valid() const noexcept { return op_ != nullptr; }
 
    private:
-    const dftu_host* host_;
+    const dftu_plugin_host* host_;
     dftu_op* op_;
 };
 
@@ -187,7 +187,7 @@ Op<In, Out> make_op(Host host, Fn fn) {
         std::is_trivially_copyable_v<In> && std::is_trivially_copyable_v<Out>,
         "compose Op values cross the C ABI as bytes; In/Out must be "
         "trivially copyable");
-    const dftu_host* raw = host.raw();
+    const dftu_plugin_host* raw = host.raw();
     const dftu_svc_compose* c = detail::compose_ext(raw);
     if (!c) return {raw, nullptr};
     Fn* state = new Fn(std::move(fn));

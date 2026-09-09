@@ -8,7 +8,7 @@
 
 static dftu_plugin g_plugin;
 
-dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+dftu_plugin* dftracer_plugin(dftu_plugin_host* h, const dftu_value* config) {
     (void)h;
     (void)config;
     memset(&g_plugin, 0, sizeof(g_plugin));

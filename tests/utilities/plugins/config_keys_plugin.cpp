@@ -39,6 +39,6 @@ struct Counted {
 }  // namespace
 
 extern "C" DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(
-    dftu_host* h, const dftu_value* config) {
+    dftu_plugin_host* h, const dftu_value* config) {
     return plugin(h, config).fold<Counted>().build();
 }

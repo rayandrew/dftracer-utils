@@ -257,7 +257,7 @@ class PluginFold : public trace::views::detail::Fold {
     int close_trace_writer(::dftu_trace_writer* w);
 
     // The fully wired host service table.
-    ::dftu_host& host() { return host_; }
+    ::dftu_plugin_host& host() { return host_; }
 
     // Valid until this PluginFold is destroyed; null on parse error.
     ::dftu_query* compile_query(const char* src, std::uint32_t len);
@@ -288,7 +288,7 @@ class PluginFold : public trace::views::detail::Fold {
     std::string plugin_name_;
     dftracer::utils::StringIntern* intern_;
     void* slice_;
-    dftu_host host_{};
+    dftu_plugin_host host_{};
     ::dftu_task* pending_ = nullptr;
     FoldPortBus* port_bus_ = nullptr;
     SharedResultRegistry* results_ = nullptr;

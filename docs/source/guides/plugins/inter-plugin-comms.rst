@@ -65,7 +65,7 @@ consumer reads it back during the same batch.
              void finalize(dftracer::utils::plugins::Host) {}
          };
 
-         dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+         dftu_plugin* dftracer_plugin(dftu_plugin_host* h, const dftu_value* config) {
              (void)h;
              return dftracer::utils::plugins::make_plugin<ProducerSlice>(config);
          }
@@ -113,7 +113,7 @@ consumer reads it back during the same batch.
       .. code-block:: c
 
          static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                                    const dftu_host* host) {
+                                    const dftu_plugin_host* host) {
              MyState* s = (MyState*)slice;
              const dftu_svc_ports* ports =
                  (const dftu_svc_ports*)host->get_service(host->h, DFTU_SVC_PORTS);
@@ -138,7 +138,7 @@ consumer reads it back during the same batch.
       .. code-block:: c
 
          static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                                    const dftu_host* host) {
+                                    const dftu_plugin_host* host) {
              MyState* s = (MyState*)slice;
              const dftu_svc_ports* ports =
                  (const dftu_svc_ports*)host->get_service(host->h, DFTU_SVC_PORTS);

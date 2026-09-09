@@ -1,8 +1,8 @@
 // Exercises the C++ SDK wrappers added over the plugin C ABI's fuller io
 // surface (vectored readv/writev/preadv/pwritev, lseek, sendfile), the
 // ergonomic Writer over the writer extension, and the coro spawn/then
-// combinators. Each drives a real PluginFold-wired dftu_host, the way a loaded
-// plugin would.
+// combinators. Each drives a real PluginFold-wired dftu_plugin_host, the way a
+// loaded plugin would.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/common/string_intern.h>
@@ -50,7 +50,7 @@ struct HostFixture {
         dftracer::utils::plugins::make_plugin<TrivialSlice>(nullptr);
     std::unique_ptr<PluginFold> fold =
         std::make_unique<PluginFold>(plugin, intern);
-    dftu_host& host() { return fold->host(); }
+    dftu_plugin_host& host() { return fold->host(); }
     ~HostFixture() {
         fold.reset();
         if (plugin && plugin->destroy) plugin->destroy(plugin->self);
@@ -73,7 +73,7 @@ std::string read_all(const std::string& path) {
 // Drive a plugin Task to completion on a fresh Runtime, exactly as the fuse
 // worker drives a plugin coroutine.
 template <class MakeTask>
-void drive_task(dftu_host& host, int workers, MakeTask make) {
+void drive_task(dftu_plugin_host& host, int workers, MakeTask make) {
     Runtime rt(workers);
     rt.scope("caller", [&](CoroScope&) -> coro::CoroTask<void> {
           dftu_task* driver =

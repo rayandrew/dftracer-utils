@@ -3,7 +3,7 @@
 
 /** @file
  * dftu.svc.query: the compiled predicate DSL lent to a plugin. Optional
- * service group, fetched via dftu_host::get_service(DFTU_SVC_QUERY).
+ * service group, fetched via dftu_plugin_host::get_service(DFTU_SVC_QUERY).
  * Include dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

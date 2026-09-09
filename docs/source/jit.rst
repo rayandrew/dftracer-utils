@@ -263,7 +263,7 @@ return a C/C++ string that is spliced verbatim into the per-event loop - so the
 per-event body has the full :doc:`plugins` ABI, while you keep the JIT
 framework: the typed ``jit.map`` declarations, the aggregate vocabulary above,
 and the compile / cache / load machinery. In scope inside a raw body are
-``host`` (the ``dftu_host``) and ``e`` / ``b`` / ``i`` (the current event,
+``host`` (the ``dftu_plugin_host``) and ``e`` / ``b`` / ``i`` (the current event,
 batch, and index).
 
 So JIT covers everything the C ABI can: the structured subset for the common

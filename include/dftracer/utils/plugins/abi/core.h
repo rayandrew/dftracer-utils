@@ -63,7 +63,7 @@ typedef enum {
     DFTU_PH_METADATA
 } dftu_phase;
 
-typedef struct dftu_host dftu_host;
+typedef struct dftu_plugin_host dftu_plugin_host;
 typedef struct dftu_task dftu_task;     /**< async node; awaited exactly once */
 typedef struct dftu_writer dftu_writer; /**< parallel output; host-owned */
 typedef struct dftu_query dftu_query;   /**< compiled filter; scan-lifetime */
@@ -168,8 +168,9 @@ typedef void (*dftu_work_fn)(void* arg);
    call only. `ud` is plugin-owned. */
 typedef void (*dftu_stream_item_fn)(const void* item, void* ud);
 
-/** Severity for dftu_host::log; higher is more severe. Mirrors the host's own
-   logger levels, so a plugin's line is gated by the same threshold. */
+/** Severity for dftu_plugin_host::log; higher is more severe. Mirrors the
+   host's own logger levels, so a plugin's line is gated by the same threshold.
+ */
 typedef enum {
     DFTU_LOG_TRACE = 0,
     DFTU_LOG_DEBUG = 1,
@@ -181,7 +182,7 @@ typedef enum {
 /** Services the host lends the plugin; all calls are safe from any slice
  * thread.
  */
-struct dftu_host {
+struct dftu_plugin_host {
     uint32_t abi_version;
     void* h;
 

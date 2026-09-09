@@ -38,7 +38,7 @@ void* make_empty_slice(void*) { return new int(0); }
 void destroy_empty_slice(void* slice) { delete static_cast<int*>(slice); }
 void no_merge(void*, void*) {}
 void no_destroy(void*) {}
-dftu_task* no_finalize(void*, const dftu_host*) { return nullptr; }
+dftu_task* no_finalize(void*, const dftu_plugin_host*) { return nullptr; }
 
 dftu_plugin make_bare_plugin(void* self) {
     dftu_plugin p{};
@@ -75,7 +75,7 @@ dftu_plugin make_graph_plugin(NameLists* st) {
 // The producer: one zero-key accumulator over the whole scan, named
 // STATS_NAME, which the consumer reads back by that name.
 dftu_task* producer_on_batch(void*, const dftu_dataframe* df,
-                             const dftu_host* host) {
+                             const dftu_plugin_host* host) {
     const auto* agg = static_cast<const dftu_svc_agg*>(
         host->get_service(host->h, DFTU_SVC_AGG));
     if (!agg || !agg->agg_new) return nullptr;
@@ -100,7 +100,7 @@ dftu_plugin make_producer() {
 // records the row count it found. Zero means it ran first and saw nothing.
 std::atomic<std::int64_t> g_seen_rows{-1};
 
-dftu_task* consumer_on_finalize(void*, const dftu_host* host) {
+dftu_task* consumer_on_finalize(void*, const dftu_plugin_host* host) {
     const auto* agg = static_cast<const dftu_svc_agg*>(
         host->get_service(host->h, DFTU_SVC_AGG));
     dftu_dataframe* res =
@@ -111,7 +111,8 @@ dftu_task* consumer_on_finalize(void*, const dftu_host* host) {
     return nullptr;
 }
 
-dftu_task* consumer_on_batch(void*, const dftu_dataframe*, const dftu_host*) {
+dftu_task* consumer_on_batch(void*, const dftu_dataframe*,
+                             const dftu_plugin_host*) {
     return nullptr;
 }
 

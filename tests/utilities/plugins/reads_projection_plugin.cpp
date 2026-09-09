@@ -92,7 +92,7 @@ struct UndeclaredReadsSlice : ColumnProbe {
 }  // namespace
 
 extern "C" DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(
-    dftu_host* h, const dftu_value* config) {
+    dftu_plugin_host* h, const dftu_value* config) {
     Config cfg(config);
     if (cfg.get_bool("declare_reads", false))
         return plugin(h, config).fold<DeclaredReadsSlice>().build();

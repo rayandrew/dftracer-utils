@@ -8,8 +8,8 @@
 
 /* Compile `src` and match row `row` of `df`: 1 match, 0 no-match, -1 on compile
  * failure. */
-int dftu_test_query_match(const dftu_host* h, const char* src, uint32_t len,
-                          const dftu_dataframe* df, int64_t row) {
+int dftu_test_query_match(const dftu_plugin_host* h, const char* src,
+                          uint32_t len, const dftu_dataframe* df, int64_t row) {
     const dftu_svc_query* q =
         (const dftu_svc_query*)h->get_service(h->h, DFTU_SVC_QUERY);
     if (!q) return -1;
@@ -19,8 +19,8 @@ int dftu_test_query_match(const dftu_host* h, const char* src, uint32_t len,
 }
 
 /* A null query must match to a defined 0 across the ABI, never trap. */
-int dftu_test_query_null_is_safe(const dftu_host* h, const dftu_dataframe* df,
-                                 int64_t row) {
+int dftu_test_query_null_is_safe(const dftu_plugin_host* h,
+                                 const dftu_dataframe* df, int64_t row) {
     const dftu_svc_query* q =
         (const dftu_svc_query*)h->get_service(h->h, DFTU_SVC_QUERY);
     if (!q) return -1;

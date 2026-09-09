@@ -8,7 +8,7 @@
 
 static dftu_plugin g_plugin;
 
-DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_host* h,
+DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_plugin_host* h,
                                                 const dftu_value* config) {
     const dftu_io* io;
     (void)config;

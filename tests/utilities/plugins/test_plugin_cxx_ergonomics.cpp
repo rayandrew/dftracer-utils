@@ -65,7 +65,7 @@ struct HostFixture {
         dftracer::utils::plugins::make_plugin<TrivialSlice>(nullptr);
     std::unique_ptr<PluginFold> fold =
         std::make_unique<PluginFold>(plugin, intern);
-    dftu_host& host() { return fold->host(); }
+    dftu_plugin_host& host() { return fold->host(); }
     dftu_str intern_str(const char* s) {
         return host().intern(host().h, s,
                              static_cast<std::uint32_t>(std::strlen(s)));
@@ -77,7 +77,7 @@ struct HostFixture {
 };
 
 template <class MakeTask>
-void drive_task(dftu_host& host, int workers, MakeTask make) {
+void drive_task(dftu_plugin_host& host, int workers, MakeTask make) {
     Runtime rt(workers);
     rt.scope("caller", [&](CoroScope&) -> coro::CoroTask<void> {
           dftu_task* driver =
@@ -405,7 +405,7 @@ FoldEvent evt(std::uint64_t pid, std::uint64_t dur, std::uint64_t tid) {
 // factories: a per-key row count and the tid at the largest duration. Neither
 // names a raw DFTU_AGG_* code nor fills a dftu_agg_col by hand.
 ::dftu_task* agg_facade_columns(void* slice, const dftu_dataframe* df,
-                                const dftu_host* host) {
+                                const dftu_plugin_host* host) {
     (void)slice;
     dftracer::utils::plugins::Host h{host};
     const auto acc =
@@ -424,7 +424,7 @@ dftu_plugin make_agg_facade_plugin() {
         return &sentinel;
     };
     p.merge = [](void*, void*) {};
-    p.on_finalize = [](void*, const dftu_host*) -> ::dftu_task* {
+    p.on_finalize = [](void*, const dftu_plugin_host*) -> ::dftu_task* {
         return nullptr;
     };
     p.destroy_slice = [](void*) {};

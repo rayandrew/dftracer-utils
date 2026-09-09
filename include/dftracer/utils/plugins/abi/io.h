@@ -3,7 +3,7 @@
 
 /** @file
  * dftu.svc.io: async POSIX file/socket I/O lent to a plugin. Optional service
- * group, fetched via dftu_host::get_service(DFTU_SVC_IO). Include
+ * group, fetched via dftu_plugin_host::get_service(DFTU_SVC_IO). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

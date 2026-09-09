@@ -34,7 +34,7 @@ class InPort;
 
 class Host {
    public:
-    explicit Host(const dftu_host* h) : h_(h) {}
+    explicit Host(const dftu_plugin_host* h) : h_(h) {}
 
     std::string_view str(StrId id) const {
         if (id.absent()) return {};
@@ -395,7 +395,7 @@ class Host {
     template <class T>
     InPort<T> consume_port(const char* name) const;
 
-    const dftu_host* raw() const { return h_; }
+    const dftu_plugin_host* raw() const { return h_; }
 
    private:
     /// Fetch a host-service group once and memoize it in `slot`; a missing
@@ -413,7 +413,7 @@ class Host {
         return e && e->emit ? e->emit(h_->h, name, v) : -1;
     }
 
-    const dftu_host* h_;
+    const dftu_plugin_host* h_;
     mutable const dftu_svc_coro* coro_ext_ = nullptr;
     mutable const dftu_svc_query* query_ext_ = nullptr;
     mutable const dftu_svc_writer* writer_ext_ = nullptr;

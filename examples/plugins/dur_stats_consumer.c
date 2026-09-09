@@ -73,7 +73,7 @@ static double cell(const dftu_dataframe* df, const char* name, int* ok) {
     return out;
 }
 
-static dftu_task* on_finalize(void* slice, const dftu_host* host) {
+static dftu_task* on_finalize(void* slice, const dftu_plugin_host* host) {
     (void)slice;
     const dftu_svc_agg* agg =
         (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);
@@ -113,7 +113,7 @@ static const char* const* consumes(void* self) {
 
 static dftu_plugin g_plugin;
 
-DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_plugin_host* h, const dftu_value* config) {
     (void)h;
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;

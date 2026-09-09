@@ -187,7 +187,7 @@ dftu_plugin state_only_plugin() {
         return &sentinel;
     };
     p.merge = [](void*, void*) {};
-    p.on_finalize = [](void*, const dftu_host*) -> dftu_task* {
+    p.on_finalize = [](void*, const dftu_plugin_host*) -> dftu_task* {
         return nullptr;
     };
     p.destroy_slice = [](void*) {};

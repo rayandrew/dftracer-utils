@@ -17,7 +17,7 @@ Two headers cover the pieces most programs need:
   query as a mask.
 
 A third header, ``dftracer/utils/plugins/abi.h``, is the C ABI for writing a
-plugin that rides the engine's fused scan (a ``dftu_host`` vtable, interned
+plugin that rides the engine's fused scan (a ``dftu_plugin_host`` vtable, interned
 strings, typed extension tables); see :doc:`../../plugins` if you are extending
 the engine rather than consuming its output.
 

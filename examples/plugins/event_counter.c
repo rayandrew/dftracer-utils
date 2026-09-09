@@ -23,7 +23,7 @@ static void* make_slice(void* self) {
 }
 
 static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                           const dftu_host* host) {
+                           const dftu_plugin_host* host) {
     Counter* c = (Counter*)slice;
     int64_t n = dftu_dataframe_num_rows(df);
     dftu_series* dur_col = dftu_dataframe_column(df, "dur");
@@ -59,7 +59,7 @@ static void merge(void* into, void* other) {
     if (o->max_dur > a->max_dur) a->max_dur = o->max_dur;
 }
 
-static dftu_task* on_finalize(void* slice, const dftu_host* host) {
+static dftu_task* on_finalize(void* slice, const dftu_plugin_host* host) {
     const Counter* c = (const Counter*)slice;
     char line[128];
     int n =
@@ -76,7 +76,7 @@ static void destroy(void* self) { (void)self; }
 
 static dftu_plugin g_plugin;
 
-DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_plugin_host* h, const dftu_value* config) {
     (void)h;
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;

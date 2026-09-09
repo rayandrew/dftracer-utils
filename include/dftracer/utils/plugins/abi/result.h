@@ -3,7 +3,7 @@
 
 /** @file
  * dftu.svc.result: the named result channel lent to a plugin. Optional
- * service group, fetched via dftu_host::get_service(DFTU_SVC_RESULT).
+ * service group, fetched via dftu_plugin_host::get_service(DFTU_SVC_RESULT).
  * Include dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

@@ -4,7 +4,7 @@
 /** @file
  * dftu.svc.writer: a host-owned parallel output writer lent to a plugin.
  * Optional service group, fetched via
- * dftu_host::get_service(DFTU_SVC_WRITER). Include
+ * dftu_plugin_host::get_service(DFTU_SVC_WRITER). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

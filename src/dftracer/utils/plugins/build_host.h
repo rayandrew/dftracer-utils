@@ -22,7 +22,7 @@ class BuildHost {
     explicit BuildHost(std::string plugin_name);
 
     /// Handed to the factory; valid only for that call.
-    dftu_host* host() { return &host_; }
+    dftu_plugin_host* host() { return &host_; }
 
     /// The first service the factory was denied, empty when it stayed inside
     /// the registration surface.
@@ -53,7 +53,7 @@ class BuildHost {
     std::string denied_;
     StateRegistry states_;
     std::vector<std::string> registered_ops_;
-    dftu_host host_{};
+    dftu_plugin_host host_{};
 };
 
 }  // namespace dftracer::utils::plugins

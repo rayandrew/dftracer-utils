@@ -3,7 +3,7 @@
 
 /** @file
  * dftu.svc.trace: dftracer trace file I/O lent to a plugin. Optional service
- * group, fetched via dftu_host::get_service(DFTU_SVC_TRACE). Include
+ * group, fetched via dftu_plugin_host::get_service(DFTU_SVC_TRACE). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

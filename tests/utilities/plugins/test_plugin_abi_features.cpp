@@ -296,7 +296,7 @@ struct FoldFixture {
     explicit FoldFixture(const dftu_value* config)
         : plugin(dftracer::utils::plugins::make_plugin<Slice>(config)),
           fold(std::make_unique<PluginFold>(plugin, intern)) {}
-    dftu_host& host() { return fold->host(); }
+    dftu_plugin_host& host() { return fold->host(); }
     ~FoldFixture() {
         fold.reset();
         if (plugin && plugin->destroy) plugin->destroy(plugin->self);
@@ -319,9 +319,9 @@ void col_merge(void* into, void* other) {
         static_cast<ColState*>(other)->dur_sum;
 }
 const char* col_plan_query(void*) { return nullptr; }
-::dftu_task* col_on_finalize(void*, const dftu_host*) { return nullptr; }
+::dftu_task* col_on_finalize(void*, const dftu_plugin_host*) { return nullptr; }
 ::dftu_task* col_on_batch(void* slice, const dftu_dataframe* df,
-                          const dftu_host*) {
+                          const dftu_plugin_host*) {
     dftu_series* col = dftu_dataframe_column(df, "dur");
     if (col) {
         dftu_scalar s = dftu_series_reduce(col, DFTU_REDUCE_SUM);
@@ -424,7 +424,7 @@ TEST_CASE("plugin ABI: config tree reads scalars, nested, array, and default") {
 
 TEST_CASE("plugin ABI: query_compile then query_matches on known events") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     const auto* qx = static_cast<const dftu_svc_query*>(
         host.get_service(host.h, DFTU_SVC_QUERY));
@@ -496,7 +496,7 @@ TEST_CASE("plugin ABI: plan_query on fhash delivers only matching events") {
 
 TEST_CASE("plugin ABI: spawn fan-out joined by when_all runs every child") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::atomic<int> ran{0};
@@ -512,7 +512,7 @@ TEST_CASE("plugin ABI: spawn fan-out joined by when_all runs every child") {
 
 TEST_CASE("plugin ABI: when_any returns after the first child") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::atomic<int> ran{0};
@@ -527,7 +527,7 @@ TEST_CASE("plugin ABI: when_any returns after the first child") {
 
 TEST_CASE("plugin ABI: compose && joins both tasks (when_all)") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::atomic<int> ran{0};
@@ -542,7 +542,7 @@ TEST_CASE("plugin ABI: compose && joins both tasks (when_all)") {
 
 TEST_CASE("plugin ABI: compose || races the tasks (when_any)") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::atomic<int> ran{0};
@@ -557,7 +557,7 @@ TEST_CASE("plugin ABI: compose || races the tasks (when_any)") {
 
 TEST_CASE("plugin ABI: compose map joins one task per item (when_all)") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::atomic<int> ran{0};
@@ -572,7 +572,7 @@ TEST_CASE("plugin ABI: compose map joins one task per item (when_all)") {
 
 TEST_CASE("plugin ABI: compose dftu_op then threads a value through the pipe") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::int64_t result = 0;
@@ -587,7 +587,7 @@ TEST_CASE("plugin ABI: compose dftu_op then threads a value through the pipe") {
 
 TEST_CASE("plugin ABI: compose dftu_op when_all concatenates outputs") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::int64_t a = 0, b = 0;
@@ -603,7 +603,7 @@ TEST_CASE("plugin ABI: compose dftu_op when_all concatenates outputs") {
 
 TEST_CASE("plugin ABI: compose dftu_op when_any yields the winner's value") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::int64_t result = 0;
@@ -618,7 +618,7 @@ TEST_CASE("plugin ABI: compose dftu_op when_any yields the winner's value") {
 
 TEST_CASE("plugin ABI: typed compose Op pipes real values") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::int64_t result = 0;
@@ -641,7 +641,7 @@ TEST_CASE(
         dftracer::utils::plugins::type_tag<dftu_dataframe*>() == DFTU_T_TABLE,
         "a dftu_dataframe* handle tags as DFTU_T_TABLE");
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     dftu_series* out = nullptr;
@@ -701,7 +701,7 @@ TEST_CASE("plugin ABI: compose dftu_op then rejects a type mismatch") {
 
 TEST_CASE("plugin ABI: then chains a continuation after its task") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
 
     Runtime rt(1);
     std::vector<int> order;
@@ -718,7 +718,7 @@ TEST_CASE("plugin ABI: then chains a continuation after its task") {
 
 TEST_CASE("plugin ABI: host utility ops fnv1a and hex64_parse") {
     FoldFixture<CountSlice> fx(nullptr);
-    dftu_host& host = fx.host();
+    dftu_plugin_host& host = fx.host();
     dftracer::utils::plugins::Host h{&host};
 
     const char data[] = "POSIXabc0123456789abcdefnothexnothex1234";

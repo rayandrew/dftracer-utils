@@ -13,7 +13,7 @@ static void count_cb(const void* item, void* ud) {
 
 /* Write every row of `df` to `path`, then read it back; *out_read gets the
  * count. */
-int dftu_test_trace_roundtrip(const dftu_host* h, const char* path,
+int dftu_test_trace_roundtrip(const dftu_plugin_host* h, const char* path,
                               const dftu_dataframe* df, int* out_read) {
     const dftu_svc_trace* t =
         (const dftu_svc_trace*)h->get_service(h->h, DFTU_SVC_TRACE);

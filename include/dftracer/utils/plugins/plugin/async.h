@@ -10,12 +10,13 @@
 namespace dftracer::utils::plugins {
 
 /// A lazy coroutine that yields, at each co_await, the next dftu_task the host
-/// should await; the host drives it to completion (see dftu_host::drive).
+/// should await; the host drives it to completion (see
+/// dftu_plugin_host::drive).
 class Task {
    public:
     struct promise_type {
         dftu_task* pending = nullptr;
-        const dftu_host* host = nullptr;
+        const dftu_plugin_host* host = nullptr;
         std::exception_ptr exc;
 
         Task get_return_object() {
@@ -72,7 +73,7 @@ struct AsyncOp {
 /// `co_await`, a no-op if the host does not provide the io group.
 class Io {
    public:
-    explicit Io(const dftu_host* h)
+    explicit Io(const dftu_plugin_host* h)
         : h_(h),
           io_(h && h->get_service ? static_cast<const dftu_io*>(
                                         h->get_service(h->h, DFTU_SVC_IO))
@@ -180,7 +181,7 @@ class Io {
     }
 
    private:
-    const dftu_host* h_;
+    const dftu_plugin_host* h_;
     const dftu_io* io_;
 };
 

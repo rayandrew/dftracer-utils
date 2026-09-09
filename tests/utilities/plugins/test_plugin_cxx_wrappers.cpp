@@ -66,7 +66,7 @@ FoldEvent evt(StringIntern& intern, std::uint64_t pid, std::uint64_t dur,
 // (pid, name) count, and a per-pid name set. All through Host::agg + the
 // agg:: factories, so no case names a raw DFTU_AGG_* code.
 ::dftu_task* wrappers_columns(void* slice, const dftu_dataframe* df,
-                              const dftu_host* host) {
+                              const dftu_plugin_host* host) {
     (void)slice;
     Host h{host};
     if (const auto a = h.agg("wrap_scalar", {},
@@ -94,7 +94,7 @@ dftu_plugin make_wrappers_plugin() {
         return &sentinel;
     };
     p.merge = [](void*, void*) {};
-    p.on_finalize = [](void*, const dftu_host*) -> ::dftu_task* {
+    p.on_finalize = [](void*, const dftu_plugin_host*) -> ::dftu_task* {
         return nullptr;
     };
     p.destroy_slice = [](void*) {};

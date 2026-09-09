@@ -3,7 +3,7 @@
 
 /** @file
  * dftu.svc.arrow: Arrow IPC file I/O lent to a plugin. Optional service
- * group, fetched via dftu_host::get_service(DFTU_SVC_ARROW). Include
+ * group, fetched via dftu_plugin_host::get_service(DFTU_SVC_ARROW). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

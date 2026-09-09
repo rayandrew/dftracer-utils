@@ -220,7 +220,7 @@ inline dftu_task* step_thunk(void* coro) {
     h.resume();
     if (!h.done()) return h.promise().pending;
     if (h.promise().exc) {
-        if (const dftu_host* host = h.promise().host) {
+        if (const dftu_plugin_host* host = h.promise().host) {
             try {
                 std::rethrow_exception(h.promise().exc);
             } catch (const std::exception& e) {
@@ -235,7 +235,7 @@ inline dftu_task* step_thunk(void* coro) {
 }
 
 template <class Slice, class Coro>
-dftu_task* drive_coro(const dftu_host* host, Coro&& coro) {
+dftu_task* drive_coro(const dftu_plugin_host* host, Coro&& coro) {
     Task t = std::forward<Coro>(coro);
     auto h = t.release();
     h.promise().host = host;
@@ -357,7 +357,7 @@ dftu_plugin* make_plugin(const dftu_value* config) {
     // dftu_plugin::on_batch is synchronous only (must return NULL); the host
     // frees the dftu_dataframe right after the call.
     vt.on_batch = [](void* slice, const dftu_dataframe* df,
-                     const dftu_host* host) -> dftu_task* {
+                     const dftu_plugin_host* host) -> dftu_task* {
         try {
             Slice* sl = static_cast<Slice*>(slice);
             Host h{host};
@@ -381,7 +381,8 @@ dftu_plugin* make_plugin(const dftu_value* config) {
         }
     };
 
-    vt.on_finalize = [](void* slice, const dftu_host* host) -> dftu_task* {
+    vt.on_finalize = [](void* slice,
+                        const dftu_plugin_host* host) -> dftu_task* {
         try {
             if constexpr (detail::AsyncFinalize<Slice>) {
                 return detail::drive_coro<Slice>(
@@ -562,7 +563,7 @@ const dftu_state_desc& state_desc_of(const char* name) {
    which is how a caller LOADS plugins. */
 class PluginBuilder {
    public:
-    PluginBuilder(dftu_host* host, const dftu_value* config)
+    PluginBuilder(dftu_plugin_host* host, const dftu_value* config)
         : host_(host), config_(config) {}
 
     /// The fold half, exactly as make_plugin<Slice> builds it. At most one.
@@ -625,14 +626,14 @@ class PluginBuilder {
         return *this;
     }
 
-    dftu_host* host_;
+    dftu_plugin_host* host_;
     const dftu_value* config_;
     dftu_plugin* vt_ = nullptr;
     bool ok_ = true;
 };
 
 /// Entry point for the builder; see PluginBuilder.
-inline PluginBuilder plugin(dftu_host* host, const dftu_value* config) {
+inline PluginBuilder plugin(dftu_plugin_host* host, const dftu_value* config) {
     return PluginBuilder{host, config};
 }
 

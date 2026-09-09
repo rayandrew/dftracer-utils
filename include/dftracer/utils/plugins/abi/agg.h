@@ -4,7 +4,7 @@
 /** @file
  * dftu.svc.agg: the host-owned cross-batch aggregation accumulator lent to a
  * plugin. Optional service group, fetched via
- * dftu_host::get_service(DFTU_SVC_AGG). Include
+ * dftu_plugin_host::get_service(DFTU_SVC_AGG). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

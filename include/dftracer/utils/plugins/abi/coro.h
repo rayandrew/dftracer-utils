@@ -3,7 +3,7 @@
 
 /** @file
  * dftu.svc.coro: task combinators lent to a plugin. Optional service group,
- * fetched via dftu_host::get_service(DFTU_SVC_CORO). Include
+ * fetched via dftu_plugin_host::get_service(DFTU_SVC_CORO). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

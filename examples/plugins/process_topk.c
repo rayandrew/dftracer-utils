@@ -22,7 +22,7 @@ static void* make_slice(void* self) {
 }
 
 static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                           const dftu_host* host) {
+                           const dftu_plugin_host* host) {
     const dftu_svc_agg* agg =
         (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);
     static const char* const keys[1] = {"pid"};
@@ -44,7 +44,7 @@ static void merge(void* into, void* other) {
     (void)other;
 }
 
-static dftu_task* on_finalize(void* slice, const dftu_host* host) {
+static dftu_task* on_finalize(void* slice, const dftu_plugin_host* host) {
     (void)slice;
     (void)host;
     return NULL;
@@ -56,7 +56,7 @@ static void destroy(void* self) { (void)self; }
 
 static dftu_plugin g_plugin;
 
-DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_plugin_host* h, const dftu_value* config) {
     (void)h;
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;

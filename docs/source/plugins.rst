@@ -132,7 +132,7 @@ call - N rows in scan order is N events, never retain the pointer.
              void finalize(Host) {}                 // emit output
          };
 
-         extern "C" dftu_plugin* dftracer_plugin(dftu_host* h,
+         extern "C" dftu_plugin* dftracer_plugin(dftu_plugin_host* h,
                                                  const dftu_value* config) {
              return plugin(h, config).fold<MyPlugin>().build();
          }
@@ -151,11 +151,11 @@ call - N rows in scan order is N events, never retain the pointer.
          static const char* plan_query(void* self) { (void)self; return NULL; }
          static void* make_slice(void* self) { (void)self; return calloc(1, 1); }
          static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                                   const dftu_host* host) {
+                                   const dftu_plugin_host* host) {
              (void)slice; (void)df; (void)host; return NULL;  /* synchronous */
          }
          static void merge(void* into, void* other) { (void)into; (void)other; }
-         static dftu_task* on_finalize(void* s, const dftu_host* h) {
+         static dftu_task* on_finalize(void* s, const dftu_plugin_host* h) {
              (void)s; (void)h; return NULL;
          }
          static void destroy_slice(void* slice) { free(slice); }
@@ -163,7 +163,7 @@ call - N rows in scan order is N events, never retain the pointer.
 
          static dftu_plugin g_plugin;
 
-         dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+         dftu_plugin* dftracer_plugin(dftu_plugin_host* h, const dftu_value* config) {
              (void)h; (void)config;
              g_plugin.abi_version   = DFTRACER_PLUGIN_ABI_VERSION;
              g_plugin.self          = NULL;
@@ -315,7 +315,7 @@ block args (later wins). A plugin reads the resulting tree from its factory.
 
       .. code-block:: c
 
-         dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+         dftu_plugin* dftracer_plugin(dftu_plugin_host* h, const dftu_value* config) {
              (void)h;
              int64_t threshold = dftu_as_i64(dftu_obj_get(config, "threshold"), 0);
              /* stash `threshold` in a static/self the slices can read */
@@ -400,7 +400,7 @@ A plugin working straight off the columns (no per-row cursor) reads the
       .. code-block:: c
 
          static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                                   const dftu_host* host) {
+                                   const dftu_plugin_host* host) {
              (void)slice;
              int64_t n = dftu_dataframe_num_rows(df);
              dftu_series* ph_col = dftu_dataframe_column(df, "ph");
@@ -498,7 +498,7 @@ Count events and total their duration per ``(pid, event-name)``:
       .. code-block:: c
 
          static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                                   const dftu_host* host) {
+                                   const dftu_plugin_host* host) {
              (void)slice;
              const dftu_svc_agg* agg =
                  (const dftu_svc_agg*)host->get_service(host->h, DFTU_SVC_AGG);
@@ -741,7 +741,7 @@ or ``run_blocking``, never inside ``on_batch``.
              }
          };
 
-         extern "C" dftu_plugin* dftracer_plugin(dftu_host* h,
+         extern "C" dftu_plugin* dftracer_plugin(dftu_plugin_host* h,
                                                  const dftu_value* config) {
              return plugin(h, config).fold<Writer>().build();
          }
@@ -757,7 +757,7 @@ or ``run_blocking``, never inside ``on_batch``.
 
       .. code-block:: c
 
-         static dftu_task* on_finalize(void* slice, const dftu_host* host) {
+         static dftu_task* on_finalize(void* slice, const dftu_plugin_host* host) {
              (void)slice;
              const dftu_io* io =
                  (const dftu_io*)host->get_service(host->h, DFTU_SVC_IO);

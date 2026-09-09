@@ -6,8 +6,8 @@
 #include <stdint.h>
 
 /* Hash `data` with the host's dftu.hash.fnv1a op; 0 ok, -1 on failure. */
-int dftu_test_ops_fnv1a(const dftu_host* h, const char* data, uint32_t len,
-                        uint64_t* out) {
+int dftu_test_ops_fnv1a(const dftu_plugin_host* h, const char* data,
+                        uint32_t len, uint64_t* out) {
     const dftu_svc_ops* ops =
         (const dftu_svc_ops*)h->get_service(h->h, DFTU_SVC_OPS);
     int32_t offsets[2];
@@ -32,7 +32,7 @@ int dftu_test_ops_fnv1a(const dftu_host* h, const char* data, uint32_t len,
 }
 
 /* The registry is reachable by name, and find exposes the op's signature. */
-int dftu_test_ops_find(const dftu_host* h) {
+int dftu_test_ops_find(const dftu_plugin_host* h) {
     const dftu_svc_ops* ops =
         (const dftu_svc_ops*)h->get_service(h->h, DFTU_SVC_OPS);
     const dftu_op_desc* desc;

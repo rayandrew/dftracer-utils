@@ -50,7 +50,7 @@ static void* make_slice(void* self) {
 }
 
 static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                           const dftu_host* host) {
+                           const dftu_plugin_host* host) {
     Counts* c = (Counts*)slice;
     int64_t n = dftu_dataframe_num_rows(df);
     dftu_series* pid_col = dftu_dataframe_column(df, "pid");
@@ -74,7 +74,7 @@ static void merge(void* into, void* other) {
 
 /* Serialize the merged map to TSV and hand the bytes to the host. Sorted by pid
  * so the output is deterministic regardless of worker interleaving. */
-static dftu_task* on_finalize(void* slice, const dftu_host* host) {
+static dftu_task* on_finalize(void* slice, const dftu_plugin_host* host) {
     Counts* c = (Counts*)slice;
     const dftu_svc_result* res =
         (const dftu_svc_result*)host->get_service(host->h, DFTU_SVC_RESULT);
@@ -121,7 +121,7 @@ static void destroy(void* self) { (void)self; }
 
 static dftu_plugin g_plugin;
 
-DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_host* h, const dftu_value* config) {
+DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_plugin_host* h, const dftu_value* config) {
     (void)h;
     (void)config;
     g_plugin.abi_version = DFTRACER_PLUGIN_ABI_VERSION;

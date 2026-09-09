@@ -40,7 +40,7 @@ struct HostFixture {
         dftracer::utils::plugins::make_plugin<TrivialSlice>(nullptr);
     std::unique_ptr<PluginFold> fold =
         std::make_unique<PluginFold>(plugin, intern);
-    dftu_host& host() { return fold->host(); }
+    dftu_plugin_host& host() { return fold->host(); }
     ~HostFixture() {
         fold.reset();
         if (plugin && plugin->destroy) plugin->destroy(plugin->self);

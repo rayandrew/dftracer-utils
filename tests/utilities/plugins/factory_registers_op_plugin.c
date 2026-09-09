@@ -27,7 +27,7 @@ static void* make_slice(void* self) {
 }
 
 static dftu_task* on_batch(void* slice, const dftu_dataframe* df,
-                           const dftu_host* host) {
+                           const dftu_plugin_host* host) {
     const dftu_svc_ops* ops =
         (const dftu_svc_ops*)host->get_service(host->h, DFTU_SVC_OPS);
     dftu_series* dur = dftu_dataframe_column(df, "dur");
@@ -44,7 +44,7 @@ static void merge(void* into, void* other) {
     *(int64_t*)into += *(int64_t*)other;
 }
 
-static dftu_task* on_finalize(void* slice, const dftu_host* host) {
+static dftu_task* on_finalize(void* slice, const dftu_plugin_host* host) {
     const dftu_svc_result* res =
         (const dftu_svc_result*)host->get_service(host->h, DFTU_SVC_RESULT);
     dftu_result_value v;
@@ -63,7 +63,7 @@ static void destroy(void* self) { (void)self; }
 
 static dftu_plugin g_plugin;
 
-DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_host* h,
+DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_plugin_host* h,
                                                 const dftu_value* config) {
     const dftu_svc_ops* ops;
     (void)config;

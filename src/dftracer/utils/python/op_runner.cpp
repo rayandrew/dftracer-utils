@@ -28,7 +28,7 @@ struct TrivialSlice {
     void finalize(dftracer::utils::plugins::Host) {}
 };
 
-using build_op_fn = ::dftu_op* (*)(const ::dftu_host*);
+using build_op_fn = ::dftu_op* (*)(const ::dftu_plugin_host*);
 
 PyObject* jit_run_op(PyObject*, PyObject* args) {
     const char* so_path = nullptr;
@@ -68,7 +68,7 @@ PyObject* jit_run_op(PyObject*, PyObject* args) {
             dftracer::utils::plugins::make_plugin<TrivialSlice>(nullptr);
         {
             PluginFold fold(plugin, intern);
-            ::dftu_host& host = fold.host();
+            ::dftu_plugin_host& host = fold.host();
             ::dftu_op* op = build(&host);
             const auto* compose = static_cast<const ::dftu_svc_compose*>(
                 host.get_service(host.h, DFTU_SVC_COMPOSE));

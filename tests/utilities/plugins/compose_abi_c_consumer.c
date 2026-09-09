@@ -19,12 +19,12 @@ static dftu_task* c_plus10(void* state, const void* in, void* out, int* rc) {
     return NULL;
 }
 
-static const dftu_svc_compose* compose_of(const dftu_host* h) {
+static const dftu_svc_compose* compose_of(const dftu_plugin_host* h) {
     return (const dftu_svc_compose*)h->get_service(h->h, DFTU_SVC_COMPOSE);
 }
 
 /* (in*2) then (+10); returns the run task, writes *out and *rc. */
-dftu_task* dftu_test_compose_pipe(const dftu_host* h, const int64_t* in,
+dftu_task* dftu_test_compose_pipe(const dftu_plugin_host* h, const int64_t* in,
                                   int64_t* out, int* rc) {
     const dftu_svc_compose* c = compose_of(h);
     if (!c) return NULL;
@@ -36,7 +36,7 @@ dftu_task* dftu_test_compose_pipe(const dftu_host* h, const int64_t* in,
 }
 
 /* when_all fans one input to both leaves; out is int64[2] = {in*2, in+10}. */
-dftu_task* dftu_test_compose_all(const dftu_host* h, const int64_t* in,
+dftu_task* dftu_test_compose_all(const dftu_plugin_host* h, const int64_t* in,
                                  int64_t* out, int* rc) {
     const dftu_svc_compose* c = compose_of(h);
     if (!c) return NULL;
@@ -50,7 +50,7 @@ dftu_task* dftu_test_compose_all(const dftu_host* h, const int64_t* in,
 
 /* 1 if the ABI rejects a mismatched pipe (i64 -> f64) and accepts a matching
  * one (i64 -> i64); pure graph building, no run needed. */
-int dftu_test_compose_typecheck(const dftu_host* h) {
+int dftu_test_compose_typecheck(const dftu_plugin_host* h) {
     const dftu_svc_compose* c = compose_of(h);
     if (!c) return 0;
     dftu_op* a =

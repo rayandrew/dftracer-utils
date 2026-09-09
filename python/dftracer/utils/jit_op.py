@@ -183,7 +183,7 @@ def _emit(op_obj: Op) -> str:
         "#ifdef __cplusplus",
         'extern "C"',
         "#endif",
-        "dftu_op* dftracer_build_op(const dftu_host* host) {",
+        "dftu_op* dftracer_build_op(const dftu_plugin_host* host) {",
         "    const dftu_svc_compose* c = (const dftu_svc_compose*)"
         "host->get_service(host->h, DFTU_SVC_COMPOSE);",
         "    if (!c) return 0;",

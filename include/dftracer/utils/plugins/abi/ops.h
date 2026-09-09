@@ -3,8 +3,9 @@
 
 /** @file
  * dftu.svc.ops: the dataframe engine's op registry lent to a plugin by name.
- * Optional service group, fetched via dftu_host::get_service(DFTU_SVC_OPS).
- * Include dftracer/utils/plugins/abi.h rather than this file directly.
+ * Optional service group, fetched via
+ * dftu_plugin_host::get_service(DFTU_SVC_OPS). Include
+ * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 
 #include <dftracer/utils/dataframe/abi.h> /* dftu_scalar, by value below */

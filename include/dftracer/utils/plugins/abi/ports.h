@@ -4,7 +4,7 @@
 /** @file
  * dftu.svc.ports: batch-scoped producer -> consumer channels lent to a
  * plugin. Optional service group, fetched via
- * dftu_host::get_service(DFTU_SVC_PORTS). Include
+ * dftu_plugin_host::get_service(DFTU_SVC_PORTS). Include
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 

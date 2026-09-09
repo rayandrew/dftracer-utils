@@ -48,9 +48,9 @@ typedef struct dftu_plugin {
        synchronous (return NULL); `df` is owned by the host and valid only for
        the call. */
     dftu_task* (*on_batch)(void* slice, const dftu_dataframe* df,
-                           const dftu_host* host);
+                           const dftu_plugin_host* host);
     void (*merge)(void* into, void* other);
-    dftu_task* (*on_finalize)(void* slice, const dftu_host* host);
+    dftu_task* (*on_finalize)(void* slice, const dftu_plugin_host* host);
     void (*destroy_slice)(void* slice); /**< one call per make_slice */
     void (*destroy)(void* self);        /**< plugin teardown; frees self */
 
@@ -108,7 +108,7 @@ typedef struct dftu_plugin {
    The returned descriptor is still pure data: plan_query, provides and consumes
    are read after every factory has run, so registering here does not reorder
    the fold or change the prune. */
-typedef dftu_plugin* (*dftu_plugin_factory)(dftu_host* h,
+typedef dftu_plugin* (*dftu_plugin_factory)(dftu_plugin_host* h,
                                             const dftu_value* config);
 #define DFTRACER_PLUGIN_FACTORY_SYMBOL "dftracer_plugin"
 

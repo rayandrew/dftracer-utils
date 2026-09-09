@@ -56,7 +56,7 @@ constexpr std::uint64_t TINY_BUDGET = 4096;
 // count) and a spread of ops: FieldStat-derived, sketch-derived, and a
 // String-repr op, all of which have to survive a serialize/merge round trip.
 ::dftu_task* spill_columns(void* slice, const dftu_dataframe* df,
-                           const dftu_host* host) {
+                           const dftu_plugin_host* host) {
     (void)slice;
     Host h(host);
     const auto acc =
@@ -72,7 +72,7 @@ constexpr std::uint64_t TINY_BUDGET = 4096;
 // vertically concat a List column, so this exercises the single-finalize path
 // through the same spilled runs.
 ::dftu_task* spill_nested_columns(void* slice, const dftu_dataframe* df,
-                                  const dftu_host* host) {
+                                  const dftu_plugin_host* host) {
     (void)slice;
     const auto* ext = static_cast<const dftu_svc_agg*>(
         host->get_service(host->h, DFTU_SVC_AGG));
@@ -88,7 +88,7 @@ constexpr std::uint64_t TINY_BUDGET = 4096;
 }
 
 dftu_plugin make_plugin(::dftu_task* (*on_columns)(void*, const dftu_dataframe*,
-                                                   const dftu_host*)) {
+                                                   const dftu_plugin_host*)) {
     dftu_plugin p{};
     p.abi_version = DFTRACER_PLUGIN_ABI_VERSION;
     p.plan_query = [](void*) -> const char* { return nullptr; };
@@ -97,7 +97,7 @@ dftu_plugin make_plugin(::dftu_task* (*on_columns)(void*, const dftu_dataframe*,
         return &sentinel;
     };
     p.merge = [](void*, void*) {};
-    p.on_finalize = [](void*, const dftu_host*) -> ::dftu_task* {
+    p.on_finalize = [](void*, const dftu_plugin_host*) -> ::dftu_task* {
         return nullptr;
     };
     p.destroy_slice = [](void*) {};
