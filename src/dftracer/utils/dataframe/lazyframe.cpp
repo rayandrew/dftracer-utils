@@ -92,6 +92,30 @@ coro::CoroTask<DataFrame> drain_stream(coro::AsyncGenerator<DataFrame> gen) {
     co_return concat(ptrs, uniform ? ConcatHow::Vertical : ConcatHow::Diagonal);
 }
 
+// Drain a Cursor to a single DataFrame: for a pipeline breaker (take, reverse,
+// sort_by_multi) whose eager op has no incremental form and needs every row at
+// once.
+coro::CoroTask<DataFrame> drain_cursor(Cursor& c, std::vector<std::string> sch,
+                                       std::int64_t max_rows) {
+    std::vector<DataFrame> parts;
+    while (auto m = co_await c.next(max_rows)) {
+        DataFrame df;
+        df.names = sch;
+        df.columns = std::move(m->columns);
+        parts.push_back(std::move(df));
+    }
+    if (parts.empty()) {
+        DataFrame e;
+        e.names = std::move(sch);
+        co_return e;
+    }
+    if (parts.size() == 1) co_return std::move(parts[0]);
+    std::vector<const DataFrame*> ptrs;
+    ptrs.reserve(parts.size());
+    for (const DataFrame& p : parts) ptrs.push_back(&p);
+    co_return concat(ptrs, ConcatHow::Vertical);
+}
+
 Morsel morsel_of(DataFrame&& f) {
     Morsel out;
     out.rows = f.num_rows();
@@ -291,6 +315,53 @@ class FilterCursor : public Cursor {
    private:
     std::unique_ptr<Cursor> in_;
     Expr pred_;
+};
+
+// Keeps rows where a precomputed mask is true. The mask is fixed against this
+// op's own input stream, one flag per row in order, so each morsel consumes
+// the matching slice as it goes by - streams like FilterCursor.
+class FilterMaskCursor : public Cursor {
+   public:
+    FilterMaskCursor(std::unique_ptr<Cursor> in, Series mask)
+        : in_(std::move(in)), mask_(std::move(mask)) {}
+
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        while (auto m = co_await in_->next(max_rows)) {
+            const std::int64_t n = m->rows;
+            if (off_ + n > mask_.length())
+                throw std::out_of_range("filter_mask: mask shorter than input");
+            // Series::slice only supports byte-per-element FLAT types, not the
+            // bit-packed Bool layout, so the sub-mask is re-packed by hand
+            // instead (same bit math as IsDupCursor's mask build).
+            const std::uint8_t* bits = mask_.data<std::uint8_t>();
+            std::vector<std::uint8_t> sub(static_cast<std::size_t>((n + 7) / 8),
+                                          0);
+            for (std::int64_t i = 0; i < n; ++i) {
+                const std::int64_t p = off_ + i;
+                if ((bits[p >> 3] >> (p & 7)) & 1u)
+                    sub[static_cast<std::size_t>(i >> 3)] |=
+                        static_cast<std::uint8_t>(1u << (i & 7));
+            }
+            off_ += n;
+            Series sub_mask = Series::flat(TypeId::Bool, sub.data(), n);
+            DataFrame tmp;
+            tmp.names.assign(m->columns.size(), std::string());
+            for (Series& c : m->columns) tmp.columns.push_back(c.share());
+            DataFrame kept = tmp.filter(sub_mask);
+            Morsel out;
+            out.columns.reserve(kept.columns.size());
+            for (const Series& c : kept.columns)
+                out.columns.push_back(c.materialize());
+            out.rows = out.columns.empty() ? 0 : out.columns.front().length();
+            if (out.rows > 0) co_return out;
+        }
+        co_return std::nullopt;
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    Series mask_;
+    std::int64_t off_ = 0;
 };
 
 // Projects columns by index (share, no copy).
@@ -2003,6 +2074,99 @@ class PivotCursor : public Cursor {
     std::vector<std::string> produced_;
 };
 
+// Reverses row order. Buffers the whole input through a Spool (bounded memory,
+// spills past budget), then applies DataFrame::reverse once and emits one
+// morsel - there is no incremental reverse.
+class ReverseCursor : public Cursor {
+   public:
+    ReverseCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                  std::uint64_t budget)
+        : in_(std::move(in)), spool_(budget), sch_(std::move(sch)) {}
+
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
+        done_ = true;
+        while (auto m = co_await in_->next(max_rows))
+            spool_.add(std::move(m->columns), m->rows);
+        in_.reset();
+        std::unique_ptr<Cursor> reader = spool_.reader();
+        DataFrame df = co_await drain_cursor(*reader, sch_, max_rows);
+        co_return morsel_of(df.reverse());
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    spill::Spool spool_;
+    std::vector<std::string> sch_;
+    bool done_ = false;
+};
+
+// Keeps the rows at `indices_` (arbitrary order, repeats allowed). Buffers the
+// whole input as ReverseCursor does: the requested indices are positions
+// against the fully assembled frame, so every row must be resident first.
+class TakeCursor : public Cursor {
+   public:
+    TakeCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+               std::vector<std::int64_t> indices, std::uint64_t budget)
+        : in_(std::move(in)),
+          spool_(budget),
+          sch_(std::move(sch)),
+          indices_(std::move(indices)) {}
+
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
+        done_ = true;
+        while (auto m = co_await in_->next(max_rows))
+            spool_.add(std::move(m->columns), m->rows);
+        in_.reset();
+        std::unique_ptr<Cursor> reader = spool_.reader();
+        DataFrame df = co_await drain_cursor(*reader, sch_, max_rows);
+        co_return morsel_of(df.take(indices_));
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    spill::Spool spool_;
+    std::vector<std::string> sch_;
+    std::vector<std::int64_t> indices_;
+    bool done_ = false;
+};
+
+// Stable lexicographic sort by several key columns. Buffers the whole input as
+// ReverseCursor does: DataFrame::sort_by_multi has no external-merge form
+// (unlike the single-key SortMergeCursor), so this holds the full frame rather
+// than reimplementing one.
+class SortByMultiCursor : public Cursor {
+   public:
+    SortByMultiCursor(std::unique_ptr<Cursor> in, std::vector<std::string> sch,
+                      std::vector<std::string> by, std::vector<bool> descending,
+                      std::uint64_t budget)
+        : in_(std::move(in)),
+          spool_(budget),
+          sch_(std::move(sch)),
+          by_(std::move(by)),
+          descending_(std::move(descending)) {}
+
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        if (done_) co_return std::nullopt;
+        done_ = true;
+        while (auto m = co_await in_->next(max_rows))
+            spool_.add(std::move(m->columns), m->rows);
+        in_.reset();
+        std::unique_ptr<Cursor> reader = spool_.reader();
+        DataFrame df = co_await drain_cursor(*reader, sch_, max_rows);
+        co_return morsel_of(df.sort_by_multi(by_, descending_));
+    }
+
+   private:
+    std::unique_ptr<Cursor> in_;
+    spill::Spool spool_;
+    std::vector<std::string> sch_;
+    std::vector<std::string> by_;
+    std::vector<bool> descending_;
+    bool done_ = false;
+};
+
 // ---- plan ops (tagged union) ------------------------------------------------
 
 struct FilterOp {
@@ -2078,6 +2242,17 @@ struct ToDummiesOp {
     std::string column;
 };
 struct DescribeOp {};
+struct ReverseOp {};
+struct TakeOp {
+    std::vector<std::int64_t> indices;
+};
+struct FilterMaskOp {
+    Series mask;
+};
+struct SortByMultiOp {
+    std::vector<std::string> by;
+    std::vector<bool> descending;
+};
 
 template <class... Ts>
 struct overloaded : Ts... {
@@ -2118,7 +2293,7 @@ class LazyOp {
                  DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp,
                  ExplodeOp, UnpivotOp, TopkOp, GroupByOp, SortByOp, UniqueOp,
                  SampleOp, IsDupOp, GroupByDynamicOp, PivotOp, ToDummiesOp,
-                 DescribeOp>
+                 DescribeOp, ReverseOp, TakeOp, FilterMaskOp, SortByMultiOp>
         node;
 };
 
@@ -2186,7 +2361,11 @@ std::vector<std::string> out_schema(const LazyOp& op,
             // relabels from the cursor's out_names().
             [&](const PivotOp&) { return std::vector<std::string>{}; },
             [&](const ToDummiesOp&) { return std::vector<std::string>{}; },
-            [&](const DescribeOp&) { return std::vector<std::string>{}; }},
+            [&](const DescribeOp&) { return std::vector<std::string>{}; },
+            [&](const ReverseOp&) { return in; },
+            [&](const TakeOp&) { return in; },
+            [&](const FilterMaskOp&) { return in; },
+            [&](const SortByMultiOp&) { return in; }},
         op.node);
 }
 
@@ -2222,7 +2401,15 @@ std::string describe_op(const LazyOp& op) {
             },
             [](const PivotOp& o) { return "pivot on " + o.on; },
             [](const ToDummiesOp& o) { return "to_dummies " + o.column; },
-            [](const DescribeOp&) { return std::string("describe"); }},
+            [](const DescribeOp&) { return std::string("describe"); },
+            [](const ReverseOp&) { return std::string("reverse"); },
+            [](const TakeOp& o) {
+                return "take [" + std::to_string(o.indices.size()) + "]";
+            },
+            [](const FilterMaskOp&) { return std::string("filter_mask"); },
+            [](const SortByMultiOp& o) {
+                return "sort_by_multi [" + join_names(o.by) + "]";
+            }},
         op.node);
 }
 
@@ -2257,8 +2444,12 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
 
     // Hoist a filter past a preceding op that keeps its columns' positions and
     // rows: with_column (unless the predicate reads the written column),
-    // sort_by, rename. filter-before-sort is the big win - the sort runs on
-    // survivors.
+    // sort_by, sort_by_multi, rename, reverse. A value-based filter selects
+    // the same rows in the same relative order on either side of a reorder,
+    // so sort_by_multi/reverse commute with it exactly as sort_by/rename do.
+    // take and filter_mask get no branch: both are keyed by row position
+    // against whatever stream reaches them, so hoisting a filter above them
+    // would shift those positions and change which rows they act on.
     bool changed = true;
     while (changed) {
         changed = false;
@@ -2270,7 +2461,9 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
             if (std::holds_alternative<WithColumnOp>(prev.node)) {
                 hoist = !expr_references(filt->pred, nodes[i - 1].write_idx);
             } else if (std::holds_alternative<SortByOp>(prev.node) ||
-                       std::holds_alternative<RenameOp>(prev.node)) {
+                       std::holds_alternative<RenameOp>(prev.node) ||
+                       std::holds_alternative<SortByMultiOp>(prev.node) ||
+                       std::holds_alternative<ReverseOp>(prev.node)) {
                 hoist = true;
             }
             if (hoist) {
@@ -2287,7 +2480,8 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
 }
 
 // Projection pushdown: for a schema-preserving plan (filter/sort_by/slice/tail/
-// topk/sample) that ends in a select, insert a projection after the source
+// topk/sample/reverse/take/filter_mask/sort_by_multi) that ends in a select,
+// insert a projection after the source
 // keeping only the columns the output and ops read, renumbering the filters
 // into it. Any other op leaves the plan unchanged; pushdown is an optimization,
 // so bailing is always correct. Biggest payoff is a scan source that then reads
@@ -2305,7 +2499,11 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_projections(
               std::holds_alternative<SliceOp>(n) ||
               std::holds_alternative<TailOp>(n) ||
               std::holds_alternative<TopkOp>(n) ||
-              std::holds_alternative<SampleOp>(n)))
+              std::holds_alternative<SampleOp>(n) ||
+              std::holds_alternative<ReverseOp>(n) ||
+              std::holds_alternative<TakeOp>(n) ||
+              std::holds_alternative<FilterMaskOp>(n) ||
+              std::holds_alternative<SortByMultiOp>(n)))
             return ops;  // changes the schema or reads whole rows: bail
     }
 
@@ -2330,7 +2528,13 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_projections(
         } else if (const auto* t = std::get_if<TopkOp>(&n)) {
             int c = col_index(source_names, t->name);
             if (c >= 0) need[static_cast<std::size_t>(c)] = 1;
+        } else if (const auto* sm = std::get_if<SortByMultiOp>(&n)) {
+            for (const std::string& nm : sm->by) {
+                int c = col_index(source_names, nm);
+                if (c >= 0) need[static_cast<std::size_t>(c)] = 1;
+            }
         }
+        // reverse/take/filter_mask read no column of their own: nothing to add.
     }
 
     std::vector<std::string> live;
@@ -2514,6 +2718,12 @@ std::optional<DataFrame> run_ops_in_memory(
                 [&](const SortByOp& o) {
                     return df.sort_by(o.name, o.descending);
                 },
+                [&](const SortByMultiOp& o) {
+                    return df.sort_by_multi(o.by, o.descending);
+                },
+                [&](const ReverseOp&) { return df.reverse(); },
+                [&](const TakeOp& o) { return df.take(o.indices); },
+                [&](const FilterMaskOp& o) { return df.filter(o.mask); },
                 [&](const UniqueOp&) { return df.unique(); },
                 [&](const SampleOp& o) { return df.sample(o.n, o.seed); },
                 [&](const TopkOp& o) {
@@ -2609,6 +2819,22 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             [&](const SortByOp& o) -> std::unique_ptr<Cursor> {
                 return std::make_unique<SortMergeCursor>(
                     std::move(in), sch, o.name, o.descending, budget);
+            },
+            [&](const SortByMultiOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<SortByMultiCursor>(
+                    std::move(in), sch, o.by, o.descending, budget);
+            },
+            [&](const ReverseOp&) -> std::unique_ptr<Cursor> {
+                return std::make_unique<ReverseCursor>(std::move(in), sch,
+                                                       budget);
+            },
+            [&](const TakeOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<TakeCursor>(std::move(in), sch,
+                                                    o.indices, budget);
+            },
+            [&](const FilterMaskOp& o) -> std::unique_ptr<Cursor> {
+                return std::make_unique<FilterMaskCursor>(std::move(in),
+                                                          o.mask.share());
             },
             [&](const UniqueOp&) -> std::unique_ptr<Cursor> {
                 return std::make_unique<UniqueCursor>(std::move(in), sch,
@@ -2732,6 +2958,25 @@ LazyFrame LazyFrame::fill_null(Scalar value) const {
     return with_ops(std::move(ops));
 }
 
+LazyFrame LazyFrame::take(std::vector<std::int64_t> indices) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{TakeOp{std::move(indices)}}));
+    return with_ops(std::move(ops));
+}
+
+LazyFrame LazyFrame::filter_mask(Series mask) const {
+    auto ops = ops_;
+    ops.push_back(
+        std::make_shared<LazyOp>(LazyOp{FilterMaskOp{std::move(mask)}}));
+    return with_ops(std::move(ops));
+}
+
+LazyFrame LazyFrame::reverse() const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(LazyOp{ReverseOp{}}));
+    return with_ops(std::move(ops));
+}
+
 LazyFrame LazyFrame::with_row_index(std::string name) const {
     auto ops = ops_;
     ops.push_back(
@@ -2849,6 +3094,20 @@ LazyFrame LazyFrame::sort_by(std::string name, bool descending) const {
     auto ops = ops_;
     ops.push_back(std::make_shared<LazyOp>(
         LazyOp{SortByOp{std::move(name), descending}}));
+    return with_ops(std::move(ops));
+}
+
+LazyFrame LazyFrame::sort_by_multi(std::vector<std::string> by,
+                                   bool descending) const {
+    std::vector<bool> flags(by.size(), descending);
+    return sort_by_multi(std::move(by), std::move(flags));
+}
+
+LazyFrame LazyFrame::sort_by_multi(std::vector<std::string> by,
+                                   std::vector<bool> descending) const {
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(
+        LazyOp{SortByMultiOp{std::move(by), std::move(descending)}}));
     return with_ops(std::move(ops));
 }
 

@@ -146,6 +146,18 @@ class LazyFrame {
     LazyFrame tail(std::int64_t n) const;
     LazyFrame drop_nulls() const;
     LazyFrame fill_null(Scalar value) const;
+    /// Keeps the rows at `indices` (arbitrary order, repeats allowed), as
+    /// DataFrame::take. Not streaming: the whole frame must be resident before
+    /// the indices can be applied.
+    LazyFrame take(std::vector<std::int64_t> indices) const;
+    /// Keeps rows where the precomputed `mask` is true, positionally aligned to
+    /// this frame's rows. Streams: each morsel consumes the matching mask
+    /// slice. Named apart from filter(Expr) - a mask column is data, not a
+    /// predicate to compile - so the two never collide at a call site.
+    LazyFrame filter_mask(Series mask) const;
+    /// Reverses row order, as DataFrame::reverse. Not streaming: every row
+    /// must be resident before it can be reordered.
+    LazyFrame reverse() const;
     /// Fill nulls with a natural C++ value; converts to each column's type.
     template <class T, class = std::enable_if_t<std::is_arithmetic_v<T>>>
     LazyFrame fill_null(T value) const {
@@ -188,6 +200,14 @@ class LazyFrame {
     /// Sort by `name`. External merge sort: spills sorted runs past the memory
     /// budget and k-way merges them, so peak memory stays bounded.
     LazyFrame sort_by(std::string name, bool descending = false) const;
+    /// Stable lexicographic sort by several key columns (nulls last), as
+    /// DataFrame::sort_by_multi. Not streaming: needs every row to compare
+    /// across the whole frame.
+    LazyFrame sort_by_multi(std::vector<std::string> by,
+                            bool descending = false) const;
+    /// Per-column direction form: `descending[i]` applies to `by[i]`.
+    LazyFrame sort_by_multi(std::vector<std::string> by,
+                            std::vector<bool> descending) const;
     /// Distinct rows, first occurrence, in original order. Streams input and
     /// output; holds only the distinct set (the result itself).
     LazyFrame unique() const;

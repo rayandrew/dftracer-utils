@@ -866,6 +866,218 @@ TEST_SUITE("lazyframe") {
         }
     }
 
+    TEST_CASE("lazy take matches the eager path") {
+        DataFrame df = make_df();
+        std::vector<std::int64_t> idx{4, 0, 2, 2, 5};
+        DataFrame lz = run(df.lazy().take(idx).collect(2));
+        DataFrame eg = df.take(idx);
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* la = lz.column("a").data<std::int64_t>();
+        const std::int64_t* ea = eg.column("a").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(la[i] == ea[i]);
+    }
+
+    TEST_CASE("lazy filter_mask matches the eager DataFrame::filter(mask)") {
+        DataFrame df = make_df();
+        Series mask = eval(col(0) > std::int64_t{3}, ptrs(df));
+        DataFrame lz = run(df.lazy().filter_mask(mask.share()).collect(2));
+        DataFrame eg = df.filter(mask);
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* la = lz.column("a").data<std::int64_t>();
+        const std::int64_t* ea = eg.column("a").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(la[i] == ea[i]);
+    }
+
+    TEST_CASE("lazy reverse matches the eager path") {
+        DataFrame df = make_df();
+        DataFrame lz = run(df.lazy().reverse().collect(2));
+        DataFrame eg = df.reverse();
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* la = lz.column("a").data<std::int64_t>();
+        const std::int64_t* ea = eg.column("a").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(la[i] == ea[i]);
+    }
+
+    TEST_CASE(
+        "lazy sort_by_multi matches the eager path (broadcast and "
+        "per-column direction)") {
+        std::vector<std::int64_t> k{1, 1, 2, 2, 3};
+        std::vector<std::int64_t> v{20, 10, 40, 30, 5};
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(Series::flat_i64(k.data(), 5));
+        df.columns.push_back(Series::flat_i64(v.data(), 5));
+
+        DataFrame lz1 =
+            run(df.lazy().sort_by_multi({"k", "v"}, false).collect(2));
+        DataFrame eg1 = df.sort_by_multi({"k", "v"}, false);
+        REQUIRE(lz1.num_rows() == eg1.num_rows());
+        {
+            const std::int64_t* lk = lz1.column("k").data<std::int64_t>();
+            const std::int64_t* ek = eg1.column("k").data<std::int64_t>();
+            const std::int64_t* lv = lz1.column("v").data<std::int64_t>();
+            const std::int64_t* ev = eg1.column("v").data<std::int64_t>();
+            for (std::int64_t i = 0; i < lz1.num_rows(); ++i) {
+                CHECK(lk[i] == ek[i]);
+                CHECK(lv[i] == ev[i]);
+            }
+        }
+
+        DataFrame lz2 =
+            run(df.lazy()
+                    .sort_by_multi({"k", "v"}, std::vector<bool>{false, true})
+                    .collect(2));
+        DataFrame eg2 =
+            df.sort_by_multi({"k", "v"}, std::vector<bool>{false, true});
+        REQUIRE(lz2.num_rows() == eg2.num_rows());
+        const std::int64_t* lk = lz2.column("k").data<std::int64_t>();
+        const std::int64_t* ek = eg2.column("k").data<std::int64_t>();
+        const std::int64_t* lv = lz2.column("v").data<std::int64_t>();
+        const std::int64_t* ev = eg2.column("v").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz2.num_rows(); ++i) {
+            CHECK(lk[i] == ek[i]);
+            CHECK(lv[i] == ev[i]);
+        }
+    }
+
+    TEST_CASE("predicate pushdown moves a filter before reverse") {
+        // reverse only flips row order, so a value-based filter commutes with
+        // it and hoists ahead, same reasoning as sort_by.
+        auto lf = make_df().lazy().reverse().filter(col(0) > std::int64_t{3});
+        const std::string plan = lf.explain();
+        const auto fpos = plan.find("filter");
+        const auto rpos = plan.find("reverse");
+        CHECK(fpos != std::string::npos);
+        CHECK(rpos != std::string::npos);
+        CHECK(fpos < rpos);  // filter reordered before reverse
+
+        DataFrame df = make_df();
+        DataFrame eg =
+            df.filter(eval(col(0) > std::int64_t{3}, ptrs(df))).reverse();
+        DataFrame lz = run(lf.collect(2));
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* la = lz.column("a").data<std::int64_t>();
+        const std::int64_t* ea = eg.column("a").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(la[i] == ea[i]);
+    }
+
+    TEST_CASE("predicate pushdown moves a filter before sort_by_multi") {
+        std::vector<std::int64_t> k{3, 1, 2, 1, 3};
+        std::vector<std::int64_t> v{1, 2, 3, 4, 5};
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(Series::flat_i64(k.data(), 5));
+        df.columns.push_back(Series::flat_i64(v.data(), 5));
+
+        auto lf = df.lazy()
+                      .sort_by_multi({"k", "v"}, false)
+                      .filter(col(0) > std::int64_t{1});
+        const std::string plan = lf.explain();
+        const auto fpos = plan.find("filter");
+        const auto spos = plan.find("sort_by_multi");
+        CHECK(fpos != std::string::npos);
+        CHECK(spos != std::string::npos);
+        CHECK(fpos < spos);  // filter reordered before sort_by_multi
+
+        DataFrame eg = df.filter(eval(col(0) > std::int64_t{1}, ptrs(df)))
+                           .sort_by_multi({"k", "v"}, false);
+        DataFrame lz = run(lf.collect(2));
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* lk = lz.column("k").data<std::int64_t>();
+        const std::int64_t* ek = eg.column("k").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(lk[i] == ek[i]);
+    }
+
+    TEST_CASE(
+        "predicate pushdown leaves a filter after take (position-sensitive)") {
+        // take's indices index into whatever reaches it; hoisting a filter
+        // above it would renumber the rows out from under those indices.
+        DataFrame df = make_df();
+        std::vector<std::int64_t> idx{5, 4, 3, 2, 1, 0};  // full reversal
+        auto lf = df.lazy().take(idx).filter(col(0) > std::int64_t{3});
+        const std::string plan = lf.explain();
+        const auto fpos = plan.find("filter");
+        const auto tpos = plan.find("take");
+        CHECK(fpos != std::string::npos);
+        CHECK(tpos != std::string::npos);
+        CHECK(tpos < fpos);  // NOT hoisted: take must run first
+
+        DataFrame taken = df.take(idx);
+        DataFrame eg =
+            taken.filter(eval(col(0) > std::int64_t{3}, ptrs(taken)));
+        DataFrame lz = run(lf.collect(2));
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* la = lz.column("a").data<std::int64_t>();
+        const std::int64_t* ea = eg.column("a").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(la[i] == ea[i]);
+    }
+
+    TEST_CASE("filter -> take -> select: projection pushdown, no hoist") {
+        DataFrame df = make_df();
+        std::vector<std::int64_t> idx{0, 2, 1};
+        auto lf =
+            df.lazy().filter(col(0) > std::int64_t{1}).take(idx).select({"a"});
+        const std::string plan = lf.explain();
+        const auto proj = plan.find("select [a]");
+        const auto filt = plan.rfind("filter");
+        CHECK(proj != std::string::npos);
+        CHECK(filt != std::string::npos);
+        CHECK(proj < filt);  // projection pushed ahead of filter+take
+
+        DataFrame filtered =
+            df.filter(eval(col(0) > std::int64_t{1}, ptrs(df)));
+        DataFrame eg = filtered.take(idx).select({"a"});
+        DataFrame lz = run(lf.collect(2));
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* la = lz.column("a").data<std::int64_t>();
+        const std::int64_t* ea = eg.column("a").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(la[i] == ea[i]);
+    }
+
+    TEST_CASE("filter -> reverse -> select: projection pushdown") {
+        DataFrame df = make_df();
+        auto lf =
+            df.lazy().filter(col(0) > std::int64_t{2}).reverse().select({"a"});
+        const std::string plan = lf.explain();
+        CHECK(plan.find("select [a]") != std::string::npos);
+        CHECK(plan.find("reverse") != std::string::npos);
+
+        DataFrame filtered =
+            df.filter(eval(col(0) > std::int64_t{2}, ptrs(df)));
+        DataFrame eg = filtered.reverse().select({"a"});
+        DataFrame lz = run(lf.collect(2));
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* la = lz.column("a").data<std::int64_t>();
+        const std::int64_t* ea = eg.column("a").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(la[i] == ea[i]);
+    }
+
+    TEST_CASE("filter -> filter_mask -> select: projection pushdown") {
+        // filter_mask's mask is positionally aligned to its OWN input stream,
+        // so it is built against the already-filtered frame (5 rows), not the
+        // original.
+        DataFrame df = make_df();
+        DataFrame filtered =
+            df.filter(eval(col(0) > std::int64_t{1}, ptrs(df)));
+        Series mask =
+            eval(col(1) < std::int64_t{60}, ptrs(filtered));  // b < 60
+
+        auto lf = df.lazy()
+                      .filter(col(0) > std::int64_t{1})
+                      .filter_mask(mask.share())
+                      .select({"a"});
+        const std::string plan = lf.explain();
+        CHECK(plan.find("select [a]") != std::string::npos);
+        CHECK(plan.find("filter_mask") != std::string::npos);
+
+        DataFrame eg = filtered.filter(mask).select({"a"});
+        DataFrame lz = run(lf.collect(2));
+        REQUIRE(lz.num_rows() == eg.num_rows());
+        const std::int64_t* la = lz.column("a").data<std::int64_t>();
+        const std::int64_t* ea = eg.column("a").data<std::int64_t>();
+        for (std::int64_t i = 0; i < lz.num_rows(); ++i) CHECK(la[i] == ea[i]);
+    }
+
     TEST_CASE("sample / is_duplicated / group_by_dynamic") {
         DataFrame s = run(make_df().lazy().sample(3, 42).collect(2));
         CHECK(s.num_rows() == 3);
