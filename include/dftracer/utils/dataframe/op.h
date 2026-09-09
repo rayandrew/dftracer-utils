@@ -17,10 +17,12 @@ enum class OpKind : std::int32_t {
     Series = DFTU_OP_KIND_SERIES,
     Aggregate = DFTU_OP_KIND_AGGREGATE,
     Frame = DFTU_OP_KIND_FRAME,
+    Lazy = DFTU_OP_KIND_LAZY,
 };
 static_assert(static_cast<int>(OpKind::Series) == DFTU_OP_KIND_SERIES);
 static_assert(static_cast<int>(OpKind::Aggregate) == DFTU_OP_KIND_AGGREGATE);
 static_assert(static_cast<int>(OpKind::Frame) == DFTU_OP_KIND_FRAME);
+static_assert(static_cast<int>(OpKind::Lazy) == DFTU_OP_KIND_LAZY);
 
 /// Mirrors dftu_op_tok.
 enum class OpTok : std::int32_t {
@@ -43,6 +45,10 @@ enum class OpTok : std::int32_t {
     Frame = DFTU_TOK_FRAME,
     StrList = DFTU_TOK_STRLIST,
     I32List = DFTU_TOK_I32LIST,
+    Lazy = DFTU_TOK_LAZY,
+    Expr = DFTU_TOK_EXPR,
+    AggList = DFTU_TOK_AGGLIST,
+    U64 = DFTU_TOK_U64,
 };
 static_assert(static_cast<int>(OpTok::None) == DFTU_TOK_NONE);
 static_assert(static_cast<int>(OpTok::Series) == DFTU_TOK_SERIES);
@@ -63,6 +69,10 @@ static_assert(static_cast<int>(OpTok::Rolling) == DFTU_TOK_ROLLING);
 static_assert(static_cast<int>(OpTok::Frame) == DFTU_TOK_FRAME);
 static_assert(static_cast<int>(OpTok::StrList) == DFTU_TOK_STRLIST);
 static_assert(static_cast<int>(OpTok::I32List) == DFTU_TOK_I32LIST);
+static_assert(static_cast<int>(OpTok::Lazy) == DFTU_TOK_LAZY);
+static_assert(static_cast<int>(OpTok::Expr) == DFTU_TOK_EXPR);
+static_assert(static_cast<int>(OpTok::AggList) == DFTU_TOK_AGGLIST);
+static_assert(static_cast<int>(OpTok::U64) == DFTU_TOK_U64);
 
 /// Value wrapper over a packed dftu_op_sig.
 class OpSig {
@@ -146,6 +156,10 @@ class OpArgs {
         arg_.args[i].i64 = v;
         return *this;
     }
+    OpArgs& u64(std::uint32_t i, std::uint64_t v) noexcept {
+        arg_.args[i].u64 = v;
+        return *this;
+    }
     OpArgs& f64(std::uint32_t i, double v) noexcept {
         arg_.args[i].f64 = v;
         return *this;
@@ -175,6 +189,23 @@ class OpArgs {
     }
     OpArgs& series(std::uint32_t i, const dftu_series* v) noexcept {
         arg_.args[i].series = v;
+        return *this;
+    }
+    OpArgs& lazy(std::uint32_t i, const dftu_lazyframe* v) noexcept {
+        arg_.args[i].lazy = v;
+        return *this;
+    }
+    /// Borrows `e`: `e` must outlive the dftu_op_run* call this is passed to.
+    OpArgs& expr(std::uint32_t i, const dftu_expr* e) noexcept {
+        arg_.args[i].expr = e;
+        return *this;
+    }
+    /// Borrows `items`: it must outlive the dftu_op_run* call this is passed
+    /// to.
+    OpArgs& agglist(std::uint32_t i,
+                    std::span<const dftu_group_agg> items) noexcept {
+        arg_.args[i].agglist.items = items.data();
+        arg_.args[i].agglist.n = static_cast<std::int32_t>(items.size());
         return *this;
     }
     /// Borrows `s`: `s` must outlive the dftu_op_run* call this is passed to.

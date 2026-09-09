@@ -961,13 +961,15 @@ DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_auto_spill(const dftu_lazyframe* lf);
 typedef enum {
     DFTU_OP_KIND_SERIES = 0, /**< column(s) -> column */
     DFTU_OP_KIND_AGGREGATE,  /**< column -> scalar (a reducer) */
-    DFTU_OP_KIND_FRAME       /**< table(s) -> table */
+    DFTU_OP_KIND_FRAME,      /**< table(s) -> table */
+    DFTU_OP_KIND_LAZY        /**< lazy plan -> lazy plan (a plan node) */
 } dftu_op_kind;
 
-/** Operand/return tokens, one 4-bit field each. A signature packs a return
- * token plus up to three operand tokens into one integer (DFTU_OP_SIG), the way
- * a Linux ioctl number packs direction/type/nr/size. APPEND ONLY - a token's
- * value is ABI-stable. */
+/** Operand/return tokens, one 5-bit field each, so 32 values exist in total. A
+ * signature packs a return token plus up to DFTU_OP_MAX_ARGS operand tokens
+ * into one integer (DFTU_OP_SIG6), the way a Linux ioctl number packs
+ * direction/type/nr/size. APPEND ONLY - a token's value is ABI-stable, and a
+ * value past 31 would silently corrupt every signature it appears in. */
 typedef enum {
     DFTU_TOK_NONE = 0, /**< empty slot */
     DFTU_TOK_SERIES,   /**< a column operand, or a column return */
@@ -988,7 +990,16 @@ typedef enum {
     DFTU_TOK_FRAME, /**< a dftu_dataframe operand, or a dftu_dataframe return */
     DFTU_TOK_STRLIST, /**< a (const char* const*, int32 count) string-list
                          operand */
-    DFTU_TOK_I32LIST  /**< a (const int32_t*, int32 count) int32-list operand */
+    DFTU_TOK_I32LIST, /**< a (const int32_t*, int32 count) int32-list operand */
+    DFTU_TOK_LAZY,    /**< a dftu_lazyframe operand, or a dftu_lazyframe return
+                       */
+    DFTU_TOK_EXPR,    /**< a const dftu_expr* operand (a predicate or a
+                         projection), borrowed for the call */
+    DFTU_TOK_AGGLIST, /**< a (const dftu_group_agg*, int32 count) aggregate-spec
+                         list operand */
+    DFTU_TOK_U64      /**< uint64 operand (a byte count, a seed), distinct from
+                         I64 so a signature describes the real parameter type
+                         and cannot collide with a signed-shaped op */
 } dftu_op_tok;
 
 /** Max operand tokens a signature carries (5-bit fields: a return token plus up
@@ -1077,6 +1088,7 @@ DFTU_EXPORT int dftu_op_unregister(const char* name);
 typedef union dftu_op_val {
     dftu_scalar scalar;
     int64_t i64;
+    uint64_t u64;
     int32_t i32;
     double f64;
     char ch;
@@ -1093,6 +1105,12 @@ typedef union dftu_op_val {
         const int32_t* items;
         int32_t n;
     } i32list;
+    const dftu_lazyframe* lazy;
+    const dftu_expr* expr;
+    struct {
+        const dftu_group_agg* items;
+        int32_t n;
+    } agglist;
 } dftu_op_val;
 
 /** The operands an op consumes, one slot per operand token in order (args[i]
@@ -1128,6 +1146,16 @@ DFTU_EXPORT dftu_scalar dftu_op_run_aggregate(const dftu_op_desc* op,
 DFTU_EXPORT dftu_dataframe* dftu_op_run_frame(
     const dftu_op_desc* op, const dftu_dataframe* const* frames, uint32_t n,
     const dftu_op_arg* arg);
+
+/** Run a lazy op (a signature whose return token is LAZY): `in` are the `n`
+ * borrowed input dftu_lazyframe operands (n == dftu_op_arity(op->sig)), and
+ * every other operand (string/scalar/list/expr/agglist/int) rides `arg`.
+ * Returns a new owned dftu_lazyframe (free with dftu_lazyframe_free), or NULL
+ * on a NULL/kind/arity/shape mismatch. */
+DFTU_EXPORT dftu_lazyframe* dftu_op_run_lazy(const dftu_op_desc* op,
+                                             const dftu_lazyframe* const* in,
+                                             uint32_t n,
+                                             const dftu_op_arg* arg);
 
 #ifdef __cplusplus
 } /* extern "C" */
