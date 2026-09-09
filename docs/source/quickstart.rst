@@ -171,7 +171,7 @@ For distributed processing with ``dask.distributed``:
 
    def count_events(path):
        from dftracer.utils import TraceViewer
-       return TraceViewer([path]).agg("count").collect().to_pandas()["count"].sum()
+       return TraceViewer([path]).agg("count").collect().collect().to_pandas()["count"].sum()
 
    futures = client.map(count_events, file_paths)
    results = client.gather(futures)
