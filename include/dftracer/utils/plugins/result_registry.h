@@ -2,11 +2,14 @@
 #define DFTRACER_UTILS_PLUGINS_RESULT_REGISTRY_H
 
 #include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/op.h>
+#include <dftracer/utils/plugins/abi/ops.h>
 #include <dftracer/utils/plugins/owned_arrow.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -57,17 +60,37 @@ struct OwnedDataFrame {
 /// source an in-memory frame or a re-openable source, e.g. dftu_dataframe_lazy
 /// of a materialized frame); referencing the plugin's per-scan/executor
 /// context, which dies at finalize, is a plugin bug.
+///
+/// Also a fluent plan builder over the registered "dftu.lazy.*" ops (see
+/// exported_lazy_ops.def): every method below reaches the host through the op
+/// registry (dftu_ext_ops::run_lazy) rather than linking the dataframe
+/// dftu_lazyframe_* ABI directly, the same indirection dftu_ext_ops already
+/// uses for column/frame ops. Every method BORROWS `*this` and returns a new
+/// plan, leaving this one usable - the same contract as the layers beneath,
+/// where dftu_lazyframe_* takes a const handle and LazyFrame's own methods are
+/// const. A method that fails for any reason (no ops extension wired up, an
+/// unregistered name, or a kind/arity/shape/argument rejection) returns an
+/// EMPTY OwnedLazyFrame (`!out.handle`); every method short-circuits on an
+/// already-empty OwnedLazyFrame, so a failure partway through a chain
+/// propagates to the end without corrupting or leaking anything, and the
+/// caller checks `handle` once at the end of the chain rather than after
+/// every step.
 struct OwnedLazyFrame {
-    dftu_lazyframe* handle = nullptr;
     OwnedLazyFrame() = default;
     explicit OwnedLazyFrame(dftu_lazyframe* h) noexcept : handle(h) {}
-    OwnedLazyFrame(OwnedLazyFrame&& o) noexcept : handle(o.handle) {
+    OwnedLazyFrame(dftu_lazyframe* h, const dftu_ext_ops* ops,
+                   void* host) noexcept
+        : handle(h), ops_(ops), host_(host) {}
+    OwnedLazyFrame(OwnedLazyFrame&& o) noexcept
+        : handle(o.handle), ops_(o.ops_), host_(o.host_) {
         o.handle = nullptr;
     }
     OwnedLazyFrame& operator=(OwnedLazyFrame&& o) noexcept {
         if (this != &o) {
             if (handle) dftu_lazyframe_free(handle);
             handle = o.handle;
+            ops_ = o.ops_;
+            host_ = o.host_;
             o.handle = nullptr;
         }
         return *this;
@@ -85,6 +108,181 @@ struct OwnedLazyFrame {
         handle = nullptr;
         return h;
     }
+
+    dftu_lazyframe* handle = nullptr;
+
+    OwnedLazyFrame auto_spill() const {
+        return apply("dftu.lazy.auto_spill", nullptr);
+    }
+    OwnedLazyFrame describe() const {
+        return apply("dftu.lazy.describe", nullptr);
+    }
+    OwnedLazyFrame drop_duplicates() const {
+        return apply("dftu.lazy.drop_duplicates", nullptr);
+    }
+    OwnedLazyFrame drop_nulls() const {
+        return apply("dftu.lazy.drop_nulls", nullptr);
+    }
+    OwnedLazyFrame is_duplicated() const {
+        return apply("dftu.lazy.is_duplicated", nullptr);
+    }
+    OwnedLazyFrame is_unique() const {
+        return apply("dftu.lazy.is_unique", nullptr);
+    }
+    OwnedLazyFrame null_count() const {
+        return apply("dftu.lazy.null_count", nullptr);
+    }
+    OwnedLazyFrame unique() const { return apply("dftu.lazy.unique", nullptr); }
+    OwnedLazyFrame reverse() const {
+        return apply("dftu.lazy.reverse", nullptr);
+    }
+
+    OwnedLazyFrame explode(const char* column) const {
+        return apply("dftu.lazy.explode",
+                     dataframe::OpArgs().str(1, column ? column : ""));
+    }
+    OwnedLazyFrame to_dummies(const char* column) const {
+        return apply("dftu.lazy.to_dummies",
+                     dataframe::OpArgs().str(1, column ? column : ""));
+    }
+    OwnedLazyFrame with_row_index(const char* name) const {
+        return apply("dftu.lazy.with_row_index",
+                     dataframe::OpArgs().str(1, name ? name : ""));
+    }
+
+    OwnedLazyFrame filter_mask(const dftu_series* mask) const {
+        return apply("dftu.lazy.filter_mask",
+                     dataframe::OpArgs().series(1, mask));
+    }
+
+    OwnedLazyFrame fill_null(dftu_scalar value) const {
+        return apply("dftu.lazy.fill_null",
+                     dataframe::OpArgs().scalar(1, value));
+    }
+    OwnedLazyFrame filter(const dftu_expr* pred) const {
+        return apply("dftu.lazy.filter", dataframe::OpArgs().expr(1, pred));
+    }
+    OwnedLazyFrame with_column(const char* name, const dftu_expr* expr) const {
+        return apply(
+            "dftu.lazy.with_column",
+            dataframe::OpArgs().str(1, name ? name : "").expr(2, expr));
+    }
+
+    OwnedLazyFrame head(std::int64_t n) const {
+        return apply("dftu.lazy.head", dataframe::OpArgs().i64(1, n));
+    }
+    OwnedLazyFrame tail(std::int64_t n) const {
+        return apply("dftu.lazy.tail", dataframe::OpArgs().i64(1, n));
+    }
+    OwnedLazyFrame memory_budget(std::uint64_t bytes) const {
+        return apply("dftu.lazy.memory_budget",
+                     dataframe::OpArgs().u64(1, bytes));
+    }
+    OwnedLazyFrame slice(std::int64_t offset, std::int64_t len) const {
+        return apply("dftu.lazy.slice",
+                     dataframe::OpArgs().i64(1, offset).i64(2, len));
+    }
+    OwnedLazyFrame sample(std::int64_t n, std::uint64_t seed) const {
+        return apply("dftu.lazy.sample",
+                     dataframe::OpArgs().i64(1, n).u64(2, seed));
+    }
+
+    OwnedLazyFrame select(std::initializer_list<const char*> names) const {
+        std::vector<const char*> v(names);
+        return apply("dftu.lazy.select",
+                     dataframe::OpArgs().strlist(
+                         1, v.data(), static_cast<std::int32_t>(v.size())));
+    }
+    OwnedLazyFrame rename(std::initializer_list<const char*> names) const {
+        std::vector<const char*> v(names);
+        return apply("dftu.lazy.rename",
+                     dataframe::OpArgs().strlist(
+                         1, v.data(), static_cast<std::int32_t>(v.size())));
+    }
+    OwnedLazyFrame unpivot(
+        std::initializer_list<const char*> id_vars,
+        std::initializer_list<const char*> value_vars) const {
+        std::vector<const char*> ids(id_vars), vals(value_vars);
+        return apply(
+            "dftu.lazy.unpivot",
+            dataframe::OpArgs()
+                .strlist(1, ids.data(), static_cast<std::int32_t>(ids.size()))
+                .strlist(2, vals.data(),
+                         static_cast<std::int32_t>(vals.size())));
+    }
+    OwnedLazyFrame melt(std::initializer_list<const char*> id_vars,
+                        std::initializer_list<const char*> value_vars) const {
+        std::vector<const char*> ids(id_vars), vals(value_vars);
+        return apply(
+            "dftu.lazy.melt",
+            dataframe::OpArgs()
+                .strlist(1, ids.data(), static_cast<std::int32_t>(ids.size()))
+                .strlist(2, vals.data(),
+                         static_cast<std::int32_t>(vals.size())));
+    }
+    OwnedLazyFrame group_by(std::initializer_list<const char*> keys,
+                            std::initializer_list<dftu_group_agg> aggs) const {
+        std::vector<const char*> k(keys);
+        std::vector<dftu_group_agg> a(aggs);
+        return apply(
+            "dftu.lazy.group_by",
+            dataframe::OpArgs()
+                .strlist(1, k.data(), static_cast<std::int32_t>(k.size()))
+                .agglist(2, a));
+    }
+    OwnedLazyFrame sort_by_multi(std::initializer_list<const char*> by,
+                                 bool descending) const {
+        std::vector<const char*> v(by);
+        return apply(
+            "dftu.lazy.sort_by_multi",
+            dataframe::OpArgs()
+                .strlist(1, v.data(), static_cast<std::int32_t>(v.size()))
+                .i32(2, static_cast<std::int32_t>(descending)));
+    }
+
+    OwnedLazyFrame sort_by(const char* name, bool descending) const {
+        return apply("dftu.lazy.sort_by",
+                     dataframe::OpArgs()
+                         .str(1, name ? name : "")
+                         .i32(2, static_cast<std::int32_t>(descending)));
+    }
+    OwnedLazyFrame topk(const char* name, std::int64_t k, bool largest) const {
+        return apply("dftu.lazy.topk",
+                     dataframe::OpArgs()
+                         .str(1, name ? name : "")
+                         .i64(2, k)
+                         .i32(3, static_cast<std::int32_t>(largest)));
+    }
+
+    OwnedLazyFrame pivot(const char* index, const char* on, const char* values,
+                         const char* agg) const {
+        return apply("dftu.lazy.pivot", dataframe::OpArgs()
+                                            .str(1, index ? index : "")
+                                            .str(2, on ? on : "")
+                                            .str(3, values ? values : "")
+                                            .str(4, agg ? agg : ""));
+    }
+
+   private:
+    /// Runs the registered lazy op `name` on the current handle, consuming it
+    /// either way. Empty (`!handle`) on a missing ops extension, an
+    /// unregistered name, or a kind/arity/shape/argument rejection.
+    // Borrows, like every layer beneath it: dftu_lazyframe_* takes a const
+    // handle and LazyFrame's own methods are const, both returning a new plan
+    // and leaving the input usable. Consuming here would let
+    // `auto a = lf.head(1); auto b = lf.tail(1);` silently hand back an empty
+    // `b`, with no error and nothing to see at the call site.
+    OwnedLazyFrame apply(const char* name, const dftu_op_arg* args) const {
+        if (!handle) return OwnedLazyFrame{};
+        if (!ops_ || !ops_->run_lazy) return OwnedLazyFrame{};
+        const dftu_lazyframe* src = handle;
+        dftu_result_lazyframe res = ops_->run_lazy(host_, name, &src, 1, args);
+        if (!DFTU_RESULT_OK(res)) return OwnedLazyFrame{};
+        return OwnedLazyFrame{DFTU_RESULT_VALUE(res), ops_, host_};
+    }
+
+    const dftu_ext_ops* ops_ = nullptr;
+    void* host_ = nullptr;
 };
 
 using NamedResult = std::variant<std::vector<std::byte>, OwnedArrow,

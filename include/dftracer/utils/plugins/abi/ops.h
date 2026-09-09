@@ -63,6 +63,12 @@ typedef struct dftu_ext_ops {
        shadowed. Returns 0 on success, non-zero if `desc`/its name is NULL, the
        name is already registered, or the name is one the host keeps. */
     int (*register_op)(void* h, const dftu_op_desc* desc);
+    /** find(name) then dftu_op_run_lazy: `in` are `n_in` borrowed input
+       lazyframes. On success carries a new owned lazyframe (free with
+       dftu_lazyframe_free); on failure carries a dftu_error - see `run`. */
+    DFTU_RESULT_MUST_CHECK dftu_result_lazyframe (*run_lazy)(
+        void* h, const char* name, const dftu_lazyframe* const* in,
+        uint32_t n_in, const dftu_op_arg* args);
 } dftu_ext_ops;
 
 #ifdef __cplusplus

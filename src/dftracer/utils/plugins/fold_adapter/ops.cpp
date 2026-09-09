@@ -57,6 +57,17 @@ namespace {
     return ::dftu_result_frame{1, {.value = result}};
 }
 
+::dftu_result_lazyframe host_ops_run_lazy(void*, const char* name,
+                                          const ::dftu_lazyframe* const* in,
+                                          std::uint32_t n_in,
+                                          const ::dftu_op_arg* args) {
+    const ::dftu_op_desc* op = name ? ::dftu_op_find(name) : nullptr;
+    if (!op) return ::dftu_result_lazyframe{0, {.err = not_found_error()}};
+    ::dftu_lazyframe* result = ::dftu_op_run_lazy(op, in, n_in, args);
+    if (!result) return ::dftu_result_lazyframe{0, {.err = rejected_error()}};
+    return ::dftu_result_lazyframe{1, {.value = result}};
+}
+
 const ::dftu_op_desc* host_ops_find(void*, const char* name) {
     return ::dftu_op_find(name);
 }
@@ -73,9 +84,9 @@ int host_ops_register(void*, const ::dftu_op_desc* desc) {
     return -1;
 }
 
-const ::dftu_ext_ops g_ops = {host_ops_run, host_ops_run_aggregate,
+const ::dftu_ext_ops g_ops = {host_ops_run,       host_ops_run_aggregate,
                               host_ops_run_frame, host_ops_find,
-                              host_ops_register};
+                              host_ops_register,  host_ops_run_lazy};
 
 }  // namespace
 

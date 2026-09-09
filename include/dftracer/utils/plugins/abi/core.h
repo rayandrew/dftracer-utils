@@ -148,6 +148,7 @@ typedef struct dftu_error {
 
 DFTU_RESULT_DECL(dftu_result_series, dftu_series*);
 DFTU_RESULT_DECL(dftu_result_frame, dftu_dataframe*);
+DFTU_RESULT_DECL(dftu_result_lazyframe, dftu_lazyframe*);
 DFTU_RESULT_DECL(dftu_result_u64, uint64_t);
 
 /** A byte buffer crossing the ABI. `free_fn` is NULL when the bytes need no

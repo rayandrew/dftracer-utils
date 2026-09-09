@@ -58,9 +58,17 @@ int build_ops_register(void* h, const ::dftu_op_desc* desc) {
     return rc;
 }
 
-const ::dftu_ext_ops g_build_ops = {build_ops_run, build_ops_run_aggregate,
-                                    build_ops_run_frame, build_ops_find,
-                                    build_ops_register};
+::dftu_result_lazyframe build_ops_run_lazy(void* h, const char*,
+                                           const ::dftu_lazyframe* const*,
+                                           std::uint32_t,
+                                           const ::dftu_op_arg*) {
+    self_of(h).deny(DFTU_EXT_OPS "::run_lazy");
+    return ::dftu_result_lazyframe{0, {.err = denied_error()}};
+}
+
+const ::dftu_ext_ops g_build_ops = {
+    build_ops_run,  build_ops_run_aggregate, build_ops_run_frame,
+    build_ops_find, build_ops_register,      build_ops_run_lazy};
 
 ::dftu_agg* build_agg_new(void* h, const char*, const char* const*,
                           std::uint32_t, const ::dftu_agg_col*, std::uint32_t) {

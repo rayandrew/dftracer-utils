@@ -86,6 +86,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_agg.cpp
     plugins/test_plugin_agg_spill.cpp
     plugins/test_plugin_ops.cpp
+    plugins/test_plugin_lazyframe_facade.cpp
     plugins/test_plugin_planner.cpp
     plugins/test_plugin_order.cpp
     plugins/test_plugin_abi_gate.cpp
