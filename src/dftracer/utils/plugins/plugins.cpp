@@ -71,8 +71,8 @@ struct Plugins::Impl {
     std::deque<ConfigTree> configs;
     // Providers before consumers; a full permutation of plugin indices.
     std::vector<std::size_t> order;
-    // The union prune, settled once at build; only run() applies it (see
-    // Plugins::attach()).
+    // The union prune, settled once at build. run() applies it directly;
+    // attach() only offers it to the session (see Plugins::attach()).
     std::optional<Query> prune;
 };
 
@@ -383,6 +383,7 @@ std::vector<Plugins::PluginInfo> Plugins::describe() const {
         info.has_plan_query = p.plugin->plan_query != nullptr;
         info.provides = name_list(p.plugin->provides, p.plugin->self);
         info.consumes = name_list(p.plugin->consumes, p.plugin->self);
+        info.ops = p.registered_ops;
         out.push_back(std::move(info));
     }
     return out;

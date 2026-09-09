@@ -76,6 +76,8 @@ class Plugins {
             false;         ///< true if the plugin declares a plan_query
         std::vector<std::string> provides;
         std::vector<std::string> consumes;
+        /// Op names the plugin's factory added to the host op registry.
+        std::vector<std::string> ops;
     };
 
     /// One entry per loaded plugin, in registration order.
@@ -90,15 +92,14 @@ class Plugins {
     /// `->results` and `->stats` throw if read before session.execute()
     /// completes.
     ///
-    /// The index prune that run() applies is only safe when the plugin branch
-    /// is a session's sole branch - applied to a shared scan it would starve
-    /// a co-scanning branch (e.g. a collect()) of events it is entitled to.
-    /// ViewSession's base scan is fixed at View::session() and exposes no way
-    /// for this call to tell whether other branches are, or will be, attached
-    /// to `session`, so attach() never narrows the shared scan; `stats` stays
-    /// default (the shared scan's own counters are session.execute()'s
-    /// return, not a plugin-only count). Use run() when the plugins are the
-    /// only reader of a trace and the prune should apply.
+    /// The index prune that run() applies would starve a co-scanning branch
+    /// (e.g. a collect()) of events it is entitled to, so attach() only
+    /// OFFERS it, via ViewSession::propose_base_prune; the session applies it
+    /// at execute() and only when the plugins are its sole branch. Nothing is
+    /// required of the caller either way.
+    ///
+    /// `stats` stays default: the shared scan's own counters are
+    /// session.execute()'s return, not a plugin-only count.
     trace::views::Deferred<PluginRun> attach(
         trace::views::ViewSession& session) const;
 
@@ -109,7 +110,8 @@ class Plugins {
     /// `view` narrowed by the union of the plugins' plan_query filters (the
     /// weakest predicate that still selects every event any plugin keeps), or
     /// unchanged when no prune applies. Only run() calls this: it owns the
-    /// scan it runs, so the prune can never starve another branch.
+    /// scan it runs, so it can narrow directly rather than offering the
+    /// narrowing as attach() does.
     trace::views::View prune(const trace::views::View& view) const;
 
     std::unique_ptr<Impl> impl_;

@@ -295,6 +295,9 @@ TEST_SUITE("DFTracerRun") {
               std::string::npos);
         CHECK(r.err.find("consumes: com.example.dur_stats") !=
               std::string::npos);
+        // Neither dur_stats plugin registers an op, so the line is present
+        // and reads none rather than being omitted.
+        CHECK(r.err.find("ops: (none)") != std::string::npos);
         MESSAGE("describe: " << r.err);
     }
 

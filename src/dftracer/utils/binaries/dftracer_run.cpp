@@ -243,6 +243,7 @@ static int describe_plugins(const PluginArgs& plugin_args) {
                      join_or_none(info.provides).c_str());
         std::fprintf(stderr, "  consumes: %s\n",
                      join_or_none(info.consumes).c_str());
+        std::fprintf(stderr, "  ops: %s\n", join_or_none(info.ops).c_str());
         std::fprintf(stderr, "\n");
     }
     return 0;

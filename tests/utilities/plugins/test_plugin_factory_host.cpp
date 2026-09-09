@@ -14,6 +14,7 @@
 #include <doctest/doctest.h>
 #include <testing_utilities.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -118,6 +119,17 @@ TEST_CASE("an op registered by the factory is live before the scan") {
     std::int64_t total = 0;
     std::memcpy(&total, bytes.data(), sizeof(total));
     CHECK(total == 2 * EVENTS);
+}
+
+TEST_CASE("describe() lists the ops a plugin's factory registered") {
+    auto set = Plugins::builder().add(FACTORY_REGISTERS_OP_PLUGIN_PATH).build();
+    INFO((set.has_value() ? std::string{} : set.error().message));
+    REQUIRE(set.has_value());
+
+    auto info = set->describe();
+    REQUIRE(info.size() == 1);
+    CHECK(std::find(info[0].ops.begin(), info[0].ops.end(),
+                    "factory_registers_op.double_rows") != info[0].ops.end());
 }
 
 TEST_CASE(
