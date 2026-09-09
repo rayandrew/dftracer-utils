@@ -289,14 +289,19 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
     if (const char* pq =
             plugin->plan_query ? plugin->plan_query(plugin->self) : nullptr;
         pq != nullptr && *pq != '\0') {
-        auto parsed = Query::from_string(pq);
+        // Copied before the teardown below: the string belongs to the plugin
+        // (the C++ SDK backs it with the holder's `plan` member), so destroy()
+        // frees it and dlclose() unmaps the code it came from. Reading it
+        // afterwards to build the message is a use-after-free.
+        const std::string plan(pq);
+        auto parsed = Query::from_string(plan);
         if (!parsed) {
             if (plugin->destroy) plugin->destroy(plugin->self);
             unregister_all();
             dlclose(handle);
             return make_error(
                 ErrorCode::INVALID_ARGUMENT,
-                "plugin '" + path + "' plan_query '" + std::string(pq) +
+                "plugin '" + path + "' plan_query '" + plan +
                     "' does not parse: " + parsed.error().message);
         }
     }
