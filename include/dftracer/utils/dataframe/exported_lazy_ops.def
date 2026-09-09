@@ -17,9 +17,13 @@
  *
  * Deferred: group_by_dynamic needs 7 operands (lazy, time_col, every, period,
  * aggs, origin, origin_min) against a 5-operand-slot signature cap - no row
- * added. collect/schema/explain/free are terminal accessors (they return a
- * dataframe, a string, or nothing, not a lazyframe), not plan nodes, so they
- * stay out of this table; use the dftu_lazyframe_* ABI / LazyFrame methods.
+ * added. take needs an int64-index-list operand and there is no I64LIST
+ * token (only STRLIST/I32LIST exist) - no row added; see
+ * dftu_dataframe_take for the equivalent eager-frame ABI shape once such a
+ * token exists. collect/schema/explain/free are terminal accessors (they
+ * return a dataframe, a string, or nothing, not a lazyframe), not plan
+ * nodes, so they stay out of this table; use the dftu_lazyframe_* ABI /
+ * LazyFrame methods.
  */
 
 #ifndef DFTU_LAZY_OP
@@ -35,11 +39,15 @@ DFTU_LAZY_OP(is_duplicated, dftu_lazyframe_is_duplicated, LAZY, LAZY, NONE, NONE
 DFTU_LAZY_OP(is_unique, dftu_lazyframe_is_unique, LAZY, LAZY, NONE, NONE, NONE, NONE)
 DFTU_LAZY_OP(null_count, dftu_lazyframe_null_count, LAZY, LAZY, NONE, NONE, NONE, NONE)
 DFTU_LAZY_OP(unique, dftu_lazyframe_unique, LAZY, LAZY, NONE, NONE, NONE, NONE)
+DFTU_LAZY_OP(reverse, dftu_lazyframe_reverse, LAZY, LAZY, NONE, NONE, NONE, NONE)
 
 /* lazy + column name. */
 DFTU_LAZY_OP(explode, dftu_lazyframe_explode, LAZY, LAZY, STR, NONE, NONE, NONE)
 DFTU_LAZY_OP(to_dummies, dftu_lazyframe_to_dummies, LAZY, LAZY, STR, NONE, NONE, NONE)
 DFTU_LAZY_OP(with_row_index, dftu_lazyframe_with_row_index, LAZY, LAZY, STR, NONE, NONE, NONE)
+
+/* lazy + series. */
+DFTU_LAZY_OP(filter_mask, dftu_lazyframe_filter_mask, LAZY, LAZY, SERIES, NONE, NONE, NONE)
 
 /* lazy + scalar / expr. */
 DFTU_LAZY_OP(fill_null, dftu_lazyframe_fill_null, LAZY, LAZY, SCALAR, NONE, NONE, NONE)
@@ -59,6 +67,7 @@ DFTU_LAZY_OP(rename, dftu_lazyframe_rename, LAZY, LAZY, STRLIST, NONE, NONE, NON
 DFTU_LAZY_OP(unpivot, dftu_lazyframe_unpivot, LAZY, LAZY, STRLIST, STRLIST, NONE, NONE)
 DFTU_LAZY_OP(melt, dftu_lazyframe_melt, LAZY, LAZY, STRLIST, STRLIST, NONE, NONE)
 DFTU_LAZY_OP(group_by, dftu_lazyframe_group_by, LAZY, LAZY, STRLIST, AGGLIST, NONE, NONE)
+DFTU_LAZY_OP(sort_by_multi, dftu_lazyframe_sort_by_multi, LAZY, LAZY, STRLIST, I32, NONE, NONE)
 
 /* lazy + column name + int64/enum. */
 DFTU_LAZY_OP(sort_by, dftu_lazyframe_sort_by, LAZY, LAZY, STR, I32, NONE, NONE)

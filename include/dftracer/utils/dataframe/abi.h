@@ -951,6 +951,21 @@ DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_memory_budget(
  * default auto-spill budget. */
 DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_auto_spill(const dftu_lazyframe* lf);
 
+/** Keep rows where the positionally-aligned `mask` is true, as
+ * DataFrame::filter. `mask` is borrowed. NULL if `lf` or `mask` is NULL. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_filter_mask(const dftu_lazyframe* lf,
+                                                       const dftu_series* mask);
+
+/** Rows in reverse order, as DataFrame::reverse. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_reverse(const dftu_lazyframe* lf);
+
+/** Stable lexicographic sort by the `n` key columns named by `by`, ascending
+ * unless `descending` (nulls last in both directions), as
+ * DataFrame::sort_by_multi. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_sort_by_multi(
+    const dftu_lazyframe* lf, const char* const* by, int32_t n,
+    int32_t descending);
+
 /* ---- Op registry -------------------------------------------------------- */
 /* One name-keyed registry over the engine's ops so a built-in op and a user op
  * are looked up and run the same way (the plugin-ABI foundation). Built-in ops

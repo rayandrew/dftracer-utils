@@ -657,4 +657,40 @@ dftu_lazyframe* dftu_lazyframe_auto_spill(const dftu_lazyframe* lf) {
     }
 }
 
+dftu_lazyframe* dftu_lazyframe_filter_mask(const dftu_lazyframe* lf,
+                                           const dftu_series* mask) {
+    if (!lf || !mask) return nullptr;
+    try {
+        return with_borrowed(mask, [&](const Series& m) {
+            return wrap_lazy(lf->lf.filter_mask(m.share()));
+        });
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_reverse(const dftu_lazyframe* lf) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.reverse());
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_sort_by_multi(const dftu_lazyframe* lf,
+                                             const char* const* by, int32_t n,
+                                             int32_t descending) {
+    if (!lf || n < 0 || (n > 0 && !by)) return nullptr;
+    try {
+        std::vector<std::string> cols;
+        cols.reserve(static_cast<std::size_t>(n));
+        for (int32_t i = 0; i < n; ++i) cols.emplace_back(by[i]);
+        return wrap_lazy(
+            lf->lf.sort_by_multi(std::move(cols), descending != 0));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
 }  // extern "C"

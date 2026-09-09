@@ -507,6 +507,13 @@ dftu_lazyframe* dftu_op_run_lazy(const dftu_op_desc* op,
         case DFTU_OP_SIG(LAZY, LAZY, STR, I32):
             return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STR, I32)>::type>(op->fn)(
                 lf, g[1].str.ptr, g[2].i32);
+        case DFTU_OP_SIG(LAZY, LAZY, SERIES, NONE):
+            if (!g[1].series) return nullptr;
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, SERIES, NONE)>::type>(
+                op->fn)(lf, g[1].series);
+        case DFTU_OP_SIG(LAZY, LAZY, STRLIST, I32):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STRLIST, I32)>::type>(
+                op->fn)(lf, g[1].list.items, g[1].list.n, g[2].i32);
         case DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE):
             return as<
                 op_fn<DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE)>::type>(

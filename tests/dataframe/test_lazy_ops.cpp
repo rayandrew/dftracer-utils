@@ -110,6 +110,7 @@ TEST_SUITE("lazy_ops") {
             {"dftu.lazy.is_unique", dftu_lazyframe_is_unique},
             {"dftu.lazy.null_count", dftu_lazyframe_null_count},
             {"dftu.lazy.unique", dftu_lazyframe_unique},
+            {"dftu.lazy.reverse", dftu_lazyframe_reverse},
         };
         for (const Case& c : cases) {
             INFO(c.name);
@@ -628,9 +629,75 @@ TEST_SUITE("lazy_ops") {
         dftu_dataframe_free(df);
     }
 
-    TEST_CASE("dftu.lazy.group_by_dynamic was intentionally left out") {
-        CHECK(dftu_op_find("dftu.lazy.group_by_dynamic") == nullptr);
+    TEST_CASE("dftu.lazy.filter_mask matches dftu_lazyframe_filter_mask") {
+        dftu_dataframe* df = make_frame({1, 2, 3}, {10, 20, 30});
+        REQUIRE(df != nullptr);
+
+        check_kind_and_arity("dftu.lazy.filter_mask", 1);
+        dftu_lazyframe* lf1 = dftu_dataframe_lazy(df);
+        dftu_lazyframe* lf2 = dftu_dataframe_lazy(df);
+        const std::uint8_t mask_bits = 0b101;  // rows 0 and 2 set.
+        dftu_series* mask =
+            dftu_series_new_flat(DFTU_TYPE_BOOL, &mask_bits, 3, nullptr);
+        REQUIRE(mask != nullptr);
+        OpArgs a;
+        a.series(1, mask);
+        dftu_dataframe* via_registry =
+            run_registry("dftu.lazy.filter_mask", lf1, a);
+        dftu_lazyframe* direct = dftu_lazyframe_filter_mask(lf2, mask);
+        REQUIRE(direct != nullptr);
+        dftu_dataframe* via_direct = dftu_lazyframe_collect(direct, 0);
+        check_same(via_registry, via_direct);
+        CHECK(dftu_dataframe_num_rows(via_registry) == 2);
+
+        dftu_series_free(mask);
+        dftu_dataframe_free(via_registry);
+        dftu_dataframe_free(via_direct);
+        dftu_lazyframe_free(direct);
+        dftu_lazyframe_free(lf1);
+        dftu_lazyframe_free(lf2);
+        dftu_dataframe_free(df);
     }
+
+    TEST_CASE("dftu.lazy.sort_by_multi matches dftu_lazyframe_sort_by_multi") {
+        dftu_dataframe* df = make_frame({2, 1, 1}, {20, 30, 10});
+        REQUIRE(df != nullptr);
+
+        check_kind_and_arity("dftu.lazy.sort_by_multi", 1);
+        dftu_lazyframe* lf1 = dftu_dataframe_lazy(df);
+        dftu_lazyframe* lf2 = dftu_dataframe_lazy(df);
+        const char* by[2] = {"k", "v"};
+        OpArgs a;
+        a.strlist(1, by, 2).i32(2, 0);
+        dftu_dataframe* via_registry =
+            run_registry("dftu.lazy.sort_by_multi", lf1, a);
+        dftu_lazyframe* direct = dftu_lazyframe_sort_by_multi(lf2, by, 2, 0);
+        REQUIRE(direct != nullptr);
+        dftu_dataframe* via_direct = dftu_lazyframe_collect(direct, 0);
+        check_same(via_registry, via_direct);
+        dftu_series* kc = dftu_dataframe_column(via_registry, "k");
+        dftu_series* vc = dftu_dataframe_column(via_registry, "v");
+        REQUIRE(kc != nullptr);
+        REQUIRE(vc != nullptr);
+        CHECK(i64_of(kc)[0] == 1);
+        CHECK(i64_of(vc)[0] == 10);
+        dftu_series_free(kc);
+        dftu_series_free(vc);
+
+        dftu_dataframe_free(via_registry);
+        dftu_dataframe_free(via_direct);
+        dftu_lazyframe_free(direct);
+        dftu_lazyframe_free(lf1);
+        dftu_lazyframe_free(lf2);
+        dftu_dataframe_free(df);
+    }
+
+    // group_by_dynamic (7 operands against the 5-slot cap) and take (needs an
+    // int64 index list, and no I64LIST token exists) are DEBT, not design:
+    // both are recorded in exported_lazy_ops.def's header and in the sweep's
+    // allowlist. Deliberately not pinned here - a test asserting they are
+    // absent would turn registering them into a failing build, which is
+    // backwards for something we want closed.
 
     TEST_CASE("collect/schema/explain/free stay out of the lazy op table") {
         CHECK(dftu_op_find("dftu.lazy.collect") == nullptr);

@@ -30,10 +30,8 @@ CLASSES = {
     "LazyFrame": "classdftracer_1_1utils_1_1dataframe_1_1_lazy_frame.xml",
 }
 
-# Which registry bucket (see dftu_op_kind in abi.h) backs each class; None
-# means the kind does not exist yet (LazyFrame - docs/plans/plugin_runtime.md
-# item 18), so nothing in the registry can back it.
-REGISTRY_BUCKET = {"Series": "series", "DataFrame": "frame", "LazyFrame": None}
+# Which registry bucket (see dftu_op_kind in abi.h) backs each class.
+REGISTRY_BUCKET = {"Series": "series", "DataFrame": "frame", "LazyFrame": "lazy"}
 
 MEMBER_RE = re.compile(r'<memberdef kind="function"[^>]*>.*?</memberdef>', re.S)
 PROT_RE = re.compile(r'prot="([a-z]+)"')
@@ -65,13 +63,8 @@ ALLOWLIST = {
         "group_by", "group_by_dynamic", "mask", "melt", "sample", "take",
     },
     "LazyFrame": {
-        "auto_spill", "collect", "collect_group_state", "describe",
-        "drop_duplicates", "drop_nulls", "explain", "explode", "fill_null",
-        "filter", "group_by", "group_by_dynamic", "head", "is_duplicated",
-        "is_unique", "melt", "memory_budget", "null_count", "pivot",
-        "rename", "sample", "scan", "schema", "select", "slice", "sort_by",
-        "stream", "tail", "to_dummies", "topk", "unique", "unpivot",
-        "with_column", "with_row_index",
+        "collect", "collect_group_state", "explain", "group_by_dynamic",
+        "scan", "schema", "stream", "take",
     },
 }
 
@@ -109,9 +102,10 @@ def registry_leaf_names(lib_path: Path) -> dict[str, set[str]]:
     lib.dftu_op_kind_of.restype = ctypes.c_int
     lib.dftu_op_kind_of.argtypes = [ctypes.c_int32]
 
-    DFTU_OP_KIND_SERIES, DFTU_OP_KIND_AGGREGATE, DFTU_OP_KIND_FRAME = 0, 1, 2
+    DFTU_OP_KIND_SERIES, DFTU_OP_KIND_AGGREGATE = 0, 1
+    DFTU_OP_KIND_FRAME, DFTU_OP_KIND_LAZY = 2, 3
 
-    by_bucket: dict[str, set[str]] = {"series": set(), "frame": set()}
+    by_bucket: dict[str, set[str]] = {"series": set(), "frame": set(), "lazy": set()}
     for i in range(lib.dftu_op_count()):
         desc = lib.dftu_op_at(i).contents
         leaf = desc.name.decode().rsplit(".", 1)[-1]
@@ -120,6 +114,8 @@ def registry_leaf_names(lib_path: Path) -> dict[str, set[str]]:
             by_bucket["series"].add(leaf)
         elif kind == DFTU_OP_KIND_FRAME:
             by_bucket["frame"].add(leaf)
+        elif kind == DFTU_OP_KIND_LAZY:
+            by_bucket["lazy"].add(leaf)
     return by_bucket
 
 
