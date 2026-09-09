@@ -843,6 +843,114 @@ DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_drop_nulls(const dftu_lazyframe* lf);
 /** Distinct rows (keep first), in original order. */
 DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_unique(const dftu_lazyframe* lf);
 
+/** Alias of dftu_lazyframe_unique. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_drop_duplicates(
+    const dftu_lazyframe* lf);
+
+/** Replace column names positionally with the `n` `names`, keeping column
+ * order. `n` must match the frame's column count; a mismatch surfaces as a
+ * collect error, not here. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_rename(const dftu_lazyframe* lf,
+                                                  const char* const* names,
+                                                  int32_t n);
+
+/** Keep `len` rows starting at `offset` (negative `offset` counts from the
+ * end, as DataFrame::slice). */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_slice(const dftu_lazyframe* lf,
+                                                 int64_t offset, int64_t len);
+
+/** Replace every null with `value`, cast to each column's type. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_fill_null(const dftu_lazyframe* lf,
+                                                     dftu_scalar value);
+
+/** Append an Int64 row-index column named `name`, starting at 0. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_with_row_index(
+    const dftu_lazyframe* lf, const char* name);
+
+/** A one-row frame of each column's null count. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_null_count(const dftu_lazyframe* lf);
+
+/** Expand a List `column`: each element becomes its own row. An unknown
+ * column or a non-List column surfaces as a collect error, not here. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_explode(const dftu_lazyframe* lf,
+                                                   const char* column);
+
+/** Reshape wide -> long: keep the `n_id` `id_vars` columns, stack the `n_val`
+ * `value_vars` columns into `variable`/`value` columns, as
+ * dftu_dataframe_unpivot. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_unpivot(
+    const dftu_lazyframe* lf, const char* const* id_vars, int32_t n_id,
+    const char* const* value_vars, int32_t n_val);
+
+/** Alias of dftu_lazyframe_unpivot. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_melt(const dftu_lazyframe* lf,
+                                                const char* const* id_vars,
+                                                int32_t n_id,
+                                                const char* const* value_vars,
+                                                int32_t n_val);
+
+/** The `k` rows with the largest (or smallest, when `largest` is 0) `name`
+ * values. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_topk(const dftu_lazyframe* lf,
+                                                const char* name, int64_t k,
+                                                int32_t largest);
+
+/** A deterministic n-row sample (mix64 min-hash), bounded to `n` rows. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_sample(const dftu_lazyframe* lf,
+                                                  int64_t n, uint64_t seed);
+
+/** One Bool column: true where the whole row is duplicated. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_is_duplicated(
+    const dftu_lazyframe* lf);
+
+/** One Bool column: true where the whole row is unique. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_is_unique(const dftu_lazyframe* lf);
+
+/** Tumbling/sliding time-window aggregation over an ascending Int64
+ * `time_col`, as dftu_dataframe_group_by_dynamic, plus `origin` (the window
+ * grid's zero point) and `origin_min` (nonzero: start the grid at the data's
+ * first timestamp instead of `origin`). An invalid `every`, an unknown
+ * `time_col`, or an agg naming an unknown column/op surfaces as a collect
+ * error, not here. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_group_by_dynamic(
+    const dftu_lazyframe* lf, const char* time_col, int64_t every,
+    int64_t period, const dftu_group_agg* aggs, int32_t n_aggs, int64_t origin,
+    int32_t origin_min);
+
+/** Reshape long -> wide: rows are the distinct `index` values, one value
+ * column per distinct `on` value, each cell `values` aggregated over the
+ * matching rows. `agg` is the collision reducer: first|last|sum|min|max|mean
+ * (NULL defaults to "first"). Output columns are data-dependent, so
+ * dftu_lazyframe_schema is empty until collect. An unknown column or agg
+ * surfaces as a collect error, not here. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_pivot(const dftu_lazyframe* lf,
+                                                 const char* index,
+                                                 const char* on,
+                                                 const char* values,
+                                                 const char* agg);
+
+/** One-hot encode `column`: replace it with one Int8 column per distinct
+ * value, named `<column>_<value>`. Output columns are data-dependent, so
+ * dftu_lazyframe_schema is empty until collect. An unknown column surfaces as
+ * a collect error, not here. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_to_dummies(const dftu_lazyframe* lf,
+                                                      const char* column);
+
+/** Per-column summary statistics (count/null_count/mean/std/min/max). Output
+ * columns are data-dependent, so dftu_lazyframe_schema is empty until
+ * collect. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_describe(const dftu_lazyframe* lf);
+
+/** Out-of-core budget for the pipeline breakers (sort/unique/group_by): when a
+ * sink's in-memory state grows past `bytes` it spills to a sorted temp run,
+ * k-way merged at collect. 0 means "auto" (~1/3 of available memory). */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_memory_budget(
+    const dftu_lazyframe* lf, uint64_t bytes);
+
+/** Sugar for dftu_lazyframe_memory_budget(lf, 0): explicitly request the
+ * default auto-spill budget. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_auto_spill(const dftu_lazyframe* lf);
+
 /* ---- Op registry -------------------------------------------------------- */
 /* One name-keyed registry over the engine's ops so a built-in op and a user op
  * are looked up and run the same way (the plugin-ABI foundation). Built-in ops

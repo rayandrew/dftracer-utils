@@ -440,4 +440,221 @@ dftu_lazyframe* dftu_lazyframe_unique(const dftu_lazyframe* lf) {
     }
 }
 
+dftu_lazyframe* dftu_lazyframe_drop_duplicates(const dftu_lazyframe* lf) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.drop_duplicates());
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_rename(const dftu_lazyframe* lf,
+                                      const char* const* names, int32_t n) {
+    if (!lf || n < 0 || (n > 0 && !names)) return nullptr;
+    try {
+        std::vector<std::string> v;
+        v.reserve(static_cast<std::size_t>(n));
+        for (int32_t i = 0; i < n; ++i) v.emplace_back(names[i]);
+        return wrap_lazy(lf->lf.rename(std::move(v)));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_slice(const dftu_lazyframe* lf, int64_t offset,
+                                     int64_t len) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.slice(offset, len));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_fill_null(const dftu_lazyframe* lf,
+                                         dftu_scalar value) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.fill_null(value));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_with_row_index(const dftu_lazyframe* lf,
+                                              const char* name) {
+    if (!lf || !name) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.with_row_index(name));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_null_count(const dftu_lazyframe* lf) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.null_count());
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_explode(const dftu_lazyframe* lf,
+                                       const char* column) {
+    if (!lf || !column) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.explode(column));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_unpivot(const dftu_lazyframe* lf,
+                                       const char* const* id_vars, int32_t n_id,
+                                       const char* const* value_vars,
+                                       int32_t n_val) {
+    if (!lf || n_id < 0 || n_val < 0) return nullptr;
+    try {
+        std::vector<std::string> ids, vals;
+        ids.reserve(static_cast<std::size_t>(n_id));
+        vals.reserve(static_cast<std::size_t>(n_val));
+        for (int32_t i = 0; i < n_id; ++i) ids.emplace_back(id_vars[i]);
+        for (int32_t i = 0; i < n_val; ++i) vals.emplace_back(value_vars[i]);
+        return wrap_lazy(lf->lf.unpivot(std::move(ids), std::move(vals)));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_melt(const dftu_lazyframe* lf,
+                                    const char* const* id_vars, int32_t n_id,
+                                    const char* const* value_vars,
+                                    int32_t n_val) {
+    if (!lf || n_id < 0 || n_val < 0) return nullptr;
+    try {
+        std::vector<std::string> ids, vals;
+        ids.reserve(static_cast<std::size_t>(n_id));
+        vals.reserve(static_cast<std::size_t>(n_val));
+        for (int32_t i = 0; i < n_id; ++i) ids.emplace_back(id_vars[i]);
+        for (int32_t i = 0; i < n_val; ++i) vals.emplace_back(value_vars[i]);
+        return wrap_lazy(lf->lf.melt(std::move(ids), std::move(vals)));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_topk(const dftu_lazyframe* lf, const char* name,
+                                    int64_t k, int32_t largest) {
+    if (!lf || !name) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.topk(name, k, largest != 0));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_sample(const dftu_lazyframe* lf, int64_t n,
+                                      uint64_t seed) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.sample(n, seed));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_is_duplicated(const dftu_lazyframe* lf) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.is_duplicated());
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_is_unique(const dftu_lazyframe* lf) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.is_unique());
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_group_by_dynamic(const dftu_lazyframe* lf,
+                                                const char* time_col,
+                                                int64_t every, int64_t period,
+                                                const dftu_group_agg* aggs,
+                                                int32_t n_aggs, int64_t origin,
+                                                int32_t origin_min) {
+    if (!lf || !time_col || n_aggs < 0 || (n_aggs > 0 && !aggs)) return nullptr;
+    try {
+        std::vector<GroupAgg> v;
+        v.reserve(static_cast<std::size_t>(n_aggs));
+        for (int32_t i = 0; i < n_aggs; ++i) {
+            GroupAgg a;
+            a.op = dftracer::utils::dataframe::agg_from_string(
+                aggs[i].op ? aggs[i].op : "");
+            a.column = aggs[i].column ? aggs[i].column : "";
+            a.out = aggs[i].out ? aggs[i].out : "";
+            v.push_back(std::move(a));
+        }
+        return wrap_lazy(lf->lf.group_by_dynamic(
+            time_col, every, period, std::move(v), origin, origin_min != 0));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_pivot(const dftu_lazyframe* lf,
+                                     const char* index, const char* on,
+                                     const char* values, const char* agg) {
+    if (!lf || !index || !on || !values) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.pivot(index, on, values, agg ? agg : "first"));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_to_dummies(const dftu_lazyframe* lf,
+                                          const char* column) {
+    if (!lf || !column) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.to_dummies(column));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_describe(const dftu_lazyframe* lf) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.describe());
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_memory_budget(const dftu_lazyframe* lf,
+                                             uint64_t bytes) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.memory_budget(bytes));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_lazyframe_auto_spill(const dftu_lazyframe* lf) {
+    if (!lf) return nullptr;
+    try {
+        return wrap_lazy(lf->lf.auto_spill());
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
 }  // extern "C"
