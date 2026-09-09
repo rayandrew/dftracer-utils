@@ -81,6 +81,17 @@ TEST_CASE("a `query` key is accepted alongside the declared ones") {
     CHECK(set.has_value());
 }
 
+TEST_CASE("an unparseable `query` fails the load") {
+    // `query` becomes the plugin's plan_query. A predicate that does not parse
+    // used to be logged and dropped, which cost the whole SET its index prune
+    // and let this plugin fold over events its own predicate excluded. Both
+    // are silent wrong answers, so the load fails instead.
+    auto set = load(config_of(R"({"label": "rows", "query": "cat =="})"));
+    REQUIRE(!set.has_value());
+    CHECK(has_substr(set.error().message, "plan_query"));
+    CHECK(has_substr(set.error().message, "does not parse"));
+}
+
 TEST_CASE("no config at all still fails when a key is required") {
     auto set = Plugins::builder().add(CONFIG_KEYS_PLUGIN_PATH).build();
     REQUIRE(!set.has_value());

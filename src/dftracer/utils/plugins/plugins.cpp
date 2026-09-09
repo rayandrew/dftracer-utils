@@ -281,6 +281,26 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                           "plugin '" + path + "' config: " + bad);
     }
 
+    // A plan_query that does not parse used to be logged and dropped, which
+    // silently cost two things: plugin_union_prune_query gave up, so the whole
+    // SET lost its index prune, and PluginFold ran with no filter, folding the
+    // plugin over events its own predicate excluded. The second is a wrong
+    // answer, not a lost optimisation, so a broken predicate fails the load.
+    if (const char* pq =
+            plugin->plan_query ? plugin->plan_query(plugin->self) : nullptr;
+        pq != nullptr && *pq != '\0') {
+        auto parsed = Query::from_string(pq);
+        if (!parsed) {
+            if (plugin->destroy) plugin->destroy(plugin->self);
+            unregister_all();
+            dlclose(handle);
+            return make_error(
+                ErrorCode::INVALID_ARGUMENT,
+                "plugin '" + path + "' plan_query '" + std::string(pq) +
+                    "' does not parse: " + parsed.error().message);
+        }
+    }
+
     return Plugins::Impl::Loaded{handle,
                                  plugin,
                                  true,
