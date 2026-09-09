@@ -2543,3 +2543,35 @@ TEST_SUITE("vec_arrow") {
     }
 }
 #endif  // DFTRACER_UTILS_ENABLE_ARROW
+
+TEST_CASE("slicing a Bool column respects bit packing") {
+    // Bool data is bit-packed ((n+7)/8 bytes) while byte_width(Bool) is 1, so
+    // a byte-stride slice both read the wrong bits and ran past the end of the
+    // buffer.
+    namespace df = dftracer::utils::dataframe;
+    std::vector<bool> vals;
+    for (int i = 0; i < 40; ++i) vals.push_back(i % 3 == 0);
+
+    std::vector<std::uint8_t> packed((vals.size() + 7) / 8, 0);
+    for (std::size_t i = 0; i < vals.size(); ++i)
+        if (vals[i]) packed[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+
+    df::Series col{dftu_series_new_flat(DFTU_TYPE_BOOL, packed.data(),
+                                        static_cast<std::int64_t>(vals.size()),
+                                        nullptr)};
+    REQUIRE(col.valid());
+
+    for (std::int64_t off : {std::int64_t{0}, std::int64_t{1}, std::int64_t{7},
+                             std::int64_t{8}, std::int64_t{13}}) {
+        const std::int64_t n = 11;
+        df::Series s{dftu_series_slice(col.handle(), off, n)};
+        REQUIRE(s.valid());
+        REQUIRE(s.length() == n);
+        const auto* bits =
+            static_cast<const std::uint8_t*>(dftu_series_data(s.handle()));
+        for (std::int64_t i = 0; i < n; ++i) {
+            const bool got = ((bits[i >> 3] >> (i & 7)) & 1u) != 0;
+            CHECK(got == vals[static_cast<std::size_t>(off + i)]);
+        }
+    }
+}

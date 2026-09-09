@@ -215,9 +215,26 @@ dftu_series* dftu_series_slice(const dftu_series* col, int64_t offset,
     out->encoding = Encoding::Flat;
     out->length = len;
     auto parent = col->data;  // shared_ptr copy keeps the buffer alive
-    std::uint8_t* base = parent->data() + static_cast<std::size_t>(offset) * w;
-    out->data = Buffer::wrap(base, static_cast<std::size_t>(len) * w,
-                             [parent](void*) { /* view: parent owns it */ });
+    if (col->type == TypeId::Bool) {
+        // Bool is bit-packed ((n+7)/8 bytes)
+        const std::size_t nbytes = static_cast<std::size_t>((len + 7) / 8);
+        auto dbuf = Buffer::allocate(nbytes);
+        std::memset(dbuf->data(), 0, nbytes);
+        const std::uint8_t* src = parent->data();
+        std::uint8_t* dst = dbuf->data();
+        for (int64_t i = 0; i < len; ++i) {
+            const int64_t p = offset + i;
+            if ((src[p >> 3] >> (p & 7)) & 1u)
+                dst[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+        }
+        out->data = std::move(dbuf);
+    } else {
+        std::uint8_t* base =
+            parent->data() + static_cast<std::size_t>(offset) * w;
+        out->data =
+            Buffer::wrap(base, static_cast<std::size_t>(len) * w,
+                         [parent](void*) { /* view: parent owns it */ });
+    }
 
     // Carry the validity bitmap so nulls survive into the expression engine.
     // The bitmap is indexed from bit 0, so a byte-aligned offset can share the
