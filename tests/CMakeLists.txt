@@ -432,7 +432,7 @@ if(DFTRACER_UTILS_PACKAGE_TESTS)
     NAME test_pkgconfig_discovery_core
     COMMAND
       ${CMAKE_COMMAND}
-      -DPKG_CONFIG_PATH=${TEST_INSTALL_PREFIX}/lib/pkgconfig:${TEST_INSTALL_PREFIX}/lib64/pkgconfig
+      -DPKG_CONFIG_PATH=${TEST_INSTALL_PREFIX}/lib/pkgconfig:${TEST_INSTALL_PREFIX}/lib64/pkgconfig:${TEST_INSTALL_PREFIX}/lib/${CMAKE_LIBRARY_ARCHITECTURE}/pkgconfig
       -DLIBRARY_NAME=dftracer_utils_core
       -DTEST_TYPE=pkgconfig -P
       ${CMAKE_CURRENT_SOURCE_DIR}/test_package_discovery.cmake)
@@ -442,7 +442,7 @@ if(DFTRACER_UTILS_PACKAGE_TESTS)
     NAME test_pkgconfig_discovery_utilities
     COMMAND
       ${CMAKE_COMMAND}
-      -DPKG_CONFIG_PATH=${TEST_INSTALL_PREFIX}/lib/pkgconfig:${TEST_INSTALL_PREFIX}/lib64/pkgconfig
+      -DPKG_CONFIG_PATH=${TEST_INSTALL_PREFIX}/lib/pkgconfig:${TEST_INSTALL_PREFIX}/lib64/pkgconfig:${TEST_INSTALL_PREFIX}/lib/${CMAKE_LIBRARY_ARCHITECTURE}/pkgconfig
       -DLIBRARY_NAME=dftracer_utils_utilities
       -DTEST_TYPE=pkgconfig -P
       ${CMAKE_CURRENT_SOURCE_DIR}/test_package_discovery.cmake)
@@ -452,7 +452,7 @@ if(DFTRACER_UTILS_PACKAGE_TESTS)
     NAME test_pkgconfig_discovery_unified
     COMMAND
       ${CMAKE_COMMAND}
-      -DPKG_CONFIG_PATH=${TEST_INSTALL_PREFIX}/lib/pkgconfig:${TEST_INSTALL_PREFIX}/lib64/pkgconfig
+      -DPKG_CONFIG_PATH=${TEST_INSTALL_PREFIX}/lib/pkgconfig:${TEST_INSTALL_PREFIX}/lib64/pkgconfig:${TEST_INSTALL_PREFIX}/lib/${CMAKE_LIBRARY_ARCHITECTURE}/pkgconfig
       -DLIBRARY_NAME=dftracer_utils
       -DTEST_TYPE=pkgconfig -P
       ${CMAKE_CURRENT_SOURCE_DIR}/test_package_discovery.cmake)
