@@ -280,6 +280,32 @@ const char* const* name_list_thunk(void*) {
     return names.data();
 }
 
+/// A Slice declaring the config keys it reads via a static `config_keys()`
+/// returning a range of dftu_config_key (a NULL name is not needed; the thunk
+/// terminates the array).
+template <class Slice>
+concept DeclaresConfigKeys = requires {
+    { std::begin(Slice::config_keys()) };
+    { std::end(Slice::config_keys()) };
+};
+
+// The declared keys copied into a NULL-name-terminated array with static
+// storage, plus the "query" key every Slice built here reads (make_plugin
+// takes plan_query from it), so declaring keys does not make a caller's
+// `query` an unknown one.
+template <class Slice>
+const dftu_config_key* config_key_thunk(void*) {
+    static const std::vector<dftu_config_key> keys = [] {
+        std::vector<dftu_config_key> v;
+        for (const dftu_config_key& k : Slice::config_keys()) v.push_back(k);
+        v.push_back({"query", DFTU_VAL_STR, 0,
+                     "coarse DSL predicate the scan is pruned by"});
+        v.push_back({nullptr, DFTU_CONFIG_ANY, 0, nullptr});
+        return v;
+    }();
+    return keys.data();
+}
+
 }  // namespace detail
 
 /** Build a dftu_plugin from a Slice providing Slice(const Config&), merge, and
@@ -362,6 +388,8 @@ dftu_plugin* make_plugin(const dftu_value* config) {
         vt.provides = &detail::name_list_thunk<Slice, true>;
     if constexpr (detail::DeclaresConsumes<Slice>)
         vt.consumes = &detail::name_list_thunk<Slice, false>;
+    if constexpr (detail::DeclaresConfigKeys<Slice>)
+        vt.config_keys = &detail::config_key_thunk<Slice>;
 
     return &vt;
 }

@@ -298,6 +298,9 @@ TEST_SUITE("DFTracerRun") {
         // Neither dur_stats plugin registers an op, so the line is present
         // and reads none rather than being omitted.
         CHECK(r.err.find("ops: (none)") != std::string::npos);
+        // Neither declares its config keys, so describe says so rather than
+        // implying an empty but declared set.
+        CHECK(r.err.find("config: (undeclared)") != std::string::npos);
         MESSAGE("describe: " << r.err);
     }
 

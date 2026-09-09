@@ -107,6 +107,81 @@ std::string plugin_name_from_path(std::string_view path) {
     return std::string(base);
 }
 
+const char* value_kind_name(std::int32_t kind) {
+    switch (static_cast<dftu_value_kind>(kind)) {
+        case DFTU_VAL_NULL:
+            return "null";
+        case DFTU_VAL_BOOL:
+            return "bool";
+        case DFTU_VAL_I64:
+            return "int";
+        case DFTU_VAL_F64:
+            return "float";
+        case DFTU_VAL_STR:
+            return "string";
+        case DFTU_VAL_ARRAY:
+            return "array";
+        case DFTU_VAL_OBJECT:
+            return "object";
+    }
+    return "?";
+}
+
+bool is_numeric(std::int32_t kind) {
+    return kind == DFTU_VAL_BOOL || kind == DFTU_VAL_I64 ||
+           kind == DFTU_VAL_F64;
+}
+
+// The declared kind is a contract about what the plugin will READ, and it
+// reads through dftu_as_i64/f64/bool, which coerce freely between the three
+// scalar kinds. So a numeric declaration accepts any numeric value; every
+// other kind must match exactly.
+bool kind_accepts(std::int32_t declared, std::int32_t given) {
+    if (declared == DFTU_CONFIG_ANY) return true;
+    if (is_numeric(declared)) return is_numeric(given);
+    return declared == given;
+}
+
+// Empty when `config` satisfies what `plugin` declares, else the one reason to
+// reject the load. A plugin that declares no keys is not validated: an
+// undeclared config is the plugin's own business.
+std::string config_violation(const dftu_plugin* plugin,
+                             const dftu_value* config) {
+    if (!plugin->config_keys) return {};
+    const dftu_config_key* keys = plugin->config_keys(plugin->self);
+    if (!keys) return {};
+
+    if (config && config->kind != DFTU_VAL_OBJECT)
+        return "expected a JSON object";
+
+    for (const dftu_config_key* k = keys; k->name; ++k) {
+        const dftu_value* v = config ? dftu_obj_get(config, k->name) : nullptr;
+        if (!v) {
+            if (k->required)
+                return std::string("required key '") + k->name + "' is missing";
+            continue;
+        }
+        if (!kind_accepts(k->kind, v->kind))
+            return std::string("key '") + k->name + "' must be " +
+                   value_kind_name(k->kind) + ", got " +
+                   value_kind_name(v->kind);
+    }
+
+    if (!config) return {};
+    for (std::uint32_t i = 0; i < config->count; ++i) {
+        const std::string_view given{config->as.members[i].key,
+                                     config->as.members[i].key_len};
+        bool declared = false;
+        for (const dftu_config_key* k = keys; k->name && !declared; ++k)
+            declared = given == k->name;
+        if (!declared)
+            return "unknown key '" + std::string(given) +
+                   "'; the plugin declares its keys, so this is a typo or a "
+                   "key it does not read";
+    }
+    return {};
+}
+
 Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                                           const dftu_value* config) {
     void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
@@ -169,6 +244,14 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                           "plugin '" + path + "' ABI version " +
                               std::to_string(got) + " does not match host " +
                               std::to_string(DFTRACER_PLUGIN_ABI_VERSION));
+    }
+
+    if (std::string bad = config_violation(plugin, config); !bad.empty()) {
+        if (plugin->destroy) plugin->destroy(plugin->self);
+        unregister_all();
+        dlclose(handle);
+        return make_error(ErrorCode::INVALID_ARGUMENT,
+                          "plugin '" + path + "' config: " + bad);
     }
 
     return Plugins::Impl::Loaded{handle,
@@ -384,6 +467,21 @@ std::vector<Plugins::PluginInfo> Plugins::describe() const {
         info.provides = name_list(p.plugin->provides, p.plugin->self);
         info.consumes = name_list(p.plugin->consumes, p.plugin->self);
         info.ops = p.registered_ops;
+        if (p.plugin->config_keys) {
+            const dftu_config_key* keys = p.plugin->config_keys(p.plugin->self);
+            for (; keys && keys->name; ++keys) {
+                std::string line = keys->name;
+                line += " (";
+                line += keys->kind == DFTU_CONFIG_ANY
+                            ? "any"
+                            : value_kind_name(keys->kind);
+                if (keys->required) line += ", required";
+                line += ")";
+                if (keys->doc && *keys->doc)
+                    line += std::string(" - ") + keys->doc;
+                info.config_keys.push_back(std::move(line));
+            }
+        }
         out.push_back(std::move(info));
     }
     return out;

@@ -13,6 +13,20 @@
 extern "C" {
 #endif
 
+/** Any value kind is accepted for a declared config key. */
+#define DFTU_CONFIG_ANY (-1)
+
+/** One config key a plugin reads, for validation and for --describe. */
+typedef struct dftu_config_key {
+    const char* name; /**< key at the top level of the config object; NULL
+                          terminates the array */
+    int32_t kind;     /**< a dftu_value_kind the value must have, or
+                          DFTU_CONFIG_ANY. BOOL/I64/F64 accept each other,
+                          since dftu_as_i64/f64/bool coerce between them */
+    int32_t required; /**< nonzero: the load fails when the key is absent */
+    const char* doc;  /**< one line, no trailing period; may be NULL */
+} dftu_config_key;
+
 /** A plugin: a data-parallel fold; one slice per worker, merged then finalized.
    on_finalize returns NULL when handled synchronously, else a task the host
    awaits. */
@@ -51,6 +65,13 @@ typedef struct dftu_plugin {
        consumed name first, and rejects the set when no loaded plugin provides
        one or when the resulting graph has a cycle. */
     const char* const* (*consumes)(void* self);
+    /** The config keys this plugin reads, as an array terminated by an entry
+       with a NULL name that outlives the plugin; NULL = undeclared. Declaring
+       them makes the host VALIDATE the config before the plugin runs: a key
+       that is not declared, a declared key of the wrong kind, and a missing
+       required key each fail the load, so a typo is reported instead of
+       silently doing nothing. An undeclared plugin is validated not at all. */
+    const dftu_config_key* (*config_keys)(void* self);
 } dftu_plugin;
 
 /** The one symbol the loader resolves via dlsym; the plugin's init. `config` is

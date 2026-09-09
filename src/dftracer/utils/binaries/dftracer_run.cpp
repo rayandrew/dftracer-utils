@@ -244,6 +244,12 @@ static int describe_plugins(const PluginArgs& plugin_args) {
         std::fprintf(stderr, "  consumes: %s\n",
                      join_or_none(info.consumes).c_str());
         std::fprintf(stderr, "  ops: %s\n", join_or_none(info.ops).c_str());
+        if (info.config_keys.empty()) {
+            std::fprintf(stderr, "  config: (undeclared)\n");
+        } else {
+            for (const auto& key : info.config_keys)
+                std::fprintf(stderr, "  config: %s\n", key.c_str());
+        }
         std::fprintf(stderr, "\n");
     }
     return 0;

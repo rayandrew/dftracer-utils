@@ -78,6 +78,10 @@ class Plugins {
         std::vector<std::string> consumes;
         /// Op names the plugin's factory added to the host op registry.
         std::vector<std::string> ops;
+        /// One entry per declared config key: `name (kind[, required]) - doc`.
+        /// Empty when the plugin declares none, in which case its config is
+        /// not validated either.
+        std::vector<std::string> config_keys;
     };
 
     /// One entry per loaded plugin, in registration order.

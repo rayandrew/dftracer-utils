@@ -2595,6 +2595,24 @@ def _emit(
         out.append(f"static {'double' if is_f else 'int64_t'} _cfg_{cn} = 0;")
     if cfgs:
         out.append("")
+    # A plugin that reads config declares its keys, so the host rejects a
+    # config key this plugin does not read instead of ignoring it. A plugin
+    # with no config fields declares nothing and stays unvalidated.
+    if cfgs:
+        out.append("static const dftu_config_key g_config_keys[] = {")
+        for cn, is_f in cfgs.items():
+            kind = "DFTU_VAL_F64" if is_f else "DFTU_VAL_I64"
+            out.append(f"    {{{_c_str_literal(cn)}, {kind}, 0, NULL}},")
+        out += [
+            "    {NULL, DFTU_CONFIG_ANY, 0, NULL},",
+            "};",
+            "",
+            "static const dftu_config_key* config_keys(void* self) {",
+            "    (void)self;",
+            "    return g_config_keys;",
+            "}",
+            "",
+        ]
     # Config reads for the factory: (void)config then one dftu_as_* per field.
     cfg_reads = "\n".join(
         ["    (void)config;"]
@@ -2711,6 +2729,7 @@ def _emit(
             "    g_plugin.destroy_slice = destroy_slice;",
             "    g_plugin.destroy = destroy;",
         ]
+        + (["    g_plugin.config_keys = config_keys;"] if cfgs else [])
         + name_assigns
     )
     out.extend(

@@ -57,3 +57,38 @@ class TestAuthoring:
     def test_string_config_rejected(self):
         with pytest.raises(jit.JitError):
             jit.config(jit.str_)
+
+
+@_needs_cxx
+def test_jit_config_typo_fails_the_load(tmp_path):
+    @jit.plugin
+    class Threshed:
+        threshold = jit.config(jit.i64)
+        hits = jit.map(key=(jit.i64,), value=jit.count())
+
+        @jit.each_event
+        def step(self, e):
+            if e.dur > self.threshold:
+                self.hits[(e.pid,)] += 1
+
+    # A plugin that reads config declares its keys, so a misspelling is
+    # reported instead of leaving the threshold silently at 0.
+    with pytest.raises(Exception, match="thresh0ld"):
+        Plugins([Threshed], config={"Threshed": {"thresh0ld": 45}})
+
+    # The declared key itself still loads.
+    Plugins([Threshed], config={"Threshed": {"threshold": 45}})
+
+
+@_needs_cxx
+def test_jit_plugin_without_config_is_not_validated(tmp_path):
+    @jit.plugin
+    class NoConfig:
+        hits = jit.map(key=(jit.i64,), value=jit.count())
+
+        @jit.each_event
+        def step(self, e):
+            self.hits[(e.pid,)] += 1
+
+    # It declares no keys, so nothing is checked; declaring is opt-in.
+    Plugins([NoConfig], config={"NoConfig": {"anything": 1}})

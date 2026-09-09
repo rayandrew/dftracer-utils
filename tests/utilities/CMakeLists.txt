@@ -90,6 +90,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_order.cpp
     plugins/test_plugin_abi_gate.cpp
     plugins/test_plugin_factory_host.cpp
+    plugins/test_plugin_config.cpp
     plugins/test_plugin_state.cpp
 )
 
@@ -428,31 +429,41 @@ foreach(fh_plugin factory_registers_op_plugin factory_escapes_plugin
                                      ${CMAKE_BINARY_DIR}/include)
 endforeach()
 
-add_library(builder_plugin MODULE plugins/builder_plugin.cpp)
-set_target_properties(
-  builder_plugin
-  PROPERTIES OUTPUT_NAME builder_plugin
-             PREFIX ""
-             POSITION_INDEPENDENT_CODE ON
-             CXX_STANDARD 20
-             CXX_STANDARD_REQUIRED ON
-             CXX_EXTENSIONS OFF
-             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins"
-             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins")
-target_include_directories(builder_plugin
-                           PRIVATE ${CMAKE_SOURCE_DIR}/include
-                                   ${CMAKE_BINARY_DIR}/include)
-target_enable_coroutine(builder_plugin)
+foreach(cxx_plugin builder_plugin config_keys_plugin)
+  add_library(${cxx_plugin} MODULE plugins/${cxx_plugin}.cpp)
+  set_target_properties(
+    ${cxx_plugin}
+    PROPERTIES OUTPUT_NAME ${cxx_plugin}
+               PREFIX ""
+               POSITION_INDEPENDENT_CODE ON
+               CXX_STANDARD 20
+               CXX_STANDARD_REQUIRED ON
+               CXX_EXTENSIONS OFF
+               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins"
+               LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins")
+  target_include_directories(${cxx_plugin}
+                             PRIVATE ${CMAKE_SOURCE_DIR}/include
+                                     ${CMAKE_BINARY_DIR}/include)
+  target_enable_coroutine(${cxx_plugin})
+endforeach()
 
 # It reads the batch dataframe and runs its own registered op, so it links the
 # dataframe C ABI like the examples that do the same.
-foreach(df_plugin factory_registers_op_plugin builder_plugin)
+foreach(df_plugin factory_registers_op_plugin builder_plugin
+                  config_keys_plugin)
   if(TARGET dftracer_utils_dataframe::shared)
     target_link_libraries(${df_plugin} PRIVATE dftracer_utils_dataframe::shared)
   elseif(TARGET dftracer_utils_dataframe::static)
     target_link_libraries(${df_plugin} PRIVATE dftracer_utils_dataframe::static)
   endif()
 endforeach()
+
+if(TARGET utilities_plugins_test_plugin_config)
+  target_compile_definitions(
+    utilities_plugins_test_plugin_config PRIVATE
+    CONFIG_KEYS_PLUGIN_PATH="$<TARGET_FILE:config_keys_plugin>")
+  add_dependencies(utilities_plugins_test_plugin_config config_keys_plugin)
+endif()
 
 if(TARGET utilities_plugins_test_plugin_factory_host)
   target_compile_definitions(
