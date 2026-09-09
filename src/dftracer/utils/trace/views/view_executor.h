@@ -206,6 +206,10 @@ std::shared_ptr<ViewSessionState> make_view_session_state(
     std::shared_ptr<const ViewPlan> plan);
 void add_branch(ViewSessionState& state, BranchHooks hooks);
 
+/// Offer `q` as a narrowing of the session's shared scan. execute() applies it
+/// only when no other branch is registered; see ViewSessionState.
+void propose_base_prune(ViewSessionState& state, query::Query q);
+
 // Attach an externally-built Fold to the session's shared scan: `make`
 // constructs it with the scan's intern, `finalize` runs after the merge.
 void add_fold_factory(

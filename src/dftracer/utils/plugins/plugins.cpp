@@ -429,6 +429,10 @@ trace::views::Deferred<PluginRun> Plugins::attach(
         *executed = true;
         return {out, executed};
     }
+    // Offer the same union prune run() applies. The session drops it if any
+    // other branch joins, since the scan they share must stay wide enough for
+    // all of them; only execute() knows the final branch set.
+    if (impl_->prune) session.propose_base_prune(*impl_->prune);
     for (std::size_t idx = 0; idx < n; ++idx) {
         std::size_t i = impl_->order[idx];
         const dftu_plugin* plugin = impl_->plugins[i].plugin;

@@ -322,22 +322,23 @@ TEST_SUITE("PluginAttachHandle") {
         ViewSession sess = base.session();
         Deferred<PluginRun> h = set->attach(sess);
 
+        ExportStats scan{};
         Runtime rt(4);
         auto task = dftracer::utils::run_coro_scope(
             rt.executor(), [&](CoroScope&) -> coro::CoroTask<void> {
-                co_await sess.execute();
+                scan = co_await sess.execute();
                 co_return;
             });
         rt.submit(std::move(task), "plugin-attach-solo").wait();
         rt.shutdown();
 
         CHECK(st.total.load() == N);  // the plugin's own filter still applies
-        // attach() cannot see whether it is the session's sole branch, so it
-        // never applies the union prune: stats stays default rather than
-        // reporting a chunk skip run() would have made. Contrast with "the
-        // prune skips index chunks, not just rows" above, which shows the
-        // same plugin's plan_query DOES skip chunks through run().
-        CHECK(h->stats.chunks_skipped == 0);
+        // Sole branch, so execute() applies the narrowing attach() offered and
+        // the index skips whole chunks. Read it from execute()'s own counters:
+        // PluginRun::stats is not populated on the attach path, so asserting
+        // through the handle would pass whether or not the prune ran.
+        CHECK(scan.chunks_skipped > 0);
+        (void)h;
     }
 
     // The regression that matters: a plugin with a narrow plan_query must not
@@ -363,18 +364,21 @@ TEST_SUITE("PluginAttachHandle") {
         Deferred<dftracer::utils::dataframe::DataFrame> all =
             sess.collect({}, {{AggOp::Count, "", "n"}});
 
+        ExportStats scan{};
         Runtime rt(4);
         auto task = dftracer::utils::run_coro_scope(
             rt.executor(), [&](CoroScope&) -> coro::CoroTask<void> {
-                co_await sess.execute();
+                scan = co_await sess.execute();
                 co_return;
             });
         rt.submit(std::move(task), "plugin-attach-coscan").wait();
         rt.shutdown();
 
         CHECK(st.total.load() == N);  // plugin's own filter is unaffected
-        // If attach() had chunk-pruned to the plugin's STDIO-only query, the
-        // collect branch would have missed the POSIX file entirely.
+        // The collect branch joined, so execute() drops the narrowing attach()
+        // offered: nothing is skipped, and the branch sees both files. Had the
+        // prune applied, it would have missed the POSIX file entirely.
+        CHECK(scan.chunks_skipped == 0);
         REQUIRE(all->num_rows() == 1);
         CHECK(col_sum(*all, "n") == 2 * N);
     }

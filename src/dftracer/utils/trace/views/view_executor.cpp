@@ -878,6 +878,11 @@ struct ViewSessionState {
     std::shared_ptr<const ViewPlan> plan;
     std::vector<BranchHooks> branches;
     std::vector<FoldFactory> fold_factories;
+    /// A narrowing an attached fold offered for the shared scan, applied by
+    /// execute() only when no other branch exists. The scan feeds every
+    /// branch, so narrowing it for one would starve the rest; whether that
+    /// holds is knowable only here, after every branch has been added.
+    std::optional<query::Query> proposed_prune;
 };
 
 std::shared_ptr<ViewSessionState> make_view_session_state(
@@ -885,6 +890,10 @@ std::shared_ptr<ViewSessionState> make_view_session_state(
     auto st = std::make_shared<ViewSessionState>();
     st->plan = std::move(plan);
     return st;
+}
+
+void propose_base_prune(ViewSessionState& state, query::Query q) {
+    state.proposed_prune = std::move(q);
 }
 
 void add_branch(ViewSessionState& state, BranchHooks hooks) {
@@ -1115,6 +1124,17 @@ coro::CoroTask<ExportStats> run_session(
     // One fused scan drives every branch: an EngineAggFold per aggregation and
     // one BranchDriverFold parsing raw lines for the fold/export branches.
     ViewPlan scan_plan = plan;
+    // A fold-only session may narrow the shared scan: with no other branch
+    // there is nobody to starve, and the index can skip whole chunks.
+    if (state->branches.empty() && state->proposed_prune) {
+        if (scan_plan.query) {
+            scan_plan.query = query::parse_or_throw(
+                "(" + scan_plan.query->source() + ") and (" +
+                state->proposed_prune->source() + ")");
+        } else {
+            scan_plan.query = *state->proposed_prune;
+        }
+    }
     if (auto mv = find_subsuming_view(plan)) scan_plan.files = std::move(*mv);
     ViewDefinition avdef = make_vdef(scan_plan, /*for_aggregation=*/true);
     // A Rank group key harvests the PR metadata during the scan, but make_vdef

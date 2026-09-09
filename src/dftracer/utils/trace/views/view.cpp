@@ -725,6 +725,10 @@ void ViewSession::attach_fold_factory(
     detail::add_fold_factory(*state_, std::move(make), std::move(finalize));
 }
 
+void ViewSession::propose_base_prune(Query q) {
+    detail::propose_base_prune(*state_, std::move(q));
+}
+
 Deferred<dataframe::DataFrame> ViewSession::collect(
     Query predicate, std::vector<GroupKey> group_by, std::vector<AggSpec> agg) {
     auto out = std::make_shared<dataframe::DataFrame>();

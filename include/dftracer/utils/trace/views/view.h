@@ -449,6 +449,13 @@ class ViewSession {
                                  make,
                              std::function<void()> finalize);
 
+    /// Offer `q` as a narrowing of this session's shared scan, so the index can
+    /// skip chunks the attached fold does not want. APPLIED ONLY when no other
+    /// branch is registered: the scan feeds every branch, so narrowing it for
+    /// one would starve the rest. execute() decides, because branches may be
+    /// added after this call and only it knows the final set.
+    void propose_base_prune(Query q);
+
     /// Scan the base once and run every attached branch, resolving every
     /// Deferred handle returned above.
     coro::CoroTask<ExportStats> execute();
