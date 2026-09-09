@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     from .columnar import Agg, ColumnExpr, Expr, GroupBy
     from .lazyframe import LazyFrame
+    from .plugins import Plugins
     from .runtime import Runtime
 
 # Matches WINDOW_UNBOUNDED (int64 max): a frame bound of None means that side of
@@ -1339,6 +1340,30 @@ class Session:
         """Start a new branch view off the session's base (shares its files and
         scan settings). Chain the per-branch builder API, then a terminal."""
         return SessionView(self, self._viewer._native)
+
+    def attach(self, plugins: "Plugins") -> Handle:
+        """Fuse an already-built :class:`~dftracer.utils.plugins.Plugins` set
+        into the shared scan. Every plugin in the set folds over the same pass
+        as the session's other branches; ``result()`` is the whole
+        ``{name: value}`` mapping, the same shape as ``Plugins.run().results``.
+
+        Use this to reuse one built set (its dlopen, ABI gate, and ordering are
+        already resolved) across sessions; :meth:`SessionView.plugin` builds a
+        one-plugin set per branch instead. A set may be attached once per
+        session: its results are read back through the set itself."""
+        if self._executed:
+            raise RuntimeError("cannot add a branch after the session has executed")
+        for kind, obj, _ in self._branches:
+            if kind == "plugin" and obj is plugins:
+                raise ValueError("this Plugins set is already attached to this session")
+
+        def shape(raw: "Dict[str, Any]") -> object:
+            return {name: plugins._shape(val) for name, val in raw.items()}
+
+        handle = Handle(self, len(self._branches), shape)
+        self._branches.append(("plugin", plugins, None))
+        self._handles.append(handle)
+        return handle
 
     def _register(
         self,

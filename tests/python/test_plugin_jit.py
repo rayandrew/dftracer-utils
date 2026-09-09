@@ -2282,3 +2282,57 @@ def test_jit_plugin_fused_in_session(tmp_path):
     pdf = pa.table(res).to_pandas()
     assert int(pdf["value"].sum()) == 10  # every event counted on the same scan
     assert len(pdf) == 3  # three distinct pids
+
+
+@jit.plugin
+class _SessionDurs:
+    total = jit.map(key=(jit.i64,), value=jit.sum())
+
+    @jit.each_event
+    def step(self, e):
+        self.total[(e.pid,)] += e.dur
+
+
+@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
+def test_session_attach_built_plugin_set(tmp_path):
+    import dftracer.utils as dftu
+
+    gz = str(tmp_path / "t.pfw.gz")
+    _write_trace(gz, 10, [100, 200, 300], ["f0"])
+    with dftu.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+        ix.ensure_indexed()
+
+    plugins = Plugins([_SessionCounts, _SessionDurs])
+    tv = dftu.TraceViewer(gz, index_path=str(tmp_path))
+    with tv.session() as s:
+        by_cat = s.view().group_by("cat").agg("count").collect()
+        attached = s.attach(plugins)
+
+    assert int(pa.table(by_cat.result()).to_pandas()["count"].sum()) == 10
+
+    res = attached.result()
+    # a whole set attaches as a mapping, never collapsed to one value.
+    assert isinstance(res, dict)
+    assert set(res) == {"hits", "total"}
+    hits = pa.table(res["hits"]).to_pandas()
+    assert int(hits["value"].sum()) == 10
+    assert len(hits) == 3
+    total = pa.table(res["total"]).to_pandas()
+    assert total["value"].sum() == pytest.approx(sum(10 + i for i in range(10)))
+
+
+@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
+def test_session_attach_same_set_twice_raises(tmp_path):
+    import dftracer.utils as dftu
+
+    gz = str(tmp_path / "t.pfw.gz")
+    _write_trace(gz, 4, [100], ["f0"])
+    with dftu.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+        ix.ensure_indexed()
+
+    plugins = Plugins([_SessionCounts])
+    tv = dftu.TraceViewer(gz, index_path=str(tmp_path))
+    s = tv.session()
+    s.attach(plugins)
+    with pytest.raises(ValueError, match="already attached"):
+        s.attach(plugins)
