@@ -959,6 +959,11 @@ DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_filter_mask(const dftu_lazyframe* lf,
 /** Rows in reverse order, as DataFrame::reverse. */
 DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_reverse(const dftu_lazyframe* lf);
 
+/** Rows at `idx` (0-based, may repeat or reorder), as DataFrame::take. `idx`
+ * is borrowed for the call. NULL if `lf` is NULL. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_take(const dftu_lazyframe* lf,
+                                                const int64_t* idx, int32_t n);
+
 /** Stable lexicographic sort by the `n` key columns named by `by`, ascending
  * unless `descending` (nulls last in both directions), as
  * DataFrame::sort_by_multi. */
@@ -1012,39 +1017,75 @@ typedef enum {
                          projection), borrowed for the call */
     DFTU_TOK_AGGLIST, /**< a (const dftu_group_agg*, int32 count) aggregate-spec
                          list operand */
-    DFTU_TOK_U64      /**< uint64 operand (a byte count, a seed), distinct from
+    DFTU_TOK_U64,     /**< uint64 operand (a byte count, a seed), distinct from
                          I64 so a signature describes the real parameter type
                          and cannot collide with a signed-shaped op */
+    DFTU_TOK_I64LIST  /**< a (const int64_t*, int32 count) int64-list operand
+                         (e.g. LazyFrame::take's row indices) */
 } dftu_op_tok;
 
+/** One past the last token; a macro, so it does not become a case every switch
+ * over dftu_op_tok has to answer for. Update alongside the last token. */
+#define DFTU_TOK_COUNT (DFTU_TOK_I64LIST + 1)
+
 /** Max operand tokens a signature carries (5-bit fields: a return token plus up
- * to this many operands pack into one int32). */
-#define DFTU_OP_MAX_ARGS 5
+ * to this many operands pack into one int64). */
+#define DFTU_OP_MAX_ARGS 7
 
 /** Pack a signature from a return token and up to three operand tokens. Pass
  * each token's suffix (e.g. SERIES for DFTU_TOK_SERIES; pad unused operand
  * slots with NONE) - the suffix is pasted onto DFTU_TOK_. Compose new
  * signatures from tokens rather than allocating opaque ordinals; decode with
- * DFTU_OP_SIG_RET / DFTU_OP_SIG_ARG. Use DFTU_OP_SIG6 for a frame op with more
- * operands. */
+ * DFTU_OP_SIG_RET / DFTU_OP_SIG_ARG. Use DFTU_OP_SIG6 (5 operands) or
+ * DFTU_OP_SIG8 (7 operands) for a wider op. */
 #define DFTU_OP_SIG(ret, o0, o1, o2) DFTU_OP_SIG6(ret, o0, o1, o2, NONE, NONE)
 /** Pack a signature with up to five operand tokens (5-bit fields). */
-#define DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4)                  \
-    ((int)DFTU_TOK_##ret | ((int)DFTU_TOK_##o0 << 5) |         \
-     ((int)DFTU_TOK_##o1 << 10) | ((int)DFTU_TOK_##o2 << 15) | \
-     ((int)DFTU_TOK_##o3 << 20) | ((int)DFTU_TOK_##o4 << 25))
+#define DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4) \
+    DFTU_OP_SIG8(ret, o0, o1, o2, o3, o4, NONE, NONE)
+/** Pack a signature with up to seven operand tokens (5-bit fields): a return
+ * token plus 7 operands is 8 * 5 = 40 bits, past int32 range, so every packed
+ * field is cast to int64. */
+#define DFTU_OP_SIG8(ret, o0, o1, o2, o3, o4, o5, o6)                  \
+    ((int64_t)DFTU_TOK_##ret | ((int64_t)DFTU_TOK_##o0 << 5) |         \
+     ((int64_t)DFTU_TOK_##o1 << 10) | ((int64_t)DFTU_TOK_##o2 << 15) | \
+     ((int64_t)DFTU_TOK_##o3 << 20) | ((int64_t)DFTU_TOK_##o4 << 25) | \
+     ((int64_t)DFTU_TOK_##o5 << 30) | ((int64_t)DFTU_TOK_##o6 << 35))
 /** The return token of a signature. */
-#define DFTU_OP_SIG_RET(sig) ((dftu_op_tok)((int)(sig) & 0x1F))
+#define DFTU_OP_SIG_RET(sig) ((dftu_op_tok)((int64_t)(sig) & 0x1F))
 /** Operand token `i` in [0, DFTU_OP_MAX_ARGS); DFTU_TOK_NONE past the last. */
 #define DFTU_OP_SIG_ARG(sig, i) \
-    ((dftu_op_tok)(((int)(sig) >> (5 + 5 * (i))) & 0x1F))
+    ((dftu_op_tok)(((int64_t)(sig) >> (5 + 5 * (i))) & 0x1F))
 
 /** A packed op signature: build it with DFTU_OP_SIG(ret, o0, o1, o2) at the
  * registration site, and use the same expression as a runner switch-case label
  * (a constant), the way a driver composes and switches on ioctl numbers. There
  * is deliberately no enum of named signatures: an op of an existing shape adds
  * only a registry line, and only a brand-new shape adds a runner case. */
-typedef int32_t dftu_op_sig;
+typedef int64_t dftu_op_sig;
+
+#ifdef __cplusplus
+static_assert(sizeof(dftu_op_sig) * 8 >= 5 * (DFTU_OP_MAX_ARGS + 1),
+              "dftu_op_sig is too narrow for DFTU_OP_MAX_ARGS 5-bit fields "
+              "(a return token plus DFTU_OP_MAX_ARGS operands)");
+static_assert(DFTU_TOK_COUNT <= 32, "dftu_op_tok exceeds its 5-bit field");
+static_assert(sizeof(DFTU_OP_SIG6(SERIES, SERIES, NONE, NONE, NONE, NONE)) ==
+                  sizeof(dftu_op_sig),
+              "DFTU_OP_SIG6 computes in a narrower type than dftu_op_sig");
+static_assert(sizeof(DFTU_OP_SIG8(SERIES, SERIES, NONE, NONE, NONE, NONE, NONE,
+                                  NONE)) == sizeof(dftu_op_sig),
+              "DFTU_OP_SIG8 computes in a narrower type than dftu_op_sig");
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+_Static_assert(sizeof(dftu_op_sig) * 8 >= 5 * (DFTU_OP_MAX_ARGS + 1),
+               "dftu_op_sig is too narrow for DFTU_OP_MAX_ARGS 5-bit fields "
+               "(a return token plus DFTU_OP_MAX_ARGS operands)");
+_Static_assert(DFTU_TOK_COUNT <= 32, "dftu_op_tok exceeds its 5-bit field");
+_Static_assert(sizeof(DFTU_OP_SIG6(SERIES, SERIES, NONE, NONE, NONE, NONE)) ==
+                   sizeof(dftu_op_sig),
+               "DFTU_OP_SIG6 computes in a narrower type than dftu_op_sig");
+_Static_assert(sizeof(DFTU_OP_SIG8(SERIES, SERIES, NONE, NONE, NONE, NONE, NONE,
+                                   NONE)) == sizeof(dftu_op_sig),
+               "DFTU_OP_SIG8 computes in a narrower type than dftu_op_sig");
+#endif
 
 /** A registry record. `sig` is authoritative: it packs the whole signature, so
  * it selects the fn cast, the operands read, and (via dftu_op_kind_of) the
@@ -1097,9 +1138,9 @@ DFTU_EXPORT int dftu_op_unregister(const char* name);
 /** One operand slot. Only the union member the operand's token names is read:
  * SCALAR->scalar, I64->i64, F64->f64, CHAR->ch, an enum token (CMP/PRIM/
  * LOGICAL/DTYPE/REDUCE/I32/RANK/ROLLING)->i32, STR->str, STRLIST->list,
- * I32LIST->i32list, and a frame op's SERIES operand (a mask/column)->series. A
- * SERIES/FRAME operand of a column/frame op is passed in the runner's
- * in[]/frames[] array, not here. */
+ * I32LIST->i32list, I64LIST->i64list, and a frame op's SERIES operand (a
+ * mask/column)->series. A SERIES/FRAME operand of a column/frame op is passed
+ * in the runner's in[]/frames[] array, not here. */
 typedef union dftu_op_val {
     dftu_scalar scalar;
     int64_t i64;
@@ -1120,6 +1161,10 @@ typedef union dftu_op_val {
         const int32_t* items;
         int32_t n;
     } i32list;
+    struct {
+        const int64_t* items;
+        int32_t n;
+    } i64list;
     const dftu_lazyframe* lazy;
     const dftu_expr* expr;
     struct {

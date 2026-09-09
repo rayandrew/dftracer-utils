@@ -692,12 +692,69 @@ TEST_SUITE("lazy_ops") {
         dftu_dataframe_free(df);
     }
 
-    // group_by_dynamic (7 operands against the 5-slot cap) and take (needs an
-    // int64 index list, and no I64LIST token exists) are DEBT, not design:
-    // both are recorded in exported_lazy_ops.def's header and in the sweep's
-    // allowlist. Deliberately not pinned here - a test asserting they are
-    // absent would turn registering them into a failing build, which is
-    // backwards for something we want closed.
+    TEST_CASE("dftu.lazy.take matches dftu_lazyframe_take") {
+        dftu_dataframe* df = make_frame({1, 2, 3, 4}, {10, 20, 30, 40});
+        REQUIRE(df != nullptr);
+
+        check_kind_and_arity("dftu.lazy.take", 1);
+        dftu_lazyframe* lf1 = dftu_dataframe_lazy(df);
+        dftu_lazyframe* lf2 = dftu_dataframe_lazy(df);
+        const std::int64_t idx[3] = {2, 0, 0};
+        OpArgs a;
+        a.i64list(1, idx);
+        dftu_dataframe* via_registry = run_registry("dftu.lazy.take", lf1, a);
+        dftu_lazyframe* direct = dftu_lazyframe_take(lf2, idx, 3);
+        REQUIRE(direct != nullptr);
+        dftu_dataframe* via_direct = dftu_lazyframe_collect(direct, 0);
+        check_same(via_registry, via_direct);
+        CHECK(dftu_dataframe_num_rows(via_registry) == 3);
+        dftu_series* kc = dftu_dataframe_column(via_registry, "k");
+        REQUIRE(kc != nullptr);
+        CHECK(i64_of(kc)[0] == 3);
+        CHECK(i64_of(kc)[1] == 1);
+        CHECK(i64_of(kc)[2] == 1);
+        dftu_series_free(kc);
+
+        dftu_dataframe_free(via_registry);
+        dftu_dataframe_free(via_direct);
+        dftu_lazyframe_free(direct);
+        dftu_lazyframe_free(lf1);
+        dftu_lazyframe_free(lf2);
+        dftu_dataframe_free(df);
+    }
+
+    TEST_CASE(
+        "dftu.lazy.group_by_dynamic matches dftu_lazyframe_group_by_dynamic") {
+        dftu_dataframe* df = make_frame({0, 1, 2, 10, 11}, {1, 2, 3, 4, 5});
+        REQUIRE(df != nullptr);
+
+        check_kind_and_arity("dftu.lazy.group_by_dynamic", 1);
+        dftu_lazyframe* lf1 = dftu_dataframe_lazy(df);
+        dftu_lazyframe* lf2 = dftu_dataframe_lazy(df);
+        dftu_group_agg aggs[1] = {{"sum", "v", "v_sum"}};
+        OpArgs a;
+        a.str(1, "k")
+            .i64(2, 10)
+            .i64(3, 10)
+            .agglist(4, {aggs, 1})
+            .i64(5, 0)
+            .i32(6, 0);
+        dftu_dataframe* via_registry =
+            run_registry("dftu.lazy.group_by_dynamic", lf1, a);
+        dftu_lazyframe* direct =
+            dftu_lazyframe_group_by_dynamic(lf2, "k", 10, 10, aggs, 1, 0, 0);
+        REQUIRE(direct != nullptr);
+        dftu_dataframe* via_direct = dftu_lazyframe_collect(direct, 0);
+        check_same(via_registry, via_direct);
+        CHECK(dftu_dataframe_num_rows(via_registry) == 2);
+
+        dftu_dataframe_free(via_registry);
+        dftu_dataframe_free(via_direct);
+        dftu_lazyframe_free(direct);
+        dftu_lazyframe_free(lf1);
+        dftu_lazyframe_free(lf2);
+        dftu_dataframe_free(df);
+    }
 
     TEST_CASE("collect/schema/explain/free stay out of the lazy op table") {
         CHECK(dftu_op_find("dftu.lazy.collect") == nullptr);

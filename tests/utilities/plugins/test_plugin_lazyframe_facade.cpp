@@ -185,3 +185,33 @@ TEST_CASE(
     dftu_dataframe_free(b);
     dftu_dataframe_free(source);
 }
+
+TEST_CASE("lazyframe facade: take and group_by_dynamic reach the host") {
+    HostFixture fx;
+    dftu_dataframe* source = nullptr;
+    OwnedLazyFrame lf = make_lazy(fx, &source);
+
+    const std::int64_t idx[2] = {4, 0};
+    OwnedLazyFrame taken = lf.take(idx);
+    REQUIRE(taken.handle);
+    dftu_dataframe* taken_df = dftu_lazyframe_collect(taken.handle, -1);
+    REQUIRE(taken_df);
+    REQUIRE(dftu_dataframe_num_rows(taken_df) == 2);
+    const auto* taken_ids = static_cast<const std::int64_t*>(
+        dftu_series_data(dftu_dataframe_column(taken_df, "id")));
+    REQUIRE(taken_ids);
+    CHECK(taken_ids[0] == 5);
+    CHECK(taken_ids[1] == 1);
+    dftu_dataframe_free(taken_df);
+
+    dftu_group_agg aggs[1] = {{"sum", "dur", "dur_sum"}};
+    OwnedLazyFrame windowed =
+        lf.group_by_dynamic("id", 2, 2, {aggs, 1}, 1, false);
+    REQUIRE(windowed.handle);
+    dftu_dataframe* windowed_df = dftu_lazyframe_collect(windowed.handle, -1);
+    REQUIRE(windowed_df);
+    CHECK(dftu_dataframe_num_rows(windowed_df) == 3);
+    dftu_dataframe_free(windowed_df);
+
+    dftu_dataframe_free(source);
+}

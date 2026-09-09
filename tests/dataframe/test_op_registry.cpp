@@ -298,4 +298,17 @@ TEST_SUITE("op_registry") {
               nullptr);
         dftu_series_free(c);
     }
+
+    TEST_CASE("DFTU_OP_SIG8 round-trips all 8 tokens of a widest signature") {
+        dftu_op_sig sig =
+            DFTU_OP_SIG8(LAZY, LAZY, STR, I64, I64, AGGLIST, I64, I32);
+        CHECK(DFTU_OP_SIG_RET(sig) == DFTU_TOK_LAZY);
+        CHECK(DFTU_OP_SIG_ARG(sig, 0) == DFTU_TOK_LAZY);
+        CHECK(DFTU_OP_SIG_ARG(sig, 1) == DFTU_TOK_STR);
+        CHECK(DFTU_OP_SIG_ARG(sig, 2) == DFTU_TOK_I64);
+        CHECK(DFTU_OP_SIG_ARG(sig, 3) == DFTU_TOK_I64);
+        CHECK(DFTU_OP_SIG_ARG(sig, 4) == DFTU_TOK_AGGLIST);
+        CHECK(DFTU_OP_SIG_ARG(sig, 5) == DFTU_TOK_I64);
+        CHECK(DFTU_OP_SIG_ARG(sig, 6) == DFTU_TOK_I32);
+    }
 }

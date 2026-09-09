@@ -49,6 +49,7 @@ enum class OpTok : std::int32_t {
     Expr = DFTU_TOK_EXPR,
     AggList = DFTU_TOK_AGGLIST,
     U64 = DFTU_TOK_U64,
+    I64List = DFTU_TOK_I64LIST,
 };
 static_assert(static_cast<int>(OpTok::None) == DFTU_TOK_NONE);
 static_assert(static_cast<int>(OpTok::Series) == DFTU_TOK_SERIES);
@@ -73,6 +74,7 @@ static_assert(static_cast<int>(OpTok::Lazy) == DFTU_TOK_LAZY);
 static_assert(static_cast<int>(OpTok::Expr) == DFTU_TOK_EXPR);
 static_assert(static_cast<int>(OpTok::AggList) == DFTU_TOK_AGGLIST);
 static_assert(static_cast<int>(OpTok::U64) == DFTU_TOK_U64);
+static_assert(static_cast<int>(OpTok::I64List) == DFTU_TOK_I64LIST);
 
 /// Value wrapper over a packed dftu_op_sig.
 class OpSig {
@@ -228,6 +230,14 @@ class OpArgs {
                     std::span<const std::int32_t> items) noexcept {
         arg_.args[i].i32list.items = items.data();
         arg_.args[i].i32list.n = static_cast<std::int32_t>(items.size());
+        return *this;
+    }
+    /// Borrows `items`: it must outlive the dftu_op_run* call this is passed
+    /// to.
+    OpArgs& i64list(std::uint32_t i,
+                    std::span<const std::int64_t> items) noexcept {
+        arg_.args[i].i64list.items = items.data();
+        arg_.args[i].i64list.n = static_cast<std::int32_t>(items.size());
         return *this;
     }
 

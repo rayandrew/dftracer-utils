@@ -63,8 +63,8 @@ ALLOWLIST = {
         "group_by", "group_by_dynamic", "mask", "melt", "sample", "take",
     },
     "LazyFrame": {
-        "collect", "collect_group_state", "explain", "group_by_dynamic",
-        "scan", "schema", "stream", "take",
+        "collect", "collect_group_state", "explain",
+        "scan", "schema", "stream",
     },
 }
 
@@ -72,7 +72,7 @@ ALLOWLIST = {
 class OpDesc(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char_p),
-        ("sig", ctypes.c_int32),
+        ("sig", ctypes.c_int64),
         ("fn", ctypes.c_void_p),
     ]
 
@@ -100,7 +100,7 @@ def registry_leaf_names(lib_path: Path) -> dict[str, set[str]]:
     lib.dftu_op_at.restype = ctypes.POINTER(OpDesc)
     lib.dftu_op_at.argtypes = [ctypes.c_uint32]
     lib.dftu_op_kind_of.restype = ctypes.c_int
-    lib.dftu_op_kind_of.argtypes = [ctypes.c_int32]
+    lib.dftu_op_kind_of.argtypes = [ctypes.c_int64]
 
     DFTU_OP_KIND_SERIES, DFTU_OP_KIND_AGGREGATE = 0, 1
     DFTU_OP_KIND_FRAME, DFTU_OP_KIND_LAZY = 2, 3

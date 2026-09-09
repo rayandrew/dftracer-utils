@@ -51,6 +51,9 @@ PyObject* op_info(PyObject*, PyObject* args) {
         case DFTU_OP_KIND_FRAME:
             kind = "frame";
             break;
+        case DFTU_OP_KIND_LAZY:
+            kind = "lazy";
+            break;
     }
     return Py_BuildValue("{s:s,s:s,s:I,s:s}", "name", op->name, "kind", kind,
                          "arity", dftu_op_arity(op->sig), "signature",
@@ -89,6 +92,12 @@ PyObject* op_run(PyObject*, PyObject* args) {
         PyErr_Format(
             PyExc_NotImplementedError,
             "op '%s' is a frame op; call the matching DataFrame method", name);
+        return nullptr;
+    }
+    if (dftu_op_kind_of(op->sig) == DFTU_OP_KIND_LAZY) {
+        PyErr_Format(PyExc_NotImplementedError,
+                     "op '%s' is a lazy op; call the matching LazyFrame method",
+                     name);
         return nullptr;
     }
 
@@ -158,6 +167,14 @@ PyObject* op_run(PyObject*, PyObject* args) {
                 slot.i64 = v;
                 break;
             }
+            case DFTU_TOK_U64: {
+                unsigned long long v = PyLong_AsUnsignedLongLong(a);
+                if (v == static_cast<unsigned long long>(-1) &&
+                    PyErr_Occurred())
+                    return nullptr;
+                slot.u64 = v;
+                break;
+            }
             case DFTU_TOK_CHAR: {
                 Py_ssize_t len = 0;
                 const char* p = PyUnicode_AsUTF8AndSize(a, &len);
@@ -171,11 +188,15 @@ PyObject* op_run(PyObject*, PyObject* args) {
                 break;
             }
             case DFTU_TOK_FRAME:
+            case DFTU_TOK_LAZY:
             case DFTU_TOK_STRLIST:
             case DFTU_TOK_I32LIST:
+            case DFTU_TOK_I64LIST:
+            case DFTU_TOK_EXPR:
+            case DFTU_TOK_AGGLIST:
                 PyErr_Format(PyExc_NotImplementedError,
-                             "op '%s' takes a frame/list operand not yet "
-                             "runnable via ops.run",
+                             "op '%s' takes a frame/plan/list/expr operand not "
+                             "yet runnable via ops.run",
                              name);
                 return nullptr;
             case DFTU_TOK_NONE:

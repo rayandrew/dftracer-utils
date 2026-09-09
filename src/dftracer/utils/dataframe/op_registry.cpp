@@ -22,8 +22,8 @@ const dftu_op_desc BUILTINS[] = {
     {"dftu.frame." #name, DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4), \
      reinterpret_cast<const void*>(&fn)},
 #include <dftracer/utils/dataframe/exported_frame_ops.def>
-#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4)         \
-    {"dftu.lazy." #name, DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4), \
+#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4, o5, o6)         \
+    {"dftu.lazy." #name, DFTU_OP_SIG8(ret, o0, o1, o2, o3, o4, o5, o6), \
      reinterpret_cast<const void*>(&fn)},
 #include <dftracer/utils/dataframe/exported_lazy_ops.def>
 };
@@ -46,11 +46,15 @@ constexpr uint32_t BUILTIN_COUNT =
         #name ": .def signature does not match the function");
 #include <dftracer/utils/dataframe/exported_frame_ops.def>
 
-#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4)                     \
-    static_assert(                                                          \
-        std::is_same_v<decltype(&fn),                                       \
-                       op_fn<DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4)>::type>, \
-        #name ": .def signature does not match the function");
+#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4, o5, o6)               \
+    static_assert(                                                            \
+        std::is_same_v<decltype(&fn), op_fn<DFTU_OP_SIG8(ret, o0, o1, o2, o3, \
+                                                         o4, o5, o6)>::type>, \
+        #name ": .def signature does not match the function");                \
+    static_assert(                                                            \
+        DFTU_OP_SIG_ARG(DFTU_OP_SIG8(ret, o0, o1, o2, o3, o4, o5, o6), 6) ==  \
+            DFTU_TOK_##o6,                                                    \
+        #name ": operand 6 did not survive packing");
 #include <dftracer/utils/dataframe/exported_lazy_ops.def>
 
 std::mutex& reg_mutex() {
@@ -82,9 +86,12 @@ const dftu_op_desc* find_locked(const char* name) {
 }
 
 using CS = const dftu_series*;
-template <class F>
-F as(const void* fn) {
-    return reinterpret_cast<F>(const_cast<void*>(fn));
+// Ties the reinterpret_cast to the signature, so a runner case cannot cast
+// op->fn to any type other than the one the .def row's own static_assert
+// (op_fn<S>, from op_dispatch.h) already proved it is.
+template <dftu_op_sig S>
+typename op_fn<S>::type as_op(const void* fn) {
+    return reinterpret_cast<typename op_fn<S>::type>(const_cast<void*>(fn));
 }
 
 const char* tok_name(dftu_op_tok t) {
@@ -127,6 +134,8 @@ const char* tok_name(dftu_op_tok t) {
             return "strlist";
         case DFTU_TOK_I32LIST:
             return "i32list";
+        case DFTU_TOK_I64LIST:
+            return "i64list";
         case DFTU_TOK_LAZY:
             return "lazy";
         case DFTU_TOK_EXPR:
@@ -246,71 +255,68 @@ dftu_series* dftu_op_run(const dftu_op_desc* op, const dftu_series* const* in,
     const dftu_op_val* g = a ? a->args : nullptr;
     switch (op->sig) {
         case DFTU_OP_SIG(SERIES, SERIES, NONE, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, NONE, NONE)>::type>(
-                op->fn)(in[0]);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, NONE, NONE)>(op->fn)(
+                in[0]);
         case DFTU_OP_SIG(SERIES, SERIES, SERIES, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, SERIES, NONE)>::type>(
-                op->fn)(in[0], in[1]);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, SERIES, NONE)>(op->fn)(
+                in[0], in[1]);
         case DFTU_OP_SIG(SERIES, SERIES, SCALAR, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, SCALAR, NONE)>::type>(
-                op->fn)(in[0], g[1].scalar);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, SCALAR, NONE)>(op->fn)(
+                in[0], g[1].scalar);
         case DFTU_OP_SIG(SERIES, SERIES, CMP, SCALAR):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, CMP, SCALAR)>::type>(
-                op->fn)(in[0], static_cast<dftu_cmp_op>(g[1].i32), g[2].scalar);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, CMP, SCALAR)>(op->fn)(
+                in[0], static_cast<dftu_cmp_op>(g[1].i32), g[2].scalar);
         case DFTU_OP_SIG(SERIES, SERIES, PRIM, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, PRIM, NONE)>::type>(
-                op->fn)(in[0], static_cast<dftu_prim_op>(g[1].i32));
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, PRIM, NONE)>(op->fn)(
+                in[0], static_cast<dftu_prim_op>(g[1].i32));
         case DFTU_OP_SIG(SERIES, SERIES, SERIES, LOGICAL):
-            return as<
-                op_fn<DFTU_OP_SIG(SERIES, SERIES, SERIES, LOGICAL)>::type>(
-                op->fn)(in[0], in[1], static_cast<dftu_logical_op>(g[2].i32));
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, SERIES, LOGICAL)>(op->fn)(
+                in[0], in[1], static_cast<dftu_logical_op>(g[2].i32));
         case DFTU_OP_SIG(SERIES, SERIES, DTYPE, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, DTYPE, NONE)>::type>(
-                op->fn)(in[0], static_cast<dftu_dtype>(g[1].i32));
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, DTYPE, NONE)>(op->fn)(
+                in[0], static_cast<dftu_dtype>(g[1].i32));
         case DFTU_OP_SIG(SERIES, SERIES, STR, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, STR, NONE)>::type>(
-                op->fn)(in[0], g[1].str.ptr, g[1].str.len);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, STR, NONE)>(op->fn)(
+                in[0], g[1].str.ptr, g[1].str.len);
         case DFTU_OP_SIG(SERIES, SERIES, STR, STR):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, STR, STR)>::type>(
-                op->fn)(in[0], g[1].str.ptr, g[1].str.len, g[2].str.ptr,
-                        g[2].str.len);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, STR, STR)>(op->fn)(
+                in[0], g[1].str.ptr, g[1].str.len, g[2].str.ptr, g[2].str.len);
         case DFTU_OP_SIG(SERIES, SERIES, I64, I64):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, I64, I64)>::type>(
-                op->fn)(in[0], g[1].i64, g[2].i64);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, I64, I64)>(op->fn)(
+                in[0], g[1].i64, g[2].i64);
         case DFTU_OP_SIG(SERIES, SERIES, I64, CHAR):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, I64, CHAR)>::type>(
-                op->fn)(in[0], g[1].i64, g[2].ch);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, I64, CHAR)>(op->fn)(
+                in[0], g[1].i64, g[2].ch);
         case DFTU_OP_SIG(SERIES, SERIES, I64, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, I64, NONE)>::type>(
-                op->fn)(in[0], g[1].i64);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, I64, NONE)>(op->fn)(
+                in[0], g[1].i64);
         case DFTU_OP_SIG(SERIES, SERIES, SCALAR, SCALAR):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, SCALAR, SCALAR)>::type>(
-                op->fn)(in[0], g[1].scalar, g[2].scalar);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, SCALAR, SCALAR)>(op->fn)(
+                in[0], g[1].scalar, g[2].scalar);
         case DFTU_OP_SIG(SERIES, SERIES, I32, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, I32, NONE)>::type>(
-                op->fn)(in[0], g[1].i32);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, I32, NONE)>(op->fn)(
+                in[0], g[1].i32);
         case DFTU_OP_SIG(SERIES, SERIES, F64, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, F64, NONE)>::type>(
-                op->fn)(in[0], g[1].f64);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, F64, NONE)>(op->fn)(
+                in[0], g[1].f64);
         case DFTU_OP_SIG(SERIES, SERIES, I64, F64):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, I64, F64)>::type>(
-                op->fn)(in[0], g[1].i64, g[2].f64);
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, I64, F64)>(op->fn)(
+                in[0], g[1].i64, g[2].f64);
         case DFTU_OP_SIG(SERIES, SERIES, I64, ROLLING):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, I64, ROLLING)>::type>(
-                op->fn)(in[0], g[1].i64,
-                        static_cast<dftu_rolling_op>(g[2].i32));
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, I64, ROLLING)>(op->fn)(
+                in[0], g[1].i64, static_cast<dftu_rolling_op>(g[2].i32));
         // Source ops: no column operand, so the whole column is built from
         // the string operands (a directory listing, say).
         case DFTU_OP_SIG(SERIES, STR, NONE, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, STR, NONE, NONE)>::type>(
-                op->fn)(g[0].str.ptr, g[0].str.len);
+            return as_op<DFTU_OP_SIG(SERIES, STR, NONE, NONE)>(op->fn)(
+                g[0].str.ptr, g[0].str.len);
         case DFTU_OP_SIG(SERIES, STR, STR, NONE):
-            return as<op_fn<DFTU_OP_SIG(SERIES, STR, STR, NONE)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(SERIES, STR, STR, NONE)>(op->fn)(
                 g[0].str.ptr, g[0].str.len, g[1].str.ptr, g[1].str.len);
         case DFTU_OP_SIG(SERIES, SERIES, RANK, I64):
-            return as<op_fn<DFTU_OP_SIG(SERIES, SERIES, RANK, I64)>::type>(
-                op->fn)(in[0], static_cast<dftu_rank_method>(g[1].i32),
-                        static_cast<int32_t>(g[2].i64));
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, RANK, I64)>(op->fn)(
+                in[0], static_cast<dftu_rank_method>(g[1].i32),
+                static_cast<int32_t>(g[2].i64));
         default:
             return nullptr;
     }
@@ -333,50 +339,46 @@ dftu_scalar dftu_op_run_aggregate(const dftu_op_desc* op, const dftu_series* v,
     const dftu_op_val* g = a ? a->args : nullptr;
     switch (op->sig) {
         case DFTU_OP_SIG(SCALAR, SERIES, NONE, NONE):
-            return as<op_fn<DFTU_OP_SIG(SCALAR, SERIES, NONE, NONE)>::type>(
-                op->fn)(v);
+            return as_op<DFTU_OP_SIG(SCALAR, SERIES, NONE, NONE)>(op->fn)(v);
         case DFTU_OP_SIG(SCALAR, SERIES, REDUCE, NONE):
-            return as<op_fn<DFTU_OP_SIG(SCALAR, SERIES, REDUCE, NONE)>::type>(
-                op->fn)(v, static_cast<dftu_reduce_op>(g[1].i32));
+            return as_op<DFTU_OP_SIG(SCALAR, SERIES, REDUCE, NONE)>(op->fn)(
+                v, static_cast<dftu_reduce_op>(g[1].i32));
         case DFTU_OP_SIG(SCALAR, SERIES, SERIES, NONE):
             if (!g || !g[1].series) {
                 if (ok) *ok = 0;
                 return z;
             }
-            return as<op_fn<DFTU_OP_SIG(SCALAR, SERIES, SERIES, NONE)>::type>(
-                op->fn)(v, g[1].series);
+            return as_op<DFTU_OP_SIG(SCALAR, SERIES, SERIES, NONE)>(op->fn)(
+                v, g[1].series);
         case DFTU_OP_SIG(I64, SERIES, NONE, NONE):
-            z.value.i = as<op_fn<DFTU_OP_SIG(I64, SERIES, NONE, NONE)>::type>(
-                op->fn)(v);
+            z.value.i = as_op<DFTU_OP_SIG(I64, SERIES, NONE, NONE)>(op->fn)(v);
             return z;
         case DFTU_OP_SIG(BOOL, SERIES, NONE, NONE):
-            z.value.i = as<op_fn<DFTU_OP_SIG(BOOL, SERIES, NONE, NONE)>::type>(
-                op->fn)(v);
+            z.value.i = as_op<DFTU_OP_SIG(BOOL, SERIES, NONE, NONE)>(op->fn)(v);
             return z;
         case DFTU_OP_SIG(BOOL, SERIES, I32, NONE):
-            z.value.i = as<op_fn<DFTU_OP_SIG(BOOL, SERIES, I32, NONE)>::type>(
-                op->fn)(v, g[1].i32);
+            z.value.i = as_op<DFTU_OP_SIG(BOOL, SERIES, I32, NONE)>(op->fn)(
+                v, g[1].i32);
             return z;
         case DFTU_OP_SIG(F64, SERIES, NONE, NONE):
             z.kind = DFTU_SCALAR_TAG_F64;
-            z.value.d = as<op_fn<DFTU_OP_SIG(F64, SERIES, NONE, NONE)>::type>(
-                op->fn)(v);
+            z.value.d = as_op<DFTU_OP_SIG(F64, SERIES, NONE, NONE)>(op->fn)(v);
             return z;
         case DFTU_OP_SIG(F64, SERIES, I32, NONE):
             z.kind = DFTU_SCALAR_TAG_F64;
-            z.value.d = as<op_fn<DFTU_OP_SIG(F64, SERIES, I32, NONE)>::type>(
-                op->fn)(v, g[1].i32);
+            z.value.d =
+                as_op<DFTU_OP_SIG(F64, SERIES, I32, NONE)>(op->fn)(v, g[1].i32);
             return z;
         // No column operand: an effectful op reporting success (a file
         // compression, say). `v` is unused.
         case DFTU_OP_SIG(BOOL, STR, STR, NONE):
-            z.value.i = as<op_fn<DFTU_OP_SIG(BOOL, STR, STR, NONE)>::type>(
-                op->fn)(g[0].str.ptr, g[0].str.len, g[1].str.ptr, g[1].str.len);
+            z.value.i = as_op<DFTU_OP_SIG(BOOL, STR, STR, NONE)>(op->fn)(
+                g[0].str.ptr, g[0].str.len, g[1].str.ptr, g[1].str.len);
             return z;
         case DFTU_OP_SIG(F64, SERIES, F64, NONE):
             z.kind = DFTU_SCALAR_TAG_F64;
-            z.value.d = as<op_fn<DFTU_OP_SIG(F64, SERIES, F64, NONE)>::type>(
-                op->fn)(v, g[1].f64);
+            z.value.d =
+                as_op<DFTU_OP_SIG(F64, SERIES, F64, NONE)>(op->fn)(v, g[1].f64);
             return z;
         default:
             if (ok) *ok = 0;
@@ -395,59 +397,55 @@ dftu_dataframe* dftu_op_run_frame(const dftu_op_desc* op,
     CDF df = (n >= 1 && frames) ? frames[0] : nullptr;
     switch (op->sig) {
         case DFTU_OP_SIG(FRAME, FRAME, NONE, NONE):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, NONE, NONE)>::type>(
-                op->fn)(df);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, NONE, NONE)>(op->fn)(df);
         case DFTU_OP_SIG(FRAME, FRAME, I64, NONE):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, I64, NONE)>::type>(
-                op->fn)(df, g[1].i64);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, I64, NONE)>(op->fn)(
+                df, g[1].i64);
         case DFTU_OP_SIG(FRAME, FRAME, I64, I64):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, I64, I64)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, I64, I64)>(op->fn)(
                 df, g[1].i64, g[2].i64);
         case DFTU_OP_SIG(FRAME, FRAME, SCALAR, NONE):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, SCALAR, NONE)>::type>(
-                op->fn)(df, g[1].scalar);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, SCALAR, NONE)>(op->fn)(
+                df, g[1].scalar);
         case DFTU_OP_SIG(FRAME, FRAME, SERIES, NONE):
             if (!g[1].series) return nullptr;
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, SERIES, NONE)>::type>(
-                op->fn)(df, g[1].series);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, SERIES, NONE)>(op->fn)(
+                df, g[1].series);
         case DFTU_OP_SIG(FRAME, FRAME, STR, NONE):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, STR, NONE)>::type>(
-                op->fn)(df, g[1].str.ptr);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, STR, NONE)>(op->fn)(
+                df, g[1].str.ptr);
         case DFTU_OP_SIG(FRAME, FRAME, STR, I32):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, STR, I32)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, STR, I32)>(op->fn)(
                 df, g[1].str.ptr, g[2].i32);
         case DFTU_OP_SIG(FRAME, FRAME, STR, SERIES):
             if (!g[2].series) return nullptr;
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, STR, SERIES)>::type>(
-                op->fn)(df, g[1].str.ptr, g[2].series);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, STR, SERIES)>(op->fn)(
+                df, g[1].str.ptr, g[2].series);
         case DFTU_OP_SIG(FRAME, FRAME, STRLIST, NONE):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, STRLIST, NONE)>::type>(
-                op->fn)(df, g[1].list.items, g[1].list.n);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, STRLIST, NONE)>(op->fn)(
+                df, g[1].list.items, g[1].list.n);
         case DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32)>::type>(
-                op->fn)(df, g[1].list.items, g[1].list.n, g[2].i32);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32)>(op->fn)(
+                df, g[1].list.items, g[1].list.n, g[2].i32);
         case DFTU_OP_SIG(FRAME, FRAME, STRLIST, STRLIST):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, STRLIST, STRLIST)>::type>(
-                op->fn)(df, g[1].list.items, g[1].list.n, g[2].list.items,
-                        g[2].list.n);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, STRLIST, STRLIST)>(op->fn)(
+                df, g[1].list.items, g[1].list.n, g[2].list.items, g[2].list.n);
         case DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32LIST):
-            return as<op_fn<DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32LIST)>::type>(
-                op->fn)(df, g[1].list.items, g[1].list.n, g[2].i32list.items,
-                        g[2].i32list.n);
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32LIST)>(op->fn)(
+                df, g[1].list.items, g[1].list.n, g[2].i32list.items,
+                g[2].i32list.n);
         case DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE):
-            return as<
-                op_fn<DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE)>::type>(
+            return as_op<DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE)>(
                 op->fn)(df, g[1].str.ptr, g[2].i64, g[3].i32);
         case DFTU_OP_SIG6(FRAME, FRAME, STR, STR, STR, STR):
-            return as<
-                op_fn<DFTU_OP_SIG6(FRAME, FRAME, STR, STR, STR, STR)>::type>(
+            return as_op<DFTU_OP_SIG6(FRAME, FRAME, STR, STR, STR, STR)>(
                 op->fn)(df, g[1].str.ptr, g[2].str.ptr, g[3].str.ptr,
                         g[4].str.ptr);
         case DFTU_OP_SIG(FRAME, SERIES, NONE,
                          NONE):  // value_counts: series -> frame
             if (!g[0].series) return nullptr;
-            return as<op_fn<DFTU_OP_SIG(FRAME, SERIES, NONE, NONE)>::type>(
-                op->fn)(g[0].series);
+            return as_op<DFTU_OP_SIG(FRAME, SERIES, NONE, NONE)>(op->fn)(
+                g[0].series);
         default:
             return nullptr;
     }
@@ -464,65 +462,69 @@ dftu_lazyframe* dftu_op_run_lazy(const dftu_op_desc* op,
     CLF lf = (n >= 1 && in) ? in[0] : nullptr;
     switch (op->sig) {
         case DFTU_OP_SIG(LAZY, LAZY, NONE, NONE):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, NONE, NONE)>::type>(op->fn)(
-                lf);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, NONE, NONE)>(op->fn)(lf);
         case DFTU_OP_SIG(LAZY, LAZY, STR, NONE):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STR, NONE)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, STR, NONE)>(op->fn)(
                 lf, g[1].str.ptr);
         case DFTU_OP_SIG(LAZY, LAZY, SCALAR, NONE):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, SCALAR, NONE)>::type>(
-                op->fn)(lf, g[1].scalar);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, SCALAR, NONE)>(op->fn)(
+                lf, g[1].scalar);
         case DFTU_OP_SIG(LAZY, LAZY, EXPR, NONE):
             if (!g[1].expr) return nullptr;
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, EXPR, NONE)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, EXPR, NONE)>(op->fn)(
                 lf, g[1].expr);
         case DFTU_OP_SIG(LAZY, LAZY, STR, EXPR):
             if (!g[2].expr) return nullptr;
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STR, EXPR)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, STR, EXPR)>(op->fn)(
                 lf, g[1].str.ptr, g[2].expr);
         case DFTU_OP_SIG(LAZY, LAZY, I64, NONE):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, I64, NONE)>::type>(op->fn)(
-                lf, g[1].i64);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, I64, NONE)>(op->fn)(lf,
+                                                                     g[1].i64);
         case DFTU_OP_SIG(LAZY, LAZY, I64, I64):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, I64, I64)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, I64, I64)>(op->fn)(
                 lf, g[1].i64, g[2].i64);
         case DFTU_OP_SIG(LAZY, LAZY, U64, NONE):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, U64, NONE)>::type>(op->fn)(
-                in[0], g[1].u64);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, U64, NONE)>(op->fn)(in[0],
+                                                                     g[1].u64);
         case DFTU_OP_SIG(LAZY, LAZY, I64, U64):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, I64, U64)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, I64, U64)>(op->fn)(
                 in[0], g[1].i64, g[2].u64);
         case DFTU_OP_SIG(LAZY, LAZY, STRLIST, NONE):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STRLIST, NONE)>::type>(
-                op->fn)(lf, g[1].list.items, g[1].list.n);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, STRLIST, NONE)>(op->fn)(
+                lf, g[1].list.items, g[1].list.n);
         case DFTU_OP_SIG(LAZY, LAZY, STRLIST, STRLIST):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STRLIST, STRLIST)>::type>(
-                op->fn)(lf, g[1].list.items, g[1].list.n, g[2].list.items,
-                        g[2].list.n);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, STRLIST, STRLIST)>(op->fn)(
+                lf, g[1].list.items, g[1].list.n, g[2].list.items, g[2].list.n);
         case DFTU_OP_SIG(LAZY, LAZY, STRLIST, AGGLIST):
             if (!g[2].agglist.items) return nullptr;
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STRLIST, AGGLIST)>::type>(
-                op->fn)(lf, g[1].list.items, g[1].list.n, g[2].agglist.items,
-                        g[2].agglist.n);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, STRLIST, AGGLIST)>(op->fn)(
+                lf, g[1].list.items, g[1].list.n, g[2].agglist.items,
+                g[2].agglist.n);
         case DFTU_OP_SIG(LAZY, LAZY, STR, I32):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STR, I32)>::type>(op->fn)(
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, STR, I32)>(op->fn)(
                 lf, g[1].str.ptr, g[2].i32);
         case DFTU_OP_SIG(LAZY, LAZY, SERIES, NONE):
             if (!g[1].series) return nullptr;
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, SERIES, NONE)>::type>(
-                op->fn)(lf, g[1].series);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, SERIES, NONE)>(op->fn)(
+                lf, g[1].series);
         case DFTU_OP_SIG(LAZY, LAZY, STRLIST, I32):
-            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STRLIST, I32)>::type>(
-                op->fn)(lf, g[1].list.items, g[1].list.n, g[2].i32);
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, STRLIST, I32)>(op->fn)(
+                lf, g[1].list.items, g[1].list.n, g[2].i32);
         case DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE):
-            return as<
-                op_fn<DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE)>::type>(
-                op->fn)(lf, g[1].str.ptr, g[2].i64, g[3].i32);
+            return as_op<DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE)>(op->fn)(
+                lf, g[1].str.ptr, g[2].i64, g[3].i32);
         case DFTU_OP_SIG6(LAZY, LAZY, STR, STR, STR, STR):
-            return as<
-                op_fn<DFTU_OP_SIG6(LAZY, LAZY, STR, STR, STR, STR)>::type>(
-                op->fn)(lf, g[1].str.ptr, g[2].str.ptr, g[3].str.ptr,
-                        g[4].str.ptr);
+            return as_op<DFTU_OP_SIG6(LAZY, LAZY, STR, STR, STR, STR)>(op->fn)(
+                lf, g[1].str.ptr, g[2].str.ptr, g[3].str.ptr, g[4].str.ptr);
+        case DFTU_OP_SIG(LAZY, LAZY, I64LIST, NONE):
+            return as_op<DFTU_OP_SIG(LAZY, LAZY, I64LIST, NONE)>(op->fn)(
+                lf, g[1].i64list.items, g[1].i64list.n);
+        case DFTU_OP_SIG8(LAZY, LAZY, STR, I64, I64, AGGLIST, I64, I32):
+            if (!g[4].agglist.items) return nullptr;
+            return as_op<DFTU_OP_SIG8(LAZY, LAZY, STR, I64, I64, AGGLIST, I64,
+                                      I32)>(op->fn)(
+                lf, g[1].str.ptr, g[2].i64, g[3].i64, g[4].agglist.items,
+                g[4].agglist.n, g[5].i64, g[6].i32);
         default:
             return nullptr;
     }

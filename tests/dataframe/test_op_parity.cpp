@@ -38,7 +38,7 @@ std::set<std::string> frame_def_names() {
 
 std::set<std::string> lazy_def_names() {
     std::set<std::string> names;
-#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4) \
+#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4, o5, o6) \
     names.insert("dftu.lazy." #name);
 #include <dftracer/utils/dataframe/exported_lazy_ops.def>
     return names;
@@ -68,7 +68,7 @@ std::set<std::string> def_fn_symbols() {
 #include <dftracer/utils/dataframe/exported_series_ops.def>
 #define DFTU_FRAME_OP(name, fn, ret, o0, o1, o2, o3, o4) fns.insert(#fn);
 #include <dftracer/utils/dataframe/exported_frame_ops.def>
-#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4) fns.insert(#fn);
+#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4, o5, o6) fns.insert(#fn);
 #include <dftracer/utils/dataframe/exported_lazy_ops.def>
     return fns;
 }

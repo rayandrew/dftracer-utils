@@ -11,6 +11,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -186,6 +187,9 @@ struct OwnedLazyFrame {
         return apply("dftu.lazy.sample",
                      dataframe::OpArgs().i64(1, n).u64(2, seed));
     }
+    OwnedLazyFrame take(std::span<const std::int64_t> idx) const {
+        return apply("dftu.lazy.take", dataframe::OpArgs().i64list(1, idx));
+    }
 
     OwnedLazyFrame select(std::initializer_list<const char*> names) const {
         std::vector<const char*> v(names);
@@ -261,6 +265,21 @@ struct OwnedLazyFrame {
                                             .str(2, on ? on : "")
                                             .str(3, values ? values : "")
                                             .str(4, agg ? agg : ""));
+    }
+
+    OwnedLazyFrame group_by_dynamic(const char* time_col, std::int64_t every,
+                                    std::int64_t period,
+                                    std::span<const dftu_group_agg> aggs,
+                                    std::int64_t origin,
+                                    bool origin_min) const {
+        return apply("dftu.lazy.group_by_dynamic",
+                     dataframe::OpArgs()
+                         .str(1, time_col ? time_col : "")
+                         .i64(2, every)
+                         .i64(3, period)
+                         .agglist(4, aggs)
+                         .i64(5, origin)
+                         .i32(6, static_cast<std::int32_t>(origin_min)));
     }
 
    private:

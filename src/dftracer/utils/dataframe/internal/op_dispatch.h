@@ -130,6 +130,11 @@ DFTU_OP_FN(DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE),
            LF (*)(CLF, const char*, int64_t, int32_t))
 DFTU_OP_FN(DFTU_OP_SIG6(LAZY, LAZY, STR, STR, STR, STR),
            LF (*)(CLF, const char*, const char*, const char*, const char*))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, I64LIST, NONE),
+           LF (*)(CLF, const int64_t*, int32_t))
+DFTU_OP_FN(DFTU_OP_SIG8(LAZY, LAZY, STR, I64, I64, AGGLIST, I64, I32),
+           LF (*)(CLF, const char*, int64_t, int64_t, const dftu_group_agg*,
+                  int32_t, int64_t, int32_t))
 
 #undef DFTU_OP_FN
 

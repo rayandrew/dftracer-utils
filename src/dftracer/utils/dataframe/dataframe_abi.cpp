@@ -678,6 +678,17 @@ dftu_lazyframe* dftu_lazyframe_reverse(const dftu_lazyframe* lf) {
     }
 }
 
+dftu_lazyframe* dftu_lazyframe_take(const dftu_lazyframe* lf,
+                                    const int64_t* idx, int32_t n) {
+    if (!lf || n < 0 || (n > 0 && !idx)) return nullptr;
+    try {
+        std::vector<std::int64_t> v(idx, idx + n);
+        return wrap_lazy(lf->lf.take(std::move(v)));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
 dftu_lazyframe* dftu_lazyframe_sort_by_multi(const dftu_lazyframe* lf,
                                              const char* const* by, int32_t n,
                                              int32_t descending) {
