@@ -51,6 +51,7 @@ set(TRACE_TEST_SOURCES
     views/test_result_join.cpp
     views/test_view_join.cpp
     views/test_compare_view.cpp
+    views/test_view_c_abi.cpp
 
     # Statistics
     statistics/test_trace_statistics.cpp

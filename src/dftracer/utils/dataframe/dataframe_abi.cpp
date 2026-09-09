@@ -2,6 +2,7 @@
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/batch_ops.h>
 #include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/internal/dataframe_handle.h>
 #include <dftracer/utils/dataframe/internal/expr_handle.h>
 #include <dftracer/utils/dataframe/internal/lazyframe_handle.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
@@ -26,6 +27,12 @@ struct dftu_lazyframe {
 
 namespace dftracer::utils::dataframe {
 LazyFrame& lazyframe_handle_unwrap(dftu_lazyframe* h) { return h->lf; }
+dftu_lazyframe* lazyframe_handle_wrap(LazyFrame&& lf) {
+    return new dftu_lazyframe{std::move(lf)};
+}
+dftu_dataframe* dataframe_handle_wrap(DataFrame&& df) {
+    return new dftu_dataframe{std::move(df)};
+}
 }  // namespace dftracer::utils::dataframe
 
 namespace {

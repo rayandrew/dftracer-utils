@@ -203,6 +203,7 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/sharded_view.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/view_export_index.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/result_join.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/trace/views/abi.cpp
 
     # Plugins (C ABI fold adapter + dlopen host + config tree builder)
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/build_host.cpp
