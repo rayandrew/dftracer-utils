@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -70,7 +71,8 @@ struct Plugins::Impl {
     std::deque<ConfigTree> configs;
     // Providers before consumers; a full permutation of plugin indices.
     std::vector<std::size_t> order;
-    // The union prune, settled once at build so run() and attach() agree.
+    // The union prune, settled once at build; only run() applies it (see
+    // Plugins::attach()).
     std::optional<Query> prune;
 };
 
@@ -413,15 +415,22 @@ coro::CoroTask<Result<PluginRun>> Plugins::run(const View& view) const {
     co_return out;
 }
 
-void Plugins::attach(trace::views::ViewSession& session,
-                     NamedResultRegistry& results) const {
+trace::views::Deferred<PluginRun> Plugins::attach(
+    trace::views::ViewSession& session) const {
     namespace views = trace::views;
     // Captured by the factory closures (owned by the session through execute)
     // so it outlives the scan.
     auto shared = std::make_shared<SharedResultRegistry>();
-    results.clear();
-    NamedResultRegistry* named = &results;
-    for (std::size_t i : impl_->order) {
+    auto out = std::make_shared<PluginRun>();
+    auto executed = std::make_shared<bool>(false);
+    NamedResultRegistry* named = &out->results;
+    const std::size_t n = impl_->order.size();
+    if (n == 0) {
+        *executed = true;
+        return {out, executed};
+    }
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        std::size_t i = impl_->order[idx];
         const dftu_plugin* plugin = impl_->plugins[i].plugin;
         std::string name = impl_->plugins[i].name;
         const StateRegistry* states = &impl_->plugins[i].states;
@@ -435,8 +444,13 @@ void Plugins::attach(trace::views::ViewSession& session,
                 return std::make_unique<PluginFold>(
                     plugin, intern, shared.get(), named, name, 0, states);
             },
-            []() {});
+            // The fused scan finalizes every attached fold together, so the
+            // last one to finalize marks the handle resolved.
+            idx + 1 == n
+                ? std::function<void()>([executed]() { *executed = true; })
+                : std::function<void()>([]() {}));
     }
+    return {out, executed};
 }
 
 Result<Plugins> build_injected_plugins(std::vector<dftu_plugin*> plugins) {

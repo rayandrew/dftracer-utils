@@ -257,3 +257,125 @@ TEST_SUITE("PluginPlannerScan") {
         CHECK(keeps_stdio.total.load() == same_filter.total.load());
     }
 }
+
+// Plugins::attach() returns a Deferred<PluginRun> handle and owns applying the
+// index prune itself. Unlike run() (which always owns the whole scan it
+// drives), attach() shares a caller-built ViewSession whose base scan is fixed
+// at View::session() with no way for this call to see whether another branch
+// is, or will be, registered on it - so attach() never chunk-prunes the shared
+// scan (run() above is the only path that does).
+TEST_SUITE("PluginAttachHandle") {
+    using dftracer::utils::plugins::PluginRun;
+    using dftracer::utils::trace::views::AggOp;
+    using dftracer::utils::trace::views::AggSpec;
+    using dftracer::utils::trace::views::Deferred;
+    using dftracer::utils::trace::views::GroupKey;
+    using dftracer::utils::trace::views::ViewSession;
+
+    double col_sum(const dftracer::utils::dataframe::DataFrame& df,
+                   std::string_view name) {
+        using T = dftracer::utils::dataframe::TypeId;
+        auto s = df.column(name);
+        double total = 0;
+        for (std::int64_t i = 0; i < s.length(); ++i)
+            total += s.type() == T::Int64
+                         ? static_cast<double>(s.data<std::int64_t>()[i])
+                         : static_cast<double>(s.data<std::uint64_t>()[i]);
+        return total;
+    }
+
+    TEST_CASE("reading the handle before execute() throws") {
+        dftu_utils_test::TestEnvironment env(0);
+        REQUIRE(env.is_valid());
+        std::vector<ViewFile> files{
+            index_trace(make_homog_trace(env, "early", "read", "POSIX", 5))};
+        CountState st{nullptr};
+        dftu_plugin p = make_count_plugin(&st);
+        auto set = build_injected_plugins({&p});
+        REQUIRE(set.has_value());
+
+        View base = View::from_files(files);
+        ViewSession sess = base.session();
+        Deferred<PluginRun> h = set->attach(sess);
+        CHECK_THROWS_AS(h->results, std::logic_error);
+    }
+
+    // A sole plugin branch still resolves correctly through attach(); it just
+    // does not get run()'s index-skip fast path (see the suite comment above).
+    TEST_CASE(
+        "attach on a sole plugin branch resolves without narrowing the "
+        "shared scan") {
+        dftu_utils_test::TestEnvironment env(0);
+        REQUIRE(env.is_valid());
+        const int N = 200;
+        std::vector<ViewFile> files{
+            index_trace(make_homog_trace(env, "solo1", "fwrite", "STDIO", N)),
+            index_trace(make_homog_trace(env, "solo2", "read", "POSIX", N)),
+            index_trace(make_homog_trace(env, "solo3", "write", "POSIX", N))};
+
+        CountState st{R"(cat == "STDIO")"};
+        dftu_plugin p = make_count_plugin(&st);
+        auto set = build_injected_plugins({&p});
+        REQUIRE(set.has_value());
+
+        View base = View::from_files(files);
+        ViewSession sess = base.session();
+        Deferred<PluginRun> h = set->attach(sess);
+
+        Runtime rt(4);
+        auto task = dftracer::utils::run_coro_scope(
+            rt.executor(), [&](CoroScope&) -> coro::CoroTask<void> {
+                co_await sess.execute();
+                co_return;
+            });
+        rt.submit(std::move(task), "plugin-attach-solo").wait();
+        rt.shutdown();
+
+        CHECK(st.total.load() == N);  // the plugin's own filter still applies
+        // attach() cannot see whether it is the session's sole branch, so it
+        // never applies the union prune: stats stays default rather than
+        // reporting a chunk skip run() would have made. Contrast with "the
+        // prune skips index chunks, not just rows" above, which shows the
+        // same plugin's plan_query DOES skip chunks through run().
+        CHECK(h->stats.chunks_skipped == 0);
+    }
+
+    // The regression that matters: a plugin with a narrow plan_query must not
+    // starve a co-scanning collect() branch of events it is entitled to.
+    TEST_CASE(
+        "attach co-scanning with a collect branch never narrows the "
+        "shared scan") {
+        dftu_utils_test::TestEnvironment env(0);
+        REQUIRE(env.is_valid());
+        const int N = 50;
+        std::vector<ViewFile> files{
+            index_trace(make_homog_trace(env, "mix1", "fwrite", "STDIO", N)),
+            index_trace(make_homog_trace(env, "mix2", "read", "POSIX", N))};
+
+        CountState st{R"(cat == "STDIO")"};  // the plugin only wants STDIO
+        dftu_plugin p = make_count_plugin(&st);
+        auto set = build_injected_plugins({&p});
+        REQUIRE(set.has_value());
+
+        View base = View::from_files(files);
+        ViewSession sess = base.session();
+        Deferred<PluginRun> h = set->attach(sess);
+        Deferred<dftracer::utils::dataframe::DataFrame> all =
+            sess.collect({}, {{AggOp::Count, "", "n"}});
+
+        Runtime rt(4);
+        auto task = dftracer::utils::run_coro_scope(
+            rt.executor(), [&](CoroScope&) -> coro::CoroTask<void> {
+                co_await sess.execute();
+                co_return;
+            });
+        rt.submit(std::move(task), "plugin-attach-coscan").wait();
+        rt.shutdown();
+
+        CHECK(st.total.load() == N);  // plugin's own filter is unaffected
+        // If attach() had chunk-pruned to the plugin's STDIO-only query, the
+        // collect branch would have missed the POSIX file entirely.
+        REQUIRE(all->num_rows() == 1);
+        CHECK(col_sum(*all, "n") == 2 * N);
+    }
+}

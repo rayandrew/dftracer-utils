@@ -218,12 +218,9 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
     if (!run_blocking([&] {
             View base = build_view_from_data(base_files, base_index, base_plan,
                                              /*aggregate=*/false);
-            // A plugins-only session gets the set's index prune, matching
-            // Plugins::run. With another branch present the shared scan must
-            // stay whole, since that branch is not filtered by plugin queries.
-            if (nb == 1 && bdata[0].kind == Kind::Plugin)
-                base = bdata[0].plugins->prune(base);
             ViewSession sess = base.session();
+            std::vector<Deferred<dftracer::utils::plugins::PluginRun> >
+                plugin_handles(nb);
             std::vector<Deferred<DataFrame> > agg_handles(nb);
             std::vector<Deferred<DataFrame> > agg_handles2(nb);
             std::vector<Deferred<ExportStats> > exp_handles(nb);
@@ -306,9 +303,8 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                     }
                     case Kind::Plugin:
                         // C++-only, safe with the GIL released; named results
-                        // are read back after execute.
-                        bdata[i].plugins->attach(sess,
-                                                 *bdata[i].plugin_results);
+                        // are read back from the handle after execute.
+                        plugin_handles[i] = bdata[i].plugins->attach(sess);
                         break;
                     case Kind::Join:
                         agg_handles[i] = sess.join(
@@ -338,6 +334,9 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                     export_stats[i] = exp_handles[i].get();
                 else if (bdata[i].kind == Kind::Partial)
                     partial_results[i] = std::move(partial_handles[i].get());
+                else if (bdata[i].kind == Kind::Plugin)
+                    *bdata[i].plugin_results =
+                        std::move(plugin_handles[i]->results);
             }
         }))
         return nullptr;

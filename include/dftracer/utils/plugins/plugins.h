@@ -84,21 +84,34 @@ class Plugins {
     /// Drive every plugin as a fold over one fused, pruned scan of `view`.
     coro::CoroTask<Result<PluginRun>> run(const trace::views::View& view) const;
 
-    /// `view` narrowed by the union of the plugins' plan_query filters (the
-    /// weakest predicate that still selects every event any plugin keeps), or
-    /// unchanged when no prune applies. Apply to a plugins-only session's base
-    /// view to get the same pruning run() does.
-    trace::views::View prune(const trace::views::View& view) const;
-
     /// Attach every plugin to `session` as a fused fold branch, in fold order,
-    /// so they co-scan with its other branches. Call before session.execute();
-    /// `results` must outlive the session and holds the named results after it.
-    void attach(trace::views::ViewSession& session,
-                NamedResultRegistry& results) const;
+    /// so they co-scan with its other branches. Call before session.execute().
+    /// The returned handle resolves like every other ViewSession handle:
+    /// `->results` and `->stats` throw if read before session.execute()
+    /// completes.
+    ///
+    /// The index prune that run() applies is only safe when the plugin branch
+    /// is a session's sole branch - applied to a shared scan it would starve
+    /// a co-scanning branch (e.g. a collect()) of events it is entitled to.
+    /// ViewSession's base scan is fixed at View::session() and exposes no way
+    /// for this call to tell whether other branches are, or will be, attached
+    /// to `session`, so attach() never narrows the shared scan; `stats` stays
+    /// default (the shared scan's own counters are session.execute()'s
+    /// return, not a plugin-only count). Use run() when the plugins are the
+    /// only reader of a trace and the prune should apply.
+    trace::views::Deferred<PluginRun> attach(
+        trace::views::ViewSession& session) const;
 
    private:
     explicit Plugins(std::unique_ptr<Impl> impl);
     friend struct PluginsInternalAccess;
+
+    /// `view` narrowed by the union of the plugins' plan_query filters (the
+    /// weakest predicate that still selects every event any plugin keeps), or
+    /// unchanged when no prune applies. Only run() calls this: it owns the
+    /// scan it runs, so the prune can never starve another branch.
+    trace::views::View prune(const trace::views::View& view) const;
+
     std::unique_ptr<Impl> impl_;
 };
 
