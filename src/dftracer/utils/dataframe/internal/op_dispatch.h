@@ -8,6 +8,8 @@ namespace dftracer::utils::dataframe::internal {
 using CS = const dftu_series*;
 using CDF = const dftu_dataframe*;
 using DF = dftu_dataframe*;
+using CLF = const dftu_lazyframe*;
+using LF = dftu_lazyframe*;
 
 // Maps a packed op signature to the function-pointer type a registered fn of
 // that shape must have. Left undefined for a signature dftu_op_run/
@@ -100,6 +102,31 @@ DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE),
 DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, STR, STR, STR, STR),
            DF (*)(CDF, const char*, const char*, const char*, const char*))
 DFTU_OP_FN(DFTU_OP_SIG(FRAME, SERIES, NONE, NONE), DF (*)(CS))
+
+// dftu_op_run_lazy (DFTU_OP_KIND_LAZY).
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, NONE, NONE), LF (*)(CLF))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, STR, NONE), LF (*)(CLF, const char*))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, SCALAR, NONE), LF (*)(CLF, dftu_scalar))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, EXPR, NONE), LF (*)(CLF, const dftu_expr*))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, STR, EXPR),
+           LF (*)(CLF, const char*, const dftu_expr*))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, I64, NONE), LF (*)(CLF, int64_t))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, I64, I64), LF (*)(CLF, int64_t, int64_t))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, U64, NONE), LF (*)(CLF, uint64_t))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, I64, U64), LF (*)(CLF, int64_t, uint64_t))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, STRLIST, NONE),
+           LF (*)(CLF, const char* const*, int32_t))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, STRLIST, STRLIST),
+           LF (*)(CLF, const char* const*, int32_t, const char* const*,
+                  int32_t))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, STRLIST, AGGLIST),
+           LF (*)(CLF, const char* const*, int32_t, const dftu_group_agg*,
+                  int32_t))
+DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, STR, I32), LF (*)(CLF, const char*, int32_t))
+DFTU_OP_FN(DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE),
+           LF (*)(CLF, const char*, int64_t, int32_t))
+DFTU_OP_FN(DFTU_OP_SIG6(LAZY, LAZY, STR, STR, STR, STR),
+           LF (*)(CLF, const char*, const char*, const char*, const char*))
 
 #undef DFTU_OP_FN
 

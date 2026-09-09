@@ -22,6 +22,10 @@ const dftu_op_desc BUILTINS[] = {
     {"dftu.frame." #name, DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4), \
      reinterpret_cast<const void*>(&fn)},
 #include <dftracer/utils/dataframe/exported_frame_ops.def>
+#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4)         \
+    {"dftu.lazy." #name, DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4), \
+     reinterpret_cast<const void*>(&fn)},
+#include <dftracer/utils/dataframe/exported_lazy_ops.def>
 };
 constexpr uint32_t BUILTIN_COUNT =
     static_cast<uint32_t>(sizeof(BUILTINS) / sizeof(BUILTINS[0]));
@@ -41,6 +45,13 @@ constexpr uint32_t BUILTIN_COUNT =
                        op_fn<DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4)>::type>, \
         #name ": .def signature does not match the function");
 #include <dftracer/utils/dataframe/exported_frame_ops.def>
+
+#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4)                     \
+    static_assert(                                                          \
+        std::is_same_v<decltype(&fn),                                       \
+                       op_fn<DFTU_OP_SIG6(ret, o0, o1, o2, o3, o4)>::type>, \
+        #name ": .def signature does not match the function");
+#include <dftracer/utils/dataframe/exported_lazy_ops.def>
 
 std::mutex& reg_mutex() {
     static std::mutex m;
@@ -116,6 +127,14 @@ const char* tok_name(dftu_op_tok t) {
             return "strlist";
         case DFTU_TOK_I32LIST:
             return "i32list";
+        case DFTU_TOK_LAZY:
+            return "lazy";
+        case DFTU_TOK_EXPR:
+            return "expr";
+        case DFTU_TOK_AGGLIST:
+            return "agglist";
+        case DFTU_TOK_U64:
+            return "u64";
     }
     return "?";
 }
@@ -124,7 +143,8 @@ const char* tok_name(dftu_op_tok t) {
 bool needs_arg(dftu_op_sig sig) {
     for (int i = 0; i < DFTU_OP_MAX_ARGS; ++i) {
         dftu_op_tok t = DFTU_OP_SIG_ARG(sig, i);
-        if (t != DFTU_TOK_NONE && t != DFTU_TOK_SERIES && t != DFTU_TOK_FRAME)
+        if (t != DFTU_TOK_NONE && t != DFTU_TOK_SERIES && t != DFTU_TOK_FRAME &&
+            t != DFTU_TOK_LAZY)
             return true;
     }
     return false;
@@ -138,15 +158,18 @@ dftu_op_kind dftu_op_kind_of(dftu_op_sig sig) {
     dftu_op_tok r = DFTU_OP_SIG_RET(sig);
     if (r == DFTU_TOK_SERIES) return DFTU_OP_KIND_SERIES;
     if (r == DFTU_TOK_FRAME) return DFTU_OP_KIND_FRAME;
+    if (r == DFTU_TOK_LAZY) return DFTU_OP_KIND_LAZY;
     return DFTU_OP_KIND_AGGREGATE;
 }
 
 uint32_t dftu_op_arity(dftu_op_sig sig) {
-    // The primary positional operand: FRAME for a frame op (in frames[]), else
-    // SERIES (in in[]). A frame op's series/scalar operands ride dftu_op_arg.
-    dftu_op_tok primary = dftu_op_kind_of(sig) == DFTU_OP_KIND_FRAME
-                              ? DFTU_TOK_FRAME
-                              : DFTU_TOK_SERIES;
+    // The primary positional operand: FRAME for a frame op (in frames[]), LAZY
+    // for a lazy op (in in[]), else SERIES (in in[]). Every other operand
+    // rides dftu_op_arg.
+    dftu_op_kind kind = dftu_op_kind_of(sig);
+    dftu_op_tok primary = kind == DFTU_OP_KIND_FRAME  ? DFTU_TOK_FRAME
+                          : kind == DFTU_OP_KIND_LAZY ? DFTU_TOK_LAZY
+                                                      : DFTU_TOK_SERIES;
     uint32_t n = 0;
     for (int i = 0; i < DFTU_OP_MAX_ARGS; ++i)
         if (DFTU_OP_SIG_ARG(sig, i) == primary) ++n;
@@ -425,6 +448,74 @@ dftu_dataframe* dftu_op_run_frame(const dftu_op_desc* op,
             if (!g[0].series) return nullptr;
             return as<op_fn<DFTU_OP_SIG(FRAME, SERIES, NONE, NONE)>::type>(
                 op->fn)(g[0].series);
+        default:
+            return nullptr;
+    }
+}
+
+dftu_lazyframe* dftu_op_run_lazy(const dftu_op_desc* op,
+                                 const dftu_lazyframe* const* in, uint32_t n,
+                                 const dftu_op_arg* a) {
+    if (!op || !op->fn) return nullptr;
+    if (dftu_op_kind_of(op->sig) != DFTU_OP_KIND_LAZY) return nullptr;
+    if (n != dftu_op_arity(op->sig)) return nullptr;
+    using CLF = const dftu_lazyframe*;
+    const dftu_op_val* g = a ? a->args : nullptr;
+    CLF lf = (n >= 1 && in) ? in[0] : nullptr;
+    switch (op->sig) {
+        case DFTU_OP_SIG(LAZY, LAZY, NONE, NONE):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, NONE, NONE)>::type>(op->fn)(
+                lf);
+        case DFTU_OP_SIG(LAZY, LAZY, STR, NONE):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STR, NONE)>::type>(op->fn)(
+                lf, g[1].str.ptr);
+        case DFTU_OP_SIG(LAZY, LAZY, SCALAR, NONE):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, SCALAR, NONE)>::type>(
+                op->fn)(lf, g[1].scalar);
+        case DFTU_OP_SIG(LAZY, LAZY, EXPR, NONE):
+            if (!g[1].expr) return nullptr;
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, EXPR, NONE)>::type>(op->fn)(
+                lf, g[1].expr);
+        case DFTU_OP_SIG(LAZY, LAZY, STR, EXPR):
+            if (!g[2].expr) return nullptr;
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STR, EXPR)>::type>(op->fn)(
+                lf, g[1].str.ptr, g[2].expr);
+        case DFTU_OP_SIG(LAZY, LAZY, I64, NONE):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, I64, NONE)>::type>(op->fn)(
+                lf, g[1].i64);
+        case DFTU_OP_SIG(LAZY, LAZY, I64, I64):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, I64, I64)>::type>(op->fn)(
+                lf, g[1].i64, g[2].i64);
+        case DFTU_OP_SIG(LAZY, LAZY, U64, NONE):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, U64, NONE)>::type>(op->fn)(
+                in[0], g[1].u64);
+        case DFTU_OP_SIG(LAZY, LAZY, I64, U64):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, I64, U64)>::type>(op->fn)(
+                in[0], g[1].i64, g[2].u64);
+        case DFTU_OP_SIG(LAZY, LAZY, STRLIST, NONE):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STRLIST, NONE)>::type>(
+                op->fn)(lf, g[1].list.items, g[1].list.n);
+        case DFTU_OP_SIG(LAZY, LAZY, STRLIST, STRLIST):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STRLIST, STRLIST)>::type>(
+                op->fn)(lf, g[1].list.items, g[1].list.n, g[2].list.items,
+                        g[2].list.n);
+        case DFTU_OP_SIG(LAZY, LAZY, STRLIST, AGGLIST):
+            if (!g[2].agglist.items) return nullptr;
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STRLIST, AGGLIST)>::type>(
+                op->fn)(lf, g[1].list.items, g[1].list.n, g[2].agglist.items,
+                        g[2].agglist.n);
+        case DFTU_OP_SIG(LAZY, LAZY, STR, I32):
+            return as<op_fn<DFTU_OP_SIG(LAZY, LAZY, STR, I32)>::type>(op->fn)(
+                lf, g[1].str.ptr, g[2].i32);
+        case DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE):
+            return as<
+                op_fn<DFTU_OP_SIG6(LAZY, LAZY, STR, I64, I32, NONE)>::type>(
+                op->fn)(lf, g[1].str.ptr, g[2].i64, g[3].i32);
+        case DFTU_OP_SIG6(LAZY, LAZY, STR, STR, STR, STR):
+            return as<
+                op_fn<DFTU_OP_SIG6(LAZY, LAZY, STR, STR, STR, STR)>::type>(
+                op->fn)(lf, g[1].str.ptr, g[2].str.ptr, g[3].str.ptr,
+                        g[4].str.ptr);
         default:
             return nullptr;
     }

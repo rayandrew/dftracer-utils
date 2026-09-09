@@ -1,8 +1,13 @@
 // dftu_op_count()/dftu_op_at() must contain exactly the rows in
 // exported_series_ops.def and exported_frame_ops.def, plus the fixed set
 // host_ops.cpp registers at runtime - no more, no less.
+// RTLD_DEFAULT is a GNU extension on glibc; Mach-O declares it either way.
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/dataframe/op.h>
+#include <dlfcn.h>
 #include <doctest/doctest.h>
 
 #include <cstdint>
@@ -31,6 +36,14 @@ std::set<std::string> frame_def_names() {
     return names;
 }
 
+std::set<std::string> lazy_def_names() {
+    std::set<std::string> names;
+#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4) \
+    names.insert("dftu.lazy." #name);
+#include <dftracer/utils/dataframe/exported_lazy_ops.def>
+    return names;
+}
+
 // Registered by utilities/host_ops.cpp outside the .def tables (I/O ops the
 // columnar engine itself has no business depending on, per
 // exported_series_ops.def's own header comment). Shrinks only if one of
@@ -42,6 +55,22 @@ const std::set<std::string>& runtime_registered_series_ops() {
         "dftu.text.line_filter",
     };
     return names;
+}
+
+// The C ABI symbol each .def row names as its implementation. A row whose
+// function is not exported still WORKS through dftu_op_run, because the
+// registry holds a raw pointer, so nothing else notices; but a plugin or any
+// other consumer calling the C ABI directly cannot link it. Stringify the fn
+// token and look it up in this process to catch that.
+std::set<std::string> def_fn_symbols() {
+    std::set<std::string> fns;
+#define DFTU_SERIES_OP(name, fn, ret, o0, o1, o2) fns.insert(#fn);
+#include <dftracer/utils/dataframe/exported_series_ops.def>
+#define DFTU_FRAME_OP(name, fn, ret, o0, o1, o2, o3, o4) fns.insert(#fn);
+#include <dftracer/utils/dataframe/exported_frame_ops.def>
+#define DFTU_LAZY_OP(name, fn, ret, o0, o1, o2, o3, o4) fns.insert(#fn);
+#include <dftracer/utils/dataframe/exported_lazy_ops.def>
+    return fns;
 }
 
 std::string joined(const std::set<std::string>& names) {
@@ -110,5 +139,23 @@ TEST_SUITE("op_parity") {
     TEST_CASE(
         "every exported_frame_ops.def row is registered, and vice versa") {
         check_bijection(frame_def_names(), {}, {OpKind::Frame});
+    }
+
+    TEST_CASE("every exported_lazy_ops.def row is registered, and vice versa") {
+        check_bijection(lazy_def_names(), {}, {OpKind::Lazy});
+    }
+
+    TEST_CASE("every .def row's function is an exported C ABI symbol") {
+        std::set<std::string> hidden;
+        for (const auto& fn : def_fn_symbols()) {
+            if (dlsym(RTLD_DEFAULT, fn.c_str()) == nullptr) hidden.insert(fn);
+        }
+        INFO(def_fn_symbols().size() << " .def functions checked");
+        if (!hidden.empty()) {
+            FAIL(
+                ".def function(s) not exported from the C ABI (reachable "
+                "through dftu_op_run, but not linkable by a plugin): "
+                << joined(hidden));
+        }
     }
 }

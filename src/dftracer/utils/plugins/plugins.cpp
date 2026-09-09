@@ -135,6 +135,8 @@ const char* op_kind_name(dftu_op_sig sig) {
             return "aggregate";
         case DFTU_OP_KIND_FRAME:
             return "frame";
+        case DFTU_OP_KIND_LAZY:
+            return "lazy";
     }
     return "?";
 }
