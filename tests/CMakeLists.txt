@@ -83,6 +83,7 @@ set(TEST_CPP_SOURCES
     pipeline/test_coro_scope.cpp
     pipeline/test_run_loop.cpp
     # Coroutine tests
+    test_testing_utilities.cpp
     coro/test_coro_syntax.cpp
     coro/test_channel.cpp
     coro/test_generator.cpp
