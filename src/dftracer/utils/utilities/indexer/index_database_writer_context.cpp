@@ -5,6 +5,7 @@
 #include <dftracer/utils/utilities/indexer/index_database.h>
 #include <dftracer/utils/utilities/indexer/index_database_writer_context.h>
 #include <dftracer/utils/utilities/indexer/internal/batch_scan.h>
+#include <dftracer/utils/utilities/indexer/internal/column_type_codec.h>
 #include <dftracer/utils/utilities/indexer/internal/count_map_scan.h>
 #include <dftracer/utils/utilities/indexer/internal/db_error.h>
 #include <dftracer/utils/utilities/indexer/internal/index_batch_writer.h>
@@ -819,9 +820,8 @@ void IndexDatabaseWriterContext::insert_column(int file_id,
                                                std::string_view column,
                                                ColumnType type) {
     const auto key = make_column_key(file_id, column);
-    const char value = static_cast<char>(type);
-    put_encoded(cf::DIMENSIONS, key, std::string_view(&value, 1),
-                "Failed to insert column");
+    const auto value = encode_data_type(column_type_to_data_type(type));
+    put_encoded(cf::DIMENSIONS, key, value, "Failed to insert column");
 }
 
 void IndexDatabaseWriterContext::insert_index_dimension(

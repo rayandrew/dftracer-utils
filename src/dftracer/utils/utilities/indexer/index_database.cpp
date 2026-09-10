@@ -12,6 +12,7 @@
 #include <dftracer/utils/utilities/indexer/index_database_sst_writer_context.h>
 #include <dftracer/utils/utilities/indexer/index_database_writer_context.h>
 #include <dftracer/utils/utilities/indexer/internal/batch_scan.h>
+#include <dftracer/utils/utilities/indexer/internal/column_type_codec.h>
 #include <dftracer/utils/utilities/indexer/internal/count_map_scan.h>
 #include <dftracer/utils/utilities/indexer/internal/db_error.h>
 #include <dftracer/utils/utilities/indexer/internal/helpers.h>
@@ -850,27 +851,52 @@ std::vector<std::string> IndexDatabase::query_all_columns() const {
     return out;
 }
 
+namespace {
+
+// Decodes a "c|" column record value: schema v15+ stores the TLV-encoded
+// DataType, a pre-v15 record stores the one-byte ColumnType. An undecodable
+// (corrupt) value degrades to Unknown rather than throwing, since this scans
+// arbitrary on-disk bytes.
+dataframe::DataType decode_column_record(std::string_view value) {
+    if (value.empty()) return dataframe::scalar(dataframe::TypeId::Unknown);
+    if (value.size() == 1) {
+        return column_type_to_data_type(
+            static_cast<ColumnType>(static_cast<std::uint8_t>(value[0])));
+    }
+    if (auto decoded = decode_data_type(value)) return *decoded;
+    return dataframe::scalar(dataframe::TypeId::Unknown);
+}
+
+}  // namespace
+
 std::vector<std::pair<std::string, ColumnType>>
 IndexDatabase::query_all_column_types() const {
-    // As query_all_columns, but the record value carries the one-byte
-    // ColumnType (empty for a pre-v12 record). Fold the type across files.
+    auto typed = query_all_column_data_types();
+    std::vector<std::pair<std::string, ColumnType>> out;
+    out.reserve(typed.size());
+    for (auto& [name, type] : typed)
+        out.emplace_back(std::move(name), data_type_to_column_type(type));
+    return out;
+}
+
+std::vector<std::pair<std::string, dataframe::DataType>>
+IndexDatabase::query_all_column_data_types() const {
+    // As query_all_columns, but the record value carries the TLV-encoded
+    // DataType (schema v15+; a pre-v15 record decodes via the legacy
+    // one-byte ColumnType path). Fold the type across files.
     constexpr std::size_t HEADER = 2 + sizeof(std::uint32_t);
-    ankerl::unordered_dense::map<std::string, ColumnType> cols;
+    ankerl::unordered_dense::map<std::string, dataframe::DataType> cols;
     scan_prefix(
         *impl_->db_, cf::DIMENSIONS, "c|", [&](::rocksdb::Iterator& it) {
             auto key = iterator_key(it);
             if (key.size() <= HEADER) return;
-            auto value = iterator_value(it);
-            ColumnType t = value.empty()
-                               ? ColumnType::Unknown
-                               : static_cast<ColumnType>(
-                                     static_cast<std::uint8_t>(value[0]));
+            dataframe::DataType t = decode_column_record(iterator_value(it));
             std::string name(key.substr(HEADER));
             auto [pos, inserted] = cols.emplace(std::move(name), t);
-            if (!inserted) pos->second = merge_column_type(pos->second, t);
+            if (!inserted) pos->second = merge_data_type(pos->second, t);
         });
-    std::vector<std::pair<std::string, ColumnType>> out(cols.begin(),
-                                                        cols.end());
+    std::vector<std::pair<std::string, dataframe::DataType>> out(cols.begin(),
+                                                                 cols.end());
     std::sort(out.begin(), out.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
     return out;
