@@ -45,12 +45,16 @@ inline std::int64_t floor_to_multiple(std::int64_t x, std::int64_t m) {
     return q * m;
 }
 
-/// String form of a cell, for pivot/to_dummies column naming.
+/// String form of a cell, for pivot/to_dummies column naming. Every
+/// value_domain() != None type renders a distinct label.
 inline std::string cell_to_string(const Series& c, std::int64_t i) {
     switch (c.type()) {
         case TypeId::String:
         case TypeId::Binary:
-            return std::string(c.string_at(i));
+        case TypeId::LargeString:
+        case TypeId::LargeBinary:
+        case TypeId::FixedSizeBinary:
+            return std::string(read_bytes(c, i));
         case TypeId::Bool:
             return ((c.data<std::uint8_t>()[i >> 3] >> (i & 7)) & 1) ? "true"
                                                                      : "false";
@@ -73,7 +77,17 @@ inline std::string cell_to_string(const Series& c, std::int64_t i) {
         case TypeId::Float32:
             return std::to_string(c.data<float>()[i]);
         case TypeId::Float64:
-            return std::to_string(c.data<double>()[i]);
+        case TypeId::Float16:
+        case TypeId::Decimal128:
+        case TypeId::Decimal256:
+            return std::to_string(read_f64(c, i));
+        case TypeId::Date32:
+        case TypeId::Date64:
+        case TypeId::Time32:
+        case TypeId::Time64:
+        case TypeId::Timestamp:
+        case TypeId::Duration:
+            return std::to_string(read_i64(c, i));
         default:
             return std::string();
     }
