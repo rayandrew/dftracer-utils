@@ -494,10 +494,10 @@ HWY_EXPORT(CumMinKernel);
 
 namespace {
 
-bool is_numeric(TypeId t) {
-    return t != TypeId::String && t != TypeId::Binary && t != TypeId::List &&
-           t != TypeId::Struct;
-}
+// Exactly the set the kernels below have a lane type for. Float16, the
+// decimals and every byte or nested type reach no case in the dispatch, so
+// letting them through would leave the output buffer untouched.
+bool is_numeric(TypeId t) { return is_numeric_dispatchable(t); }
 
 bool is_valid(const dftu_series& v, std::int64_t i) {
     if (!v.validity) return true;
