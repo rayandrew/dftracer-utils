@@ -4,7 +4,6 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
-#include <string>
 
 using dftracer::utils::dataframe::find_op;
 using dftracer::utils::dataframe::OpArgs;
