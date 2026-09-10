@@ -69,7 +69,14 @@ Groups build_groups(const dftu_series* keys_in) {
     }
 
     bool str = (k->type == TypeId::String || k->type == TypeId::Binary);
-    std::size_t width = str ? 0 : byte_width(k->type);
+    // FixedSizeBinary's width is a DataType parameter, not a per-TypeId
+    // constant (byte_width returns 0 for it); every other fixed-width type,
+    // Decimal128/256 included, already has a correct per-TypeId byte_width,
+    // so an equal-bytes key groups them correctly with no extra case.
+    std::size_t width = str ? 0
+                        : k->type == TypeId::FixedSizeBinary
+                            ? static_cast<std::size_t>(k->fixed_size)
+                            : byte_width(k->type);
 
     std::unordered_map<std::string, std::int32_t> idx;
     std::vector<std::string> distinct;
@@ -103,6 +110,20 @@ Groups build_groups(const dftu_series* keys_in) {
         g.keys =
             dftu_series_new_string(static_cast<dftu_dtype>(k->type), off.data(),
                                    bytes.data(), g.num_groups, nullptr);
+    } else if (k->type == TypeId::FixedSizeBinary) {
+        // dftu_series_new_flat validates via byte_width(type), which is 0 for
+        // FixedSizeBinary (its width is a DataType parameter, not a per-TypeId
+        // constant); build the column directly instead.
+        auto* out = new dftu_series();
+        out->type = TypeId::FixedSizeBinary;
+        out->encoding = Encoding::Flat;
+        out->length = g.num_groups;
+        out->fixed_size = k->fixed_size;
+        std::string bytes;
+        for (const std::string& s : distinct) bytes += s;
+        out->data = dftracer::utils::dataframe::Buffer::allocate(bytes.size());
+        std::memcpy(out->data->data(), bytes.data(), bytes.size());
+        g.keys = out;
     } else {
         std::string bytes;
         for (const std::string& s : distinct) bytes += s;

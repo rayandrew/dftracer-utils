@@ -3,6 +3,7 @@
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
 #include <dftracer/utils/dataframe/internal/radix_dedup.h>  // parallel dedup
 #include <dftracer/utils/dataframe/internal/reduce_simd.h>
+#include <dftracer/utils/dataframe/internal/type_promotion.h>
 #include <dftracer/utils/dataframe/kernels/reduce.h>
 #include <dftracer/utils/dataframe/parallel.h>
 
@@ -247,16 +248,24 @@ void mode_one(const dftu_series& v, dftu_scalar& out) {
 }  // namespace
 
 dftu_scalar dftu_series_reduce(const dftu_series* v, dftu_reduce_op op) {
-    using dftracer::utils::dataframe::TypeId;
+    using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::promote_for_arithmetic;
     dftu_scalar out{};
     out.kind = DFTU_SCALAR_TAG_I64;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return out;
-    if (v->type == TypeId::Bool || v->type == TypeId::String ||
-        v->type == TypeId::Binary)
-        return out;
+    if (!is_arithmetic_type(v->type)) return out;
 
-    if (dftracer::utils::dataframe::reduce(*v, op, out)) return out;
+    // Float16 has no reduction kernel; Decimal128/256 have no exact one. Both
+    // promote here, once, before any dispatch below sees them.
+    dftu_series* promoted = nullptr;
+    v = promote_for_arithmetic(v, promoted);
+
+    if (dftracer::utils::dataframe::reduce(*v, op, out)) {
+        if (promoted) dftu_series_free(promoted);
+        return out;
+    }
     DF_NUMERIC_DISPATCH(v->type, reduce_one, *v, op, out)
+    if (promoted) dftu_series_free(promoted);
     return out;
 }
 
@@ -265,15 +274,20 @@ int64_t dftu_series_count(const dftu_series* v) {
 }
 
 dftu_scalar dftu_series_product(const dftu_series* v) {
-    using dftracer::utils::dataframe::TypeId;
+    using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::promote_for_arithmetic;
     dftu_scalar out{};
     out.kind = DFTU_SCALAR_TAG_I64;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return out;
-    if (v->type == TypeId::Bool || v->type == TypeId::String ||
-        v->type == TypeId::Binary)
+    if (!is_arithmetic_type(v->type)) return out;
+    dftu_series* promoted = nullptr;
+    v = promote_for_arithmetic(v, promoted);
+    if (dftracer::utils::dataframe::product_simd(*v, out)) {
+        if (promoted) dftu_series_free(promoted);
         return out;
-    if (dftracer::utils::dataframe::product_simd(*v, out)) return out;
+    }
     DF_NUMERIC_DISPATCH(v->type, product_one, *v, out)
+    if (promoted) dftu_series_free(promoted);
     return out;
 }
 
@@ -294,38 +308,45 @@ int32_t dftu_series_any(const dftu_series* v) {
 }
 
 int64_t dftu_series_arg_min(const dftu_series* v) {
-    using dftracer::utils::dataframe::TypeId;
+    using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::promote_for_arithmetic;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat ||
-        v->type == TypeId::Bool || v->type == TypeId::String ||
-        v->type == TypeId::Binary)
+        !is_arithmetic_type(v->type))
         return -1;
+    dftu_series* promoted = nullptr;
+    v = promote_for_arithmetic(v, promoted);
     std::int64_t idx = -1;
-    if (dftracer::utils::dataframe::arg_extreme_simd(*v, true, idx)) return idx;
-    DF_NUMERIC_DISPATCH(v->type, argextreme_one, *v, true, idx)
+    if (!dftracer::utils::dataframe::arg_extreme_simd(*v, true, idx))
+        DF_NUMERIC_DISPATCH(v->type, argextreme_one, *v, true, idx)
+    if (promoted) dftu_series_free(promoted);
     return idx;
 }
 
 int64_t dftu_series_arg_max(const dftu_series* v) {
-    using dftracer::utils::dataframe::TypeId;
+    using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::promote_for_arithmetic;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat ||
-        v->type == TypeId::Bool || v->type == TypeId::String ||
-        v->type == TypeId::Binary)
+        !is_arithmetic_type(v->type))
         return -1;
+    dftu_series* promoted = nullptr;
+    v = promote_for_arithmetic(v, promoted);
     std::int64_t idx = -1;
-    if (dftracer::utils::dataframe::arg_extreme_simd(*v, false, idx))
-        return idx;
-    DF_NUMERIC_DISPATCH(v->type, argextreme_one, *v, false, idx)
+    if (!dftracer::utils::dataframe::arg_extreme_simd(*v, false, idx))
+        DF_NUMERIC_DISPATCH(v->type, argextreme_one, *v, false, idx)
+    if (promoted) dftu_series_free(promoted);
     return idx;
 }
 
 dftu_scalar dftu_series_mode(const dftu_series* v) {
-    using dftracer::utils::dataframe::TypeId;
+    using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::promote_for_arithmetic;
     dftu_scalar out{};
     out.kind = DFTU_SCALAR_TAG_I64;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return out;
-    if (v->type == TypeId::Bool || v->type == TypeId::String ||
-        v->type == TypeId::Binary)
-        return out;
+    if (!is_arithmetic_type(v->type)) return out;
+    dftu_series* promoted = nullptr;
+    v = promote_for_arithmetic(v, promoted);
     DF_NUMERIC_DISPATCH(v->type, mode_one, *v, out)
+    if (promoted) dftu_series_free(promoted);
     return out;
 }

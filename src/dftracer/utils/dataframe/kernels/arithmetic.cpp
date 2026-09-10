@@ -2,6 +2,7 @@
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
 #include <dftracer/utils/dataframe/internal/scalar.h>
+#include <dftracer/utils/dataframe/internal/type_promotion.h>
 #include <dftracer/utils/dataframe/kernels/arithmetic.h>
 #include <dftracer/utils/dataframe/parallel.h>
 
@@ -182,9 +183,7 @@ namespace {
 
 enum class BinOp { Add, Sub, Mul, Div };
 
-bool is_numeric(TypeId t) {
-    return t != TypeId::Bool && t != TypeId::String && t != TypeId::Binary;
-}
+bool is_numeric(TypeId t) { return is_arithmetic_type(t); }
 
 bool is_float_type(TypeId t) {
     return t == TypeId::Float32 || t == TypeId::Float64;
@@ -220,6 +219,11 @@ TypeId promote_common(TypeId a, TypeId b) {
 // dtype (numpy semantics), but a float scalar against an integer column does.
 dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
     if (a->encoding != Encoding::Flat || !is_numeric(a->type)) return nullptr;
+
+    // Float16 has no arithmetic kernel; Decimal128/256 have no exact one.
+    // Both promote here, once, before any dispatch below sees them.
+    dftu_series* promoted = nullptr;
+    a = promote_for_arithmetic(a, promoted);
 
     dftu_series* casted = nullptr;
     const dftu_series* src = a;
@@ -257,6 +261,7 @@ dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
             break;
     }
     if (casted) dftu_series_free(casted);
+    if (promoted) dftu_series_free(promoted);
     return out;
 }
 
@@ -265,6 +270,11 @@ dftu_series* binop(const dftu_series* a, const dftu_series* b, BinOp op) {
         return nullptr;
     if (a->length != b->length) return nullptr;
     if (!is_numeric(a->type) || !is_numeric(b->type)) return nullptr;
+
+    dftu_series* promoted_a = nullptr;
+    dftu_series* promoted_b = nullptr;
+    a = promote_for_arithmetic(a, promoted_a);
+    b = promote_for_arithmetic(b, promoted_b);
 
     dftu_series* casted_a = nullptr;
     dftu_series* casted_b = nullptr;
@@ -315,6 +325,8 @@ dftu_series* binop(const dftu_series* a, const dftu_series* b, BinOp op) {
     }
     if (casted_a) dftu_series_free(casted_a);
     if (casted_b) dftu_series_free(casted_b);
+    if (promoted_a) dftu_series_free(promoted_a);
+    if (promoted_b) dftu_series_free(promoted_b);
     return out;
 }
 

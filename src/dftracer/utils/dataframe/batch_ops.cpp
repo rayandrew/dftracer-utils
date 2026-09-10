@@ -6,6 +6,7 @@
 #include <dftracer/utils/dataframe/containment.h>
 #include <dftracer/utils/dataframe/internal/cell_ops.h>  // shared cell helpers
 #include <dftracer/utils/dataframe/internal/column_read.h>  // read_u64
+#include <dftracer/utils/dataframe/internal/float16.h>
 #include <dftracer/utils/dataframe/internal/radix_dedup.h>  // parallel dedup
 #include <dftracer/utils/dataframe/kernels/field_stat.h>
 #include <dftracer/utils/dataframe/kernels/filter.h>
@@ -390,8 +391,26 @@ std::string scalar_cell_to_string(const Series& s, std::int64_t i) {
         case TypeId::String:
         case TypeId::Binary:
             return std::string(s.string_at(i));
+        case TypeId::Float16:
+            return std::to_string(half_to_float(s.data<std::uint16_t>()[i]));
+        case TypeId::Date32:
+        case TypeId::Time32:
+            return std::to_string(s.data<std::int32_t>()[i]);
+        case TypeId::Date64:
+        case TypeId::Time64:
+        case TypeId::Timestamp:
+        case TypeId::Duration:
+            return std::to_string(s.data<std::int64_t>()[i]);
         case TypeId::List:
+        case TypeId::LargeList:
+        case TypeId::FixedSizeList:
         case TypeId::Struct:
+        case TypeId::Map:
+        case TypeId::Decimal128:
+        case TypeId::Decimal256:
+        case TypeId::FixedSizeBinary:
+        case TypeId::LargeString:
+        case TypeId::LargeBinary:
             return std::string();
         case TypeId::Unknown:
             break;  // schema-only marker, never a real Series' type

@@ -3,7 +3,7 @@
 # ##############################################################################
 
 set(DATAFRAME_TEST_SOURCES test_mask.cpp test_series.cpp test_result_batch.cpp test_methods.cpp
-                           test_arrow.cpp test_arrow_types.cpp
+                           test_arrow.cpp test_arrow_types.cpp test_arrow_types_compute.cpp
                            test_field.cpp test_op_registry.cpp test_op_parity.cpp
                            test_lazyframe.cpp
                            test_lazyframe_abi.cpp test_lazy_ops.cpp test_spill.cpp test_agg_state.cpp

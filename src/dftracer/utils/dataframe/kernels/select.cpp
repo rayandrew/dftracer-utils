@@ -117,6 +117,26 @@ bool is_sorted_impl(const Series& v, bool descending) {
     return true;
 }
 
+// FixedSizeBinary's width is a DataType parameter; Decimal128/256 have a
+// fixed per-TypeId byte_width (16/32). Byte equality is exact for all three
+// (unlike a float64 round-trip, which would collapse distinct decimal values
+// that happen to round to the same double).
+bool is_byte_comparable(TypeId t) {
+    return t == TypeId::FixedSizeBinary || t == TypeId::Decimal128 ||
+           t == TypeId::Decimal256;
+}
+std::size_t byte_row_width(const Series& v) {
+    return v.type() == TypeId::FixedSizeBinary
+               ? static_cast<std::size_t>(v.data_type().fixed_size)
+               : byte_width(v.type());
+}
+std::string row_bytes(const Series& v, std::int64_t i, std::size_t width) {
+    const auto* d = v.data<std::uint8_t>();
+    return std::string(
+        reinterpret_cast<const char*>(d) + static_cast<std::size_t>(i) * width,
+        width);
+}
+
 Series is_in_impl(const Series& v, const Series& values) {
     // FLAT Float64 with a small needle set: SIMD broadcast-compare.
     {
@@ -127,15 +147,20 @@ Series is_in_impl(const Series& v, const Series& values) {
             return Series::flat(TypeId::Bool, packed.data(), n);
     }
     const bool is_str = v.type() == TypeId::String;
+    const bool is_bytes = is_byte_comparable(v.type());
+    const std::size_t bw = is_bytes ? byte_row_width(v) : 0;
     std::unordered_set<double> num_set;
     std::unordered_set<std::string> str_set;
     const std::int64_t m = values.length();
     const bool vals_null = values.null_count() > 0;
     const bool vals_str = values.type() == TypeId::String;
+    const bool vals_bytes = is_bytes && values.type() == v.type();
     for (std::int64_t j = 0; j < m; ++j) {
         if (vals_null && values.is_null(j)) continue;
         if (is_str) {
             if (vals_str) str_set.insert(std::string(values.string_at(j)));
+        } else if (is_bytes) {
+            if (vals_bytes) str_set.insert(row_bytes(values, j, bw));
         } else if (!vals_str) {
             num_set.insert(read_f64(values, j));
         }
@@ -148,8 +173,9 @@ Series is_in_impl(const Series& v, const Series& values) {
         for (std::int64_t i = b; i < e; ++i) {
             if (has_nulls && v.is_null(i)) continue;
             const bool hit =
-                is_str ? str_set.count(std::string(v.string_at(i))) > 0
-                       : num_set.count(read_f64(v, i)) > 0;
+                is_str     ? str_set.count(std::string(v.string_at(i))) > 0
+                : is_bytes ? str_set.count(row_bytes(v, i, bw)) > 0
+                           : num_set.count(read_f64(v, i)) > 0;
             flags[static_cast<std::size_t>(i)] = hit ? 1 : 0;
         }
     };

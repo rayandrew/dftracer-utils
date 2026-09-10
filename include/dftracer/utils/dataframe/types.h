@@ -30,8 +30,10 @@ enum class TypeId : std::int32_t {
     Binary,
     List,
     Struct,
-    /// 2-byte IEEE 754 half-precision float. No arithmetic kernel operates on
-    /// it; it round-trips through Arrow import/export as opaque 2-byte data.
+    /// 2-byte IEEE 754 half-precision float. No kernel operates on the raw
+    /// half bits: arithmetic/reduction promote it to Float32 first (exact -
+    /// every half value has a precise float32 representation), so the result
+    /// of e.g. adding two Float16 columns is a Float32 column, not Float16.
     Float16,
     /// Days since the Unix epoch, stored as Int32 (DataType::physical_type()).
     Date32,
@@ -49,12 +51,19 @@ enum class TypeId : std::int32_t {
     /// Elapsed time in `DataType::time_unit`, stored as Int64.
     Duration,
     /// 128-bit fixed-point decimal; `DataType::decimal_precision` and
-    /// `decimal_scale` give its meaning. Opaque 16-byte data to every kernel.
+    /// `decimal_scale` give its meaning. Compare/sort/group_by/hash work on
+    /// the exact scaled integer; arithmetic promotes to Float64, which LOSES
+    /// PRECISION (a double has 53 mantissa bits; a precision-38 decimal
+    /// needs up to 127) - do not use `+`/`-`/`*`/`/` on money-shaped data
+    /// that needs exact decimal math.
     Decimal128,
-    /// 256-bit fixed-point decimal; see Decimal128. Opaque 32-byte data.
+    /// 256-bit fixed-point decimal; see Decimal128, including the arithmetic
+    /// precision loss.
     Decimal256,
-    /// Fixed-width opaque byte string; `DataType::fixed_size` is the width in
-    /// bytes. No offsets buffer.
+    /// Fixed-width byte string; `DataType::fixed_size` is the width in bytes.
+    /// No offsets buffer. Equality/comparison/sort/group_by/hash are exact
+    /// byte comparisons; it carries no numeric or text interpretation, so no
+    /// arithmetic or string kernel applies.
     FixedSizeBinary,
     /// String with 64-bit offsets, for payloads too large for String's
     /// 32-bit offsets. Its own physical layout, not String's.
@@ -238,6 +247,54 @@ inline DataType fixed_size_binary(std::int32_t size) {
     dt.id = TypeId::FixedSizeBinary;
     dt.fixed_size = size;
     return dt;
+}
+
+/// True for a type usable in numeric arithmetic/reduction after the
+/// promotions in `dataframe/internal/type_promotion.h` are applied: Float16
+/// promotes to Float32 (exact - every half value has a precise float32
+/// representation) and Decimal128/Decimal256 promote to Float64 (lossy for
+/// values that need exact decimal math, e.g. money - compare/sort/group_by/
+/// hash instead work on the exact scaled integer and do not use this).
+/// Bool/String/Binary/List/Struct and every other logical type (temporal,
+/// FixedSizeBinary, Large*, FixedSizeList, Map) are excluded: they have no
+/// numeric interpretation, or none this engine defines yet.
+constexpr bool is_arithmetic_type(TypeId t) noexcept {
+    switch (t) {
+        case TypeId::Int8:
+        case TypeId::Int16:
+        case TypeId::Int32:
+        case TypeId::Int64:
+        case TypeId::Uint8:
+        case TypeId::Uint16:
+        case TypeId::Uint32:
+        case TypeId::Uint64:
+        case TypeId::Float32:
+        case TypeId::Float64:
+        case TypeId::Float16:
+        case TypeId::Decimal128:
+        case TypeId::Decimal256:
+            return true;
+        case TypeId::Unknown:
+        case TypeId::Bool:
+        case TypeId::String:
+        case TypeId::Binary:
+        case TypeId::List:
+        case TypeId::Struct:
+        case TypeId::Date32:
+        case TypeId::Date64:
+        case TypeId::Time32:
+        case TypeId::Time64:
+        case TypeId::Timestamp:
+        case TypeId::Duration:
+        case TypeId::FixedSizeBinary:
+        case TypeId::LargeString:
+        case TypeId::LargeBinary:
+        case TypeId::LargeList:
+        case TypeId::FixedSizeList:
+        case TypeId::Map:
+            return false;
+    }
+    return false;
 }
 
 /// The TypeId whose buffer layout `t` shares, for kernel dispatch: a logical

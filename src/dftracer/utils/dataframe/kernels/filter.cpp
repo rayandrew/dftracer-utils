@@ -224,13 +224,19 @@ static dftu_series* gather_column(const dftu_series& base,
     if (base.type == TypeId::Struct) return gather_struct(base, idx, n);
     if (base.type == TypeId::List) return gather_list(base, idx, n);
 
-    const std::size_t width = byte_width(base.type);
+    // FixedSizeBinary's width is a DataType parameter, not a per-TypeId
+    // constant (byte_width returns 0 for it); every other fixed-width type
+    // already has a correct per-TypeId byte_width.
+    const std::size_t width = base.type == TypeId::FixedSizeBinary
+                                  ? static_cast<std::size_t>(base.fixed_size)
+                                  : byte_width(base.type);
     if (width == 0) return nullptr;  // Bool (bit-packed) not gatherable here
 
     auto* out = new dftu_series();
     out->type = base.type;
     out->encoding = Encoding::Flat;
     out->length = n;
+    out->fixed_size = base.fixed_size;
     out->data = Buffer::allocate(static_cast<std::size_t>(n) * width);
     const std::uint8_t* src = base.data->data();
     std::uint8_t* dst = out->data->data();

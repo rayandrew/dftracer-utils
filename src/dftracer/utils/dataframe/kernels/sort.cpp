@@ -1,3 +1,4 @@
+#include <dftracer/utils/dataframe/internal/decimal.h>
 #include <dftracer/utils/dataframe/kernels/sort.h>
 #include <dftracer/utils/dataframe/parallel.h>
 #include <hwy/contrib/sort/vqsort.h>
@@ -5,6 +6,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include <string_view>
@@ -59,6 +61,25 @@ int cmp_row(const Series& v, std::int64_t a, std::int64_t b) {
             std::string_view sb = v.string_at(b);
             int c = sa.compare(sb);
             return c < 0 ? -1 : (c > 0 ? 1 : 0);
+        }
+        case TypeId::FixedSizeBinary: {
+            // Byte-wise order is well defined for fixed-width opaque bytes.
+            const auto width =
+                static_cast<std::size_t>(v.data_type().fixed_size);
+            const std::uint8_t* d = v.data<std::uint8_t>();
+            int c = std::memcmp(d + static_cast<std::size_t>(a) * width,
+                                d + static_cast<std::size_t>(b) * width, width);
+            return c < 0 ? -1 : (c > 0 ? 1 : 0);
+        }
+        case TypeId::Decimal128: {
+            const std::uint8_t* d = v.data<std::uint8_t>();
+            return compare_decimal128(d + static_cast<std::size_t>(a) * 16,
+                                      d + static_cast<std::size_t>(b) * 16);
+        }
+        case TypeId::Decimal256: {
+            const std::uint8_t* d = v.data<std::uint8_t>();
+            return compare_decimal256(d + static_cast<std::size_t>(a) * 32,
+                                      d + static_cast<std::size_t>(b) * 32);
         }
         default:
             return 0;
