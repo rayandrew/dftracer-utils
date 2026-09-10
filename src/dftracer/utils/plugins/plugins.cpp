@@ -89,6 +89,10 @@ struct Plugins::Builder::State {
         std::string path;
         ConfigTree config;
         bool has_config = false;
+        // Parsed at build() rather than add(), so a malformed literal fails
+        // through the Result build() already returns instead of throwing out
+        // of add().
+        std::optional<std::string> config_json;
     };
     std::vector<Pending> pending;
 };
@@ -217,6 +221,20 @@ std::string config_violation(const dftu_plugin* plugin,
                    "key it does not read";
     }
     return {};
+}
+
+// ConfigTree::from_json_string throws; convert that into the plugin set's
+// Result so a malformed literal fails at build() alongside every other
+// plugin load error, not by throwing out of Builder::add.
+Result<ConfigTree> parse_config_json(const std::string& path,
+                                     const std::string& json) {
+    try {
+        return ConfigTree::from_json_string(json);
+    } catch (const std::exception& e) {
+        return make_error(
+            ErrorCode::PARSE,
+            "plugin '" + path + "' config does not parse: " + e.what());
+    }
 }
 
 Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
@@ -489,6 +507,15 @@ Plugins::Builder& Plugins::Builder::add(std::string path, ConfigTree config) {
     return *this;
 }
 
+Plugins::Builder& Plugins::Builder::add(std::string path,
+                                        std::string config_json) {
+    State::Pending pending;
+    pending.path = std::move(path);
+    pending.config_json = std::move(config_json);
+    state_->pending.push_back(std::move(pending));
+    return *this;
+}
+
 Plugins::Builder& Plugins::Builder::add(std::string path) {
     state_->pending.push_back({std::move(path), ConfigTree{}, false});
     return *this;
@@ -499,7 +526,12 @@ Result<Plugins> Plugins::Builder::build() {
     impl->plugins.reserve(state_->pending.size());
     for (auto& pending : state_->pending) {
         const dftu_value* root = nullptr;
-        if (pending.has_config) {
+        if (pending.config_json) {
+            auto parsed = parse_config_json(pending.path, *pending.config_json);
+            if (!parsed) return unexpected(std::move(parsed).error());
+            impl->configs.push_back(std::move(*parsed));
+            root = impl->configs.back().root();
+        } else if (pending.has_config) {
             impl->configs.push_back(std::move(pending.config));
             root = impl->configs.back().root();
         }

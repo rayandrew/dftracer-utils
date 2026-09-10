@@ -92,6 +92,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_abi_gate.cpp
     plugins/test_plugin_factory_host.cpp
     plugins/test_plugin_config.cpp
+    plugins/test_plugin_public_config.cpp
     plugins/test_plugin_state.cpp
     plugins/test_plugin_reads.cpp
     plugins/test_plugin_providers.cpp
@@ -468,6 +469,14 @@ if(TARGET utilities_plugins_test_plugin_config)
     utilities_plugins_test_plugin_config PRIVATE
     CONFIG_KEYS_PLUGIN_PATH="$<TARGET_FILE:config_keys_plugin>")
   add_dependencies(utilities_plugins_test_plugin_config config_keys_plugin)
+endif()
+
+if(TARGET utilities_plugins_test_plugin_public_config)
+  target_compile_definitions(
+    utilities_plugins_test_plugin_public_config PRIVATE
+    CONFIG_KEYS_PLUGIN_PATH="$<TARGET_FILE:config_keys_plugin>")
+  add_dependencies(utilities_plugins_test_plugin_public_config
+                   config_keys_plugin)
 endif()
 
 if(TARGET utilities_plugins_test_plugin_reads)

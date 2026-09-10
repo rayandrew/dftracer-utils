@@ -40,6 +40,14 @@ class Plugins {
 
         /// Queue a shared library and the config tree its factory receives.
         Builder& add(std::string path, ConfigTree config);
+
+        /// Queue a shared library and a JSON object literal for its config.
+        /// The caller owns @p config_json only for the duration of this call;
+        /// it is copied and parsed at build(), so a parse failure or a
+        /// non-object root is reported there, as a `build()` error naming
+        /// this plugin's path, not thrown by add().
+        Builder& add(std::string path, std::string config_json);
+
         Builder& add(std::string path);
 
         /// dlopen and gate the ABI version in queue order, then order the fold
