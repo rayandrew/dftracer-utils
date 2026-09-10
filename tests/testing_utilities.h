@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <thread>
@@ -283,6 +284,19 @@ class ScopedTestDir {
     /// `name` resolved inside the directory.
     std::string file(const std::string& name) const {
         return (path_ / name).string();
+    }
+
+    /// Write `content` at `relative_path`, creating any parent directories.
+    void create_file(const std::string& relative_path,
+                     const std::string& content = "test") const {
+        const fs::path p = path_ / relative_path;
+        fs::create_directories(p.parent_path());
+        std::ofstream ofs(p);
+        ofs << content;
+    }
+
+    void create_dir(const std::string& relative_path) const {
+        fs::create_directories(path_ / relative_path);
     }
 
    private:
