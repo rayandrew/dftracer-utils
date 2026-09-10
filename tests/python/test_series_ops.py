@@ -104,7 +104,7 @@ def test_astype_matches_cast_by_name_enum_and_int():
     s = Series.from_numpy(np.array([1, 2, 3], dtype=np.int64))
     by_name = s.astype("int64")
     by_enum = s.cast(DType.INT64)
-    by_int = s.cast(4)
+    by_int = s.cast(int(DType.INT64))
     assert by_name.type == by_enum.type == by_int.type == int(DType.INT64)
     assert by_name.to_numpy().tolist() == [1, 2, 3]
 

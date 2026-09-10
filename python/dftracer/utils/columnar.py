@@ -35,6 +35,7 @@ from typing import (
 
 from . import dftracer_utils_ext as _ext
 from .dataframe import DataFrame
+from .enums import DType
 from .series import Series, _unwrap
 
 if TYPE_CHECKING:
@@ -68,12 +69,12 @@ _Scalar = Union[int, float]
 #: A scalar the filter DSL can compare a field against.
 Value = Union[str, int, float, bool]
 
-# vec::TypeId (types.h enum order); only the ones the DSL requests.
-_INT64 = 4
-_UINT64 = 8
-_FLOAT32 = 9
-_FLOAT64 = 10
-_BOOL = 0
+# TypeId codes the DSL requests, off DType so the ordinals live in one place.
+_INT64 = int(DType.INT64)
+_UINT64 = int(DType.UINT64)
+_FLOAT32 = int(DType.FLOAT32)
+_FLOAT64 = int(DType.FLOAT64)
+_BOOL = int(DType.BOOL)
 _FLOAT_TYPES = (_FLOAT32, _FLOAT64)
 
 # TypeId codes the .cast() method accepts.
