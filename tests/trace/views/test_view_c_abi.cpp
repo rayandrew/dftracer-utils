@@ -8,8 +8,10 @@
 #include <dftracer/utils/trace/views/abi.h>
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "test_view_common.h"
@@ -561,11 +563,17 @@ TEST_SUITE("View C ABI") {
         REQUIRE(dftu_dataframe_num_rows(dir_df) ==
                 dftu_dataframe_num_rows(explicit_df));
         REQUIRE(dftu_dataframe_num_rows(dir_df) == 7);
-        for (std::int64_t i = 0; i < dftu_dataframe_num_rows(dir_df); ++i) {
-            CHECK(abi_str(dir_df, i, "name") ==
-                  abi_str(explicit_df, i, "name"));
-            CHECK(abi_num(dir_df, i, "pid") == abi_num(explicit_df, i, "pid"));
-        }
+        // Files are scanned in parallel, so rows from different files
+        // interleave in an order neither listing controls. Only the multiset
+        // of rows is defined.
+        auto rows = [](dftu_dataframe* df) {
+            std::vector<std::pair<std::string, double>> out;
+            for (std::int64_t i = 0; i < dftu_dataframe_num_rows(df); ++i)
+                out.emplace_back(abi_str(df, i, "name"), abi_num(df, i, "pid"));
+            std::sort(out.begin(), out.end());
+            return out;
+        };
+        CHECK(rows(dir_df) == rows(explicit_df));
 
         dftu_dataframe_free(dir_df);
         dftu_dataframe_free(explicit_df);
