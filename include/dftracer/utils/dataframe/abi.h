@@ -704,6 +704,12 @@ DFTU_EXPORT dftu_dataframe* dftu_dataframe_null_count(const dftu_dataframe* df);
 DFTU_EXPORT dftu_series* dftu_dataframe_is_duplicated(const dftu_dataframe* df);
 DFTU_EXPORT dftu_series* dftu_dataframe_is_unique(const dftu_dataframe* df);
 
+/** Evaluate `q` as a bit-packed Bool mask over `df`'s columns (the frame-shaped
+ * counterpart to dftu_dataframe_mask). Returns an owned column, or NULL if the
+ * predicate has no columnar lowering or on error. */
+DFTU_EXPORT dftu_series* dftu_dataframe_mask_frame(const dftu_dataframe* df,
+                                                   const dftu_query* q);
+
 /** The distinct values of `v` and their counts, as a frame with columns `value`
  * (v's type) and `count` (Int64), most-frequent first. Caller owns the frame
  * (dftu_dataframe_free). */
@@ -1130,13 +1136,15 @@ typedef enum {
     DFTU_TOK_U64,     /**< uint64 operand (a byte count, a seed), distinct from
                          I64 so a signature describes the real parameter type
                          and cannot collide with a signed-shaped op */
-    DFTU_TOK_I64LIST  /**< a (const int64_t*, int32 count) int64-list operand
+    DFTU_TOK_I64LIST, /**< a (const int64_t*, int32 count) int64-list operand
                          (e.g. LazyFrame::take's row indices) */
+    DFTU_TOK_QUERY    /**< a const dftu_query* operand (a compiled predicate),
+                         borrowed for the call */
 } dftu_op_tok;
 
 /** One past the last token; a macro, so it does not become a case every switch
  * over dftu_op_tok has to answer for. Update alongside the last token. */
-#define DFTU_TOK_COUNT (DFTU_TOK_I64LIST + 1)
+#define DFTU_TOK_COUNT (DFTU_TOK_QUERY + 1)
 
 /** Max operand tokens a signature carries (5-bit fields: a return token plus up
  * to this many operands pack into one int64). */
@@ -1248,9 +1256,11 @@ DFTU_EXPORT int dftu_op_unregister(const char* name);
 /** One operand slot. Only the union member the operand's token names is read:
  * SCALAR->scalar, I64->i64, F64->f64, CHAR->ch, an enum token (CMP/PRIM/
  * LOGICAL/DTYPE/REDUCE/I32/RANK/ROLLING)->i32, STR->str, STRLIST->list,
- * I32LIST->i32list, I64LIST->i64list, and a frame op's SERIES operand (a
- * mask/column)->series. A SERIES/FRAME operand of a column/frame op is passed
- * in the runner's in[]/frames[] array, not here. */
+ * I32LIST->i32list, I64LIST->i64list, QUERY->query, and a frame op's SERIES
+ * operand (a mask/column)->series. A SERIES/FRAME operand that is the primary
+ * operand of a column/frame/lazy op is passed in the runner's in[]/frames[]
+ * array, not here; a FRAME operand of a non-frame op (e.g. a SERIES-return op
+ * over a whole table) still rides here as ->frame. */
 typedef union dftu_op_val {
     dftu_scalar scalar;
     int64_t i64;
@@ -1281,6 +1291,8 @@ typedef union dftu_op_val {
         const dftu_group_agg* items;
         int32_t n;
     } agglist;
+    const dftu_dataframe* frame;
+    const dftu_query* query;
 } dftu_op_val;
 
 /** The operands an op consumes, one slot per operand token in order (args[i]

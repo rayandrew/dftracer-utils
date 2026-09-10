@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/op.h>
+#include <dftracer/utils/query/abi.h>
 #include <doctest/doctest.h>
 
 #include <cstdint>
@@ -433,6 +434,69 @@ TEST_SUITE("op_registry") {
         dftu_series_free(wsumDirect);
         dftu_dataframe_free(windowed);
         dftu_dataframe_free(windowedDirect);
+
+        dftu_dataframe_free(df);
+    }
+
+    TEST_CASE(
+        "table -> series ops (is_duplicated/is_unique/mask) run via "
+        "dftu_op_run with the frame riding args[0]") {
+        std::int64_t a[4] = {1, 2, 1, 3};
+        const char* names[1] = {"a"};
+        dftu_series* cols[1] = {i64_col(a, 4)};  // moved into df
+        dftu_dataframe* df = dftu_dataframe_new(names, cols, 1);
+        REQUIRE(df != nullptr);
+
+        auto is_dup = find_op("dftu.frame.is_duplicated");
+        REQUIRE(is_dup.has_value());
+        CHECK(is_dup->sig().kind() == OpKind::Series);
+        CHECK(is_dup->sig().arity() == 0);
+        OpArgs dupArg;
+        dupArg.frame(0, df);
+        dftu_series* dup = dftu_op_run(dftu_op_find("dftu.frame.is_duplicated"),
+                                       nullptr, 0, dupArg);
+        dftu_series* dupDirect = dftu_dataframe_is_duplicated(df);
+        REQUIRE(dup != nullptr);
+        REQUIRE(dupDirect != nullptr);
+        for (std::int64_t i = 0; i < dftu_series_length(dup); ++i)
+            CHECK(bit_of(dup, i) == bit_of(dupDirect, i));
+        dftu_series_free(dup);
+        dftu_series_free(dupDirect);
+
+        auto is_uniq = find_op("dftu.frame.is_unique");
+        REQUIRE(is_uniq.has_value());
+        CHECK(is_uniq->sig().kind() == OpKind::Series);
+        CHECK(is_uniq->sig().arity() == 0);
+        OpArgs uniqArg;
+        uniqArg.frame(0, df);
+        dftu_series* uniq = dftu_op_run(dftu_op_find("dftu.frame.is_unique"),
+                                        nullptr, 0, uniqArg);
+        dftu_series* uniqDirect = dftu_dataframe_is_unique(df);
+        REQUIRE(uniq != nullptr);
+        REQUIRE(uniqDirect != nullptr);
+        for (std::int64_t i = 0; i < dftu_series_length(uniq); ++i)
+            CHECK(bit_of(uniq, i) == bit_of(uniqDirect, i));
+        dftu_series_free(uniq);
+        dftu_series_free(uniqDirect);
+
+        auto mask = find_op("dftu.frame.mask");
+        REQUIRE(mask.has_value());
+        CHECK(mask->sig().kind() == OpKind::Series);
+        CHECK(mask->sig().arity() == 0);
+        dftu_query* q = dftu_query_parse("a > 1");
+        REQUIRE(q != nullptr);
+        OpArgs maskArg;
+        maskArg.frame(0, df).query(1, q);
+        dftu_series* m =
+            dftu_op_run(dftu_op_find("dftu.frame.mask"), nullptr, 0, maskArg);
+        dftu_series* mDirect = dftu_dataframe_mask_frame(df, q);
+        REQUIRE(m != nullptr);
+        REQUIRE(mDirect != nullptr);
+        for (std::int64_t i = 0; i < dftu_series_length(m); ++i)
+            CHECK(bit_of(m, i) == bit_of(mDirect, i));
+        dftu_series_free(m);
+        dftu_series_free(mDirect);
+        dftu_query_free(q);
 
         dftu_dataframe_free(df);
     }

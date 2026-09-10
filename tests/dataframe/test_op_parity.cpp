@@ -89,17 +89,25 @@ bool kind_in(OpKind k, std::initializer_list<OpKind> kinds) {
     return false;
 }
 
+// `claimed_elsewhere` names a row that lives in a DIFFERENT .def file's
+// bijection (e.g. dftu.frame.mask: a table -> series row in
+// exported_frame_ops.def, so its kind is Series, not Frame) - it is excluded
+// here so it is checked exactly once, against the file it is actually
+// declared in.
 void check_bijection(const std::set<std::string>& def_names,
                      const std::set<std::string>& known_extra,
-                     std::initializer_list<OpKind> kinds) {
+                     std::initializer_list<OpKind> kinds,
+                     const std::set<std::string>& claimed_elsewhere = {}) {
     std::set<std::string> registered;
     std::uint32_t n = op_count();
     for (std::uint32_t i = 0; i < n; ++i) {
         auto op = op_at(i);
         REQUIRE(static_cast<bool>(op));
-        if (kind_in(op.sig().kind(), kinds)) {
-            registered.insert(std::string(op.name()));
-        }
+        std::string name(op.name());
+        bool relevant =
+            kind_in(op.sig().kind(), kinds) || def_names.count(name);
+        if (relevant && claimed_elsewhere.count(name) == 0)
+            registered.insert(name);
     }
 
     std::set<std::string> missing_from_registry;
@@ -133,7 +141,7 @@ TEST_SUITE("op_parity") {
     TEST_CASE(
         "every exported_series_ops.def row is registered, and vice versa") {
         check_bijection(series_def_names(), runtime_registered_series_ops(),
-                        {OpKind::Series, OpKind::Aggregate});
+                        {OpKind::Series, OpKind::Aggregate}, frame_def_names());
     }
 
     TEST_CASE(

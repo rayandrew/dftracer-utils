@@ -162,17 +162,25 @@ const char* tok_name(dftu_op_tok t) {
             return "agglist";
         case DFTU_TOK_U64:
             return "u64";
+        case DFTU_TOK_QUERY:
+            return "query";
     }
     return "?";
 }
 
-// An operand token that is neither a column nor empty is read from dftu_op_arg.
+// An operand token that is not the signature's primary operand (the one that
+// rides the runner's in[]/frames[] array, per dftu_op_arity) is read from
+// dftu_op_arg - including a FRAME/LAZY token on a non-FRAME/non-LAZY-kind op
+// (e.g. a SERIES-return op over a whole table), which has no separate array
+// to ride.
 bool needs_arg(dftu_op_sig sig) {
+    dftu_op_kind kind = dftu_op_kind_of(sig);
+    dftu_op_tok primary = kind == DFTU_OP_KIND_FRAME  ? DFTU_TOK_FRAME
+                          : kind == DFTU_OP_KIND_LAZY ? DFTU_TOK_LAZY
+                                                      : DFTU_TOK_SERIES;
     for (int i = 0; i < DFTU_OP_MAX_ARGS; ++i) {
         dftu_op_tok t = DFTU_OP_SIG_ARG(sig, i);
-        if (t != DFTU_TOK_NONE && t != DFTU_TOK_SERIES && t != DFTU_TOK_FRAME &&
-            t != DFTU_TOK_LAZY)
-            return true;
+        if (t != DFTU_TOK_NONE && t != primary) return true;
     }
     return false;
 }
@@ -341,6 +349,16 @@ dftu_series* dftu_op_run(const dftu_op_desc* op, const dftu_series* const* in,
         case DFTU_OP_SIG(SERIES, SERIES, I64LIST, NONE):
             return as_op<DFTU_OP_SIG(SERIES, SERIES, I64LIST, NONE)>(op->fn)(
                 in[0], g[1].i64list.items, g[1].i64list.n);
+        // A frame-shaped SERIES-return op: the frame rides args[0].frame, not
+        // in[] (n == 0, see dftu_op_arity).
+        case DFTU_OP_SIG(SERIES, FRAME, NONE, NONE):
+            if (!g[0].frame) return nullptr;
+            return as_op<DFTU_OP_SIG(SERIES, FRAME, NONE, NONE)>(op->fn)(
+                g[0].frame);
+        case DFTU_OP_SIG(SERIES, FRAME, QUERY, NONE):
+            if (!g[0].frame || !g[1].query) return nullptr;
+            return as_op<DFTU_OP_SIG(SERIES, FRAME, QUERY, NONE)>(op->fn)(
+                g[0].frame, g[1].query);
         default:
             return nullptr;
     }

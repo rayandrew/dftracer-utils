@@ -50,6 +50,7 @@ enum class OpTok : std::int32_t {
     AggList = DFTU_TOK_AGGLIST,
     U64 = DFTU_TOK_U64,
     I64List = DFTU_TOK_I64LIST,
+    Query = DFTU_TOK_QUERY,
 };
 static_assert(static_cast<int>(OpTok::None) == DFTU_TOK_NONE);
 static_assert(static_cast<int>(OpTok::Series) == DFTU_TOK_SERIES);
@@ -75,6 +76,7 @@ static_assert(static_cast<int>(OpTok::Expr) == DFTU_TOK_EXPR);
 static_assert(static_cast<int>(OpTok::AggList) == DFTU_TOK_AGGLIST);
 static_assert(static_cast<int>(OpTok::U64) == DFTU_TOK_U64);
 static_assert(static_cast<int>(OpTok::I64List) == DFTU_TOK_I64LIST);
+static_assert(static_cast<int>(OpTok::Query) == DFTU_TOK_QUERY);
 
 /// Value wrapper over a packed dftu_op_sig.
 class OpSig {
@@ -191,6 +193,15 @@ class OpArgs {
     }
     OpArgs& series(std::uint32_t i, const dftu_series* v) noexcept {
         arg_.args[i].series = v;
+        return *this;
+    }
+    OpArgs& frame(std::uint32_t i, const dftu_dataframe* v) noexcept {
+        arg_.args[i].frame = v;
+        return *this;
+    }
+    /// Borrows `q`: `q` must outlive the dftu_op_run* call this is passed to.
+    OpArgs& query(std::uint32_t i, const dftu_query* q) noexcept {
+        arg_.args[i].query = q;
         return *this;
     }
     OpArgs& lazy(std::uint32_t i, const dftu_lazyframe* v) noexcept {

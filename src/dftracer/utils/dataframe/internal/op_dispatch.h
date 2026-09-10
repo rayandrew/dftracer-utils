@@ -67,6 +67,11 @@ DFTU_OP_FN(DFTU_OP_SIG(SERIES, SERIES, I64, U64),
            dftu_series* (*)(CS, int64_t, uint64_t))
 DFTU_OP_FN(DFTU_OP_SIG(SERIES, SERIES, I64LIST, NONE),
            dftu_series* (*)(CS, const int64_t*, int32_t))
+// A frame-shaped SERIES-return op: the frame is not the primary operand of a
+// FRAME-kind op, so it rides args[0].frame rather than an in[]/frames[] array.
+DFTU_OP_FN(DFTU_OP_SIG(SERIES, FRAME, NONE, NONE), dftu_series* (*)(CDF))
+DFTU_OP_FN(DFTU_OP_SIG(SERIES, FRAME, QUERY, NONE),
+           dftu_series* (*)(CDF, const dftu_query*))
 
 // dftu_op_run_aggregate (DFTU_OP_KIND_AGGREGATE).
 DFTU_OP_FN(DFTU_OP_SIG(SCALAR, SERIES, NONE, NONE), dftu_scalar (*)(CS))

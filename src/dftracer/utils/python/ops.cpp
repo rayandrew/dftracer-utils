@@ -194,9 +194,10 @@ PyObject* op_run(PyObject*, PyObject* args) {
             case DFTU_TOK_I64LIST:
             case DFTU_TOK_EXPR:
             case DFTU_TOK_AGGLIST:
+            case DFTU_TOK_QUERY:
                 PyErr_Format(PyExc_NotImplementedError,
-                             "op '%s' takes a frame/plan/list/expr operand not "
-                             "yet runnable via ops.run",
+                             "op '%s' takes a frame/plan/list/expr/query "
+                             "operand not yet runnable via ops.run",
                              name);
                 return nullptr;
             case DFTU_TOK_NONE:

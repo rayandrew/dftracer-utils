@@ -6,6 +6,7 @@
 #include <dftracer/utils/dataframe/internal/expr_handle.h>
 #include <dftracer/utils/dataframe/internal/lazyframe_handle.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
+#include <dftracer/utils/query/internal/query_handle.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -219,6 +220,17 @@ dftu_series* dftu_dataframe_is_duplicated(const dftu_dataframe* df) {
 }
 dftu_series* dftu_dataframe_is_unique(const dftu_dataframe* df) {
     return df ? df->df.is_unique().release() : nullptr;
+}
+
+dftu_series* dftu_dataframe_mask_frame(const dftu_dataframe* df,
+                                       const dftu_query* q) {
+    if (!df || !q) return nullptr;
+    try {
+        return df->df.mask(dftracer::utils::query::query_handle_unwrap(q))
+            .release();
+    } catch (const std::exception&) {
+        return nullptr;
+    }
 }
 
 dftu_dataframe* dftu_series_value_counts(const dftu_series* v) {

@@ -56,10 +56,9 @@ ALLOWLIST = {
     },
     "DataFrame": {
         "column", "column_index", "num_columns", "num_rows",
-        "is_unique", "is_duplicated",
         "from_arrow", "to_arrow", "to_ipc",
         "stream", "lazy",
-        "group_by", "mask", "melt",
+        "group_by", "melt",
     },
     "LazyFrame": {
         "collect", "collect_group_state", "explain",
