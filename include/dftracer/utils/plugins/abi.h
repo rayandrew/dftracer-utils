@@ -18,6 +18,7 @@
 #include <dftracer/utils/plugins/abi/ops.h>
 #include <dftracer/utils/plugins/abi/plugin.h>
 #include <dftracer/utils/plugins/abi/ports.h>
+#include <dftracer/utils/plugins/abi/providers.h>
 #include <dftracer/utils/plugins/abi/query.h>
 #include <dftracer/utils/plugins/abi/result.h>
 #include <dftracer/utils/plugins/abi/sketch.h>

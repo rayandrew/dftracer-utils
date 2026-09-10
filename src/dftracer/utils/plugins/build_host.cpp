@@ -112,11 +112,23 @@ const void* build_port_consume(void* h, std::uint64_t, std::uint32_t* out_len) {
 const ::dftu_svc_ports g_build_ports = {build_port_key, build_port_publish,
                                         build_port_consume};
 
+int build_register_provider(void* h, const char* name,
+                            const ::dftu_source_vt* vt, void* self) {
+    BuildHost& bh = self_of(h);
+    int rc = detail::register_plugin_provider(name, vt, self);
+    if (rc == 0) bh.registered_providers().emplace_back(name);
+    return rc;
+}
+
+const ::dftu_svc_providers g_build_providers = {build_register_provider};
+
 const void* build_get_service(void* h, const char* ext_id) {
     if (!ext_id) return nullptr;
     if (std::string_view{ext_id} == DFTU_SVC_OPS) return &g_build_ops;
     if (std::string_view{ext_id} == DFTU_SVC_AGG) return &g_build_agg;
     if (std::string_view{ext_id} == DFTU_SVC_PORTS) return &g_build_ports;
+    if (std::string_view{ext_id} == DFTU_SVC_PROVIDERS)
+        return &g_build_providers;
     self_of(h).deny(ext_id);
     return nullptr;
 }

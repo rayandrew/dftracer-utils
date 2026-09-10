@@ -94,6 +94,7 @@ set(UTILITIES_TEST_SOURCES
     plugins/test_plugin_config.cpp
     plugins/test_plugin_state.cpp
     plugins/test_plugin_reads.cpp
+    plugins/test_plugin_providers.cpp
 )
 
 # +++++++++++++++++++++++++++++++++++++++++
@@ -431,7 +432,8 @@ foreach(fh_plugin factory_registers_op_plugin factory_escapes_plugin
                                      ${CMAKE_BINARY_DIR}/include)
 endforeach()
 
-foreach(cxx_plugin builder_plugin config_keys_plugin reads_projection_plugin)
+foreach(cxx_plugin builder_plugin config_keys_plugin reads_projection_plugin
+                  provider_fixture_plugin)
   add_library(${cxx_plugin} MODULE plugins/${cxx_plugin}.cpp)
   set_target_properties(
     ${cxx_plugin}
@@ -452,7 +454,8 @@ endforeach()
 # It reads the batch dataframe and runs its own registered op, so it links the
 # dataframe C ABI like the examples that do the same.
 foreach(df_plugin factory_registers_op_plugin builder_plugin
-                  config_keys_plugin reads_projection_plugin)
+                  config_keys_plugin reads_projection_plugin
+                  provider_fixture_plugin)
   if(TARGET dftracer_utils_dataframe::shared)
     target_link_libraries(${df_plugin} PRIVATE dftracer_utils_dataframe::shared)
   elseif(TARGET dftracer_utils_dataframe::static)
@@ -486,4 +489,12 @@ if(TARGET utilities_plugins_test_plugin_factory_host)
                    factory_registers_op_plugin factory_escapes_plugin
                    scan_registers_op_plugin
                    builder_plugin)
+endif()
+
+if(TARGET utilities_plugins_test_plugin_providers)
+  target_compile_definitions(
+    utilities_plugins_test_plugin_providers PRIVATE
+    PROVIDER_FIXTURE_PLUGIN_PATH="$<TARGET_FILE:provider_fixture_plugin>")
+  add_dependencies(utilities_plugins_test_plugin_providers
+                   provider_fixture_plugin)
 endif()

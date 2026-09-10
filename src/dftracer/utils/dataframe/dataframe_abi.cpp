@@ -33,6 +33,11 @@ dftu_lazyframe* lazyframe_handle_wrap(LazyFrame&& lf) {
 dftu_dataframe* dataframe_handle_wrap(DataFrame&& df) {
     return new dftu_dataframe{std::move(df)};
 }
+DataFrame dataframe_handle_take(dftu_dataframe* h) {
+    DataFrame df = std::move(h->df);
+    delete h;
+    return df;
+}
 }  // namespace dftracer::utils::dataframe
 
 namespace {

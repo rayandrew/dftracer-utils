@@ -11,7 +11,8 @@
 namespace dftracer::utils::plugins {
 
 /// The host a plugin factory receives. It answers only the registration
-/// groups - DFTU_SVC_OPS, DFTU_SVC_AGG, DFTU_SVC_PORTS - and, inside those,
+/// groups - DFTU_SVC_OPS, DFTU_SVC_AGG, DFTU_SVC_PORTS, DFTU_SVC_PROVIDERS -
+/// and, inside those,
 /// only the registration slots. Anything that needs a scan (a fold, a batch,
 /// the intern table, the runtime) does not exist yet at load, so every other
 /// service returns NULL and records the denial: the loader then fails the load
@@ -48,11 +49,24 @@ class BuildHost {
 
     std::vector<std::string>& registered_ops() { return registered_ops_; }
 
+    /// The provider names the factory registered with
+    /// dftu_svc_providers::register_provider, moved out once it returns. The
+    /// loader must unregister each of these before it dlcloses the plugin, or
+    /// the provider registry keeps a dangling vt/self.
+    std::vector<std::string> take_registered_providers() {
+        return std::move(registered_providers_);
+    }
+
+    std::vector<std::string>& registered_providers() {
+        return registered_providers_;
+    }
+
    private:
     std::string plugin_name_;
     std::string denied_;
     StateRegistry states_;
     std::vector<std::string> registered_ops_;
+    std::vector<std::string> registered_providers_;
     dftu_plugin_host host_{};
 };
 

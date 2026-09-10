@@ -213,6 +213,7 @@ list(APPEND DFTRACER_UTILS_UTILITIES_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/result.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/ops.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/state.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/fold_adapter/providers.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/state_registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/plugins/plugins.cpp
 
@@ -661,6 +662,7 @@ set(DFTRACER_UTILS_DATAFRAME_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/series_methods.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/dataframe_methods.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/dataframe_abi.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/provider_registry.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/mask.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/plan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/dftracer/utils/dataframe/mask_abi.cpp)

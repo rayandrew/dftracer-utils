@@ -50,15 +50,23 @@ struct Plugins::Impl {
            registry outlives the plugin, so these must be unregistered before
            dlclose or a later lookup strcmps a name in unmapped memory. */
         std::vector<std::string> registered_ops;
+        /* Provider names the factory registered via
+           dftu_svc_providers::register_provider; the provider registry
+           outlives the plugin, so these must be unregistered before dlclose or
+           a later LazyFrame::scan calls into unmapped memory. */
+        std::vector<std::string> registered_providers;
     };
 
     ~Impl() {
-        // Unregister every op this plugin added and run destroy(), both
-        // before dlclose unmaps the plugin's code: dftu_op_find and destroy()
-        // may otherwise dereference memory that dlclose just unmapped.
+        // Unregister every op/provider this plugin added and run destroy(),
+        // both before dlclose unmaps the plugin's code: a later dftu_op_find,
+        // dftu_lazyframe_from_provider or destroy() may otherwise dereference
+        // memory that dlclose just unmapped.
         for (auto& p : plugins) {
             for (const std::string& name : p.registered_ops)
                 ::dftu_op_unregister(name.c_str());
+            for (const std::string& name : p.registered_providers)
+                ::dftu_provider_unregister(name.c_str());
             if (p.owned && p.plugin && p.plugin->destroy)
                 p.plugin->destroy(p.plugin->self);
             if (p.handle) dlclose(p.handle);
@@ -234,12 +242,15 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
     dftu_plugin* plugin = factory(build_host.host(), config);
 
     // A rejected load never reaches Loaded, so nothing will later walk
-    // registered_ops() and unregister it: a factory can register an op before
-    // hitting any of the failures below, so undo that registration here too or
-    // it dangles the instant dlclose unmaps the plugin's fn/name.
+    // registered_ops()/registered_providers() and unregister them: a factory
+    // can register either before hitting any of the failures below, so undo
+    // that registration here too or it dangles the instant dlclose unmaps the
+    // plugin's fn/name.
     auto unregister_all = [&build_host]() {
         for (const std::string& name : build_host.registered_ops())
             ::dftu_op_unregister(name.c_str());
+        for (const std::string& name : build_host.registered_providers())
+            ::dftu_provider_unregister(name.c_str());
     };
 
     // A factory that reached outside the registration surface built itself on
@@ -314,7 +325,8 @@ Result<Plugins::Impl::Loaded> load_plugin(const std::string& path,
                                  plugin_name_from_path(path),
                                  path,
                                  build_host.take_states(),
-                                 build_host.take_registered_ops()};
+                                 build_host.take_registered_ops(),
+                                 build_host.take_registered_providers()};
 }
 
 // Kahn topological sort of `n` nodes over `from -> to` edges (from must precede
@@ -616,7 +628,7 @@ Result<Plugins> build_injected_plugins(std::vector<dftu_plugin*> plugins) {
     auto impl = std::make_unique<Plugins::Impl>();
     impl->plugins.reserve(plugins.size());
     for (dftu_plugin* pl : plugins)
-        impl->plugins.push_back({nullptr, pl, false, {}, {}, {}, {}});
+        impl->plugins.push_back({nullptr, pl, false, {}, {}, {}, {}, {}});
     auto ordered = settle_order(*impl);
     if (!ordered) return unexpected(std::move(ordered).error());
     settle_prune(*impl);

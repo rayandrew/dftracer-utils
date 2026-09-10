@@ -1,7 +1,9 @@
 #ifndef DFTRACER_UTILS_DATAFRAME_ABI_H
 #define DFTRACER_UTILS_DATAFRAME_ABI_H
 
+#include <dftracer/utils/core/common/abi.h>
 #include <dftracer/utils/core/common/export.h>
+#include <dftracer/utils/core/coro/abi.h>
 #include <dftracer/utils/query/abi.h>
 #include <stdint.h>
 
@@ -970,6 +972,79 @@ DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_take(const dftu_lazyframe* lf,
 DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_sort_by_multi(
     const dftu_lazyframe* lf, const char* const* by, int32_t n,
     int32_t descending);
+
+/* ---- Provider registry --------------------------------------------------- */
+/* One name-keyed registry of Source vtables, so a LazyFrame can be built by
+ * name over a provider registered from anywhere in the process - a plugin
+ * (dftu.svc.providers@0 forwards here), a non-plugin C caller, or a future
+ * language binding. Mirrors the op registry below: process-lifetime,
+ * name-keyed, and a name already taken is refused rather than replaced. */
+
+DFTU_RESULT_DECL(dftu_result_frame, dftu_dataframe*);
+
+/** A pull cursor over one open scan of a registered source. Exactly one
+   thread drives a given cursor at a time; the host never calls next() again
+   before a prior call's task (if any) has completed. */
+typedef struct dftu_cursor_vt {
+    /** Pull up to max_rows rows.
+       Returns NULL when answered synchronously - *out is valid immediately.
+       Otherwise returns a task the host awaits (see dftu_task) BEFORE reading
+       *out; the task follows the same ownership as one returned from
+       dftu_plugin::on_batch: freed once the host has driven it to
+       completion.
+       On success, DFTU_RESULT_VALUE(*out) is a NEW dftu_dataframe the host
+       frees with dftu_dataframe_free, or NULL for end of stream. On failure
+       *out carries a dftu_error and the host surfaces it rather than treating
+       the call as end of stream. */
+    dftu_task* (*next)(void* self, int64_t max_rows, dftu_result_frame* out);
+    /** Release a cursor from source_vt::scan; exactly one call per scan(). */
+    void (*destroy)(void* self);
+} dftu_cursor_vt;
+
+/** A pushdown-free data source a plugin registers under a name. Immutable:
+   schema() reports columns without scanning and scan() may be called many
+   times to open independent cursors, so one registered source can back many
+   LazyFrame collects. */
+typedef struct dftu_source_vt {
+    /** Column names, as a NUL-terminated array owned by the source and valid
+       for its lifetime (until destroy()). Returns the count, or -1 on
+       failure. */
+    int32_t (*schema)(void* self, const char* const** out_names);
+    /** Open a cursor. Returns non-NULL on success or NULL on failure; the
+       returned pointer is only a status sentinel, since a stateless cursor's
+       own `self` may legitimately be NULL. On success, *out_cursor_self
+       receives the cursor's `self` and *out_vt its vtable, which must outlive
+       the cursor. The returned cursor's first dftu_dataframe (sync or via the
+       awaited task) must carry every column schema() named, in that order;
+       the host does not push a projection down in this slice. */
+    void* (*scan)(void* self, void** out_cursor_self,
+                  const dftu_cursor_vt** out_vt);
+    /** Release the source; called once, after every cursor it opened has
+       been destroyed. */
+    void (*destroy)(void* self);
+} dftu_source_vt;
+
+/** Register `vt`/`self` as a named provider. `vt` is copied, so it need not
+ * outlive the call, but `self` must outlive every scan opened against the
+ * provider until dftu_provider_unregister removes it. Returns 0 on success,
+ * non-zero if `name`/`vt` is NULL or `name` is already registered - a second
+ * registration under the same name is refused, never a silent replace. */
+DFTU_EXPORT int dftu_provider_register(const char* name,
+                                       const dftu_source_vt* vt, void* self);
+
+/** Remove a provider added with dftu_provider_register. A caller that can
+ * unload (a plugin's shared object) must call this before unloading, the same
+ * requirement dftu_op_unregister documents for a user op - otherwise a later
+ * dftu_lazyframe_from_provider or in-flight scan calls into unmapped memory.
+ * A no-op (returns nonzero) if `name` was never registered. */
+DFTU_EXPORT int dftu_provider_unregister(const char* name);
+
+/** Build a LazyFrame scanning the provider registered as `name`. Returns a new
+ * owned dftu_lazyframe (free with dftu_lazyframe_free), or NULL if no provider
+ * is registered under that name. The provider must stay registered for as
+ * long as the returned LazyFrame, or any LazyFrame derived from it, may still
+ * be collected. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_from_provider(const char* name);
 
 /* ---- Op registry -------------------------------------------------------- */
 /* One name-keyed registry over the engine's ops so a built-in op and a user op

@@ -7,6 +7,7 @@
  * dftracer/utils/plugins/abi.h rather than this file directly.
  */
 
+#include <dftracer/utils/core/common/abi.h>
 #include <dftracer/utils/core/common/export.h>
 #include <dftracer/utils/plugins/abi_version.h> /* DFTRACER_PLUGIN_ABI_VERSION */
 #include <stddef.h>
@@ -95,59 +96,7 @@ typedef struct dftu_op_arg dftu_op_arg;
    that header. Passed by pointer here so this header need not define it. */
 typedef struct dftu_scalar dftu_scalar;
 
-/** Portable, cross-domain error category mirroring
-   dftracer::utils::Condition; a caller switches on this without learning any
-   subsystem's private codes. */
-typedef enum {
-    DFTU_COND_UNKNOWN = 0,
-    DFTU_COND_INTERNAL,
-    DFTU_COND_INVALID_ARGUMENT,
-    DFTU_COND_NOT_FOUND,
-    DFTU_COND_IO,
-    DFTU_COND_PARSE,
-    DFTU_COND_COMPRESSION,
-    DFTU_COND_TIMEOUT,
-    DFTU_COND_UNSUPPORTED,
-    DFTU_COND_CANCELLED
-} dftu_condition;
-
-/** A fallible call's error: (domain, code) is the precise identity (mirrors
-   dftracer::utils::Error), `condition` the portable match key. `message` is
-   BORROWED - valid only until the next call on the same host handle; copy it
-   if it must outlive that. */
-typedef struct dftu_error {
-    uint64_t domain;
-    int32_t code;
-    int32_t condition; /**< a dftu_condition value */
-    const char* message;
-} dftu_error;
-
-/** Declare a value-or-error tagged union result type `name` carrying a `T` on
-   success; one declaration per T (two mentions of a bare `DFTU_RESULT(T)`
-   would be distinct, incompatible struct types in C). See
-   DFTU_RESULT_OK/VALUE/ERROR to use the result and DFTU_RESULT_MUST_CHECK to
-   mark a function returning one. */
-#define DFTU_RESULT_DECL(name, T) \
-    typedef struct name {         \
-        int32_t ok;               \
-        union {                   \
-            T value;              \
-            dftu_error err;       \
-        } u;                      \
-    } name
-
-#define DFTU_RESULT_OK(r) ((r).ok != 0)
-#define DFTU_RESULT_VALUE(r) ((r).u.value)
-#define DFTU_RESULT_ERROR(r) ((r).u.err)
-
-#if defined(__GNUC__) || defined(__clang__)
-#define DFTU_RESULT_MUST_CHECK __attribute__((warn_unused_result))
-#else
-#define DFTU_RESULT_MUST_CHECK
-#endif
-
 DFTU_RESULT_DECL(dftu_result_series, dftu_series*);
-DFTU_RESULT_DECL(dftu_result_frame, dftu_dataframe*);
 DFTU_RESULT_DECL(dftu_result_lazyframe, dftu_lazyframe*);
 DFTU_RESULT_DECL(dftu_result_u64, uint64_t);
 
