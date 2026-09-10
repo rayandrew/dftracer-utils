@@ -95,8 +95,8 @@ void rows_cursor_destroy(void* self) {
 
 const ::dftu_cursor_vt ROWS_CURSOR_VT = {rows_next, rows_cursor_destroy};
 
-void* rows_scan(void*, void** out_cursor_self,
-                const ::dftu_cursor_vt** out_vt) {
+void* rows_scan(void*, const ::dftu_scan_request*, int32_t*,
+                void** out_cursor_self, const ::dftu_cursor_vt** out_vt) {
     auto* cur = new RowsCursor();
     *out_cursor_self = cur;
     *out_vt = &ROWS_CURSOR_VT;
@@ -128,8 +128,8 @@ void failing_cursor_destroy(void*) { g_failing_cursor_destroy.fetch_add(1); }
 const ::dftu_cursor_vt FAILING_CURSOR_VT = {failing_next,
                                             failing_cursor_destroy};
 
-void* failing_scan(void*, void** out_cursor_self,
-                   const ::dftu_cursor_vt** out_vt) {
+void* failing_scan(void*, const ::dftu_scan_request*, int32_t*,
+                   void** out_cursor_self, const ::dftu_cursor_vt** out_vt) {
     static int dummy = 0;
     *out_cursor_self = &dummy;
     *out_vt = &FAILING_CURSOR_VT;

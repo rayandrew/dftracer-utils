@@ -1001,7 +1001,38 @@ typedef struct dftu_cursor_vt {
     void (*destroy)(void* self);
 } dftu_cursor_vt;
 
-/** A pushdown-free data source a plugin registers under a name. Immutable:
+/** How completely a source applied one pushed-down filter (mirrors
+   dataframe::Pushed, lazyframe.h). Passed back through scan()'s out_pushed
+   array, one entry per dftu_scan_request::filters. The host pre-fills every
+   entry with DFTU_PUSHED_NO before calling scan() and treats a value outside
+   this set as DFTU_PUSHED_NO rather than trusting it - a source has no way to
+   prove an Exact claim, so a wrong one silently drops rows and must never be
+   taken on faith. */
+typedef enum {
+    DFTU_PUSHED_NO = 0,      /**< Not applied; the host applies it. */
+    DFTU_PUSHED_INEXACT = 1, /**< Pruned I/O but did not filter survivors. */
+    DFTU_PUSHED_EXACT = 2,   /**< Fully applied; the host drops it. */
+} dftu_pushed;
+
+/** A pushdown request passed to dftu_source_vt::scan (mirrors
+   dataframe::ScanRequest, lazyframe.h). */
+typedef struct dftu_scan_request {
+    /** Columns the plan needs, in the order the scan must return them. NULL
+       or n_projection == 0 means all source columns. Accepting a non-empty
+       projection means every returned dftu_dataframe MUST carry exactly
+       these columns, in this order. */
+    const char* const* projection;
+    int32_t n_projection;
+    /** Candidate predicates, borrowed for the call, each positional against
+       the request's column set (projection when non-empty, else schema()).
+       Translate what can be pushed and report the rest DFTU_PUSHED_NO. */
+    const dftu_expr* const* filters;
+    int32_t n_filters;
+    int64_t limit;          /**< Slice pushdown hint; -1 means none. */
+    uint64_t memory_budget; /**< Bytes; most sources ignore it. */
+} dftu_scan_request;
+
+/** A pushdown-aware data source a plugin registers under a name. Immutable:
    schema() reports columns without scanning and scan() may be called many
    times to open independent cursors, so one registered source can back many
    LazyFrame collects. */
@@ -1010,15 +1041,19 @@ typedef struct dftu_source_vt {
        for its lifetime (until destroy()). Returns the count, or -1 on
        failure. */
     int32_t (*schema)(void* self, const char* const** out_names);
-    /** Open a cursor. Returns non-NULL on success or NULL on failure; the
-       returned pointer is only a status sentinel, since a stateless cursor's
-       own `self` may legitimately be NULL. On success, *out_cursor_self
-       receives the cursor's `self` and *out_vt its vtable, which must outlive
-       the cursor. The returned cursor's first dftu_dataframe (sync or via the
-       awaited task) must carry every column schema() named, in that order;
-       the host does not push a projection down in this slice. */
-    void* (*scan)(void* self, void** out_cursor_self,
-                  const dftu_cursor_vt** out_vt);
+    /** Open a cursor honoring `req`. `out_pushed` has req->n_filters entries,
+       pre-filled DFTU_PUSHED_NO by the host; write one dftu_pushed per
+       req->filters entry, leaving an untranslated filter DFTU_PUSHED_NO.
+       Returns non-NULL on success or NULL on failure; the returned pointer is
+       only a status sentinel, since a stateless cursor's own `self` may
+       legitimately be NULL. On success, *out_cursor_self receives the
+       cursor's `self` and *out_vt its vtable, which must outlive the cursor.
+       When req->projection is non-empty, every dftu_dataframe the cursor
+       produces (sync or via the awaited task) MUST carry exactly those
+       columns, in that order; the host verifies this and surfaces a scan
+       error rather than passing a mismatched frame downstream. */
+    void* (*scan)(void* self, const dftu_scan_request* req, int32_t* out_pushed,
+                  void** out_cursor_self, const dftu_cursor_vt** out_vt);
     /** Release the source; called once, after every cursor it opened has
        been destroyed. */
     void (*destroy)(void* self);

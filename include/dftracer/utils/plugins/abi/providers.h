@@ -9,13 +9,14 @@
  * in. Include dftracer/utils/plugins/abi.h rather than this file directly.
  *
  * A registered dftu_source_vt (dftracer/utils/dataframe/abi.h) is a C mirror
- * of the C++ dftracer::utils::dataframe::Source / Cursor pair
- * (lazyframe.h): schema() without a scan, scan() opens a Cursor, and the
- * Cursor pulls morsels one dftu_dataframe at a time. This slice does no
- * pushdown: the host always scans every column and never asks the provider
- * to filter, so a provider's projection/filter capability (if it grows one
- * later) is simply unused for now. That is always sound, since the engine
- * re-applies whatever a source did not.
+ * of the C++ dftracer::utils::dataframe::Source / Cursor pair (lazyframe.h):
+ * schema() without a scan, scan() opens a Cursor honoring a dftu_scan_request
+ * (projection/filters/limit pushdown), and the Cursor pulls morsels one
+ * dftu_dataframe at a time. A provider that ignores the request and reports
+ * DFTU_PUSHED_NO for every filter is always sound, since the host re-applies
+ * whatever a source did not translate; only projection is not advisory - a
+ * provider accepting a non-empty projection must return exactly those
+ * columns, in that order, or the host surfaces a scan error.
  *
  * register_provider forwards, after the plugin-name gate, into the
  * process-global provider registry (dftu_provider_register,

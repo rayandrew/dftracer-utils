@@ -62,11 +62,17 @@ struct Schema {
 
 /// How completely a source applied a pushed-down filter, per ScanRequest
 /// filter. Guides whether the engine must re-apply it over the survivors.
+/// Mirrors dftu_pushed (dataframe/abi.h).
 enum class Pushed {
-    No,       ///< Not applied by the source; the engine applies it.
-    Inexact,  ///< The source pruned I/O but did not filter survivors; re-apply.
-    Exact,    ///< Fully applied by the source; the engine drops it.
+    No = DFTU_PUSHED_NO,      ///< Not applied by the source; engine applies it.
+    Inexact =
+        DFTU_PUSHED_INEXACT,  ///< Pruned I/O but did not filter; re-apply.
+    Exact =
+        DFTU_PUSHED_EXACT,    ///< Fully applied by the source; engine drops it.
 };
+static_assert(static_cast<int>(Pushed::No) == DFTU_PUSHED_NO);
+static_assert(static_cast<int>(Pushed::Inexact) == DFTU_PUSHED_INEXACT);
+static_assert(static_cast<int>(Pushed::Exact) == DFTU_PUSHED_EXACT);
 
 /// A pushdown request the optimizer hands a Source at scan time.
 struct ScanRequest {
