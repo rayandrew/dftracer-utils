@@ -134,6 +134,9 @@ DataFrame sort_by(const DataFrame& b, const std::string& name,
     std::int64_t k = index_of(b, name);
     if (k < 0) throw std::out_of_range("sort_by: no column named " + name);
     Series order = argsort(b.columns[static_cast<std::size_t>(k)], descending);
+    if (!order.valid())
+        throw std::invalid_argument("sort_by: column " + name +
+                                    " has no order (nested type)");
     const std::int64_t* p = order.data<std::int64_t>();
     std::vector<std::int64_t> indices(p, p + order.length());
     return take(b, indices);
@@ -145,6 +148,9 @@ DataFrame topk(const DataFrame& b, const std::string& name, std::int64_t k,
     if (j < 0) throw std::out_of_range("topk: no column named " + name);
     Series ind =
         topk_indices(b.columns[static_cast<std::size_t>(j)], k, largest);
+    if (!ind.valid())
+        throw std::invalid_argument("topk: column " + name +
+                                    " has no order (nested type)");
     const std::int64_t* p = ind.data<std::int64_t>();
     std::vector<std::int64_t> indices(p, p + ind.length());
     return take(b, indices);
@@ -864,6 +870,10 @@ Series is_duplicated(const DataFrame& b) { return row_mask(b, false); }
 Series is_unique(const DataFrame& b) { return row_mask(b, true); }
 
 DataFrame value_counts(const Series& v) {
+    if (!is_orderable_type(v.type()))
+        throw std::invalid_argument(std::string("value_counts: type '") +
+                                    type_name(v.type()) +
+                                    "' has no per-row value to count");
     Series mat = v.encoding() == Encoding::Flat
                      ? v.share()
                      : Series{dftu_series_materialize(v.handle())};

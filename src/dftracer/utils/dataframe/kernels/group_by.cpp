@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
@@ -217,6 +218,12 @@ int32_t dftu_series_group_by(const dftu_series* keys, const dftu_series* values,
     if (values->type == TypeId::Bool || values->type == TypeId::String ||
         values->type == TypeId::Binary)
         return 0;
+    if (!dftracer::utils::dataframe::is_orderable_type(keys->type)) {
+        DFTRACER_UTILS_LOG_ERROR(
+            "group_by: key type '%s' has no per-row value to group on",
+            dftracer::utils::dataframe::type_name(keys->type));
+        return 0;
+    }
 
     Groups g = build_groups(keys);
     *out_keys = g.keys;

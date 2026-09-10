@@ -33,6 +33,48 @@ FieldStatDomain col_domain(TypeId t) {
     }
 }
 
+// Types group_of can key on: String via the text path, the rest read exactly
+// by read_bits. Anything else would key every row on the same zero and
+// collapse the batch into one group. No default, so a new TypeId lands here.
+bool is_group_key_type(TypeId t) {
+    switch (t) {
+        case TypeId::Bool:
+        case TypeId::Int8:
+        case TypeId::Int16:
+        case TypeId::Int32:
+        case TypeId::Int64:
+        case TypeId::Uint8:
+        case TypeId::Uint16:
+        case TypeId::Uint32:
+        case TypeId::Uint64:
+        case TypeId::Float32:
+        case TypeId::Float64:
+        case TypeId::Date32:
+        case TypeId::Date64:
+        case TypeId::Time32:
+        case TypeId::Time64:
+        case TypeId::Timestamp:
+        case TypeId::Duration:
+        case TypeId::String:
+            return true;
+        case TypeId::Unknown:
+        case TypeId::Binary:
+        case TypeId::List:
+        case TypeId::Struct:
+        case TypeId::Float16:
+        case TypeId::Decimal128:
+        case TypeId::Decimal256:
+        case TypeId::FixedSizeBinary:
+        case TypeId::LargeString:
+        case TypeId::LargeBinary:
+        case TypeId::LargeList:
+        case TypeId::FixedSizeList:
+        case TypeId::Map:
+            return false;
+    }
+    return false;
+}
+
 // Raw value bits for a fixed-width cell, reinterpreted on finalize by the
 // column's domain. Keeps first/last exact for every numeric type.
 std::uint64_t read_bits(const Series& c, std::int64_t i, FieldStatDomain d) {
@@ -142,15 +184,8 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
         st.ikey_cols.resize(st.nkeys);
         st.skey_cols.resize(st.nkeys);
         for (std::size_t k = 0; k < st.nkeys; ++k) {
-            // group_of reads every non-String key as int64/uint64/double
-            // (read_bits/col_domain). FixedSizeBinary, Decimal128/256, and
-            // LargeString/LargeBinary/LargeList have no such reading; refuse
-            // them here rather than silently collapsing every row into one
-            // group.
             const TypeId kt = keys[k]->type();
-            if (kt == TypeId::FixedSizeBinary || kt == TypeId::Decimal128 ||
-                kt == TypeId::Decimal256 || kt == TypeId::LargeString ||
-                kt == TypeId::LargeBinary || kt == TypeId::LargeList) {
+            if (!is_group_key_type(kt)) {
                 throw std::invalid_argument(
                     std::string("group_by: key column type '") + type_name(kt) +
                     "' is not supported as a group key (no int64/double "
