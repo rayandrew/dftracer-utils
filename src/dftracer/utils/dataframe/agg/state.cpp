@@ -181,6 +181,8 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
         st.key_is_str.resize(st.nkeys);
         st.key_domain.resize(st.nkeys);
         st.key_type.resize(st.nkeys);
+        st.key_time_unit.resize(st.nkeys);
+        st.key_timezone.resize(st.nkeys);
         st.ikey_cols.resize(st.nkeys);
         st.skey_cols.resize(st.nkeys);
         for (std::size_t k = 0; k < st.nkeys; ++k) {
@@ -194,6 +196,12 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
             st.key_is_str[k] = kt == TypeId::String ? 1 : 0;
             st.key_domain[k] = col_domain(kt);
             st.key_type[k] = kt;
+            if (kt == TypeId::Time32 || kt == TypeId::Time64 ||
+                kt == TypeId::Timestamp || kt == TypeId::Duration) {
+                const DataType dt = keys[k]->data_type();
+                st.key_time_unit[k] = dt.time_unit;
+                st.key_timezone[k] = dt.timezone;
+            }
         }
         st.field_domain.resize(st.nf);
         st.field_is_str.resize(st.nf);
@@ -463,6 +471,8 @@ void agg_merge(AggState& into, const AggState& other) {
         into.key_is_str = other.key_is_str;
         into.key_domain = other.key_domain;
         into.key_type = other.key_type;
+        into.key_time_unit = other.key_time_unit;
+        into.key_timezone = other.key_timezone;
         into.ikey_cols.assign(into.nkeys, {});
         into.skey_cols.assign(into.nkeys, {});
         into.inited = true;
@@ -485,10 +495,16 @@ AggStatePtr agg_regroup(const AggState& src,
     dst->key_is_str.resize(dst->nkeys);
     dst->key_domain.resize(dst->nkeys);
     dst->key_type.resize(dst->nkeys);
+    dst->key_time_unit.resize(dst->nkeys);
+    dst->key_timezone.resize(dst->nkeys);
     for (std::size_t k = 0; k < dst->nkeys; ++k) {
         dst->key_is_str[k] = src.key_is_str[static_cast<std::size_t>(keep[k])];
         dst->key_domain[k] = src.key_domain[static_cast<std::size_t>(keep[k])];
         dst->key_type[k] = src.key_type[static_cast<std::size_t>(keep[k])];
+        dst->key_time_unit[k] =
+            src.key_time_unit[static_cast<std::size_t>(keep[k])];
+        dst->key_timezone[k] =
+            src.key_timezone[static_cast<std::size_t>(keep[k])];
     }
     dst->ikey_cols.assign(dst->nkeys, {});
     dst->skey_cols.assign(dst->nkeys, {});

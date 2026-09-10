@@ -44,7 +44,7 @@ void select_gt(const dftu_series& v, dftu_scalar threshold,
 dftu_series* make_selection(const dftu_series& base,
                             const std::vector<std::int64_t>& sel) {
     auto* out = new dftu_series();
-    out->type = base.type;
+    dftracer::utils::dataframe::adopt_type_from(*out, base);
     out->encoding = Encoding::Selection;
     out->length = static_cast<std::int64_t>(sel.size());
     out->data = Buffer::allocate(sel.size() * sizeof(std::int64_t));
@@ -266,10 +266,9 @@ static dftu_series* gather_column(const dftu_series& base,
     if (width == 0) return nullptr;  // Bool (bit-packed) not gatherable here
 
     auto* out = new dftu_series();
-    out->type = base.type;
+    dftracer::utils::dataframe::adopt_type_from(*out, base);
     out->encoding = Encoding::Flat;
     out->length = n;
-    out->fixed_size = base.fixed_size;
     out->data = Buffer::allocate(static_cast<std::size_t>(n) * width);
     const std::uint8_t* src = base.data->data();
     std::uint8_t* dst = out->data->data();

@@ -51,4 +51,36 @@ struct dftu_series {
     std::int32_t fixed_size = 0;
 };
 
+namespace dftracer {
+namespace utils {
+namespace dataframe {
+
+/// Copies type and every type parameter (time_unit, timezone,
+/// decimal_precision, decimal_scale, fixed_size) from src into out, leaving
+/// out's data/length/encoding untouched. Use for any op whose result column
+/// derives its type from a single source column (gather, slice, sort, unique,
+/// reverse, fill_null, drop_nulls, dictionary_encode, ...).
+inline void adopt_type_from(dftu_series& out, const dftu_series& src) {
+    out.type = src.type;
+    out.time_unit = src.time_unit;
+    out.timezone = src.timezone;
+    out.decimal_precision = src.decimal_precision;
+    out.decimal_scale = src.decimal_scale;
+    out.fixed_size = src.fixed_size;
+}
+
+/// Same as adopt_type_from, but sets out.type to an explicit TypeId while
+/// still copying src's type parameters. Use for an op that changes the type
+/// tag within the same parameterized family (e.g. casting Timestamp[us] to
+/// Timestamp[ns] keeps the timezone; the caller sets time_unit separately).
+inline void adopt_type_params_as(dftu_series& out, const dftu_series& src,
+                                 TypeId type) {
+    adopt_type_from(out, src);
+    out.type = type;
+}
+
+}  // namespace dataframe
+}  // namespace utils
+}  // namespace dftracer
+
 #endif  // DFTRACER_UTILS_DATAFRAME_INTERNAL_COLUMN_DATA_H

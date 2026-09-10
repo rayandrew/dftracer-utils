@@ -253,7 +253,7 @@ dftu_series* dftu_series_slice(const dftu_series* col, int64_t offset,
     if (len < 0 || len > col->length - offset) len = col->length - offset;
 
     auto* out = new dftu_series();
-    out->type = col->type;
+    dftracer::utils::dataframe::adopt_type_from(*out, *col);
     out->encoding = Encoding::Flat;
     out->length = len;
     auto parent = col->data;  // shared_ptr copy keeps the buffer alive

@@ -729,7 +729,7 @@ Series import_dict(const ArrowSchema* schema, const ArrowArray* arr,
     // import_flat adding offset*width to the data pointer).
     const std::size_t off = static_cast<std::size_t>(arr->offset);
     auto* col = new dftu_series();
-    col->type = static_cast<TypeId>(dftu_series_type(values.handle()));
+    adopt_type_from(*col, *values.handle());
     col->length = n;
     col->null_count = arr->null_count < 0 ? 0 : arr->null_count;
     col->child = std::shared_ptr<dftu_series>(values.release());

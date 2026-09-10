@@ -1,11 +1,13 @@
 #include <ankerl/unordered_dense.h>
 #include <dftracer/utils/dataframe/agg/detail.h>
 #include <dftracer/utils/dataframe/dataframe.h>
+#include <dftracer/utils/dataframe/internal/column_data.h>
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <set>
 #include <string>
 #include <utility>
@@ -69,6 +71,23 @@ double kmv_estimate(const KmvMap& m, std::size_t k) {
         static_cast<double>(m.rbegin()->first) / std::ldexp(1.0, 64);
     if (!(u_max > 0.0)) return static_cast<double>(m.size());
     return static_cast<double>(k - 1) / u_max;
+}
+
+// Time32/Time64/Timestamp/Duration group key column. Series::flat has no
+// parametric constructor, so this builds the dftu_series directly to carry
+// the source's own time_unit (and, for Timestamp, timezone).
+Series flat_temporal(TypeId type, TimeUnit unit, const std::string& timezone,
+                     const void* data, std::int64_t n) {
+    auto* col = new dftu_series();
+    col->type = type;
+    col->encoding = Encoding::Flat;
+    col->length = n;
+    col->time_unit = unit;
+    if (type == TypeId::Timestamp) col->timezone = timezone;
+    const std::size_t bytes = buffer_bytes(type, n);
+    col->data = Buffer::allocate(bytes);
+    if (bytes != 0) std::memcpy(col->data->data(), data, bytes);
+    return Series{col};
 }
 
 // One list<string> column from a per-group vector of already-ordered reprs.
@@ -157,14 +176,28 @@ DataFrame agg_finalize(const AggState& st,
             // back down.
             const TypeId kt =
                 k < st.key_type.size() ? st.key_type[k] : TypeId::Int64;
-            if (kt == TypeId::Date32 || kt == TypeId::Time32) {
+            const TimeUnit ku = k < st.key_time_unit.size()
+                                    ? st.key_time_unit[k]
+                                    : TimeUnit::Micro;
+            const std::string& ktz =
+                k < st.key_timezone.size() ? st.key_timezone[k] : std::string();
+            if (kt == TypeId::Time32) {
+                std::vector<std::int32_t> v(static_cast<std::size_t>(ng));
+                for (std::int64_t g = 0; g < ng; ++g)
+                    v[static_cast<std::size_t>(g)] = static_cast<std::int32_t>(
+                        bits[static_cast<std::size_t>(g)]);
+                out.columns.push_back(flat_temporal(kt, ku, ktz, v.data(), ng));
+            } else if (kt == TypeId::Date32) {
                 std::vector<std::int32_t> v(static_cast<std::size_t>(ng));
                 for (std::int64_t g = 0; g < ng; ++g)
                     v[static_cast<std::size_t>(g)] = static_cast<std::int32_t>(
                         bits[static_cast<std::size_t>(g)]);
                 out.columns.push_back(Series::flat(kt, v.data(), ng));
-            } else if (kt == TypeId::Date64 || kt == TypeId::Time64 ||
-                       kt == TypeId::Timestamp || kt == TypeId::Duration) {
+            } else if (kt == TypeId::Time64 || kt == TypeId::Timestamp ||
+                       kt == TypeId::Duration) {
+                out.columns.push_back(
+                    flat_temporal(kt, ku, ktz, bits.data(), ng));
+            } else if (kt == TypeId::Date64) {
                 out.columns.push_back(Series::flat(kt, bits.data(), ng));
             } else {
                 out.columns.push_back(Series::flat_i64(bits.data(), ng));

@@ -131,7 +131,13 @@ class AggState {
     // The key column's exact TypeId (Date32/64, Time32/64, Timestamp,
     // Duration all widen to the I64 domain above); finalize retags the group
     // key with this instead of a bare Int64.
-    std::vector<TypeId> key_type;                      // nkeys
+    std::vector<TypeId> key_type;  // nkeys
+    // Time32/Time64/Timestamp/Duration key_type only: the unit (and, for
+    // Timestamp, the timezone) the raw I64 bits in ikey_cols are expressed
+    // in, so finalize retags the group key with the source's own unit
+    // instead of defaulting to Micro/naive.
+    std::vector<TimeUnit> key_time_unit;               // nkeys
+    std::vector<std::string> key_timezone;             // nkeys
     std::vector<std::vector<std::int64_t>> ikey_cols;  // nkeys * ngroups
     std::vector<std::vector<std::string>> skey_cols;   // nkeys * ngroups
     std::unordered_map<std::uint64_t, std::vector<std::int64_t>> key_buckets;

@@ -12,7 +12,7 @@ set(DATAFRAME_TEST_SOURCES test_mask.cpp test_series.cpp test_result_batch.cpp t
                            test_lazyframe_abi.cpp test_lazy_ops.cpp test_spill.cpp test_agg_state.cpp
                            test_agg_extended_ops.cpp test_host_ops.cpp
                            test_host_ops_autoregister.cpp test_expr_string.cpp
-                           test_provider_pushdown.cpp)
+                           test_provider_pushdown.cpp test_type_parameter_propagation.cpp)
 
 foreach(test_file ${DATAFRAME_TEST_SOURCES})
   string(REPLACE ".cpp" "" bin_exec ${test_file})

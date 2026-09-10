@@ -49,6 +49,13 @@ std::string agg_serialize(const AggState& st) {
     for (std::size_t k = 0; k < st.nkeys; ++k)
         put(s, static_cast<std::uint8_t>(
                    k < st.key_type.size() ? st.key_type[k] : TypeId::Int64));
+    for (std::size_t k = 0; k < st.nkeys; ++k)
+        put(s, static_cast<std::int32_t>(k < st.key_time_unit.size()
+                                             ? st.key_time_unit[k]
+                                             : TimeUnit::Micro));
+    for (std::size_t k = 0; k < st.nkeys; ++k)
+        put_bytes(
+            s, k < st.key_timezone.size() ? st.key_timezone[k] : std::string());
     for (const AggSpec& sp : st.specs) {
         put(s, static_cast<std::int32_t>(sp.op));
         put(s, sp.value_col);
@@ -217,6 +224,12 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     st->key_type.resize(nkeys);
     for (std::uint32_t k = 0; k < nkeys; ++k)
         st->key_type[k] = static_cast<TypeId>(r.get<std::uint8_t>());
+    st->key_time_unit.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k)
+        st->key_time_unit[k] = static_cast<TimeUnit>(r.get<std::int32_t>());
+    st->key_timezone.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k)
+        st->key_timezone[k] = r.get_bytes();
     st->specs.resize(ns);
     for (std::uint32_t i = 0; i < ns; ++i) {
         st->specs[i].op = static_cast<AggOp>(r.get<std::int32_t>());

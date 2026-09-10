@@ -153,8 +153,14 @@ Groups build_groups(const dftu_series* keys_in) {
     } else {
         std::string bytes;
         for (const std::string& s : distinct) bytes += s;
-        g.keys = dftu_series_new_flat(static_cast<dftu_dtype>(k->type),
-                                      bytes.data(), g.num_groups, nullptr);
+        auto* out = new dftu_series();
+        dftracer::utils::dataframe::adopt_type_from(*out, *k);
+        out->encoding = Encoding::Flat;
+        out->length = g.num_groups;
+        out->data = dftracer::utils::dataframe::Buffer::allocate(bytes.size());
+        if (!bytes.empty())
+            std::memcpy(out->data->data(), bytes.data(), bytes.size());
+        g.keys = out;
     }
     if (materialized) dftu_series_free(materialized);
     return g;
