@@ -63,12 +63,15 @@ char* dup_string(const std::string& s) {
 }
 
 // Run `fn(borrowed)` with a non-owning Series over `h`, without freeing `h`.
+// The release has to survive `fn` throwing: unwinding through the owning
+// Series would free a handle the caller still owns.
 template <class Fn>
 auto with_borrowed(const dftu_series* h, Fn&& fn) {
-    Series s{const_cast<dftu_series*>(h)};
-    auto out = fn(s);
-    s.release();
-    return out;
+    struct Borrowed {
+        Series s;
+        ~Borrowed() { s.release(); }
+    } b{Series{const_cast<dftu_series*>(h)}};
+    return fn(b.s);
 }
 }  // namespace
 
@@ -235,9 +238,13 @@ dftu_series* dftu_dataframe_mask_frame(const dftu_dataframe* df,
 
 dftu_dataframe* dftu_series_value_counts(const dftu_series* v) {
     if (!v) return nullptr;
-    return wrap(with_borrowed(v, [&](const Series& c) {
-        return dftracer::utils::dataframe::value_counts(c);
-    }));
+    try {
+        return wrap(with_borrowed(v, [&](const Series& c) {
+            return dftracer::utils::dataframe::value_counts(c);
+        }));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
 }
 
 dftu_dataframe* dftu_dataframe_unpivot(const dftu_dataframe* df,
