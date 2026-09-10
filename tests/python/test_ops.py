@@ -30,8 +30,16 @@ class TestDiscovery:
         assert ops.info("dftu.series.add")["kind"] == "series"
         frame_ops = [n for n in ops.list() if n.startswith("dftu.frame.")]
         assert frame_ops, "expected registered dftu.frame.* ops"
+        kinds = set()
         for n in frame_ops:
-            assert ops.info(n)["kind"] == "frame", n
+            info = ops.info(n)
+            # kind is the RETURN token, not the name prefix: a frame -> series
+            # op (mask, is_unique) is kind series while still being a
+            # DataFrame method, and dftu.frame.value_counts is a series ->
+            # frame op.
+            assert info["kind"] == info["signature"].rsplit("-> ", 1)[1], n
+            kinds.add(info["kind"])
+        assert "frame" in kinds
 
     def test_list_covers_the_surface(self):
         names = ops.list()

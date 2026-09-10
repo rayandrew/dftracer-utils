@@ -48,7 +48,10 @@ def test_ops_prefix_filters_and_reports_frame_kind(capsys):
     assert lines, "expected registered dftu.frame.* ops"
     for ln in lines:
         assert ln.startswith("dftu.frame.")
-        assert "[frame," in ln
+        # The bracketed kind is the op's RETURN token, so a frame -> series op
+        # (mask, is_unique) reports series under a dftu.frame. name.
+        assert "[frame," in ln or "[series," in ln
+    assert any("[frame," in ln for ln in lines)
 
 
 def test_ops_unknown_prefix_errors(capsys):
