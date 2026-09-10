@@ -47,7 +47,7 @@ std::vector<std::int64_t> to_index_vector(const Series& idx) {
 // over the non-null rows, mirroring the eager DataFrame dedup helpers.
 std::vector<std::int64_t> count_values(const Series& v) {
     const std::int64_t n = v.length();
-    const bool is_str = v.type() == TypeId::String;
+    const bool is_str = narrow_varwidth_type(v.type()) == TypeId::String;
     const bool has_nulls = v.null_count() > 0;
     const std::int64_t nullc = v.null_count();
 
@@ -102,7 +102,7 @@ bool is_sorted_impl(const Series& v, bool descending) {
     if (n < 2) return true;
     bool simd = false;
     if (is_sorted_numeric(*v.handle(), descending, &simd)) return simd;
-    const bool is_str = v.type() == TypeId::String;
+    const bool is_str = narrow_varwidth_type(v.type()) == TypeId::String;
     for (std::int64_t i = 1; i < n; ++i) {
         int cmp;
         if (is_str) {
@@ -146,14 +146,14 @@ Series is_in_impl(const Series& v, const Series& values) {
         if (is_in_f64_simd(*v.handle(), *values.handle(), packed.data()))
             return Series::flat(TypeId::Bool, packed.data(), n);
     }
-    const bool is_str = v.type() == TypeId::String;
+    const bool is_str = narrow_varwidth_type(v.type()) == TypeId::String;
     const bool is_bytes = is_byte_comparable(v.type());
     const std::size_t bw = is_bytes ? byte_row_width(v) : 0;
     std::unordered_set<double> num_set;
     std::unordered_set<std::string> str_set;
     const std::int64_t m = values.length();
     const bool vals_null = values.null_count() > 0;
-    const bool vals_str = values.type() == TypeId::String;
+    const bool vals_str = narrow_varwidth_type(values.type()) == TypeId::String;
     const bool vals_bytes = is_bytes && values.type() == v.type();
     for (std::int64_t j = 0; j < m; ++j) {
         if (vals_null && values.is_null(j)) continue;

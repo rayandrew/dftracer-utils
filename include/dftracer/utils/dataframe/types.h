@@ -77,17 +77,22 @@ enum class TypeId : std::int32_t {
     /// arithmetic or string kernel applies.
     FixedSizeBinary,
     /// String with 64-bit offsets, for payloads too large for String's
-    /// 32-bit offsets. Its own physical layout, not String's. STORAGE ONLY:
-    /// it round-trips through Arrow import/export, but every string,
-    /// compare, sort, and group_by kernel is written against 32-bit
-    /// offsets; giving them a 64-bit-offset path is a templating job across
-    /// several SIMD files, not yet done.
+    /// 32-bit offsets. Its own physical layout, not String's: every string,
+    /// compare, sort, group_by, and Arrow import/export kernel reads and
+    /// writes its offsets at their native 64-bit width, zero-copy, with no
+    /// size ceiling. A column constructed elsewhere (not Arrow import) is
+    /// always String, never LargeString; only Arrow import produces one, and
+    /// only from a genuine large_utf8 array.
     LargeString,
     /// Binary with 64-bit offsets. Its own physical layout, not Binary's.
-    /// STORAGE ONLY, see LargeString.
+    /// Same kernel and construction coverage as LargeString.
     LargeBinary,
-    /// List with 64-bit offsets. Its own physical layout, not List's.
-    /// STORAGE ONLY, see LargeString.
+    /// List with 64-bit offsets. Its own physical layout, not List's. Same
+    /// kernel and construction coverage as LargeString; a derived column
+    /// built by a kernel (e.g. group_by's key column, dictionary_encode's
+    /// dictionary) may still narrow to the 32-bit-offset type when its own
+    /// output is bounded - that is a fresh sizing choice for new data, not a
+    /// loss of the source column's width.
     LargeList,
     /// Fixed-count list: `DataType::fixed_size` elements of the single entry
     /// in `DataType::fields` per row. No offsets buffer.
@@ -445,6 +450,33 @@ constexpr TypeId physical_type(TypeId t) noexcept {
             return t;
     }
     return t;
+}
+
+/// The 32-bit-offset TypeId sharing `t`'s buffer shape: LargeString ->
+/// String, LargeBinary -> Binary, LargeList -> List; every other type maps to
+/// itself. A String/Binary/List-kind kernel dispatches on
+/// `narrow_varwidth_type(t)` so it does not need a separate case for the
+/// corresponding Large type; `is_wide_offset_type(t)` then says which offsets
+/// buffer (32-bit or 64-bit) actually backs the column.
+constexpr TypeId narrow_varwidth_type(TypeId t) noexcept {
+    switch (t) {
+        case TypeId::LargeString:
+            return TypeId::String;
+        case TypeId::LargeBinary:
+            return TypeId::Binary;
+        case TypeId::LargeList:
+            return TypeId::List;
+        default:
+            return t;
+    }
+}
+
+/// True if `t` stores its offsets in the 64-bit `offsets64` buffer
+/// (LargeString/LargeBinary/LargeList); false if it uses the 32-bit
+/// `offsets` buffer (String/Binary/List) or has no offsets buffer at all.
+constexpr bool is_wide_offset_type(TypeId t) noexcept {
+    return t == TypeId::LargeString || t == TypeId::LargeBinary ||
+           t == TypeId::LargeList;
 }
 
 /// FLAT: values contiguous. CONSTANT: one value, logical length N. DICTIONARY:

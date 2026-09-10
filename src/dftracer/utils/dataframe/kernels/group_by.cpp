@@ -1,6 +1,7 @@
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
+#include <dftracer/utils/dataframe/internal/varwidth_offsets.h>
 #include <dftracer/utils/dataframe/kernels/group_by.h>
 
 #include <cstring>
@@ -13,6 +14,9 @@ namespace {
 
 using dftracer::utils::dataframe::byte_width;
 using dftracer::utils::dataframe::Encoding;
+using dftracer::utils::dataframe::is_wide_offset_type;
+using dftracer::utils::dataframe::narrow_varwidth_type;
+using dftracer::utils::dataframe::offsets_of;
 using dftracer::utils::dataframe::TypeId;
 
 bool is_valid(const dftu_series& v, std::int64_t i) {
@@ -57,9 +61,30 @@ struct Groups {
     dftu_series* keys = nullptr;
 };
 
+// String/Binary(/Large) key hashing at offset width `Off`: assigns each row
+// its first-seen distinct-value group index.
+template <class Off>
+void hash_string_keys(const dftu_series& k, std::vector<std::int32_t>& group_of,
+                      std::vector<std::string>& distinct) {
+    const Off* offsets =
+        reinterpret_cast<const Off*>(offsets_of<Off>(k)->data());
+    const char* data = reinterpret_cast<const char*>(k.data->data());
+    std::unordered_map<std::string, std::int32_t> idx;
+    for (std::int64_t i = 0; i < k.length; ++i) {
+        std::string key(data + offsets[i],
+                        static_cast<std::size_t>(offsets[i + 1] - offsets[i]));
+        auto [it, ins] = idx.try_emplace(
+            std::move(key), static_cast<std::int32_t>(distinct.size()));
+        if (ins) distinct.push_back(it->first);
+        group_of[static_cast<std::size_t>(i)] = it->second;
+    }
+}
+
 // Assign each row to a group by hashing the key's raw bytes (numeric value or
 // string). Returns the assignment and a distinct-key column in first-seen
-// order.
+// order. A String/Binary key column's distinct-value output is always
+// narrow: the group key set is bounded by the row count, a fresh sizing
+// question independent of the source column's own offset width.
 Groups build_groups(const dftu_series* keys_in) {
     const dftu_series* k = keys_in;
     dftu_series* materialized = nullptr;
@@ -68,7 +93,8 @@ Groups build_groups(const dftu_series* keys_in) {
         k = materialized;
     }
 
-    bool str = (k->type == TypeId::String || k->type == TypeId::Binary);
+    const TypeId key_kind = narrow_varwidth_type(k->type);
+    bool str = (key_kind == TypeId::String || key_kind == TypeId::Binary);
     // FixedSizeBinary's width is a DataType parameter, not a per-TypeId
     // constant (byte_width returns 0 for it); every other fixed-width type,
     // Decimal128/256 included, already has a correct per-TypeId byte_width,
@@ -78,25 +104,24 @@ Groups build_groups(const dftu_series* keys_in) {
                             ? static_cast<std::size_t>(k->fixed_size)
                             : byte_width(k->type);
 
-    std::unordered_map<std::string, std::int32_t> idx;
     std::vector<std::string> distinct;
     Groups g;
     g.group_of.resize(static_cast<std::size_t>(k->length));
-    const char* data = reinterpret_cast<const char*>(k->data->data());
-    const std::int32_t* offsets =
-        str ? reinterpret_cast<const std::int32_t*>(k->offsets->data())
-            : nullptr;
-    for (std::int64_t i = 0; i < k->length; ++i) {
-        std::string key;
-        if (str)
-            key.assign(data + offsets[i],
-                       static_cast<std::size_t>(offsets[i + 1] - offsets[i]));
+    if (str) {
+        if (is_wide_offset_type(k->type))
+            hash_string_keys<std::int64_t>(*k, g.group_of, distinct);
         else
-            key.assign(data + static_cast<std::size_t>(i) * width, width);
-        auto [it, ins] = idx.try_emplace(
-            std::move(key), static_cast<std::int32_t>(distinct.size()));
-        if (ins) distinct.push_back(it->first);
-        g.group_of[static_cast<std::size_t>(i)] = it->second;
+            hash_string_keys<std::int32_t>(*k, g.group_of, distinct);
+    } else {
+        std::unordered_map<std::string, std::int32_t> idx;
+        const char* data = reinterpret_cast<const char*>(k->data->data());
+        for (std::int64_t i = 0; i < k->length; ++i) {
+            std::string key(data + static_cast<std::size_t>(i) * width, width);
+            auto [it, ins] = idx.try_emplace(
+                std::move(key), static_cast<std::int32_t>(distinct.size()));
+            if (ins) distinct.push_back(it->first);
+            g.group_of[static_cast<std::size_t>(i)] = it->second;
+        }
     }
     g.num_groups = static_cast<std::int32_t>(distinct.size());
 
@@ -107,9 +132,9 @@ Groups build_groups(const dftu_series* keys_in) {
             bytes += s;
             off.push_back(static_cast<std::int32_t>(bytes.size()));
         }
-        g.keys =
-            dftu_series_new_string(static_cast<dftu_dtype>(k->type), off.data(),
-                                   bytes.data(), g.num_groups, nullptr);
+        g.keys = dftu_series_new_string(static_cast<dftu_dtype>(key_kind),
+                                        off.data(), bytes.data(), g.num_groups,
+                                        nullptr);
     } else if (k->type == TypeId::FixedSizeBinary) {
         // dftu_series_new_flat validates via byte_width(type), which is 0 for
         // FixedSizeBinary (its width is a DataType parameter, not a per-TypeId

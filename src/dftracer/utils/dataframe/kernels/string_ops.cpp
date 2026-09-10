@@ -3,6 +3,7 @@
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/substr_simd.h>
+#include <dftracer/utils/dataframe/internal/varwidth_offsets.h>
 #include <dftracer/utils/dataframe/kernels/string_ops.h>
 #include <dftracer/utils/dataframe/parallel.h>
 
@@ -45,13 +46,27 @@ namespace {
 using dftracer::utils::dataframe::Buffer;
 using dftracer::utils::dataframe::buffer_bytes;
 using dftracer::utils::dataframe::Encoding;
+using dftracer::utils::dataframe::is_wide_offset_type;
+using dftracer::utils::dataframe::narrow_varwidth_type;
+using dftracer::utils::dataframe::offsets_of;
 using dftracer::utils::dataframe::parallel_backend_installed;
 using dftracer::utils::dataframe::parallel_for;
 using dftracer::utils::dataframe::TypeId;
 
+// String or Binary, at either offset width (narrow_varwidth_type folds the
+// Large variants into the same case).
+bool is_string_kind(TypeId t) {
+    const TypeId n = narrow_varwidth_type(t);
+    return n == TypeId::String || n == TypeId::Binary;
+}
+
+// Row `i` of a FLAT String/Binary(/Large) column `c`, reading its offsets at
+// width `Off` - int32_t for String/Binary, int64_t for LargeString/
+// LargeBinary. Callers pick `Off` once (via is_wide_offset_type) and
+// instantiate the whole hot loop at that width, never branching per row.
+template <class Off>
 std::string_view value_at(const dftu_series& c, std::int64_t i) {
-    const std::int32_t* off =
-        reinterpret_cast<const std::int32_t*>(c.offsets->data());
+    const Off* off = reinterpret_cast<const Off*>(offsets_of<Off>(c)->data());
     const char* data = reinterpret_cast<const char*>(c.data->data());
     return std::string_view(data + off[i],
                             static_cast<std::size_t>(off[i + 1] - off[i]));
@@ -62,16 +77,14 @@ std::string_view value_at(const dftu_series& c, std::int64_t i) {
 // bit-packed output, giving disjoint bytes per task with no atomics needed.
 constexpr std::int64_t STRING_PREDICATE_GRAIN = 1 << 15;
 
-// Apply a string predicate, returning a Bool column. On a DICTIONARY input the
+// Apply a string predicate at offset width `Off`, returning a Bool column. On
+// a DICTIONARY input (whose dictionary values share `v`'s offset width) the
 // predicate is evaluated once per dictionary entry, then codes are mapped.
 // `heavy` marks a compute-bound predicate (regex, glob) worth fanning out
 // through the parallel_for seam on the FLAT path; cheap byte-compare
 // predicates are bandwidth-bound and stay serial.
-template <class Pred>
-dftu_series* string_predicate(const dftu_series* v, Pred pred,
-                              bool heavy = false) {
-    if (v->type != TypeId::String && v->type != TypeId::Binary) return nullptr;
-
+template <class Off, class Pred>
+dftu_series* string_predicate_w(const dftu_series* v, Pred pred, bool heavy) {
     auto* out = new dftu_series();
     out->type = TypeId::Bool;
     out->encoding = Encoding::Flat;
@@ -92,17 +105,18 @@ dftu_series* string_predicate(const dftu_series* v, Pred pred,
             parallel_for(v->length, STRING_PREDICATE_GRAIN,
                          [&](std::int64_t b, std::int64_t e) {
                              for (std::int64_t i = b; i < e; ++i)
-                                 if (pred(value_at(*v, i))) set(i);
+                                 if (pred(value_at<Off>(*v, i))) set(i);
                          });
         } else {
             for (std::int64_t i = 0; i < v->length; ++i)
-                if (pred(value_at(*v, i))) set(i);
+                if (pred(value_at<Off>(*v, i))) set(i);
         }
     } else if (v->encoding == Encoding::Dictionary && v->child) {
         const dftu_series& dict = *v->child;
         std::vector<char> hit(static_cast<std::size_t>(dict.length));
         for (std::int64_t k = 0; k < dict.length; ++k)
-            hit[static_cast<std::size_t>(k)] = pred(value_at(dict, k)) ? 1 : 0;
+            hit[static_cast<std::size_t>(k)] =
+                pred(value_at<Off>(dict, k)) ? 1 : 0;
         const std::int32_t* codes =
             reinterpret_cast<const std::int32_t*>(v->data->data());
         for (std::int64_t i = 0; i < v->length; ++i)
@@ -114,21 +128,32 @@ dftu_series* string_predicate(const dftu_series* v, Pred pred,
     return out;
 }
 
-// Per-row byte reader over a String/Binary column that transparently resolves a
-// DICTIONARY input (row i -> dictionary entry codes[i]). Nullness comes from
-// the top-level validity bitmap in both encodings.
+template <class Pred>
+dftu_series* string_predicate(const dftu_series* v, Pred pred,
+                              bool heavy = false) {
+    if (!is_string_kind(v->type)) return nullptr;
+    return is_wide_offset_type(v->type)
+               ? string_predicate_w<std::int64_t>(v, pred, heavy)
+               : string_predicate_w<std::int32_t>(v, pred, heavy);
+}
+
+// Per-row byte reader over a String/Binary(/Large) column that transparently
+// resolves a DICTIONARY input (row i -> dictionary entry codes[i]). Reads its
+// offsets at width `Off`. Nullness comes from the top-level validity bitmap
+// in both encodings.
+template <class Off>
 class RowReader {
    public:
     explicit RowReader(const dftu_series* v) : v_(v) {
-        if (v->type != TypeId::String && v->type != TypeId::Binary) return;
-        if (v->encoding == Encoding::Flat && v->offsets && v->data) {
-            off_ = reinterpret_cast<const std::int32_t*>(v->offsets->data());
+        if (!is_string_kind(v->type)) return;
+        if (v->encoding == Encoding::Flat && offsets_of<Off>(*v) && v->data) {
+            off_ = reinterpret_cast<const Off*>(offsets_of<Off>(*v)->data());
             data_ = reinterpret_cast<const char*>(v->data->data());
             ok_ = true;
         } else if (v->encoding == Encoding::Dictionary && v->child &&
-                   v->child->offsets && v->child->data && v->data) {
-            off_ = reinterpret_cast<const std::int32_t*>(
-                v->child->offsets->data());
+                   offsets_of<Off>(*v->child) && v->child->data && v->data) {
+            off_ = reinterpret_cast<const Off*>(
+                offsets_of<Off>(*v->child)->data());
             data_ = reinterpret_cast<const char*>(v->child->data->data());
             codes_ = reinterpret_cast<const std::int32_t*>(v->data->data());
             ok_ = true;
@@ -148,7 +173,7 @@ class RowReader {
 
    private:
     const dftu_series* v_;
-    const std::int32_t* off_ = nullptr;
+    const Off* off_ = nullptr;
     const char* data_ = nullptr;
     const std::int32_t* codes_ = nullptr;
     bool ok_ = false;
@@ -193,7 +218,9 @@ dftu_series* make_u64(const dftu_series* v,
 }
 
 // Flat String output column from one string per row (size == v->length); shares
-// v's validity so null rows stay null (their bytes are ignored).
+// v's validity so null rows stay null (their bytes are ignored). Always
+// narrow (int32 offsets): a derived per-row transform's total size is its own
+// fresh sizing question, not a width the source column forces on it.
 dftu_series* make_string(const dftu_series* v,
                          const std::vector<std::string>& parts) {
     auto* out = new dftu_series();
@@ -280,11 +307,13 @@ void ascii_fold_simd(const std::uint8_t* in, std::uint8_t* out, std::size_t n,
 }
 
 // Fold that keeps offsets/validity and rewrites only the (byte-length
-// preserving) data buffer. Fast path SIMD for a FLAT input; a DICTIONARY input
-// falls back through make_string per row.
-dftu_series* ascii_fold(const dftu_series* v, std::uint8_t lo, std::uint8_t hi,
-                        int add) {
-    RowReader r(v);
+// preserving) data buffer. Fast path SIMD for a FLAT input, preserving the
+// source's own offset width and buffer (no copy of the offsets); a
+// DICTIONARY input falls back through make_string (always narrow) per row.
+template <class Off>
+dftu_series* ascii_fold_w(const dftu_series* v, std::uint8_t lo,
+                          std::uint8_t hi, int add) {
+    RowReader<Off> r(v);
     if (!r.ok()) return nullptr;
     if (v->encoding == Encoding::Flat) {
         auto* out = new dftu_series();
@@ -293,7 +322,7 @@ dftu_series* ascii_fold(const dftu_series* v, std::uint8_t lo, std::uint8_t hi,
         out->length = v->length;
         out->null_count = v->null_count;
         out->validity = v->validity;
-        out->offsets = v->offsets;  // byte lengths unchanged
+        offsets_of<Off>(*out) = offsets_of<Off>(*v);  // byte lengths unchanged
         const std::size_t data_len = v->data ? v->data->size() : 0;
         out->data = Buffer::allocate(data_len);
         if (data_len != 0)
@@ -314,10 +343,18 @@ dftu_series* ascii_fold(const dftu_series* v, std::uint8_t lo, std::uint8_t hi,
     return make_string(v, parts);
 }
 
-// Per-row string transform (scalar); null rows pass through as null.
-template <class Fn>
-dftu_series* string_transform(const dftu_series* v, Fn fn) {
-    RowReader r(v);
+dftu_series* ascii_fold(const dftu_series* v, std::uint8_t lo, std::uint8_t hi,
+                        int add) {
+    return is_wide_offset_type(v->type)
+               ? ascii_fold_w<std::int64_t>(v, lo, hi, add)
+               : ascii_fold_w<std::int32_t>(v, lo, hi, add);
+}
+
+// Per-row string transform (scalar) at offset width `Off`; null rows pass
+// through as null. Output is always narrow (see make_string).
+template <class Off, class Fn>
+dftu_series* string_transform_w(const dftu_series* v, Fn fn) {
+    RowReader<Off> r(v);
     if (!r.ok()) return nullptr;
     std::vector<std::string> parts(static_cast<std::size_t>(v->length));
     for (std::int64_t i = 0; i < v->length; ++i) {
@@ -327,10 +364,18 @@ dftu_series* string_transform(const dftu_series* v, Fn fn) {
     return make_string(v, parts);
 }
 
-// Per-row int64 transform (scalar); null rows keep the shared validity.
 template <class Fn>
-dftu_series* int_transform(const dftu_series* v, Fn fn) {
-    RowReader r(v);
+dftu_series* string_transform(const dftu_series* v, Fn fn) {
+    return is_wide_offset_type(v->type)
+               ? string_transform_w<std::int64_t>(v, fn)
+               : string_transform_w<std::int32_t>(v, fn);
+}
+
+// Per-row int64 transform (scalar) at offset width `Off`; null rows keep the
+// shared validity.
+template <class Off, class Fn>
+dftu_series* int_transform_w(const dftu_series* v, Fn fn) {
+    RowReader<Off> r(v);
     if (!r.ok()) return nullptr;
     std::vector<std::int64_t> vals(static_cast<std::size_t>(v->length), 0);
     for (std::int64_t i = 0; i < v->length; ++i) {
@@ -338,6 +383,12 @@ dftu_series* int_transform(const dftu_series* v, Fn fn) {
         vals[static_cast<std::size_t>(i)] = fn(r.at(i));
     }
     return make_i64(v, vals);
+}
+
+template <class Fn>
+dftu_series* int_transform(const dftu_series* v, Fn fn) {
+    return is_wide_offset_type(v->type) ? int_transform_w<std::int64_t>(v, fn)
+                                        : int_transform_w<std::int32_t>(v, fn);
 }
 
 bool is_ascii_ws(char c) {
@@ -579,9 +630,10 @@ dftu_series* dftu_series_str_like(const dftu_series* v, const char* pattern,
 }
 
 dftu_series* dftu_series_str_len_bytes(const dftu_series* v) {
-    RowReader r(v);
-    if (!r.ok()) return nullptr;
-    // FLAT: adjacent int32 offset difference, vectorized; DICTIONARY: scalar.
+    // FLAT, narrow offsets: adjacent int32 offset difference, vectorized.
+    // Every other case (DICTIONARY, or a wide-offset FLAT column) is scalar;
+    // a Large* column's row count is bounded by int32 either way, only its
+    // byte offsets are not, so the SIMD int32 path stays narrow-only.
     if (v->encoding == Encoding::Flat && v->offsets) {
         std::vector<std::int64_t> vals(static_cast<std::size_t>(v->length), 0);
         if (v->length > 0)
@@ -597,8 +649,9 @@ dftu_series* dftu_series_str_len_bytes(const dftu_series* v) {
 }
 
 dftu_series* dftu_series_str_len_chars(const dftu_series* v) {
-    // FLAT: count non-continuation bytes per row with the vectorized scan;
-    // DICTIONARY and other encodings take the scalar per-row path.
+    // FLAT, narrow offsets: count non-continuation bytes per row with the
+    // vectorized scan. DICTIONARY and wide-offset columns take the scalar
+    // per-row path.
     if (v->encoding == Encoding::Flat && v->offsets && v->data) {
         const std::int32_t* off =
             reinterpret_cast<const std::int32_t*>(v->offsets->data());
@@ -626,8 +679,10 @@ dftu_series* dftu_series_str_find(const dftu_series* v, const char* needle,
     });
 }
 
-dftu_series* dftu_series_fnv1a(const dftu_series* v) {
-    RowReader r(v);
+namespace {
+template <class Off>
+dftu_series* fnv1a_w(const dftu_series* v) {
+    RowReader<Off> r(v);
     if (!r.ok()) return nullptr;
     std::vector<std::uint64_t> vals(static_cast<std::size_t>(v->length), 0);
     for (std::int64_t i = 0; i < v->length; ++i) {
@@ -637,9 +692,17 @@ dftu_series* dftu_series_fnv1a(const dftu_series* v) {
     }
     return make_u64(v, vals, nullptr);
 }
+}  // namespace
 
-dftu_series* dftu_series_hex64_parse(const dftu_series* v) {
-    RowReader r(v);
+dftu_series* dftu_series_fnv1a(const dftu_series* v) {
+    return is_wide_offset_type(v->type) ? fnv1a_w<std::int64_t>(v)
+                                        : fnv1a_w<std::int32_t>(v);
+}
+
+namespace {
+template <class Off>
+dftu_series* hex64_parse_w(const dftu_series* v) {
+    RowReader<Off> r(v);
     if (!r.ok()) return nullptr;
     std::vector<std::uint64_t> vals(static_cast<std::size_t>(v->length), 0);
     std::size_t bitmap_bytes = static_cast<std::size_t>((v->length + 7) / 8);
@@ -659,6 +722,12 @@ dftu_series* dftu_series_hex64_parse(const dftu_series* v) {
     dftu_series* out = make_u64(v, vals, valid.data());
     out->null_count = nulls;
     return out;
+}
+}  // namespace
+
+dftu_series* dftu_series_hex64_parse(const dftu_series* v) {
+    return is_wide_offset_type(v->type) ? hex64_parse_w<std::int64_t>(v)
+                                        : hex64_parse_w<std::int32_t>(v);
 }
 
 dftu_series* dftu_series_hex64_format(const dftu_series* v) {
@@ -761,11 +830,14 @@ dftu_series* dftu_series_str_zfill(const dftu_series* v, int64_t width) {
         v, [width](std::string_view s) { return zfill(s, width); });
 }
 
-dftu_series* dftu_series_str_split(const dftu_series* v, const char* sep,
-                                   int32_t sep_len) {
-    RowReader r(v);
+namespace {
+// Splits every row of `v` on `s_sep`, producing a List<String> (always
+// narrow, both levels: the per-row part count and total byte count are the
+// source column's own data, already known to fit an int32 row count).
+template <class Off>
+dftu_series* str_split_w(const dftu_series* v, std::string_view s_sep) {
+    RowReader<Off> r(v);
     if (!r.ok()) return nullptr;
-    std::string_view s_sep(sep, static_cast<std::size_t>(sep_len));
 
     std::vector<std::string> all_parts;
     std::vector<std::int32_t> list_off(static_cast<std::size_t>(v->length + 1),
@@ -828,4 +900,12 @@ dftu_series* dftu_series_str_split(const dftu_series* v, const char* sep,
     std::memcpy(out->offsets->data(), list_off.data(), loff_bytes);
     out->child = std::shared_ptr<dftu_series>(child);
     return out;
+}
+}  // namespace
+
+dftu_series* dftu_series_str_split(const dftu_series* v, const char* sep,
+                                   int32_t sep_len) {
+    std::string_view s_sep(sep, static_cast<std::size_t>(sep_len));
+    return is_wide_offset_type(v->type) ? str_split_w<std::int64_t>(v, s_sep)
+                                        : str_split_w<std::int32_t>(v, s_sep);
 }

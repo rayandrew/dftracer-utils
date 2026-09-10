@@ -149,9 +149,17 @@ DFTU_EXPORT int32_t dftu_series_is_null(const dftu_series* col, int64_t i);
  * when the column is not FLAT. */
 DFTU_EXPORT const void* dftu_series_data(const dftu_series* col);
 
-/** int32 offset buffer (length+1 entries) of a variable-width String/Binary or
- * List column, or NULL for fixed-width types. */
+/** int32 offset buffer (length+1 entries) of a String/Binary/List column, or
+ * NULL when the column has no 32-bit offsets buffer: a fixed-width type, or a
+ * LargeString/LargeBinary/LargeList column, which carries its offsets at
+ * dftu_series_offsets64 instead. Exactly one of dftu_series_offsets and
+ * dftu_series_offsets64 is non-NULL for a variable-width column. */
 DFTU_EXPORT const int32_t* dftu_series_offsets(const dftu_series* col);
+
+/** int64 offset buffer (length+1 entries) of a LargeString/LargeBinary/
+ * LargeList column, or NULL otherwise (including a plain String/Binary/List
+ * column, whose offsets are dftu_series_offsets instead). */
+DFTU_EXPORT const int64_t* dftu_series_offsets64(const dftu_series* col);
 
 /** Number of child columns: 1 for a List (its flattened values), the field
  * count for a Struct, 0 otherwise. */

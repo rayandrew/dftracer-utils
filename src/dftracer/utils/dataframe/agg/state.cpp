@@ -143,12 +143,14 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
         st.skey_cols.resize(st.nkeys);
         for (std::size_t k = 0; k < st.nkeys; ++k) {
             // group_of reads every non-String key as int64/uint64/double
-            // (read_bits/col_domain). FixedSizeBinary and Decimal128/256 have
-            // no such reading; refuse them here rather than silently
-            // collapsing every row into one group.
+            // (read_bits/col_domain). FixedSizeBinary, Decimal128/256, and
+            // LargeString/LargeBinary/LargeList have no such reading; refuse
+            // them here rather than silently collapsing every row into one
+            // group.
             const TypeId kt = keys[k]->type();
             if (kt == TypeId::FixedSizeBinary || kt == TypeId::Decimal128 ||
-                kt == TypeId::Decimal256) {
+                kt == TypeId::Decimal256 || kt == TypeId::LargeString ||
+                kt == TypeId::LargeBinary || kt == TypeId::LargeList) {
                 throw std::invalid_argument(
                     std::string("group_by: key column type '") + type_name(kt) +
                     "' is not supported as a group key (no int64/double "

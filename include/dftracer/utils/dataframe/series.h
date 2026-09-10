@@ -241,7 +241,8 @@ class Series {
                    : std::span<const T>();
     }
 
-    /// Value of a String/Binary column at `i`, valid while this column lives.
+    /// Value of a String/Binary/LargeString/LargeBinary column at `i`, valid
+    /// while this column lives.
     ///
     /// FLAT only: a DICTIONARY or SELECTION column (what `filter`, `take` and
     /// the sort/topk kernels return, zero-copy over a base) carries no value
@@ -250,11 +251,18 @@ class Series {
     /// ambiguous with a genuine empty string - use `is_flat()` when the
     /// difference matters.
     std::string_view string_at(std::int64_t i) const noexcept {
-        const std::int32_t* off = dftu_series_offsets(handle_);
         const char* d = static_cast<const char*>(dftu_series_data(handle_));
         // dftu_series_data returns NULL for a non-FLAT column; reading through
         // it produced a segfault rather than a diagnosable result.
-        if (off == nullptr || d == nullptr) return {};
+        if (d == nullptr) return {};
+        if (is_wide_offset_type(type())) {
+            const std::int64_t* off = dftu_series_offsets64(handle_);
+            if (off == nullptr) return {};
+            return std::string_view(
+                d + off[i], static_cast<std::size_t>(off[i + 1] - off[i]));
+        }
+        const std::int32_t* off = dftu_series_offsets(handle_);
+        if (off == nullptr) return {};
         return std::string_view(d + off[i],
                                 static_cast<std::size_t>(off[i + 1] - off[i]));
     }
@@ -265,18 +273,34 @@ class Series {
     bool is_flat() const noexcept { return encoding() == Encoding::Flat; }
 
     /// int32 offset buffer (length+1 entries) of a String/Binary or List
-    /// column, or null for fixed-width types.
+    /// column, or null for fixed-width types and for a LargeString/
+    /// LargeBinary/LargeList column (see `offsets64()`).
     const std::int32_t* offsets() const noexcept {
         return dftu_series_offsets(handle_);
     }
 
     /// int32 offset buffer as a span of `length()+1` entries; empty for
-    /// fixed-width types.
+    /// fixed-width types and for a Large* column.
     std::span<const std::int32_t> offsets_span() const noexcept {
         const std::int32_t* off = offsets();
         return off != nullptr ? std::span<const std::int32_t>(
                                     off, static_cast<std::size_t>(length()) + 1)
                               : std::span<const std::int32_t>();
+    }
+
+    /// int64 offset buffer (length+1 entries) of a LargeString/LargeBinary/
+    /// LargeList column, or null otherwise.
+    const std::int64_t* offsets64() const noexcept {
+        return dftu_series_offsets64(handle_);
+    }
+
+    /// int64 offset buffer as a span of `length()+1` entries; empty unless
+    /// this is a Large* column.
+    std::span<const std::int64_t> offsets64_span() const noexcept {
+        const std::int64_t* off = offsets64();
+        return off != nullptr ? std::span<const std::int64_t>(
+                                    off, static_cast<std::size_t>(length()) + 1)
+                              : std::span<const std::int64_t>();
     }
 
     /// Child count: 1 for a List, the field count for a Struct, else 0.

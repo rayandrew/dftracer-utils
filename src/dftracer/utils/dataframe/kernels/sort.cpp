@@ -34,8 +34,10 @@ int cmp_bool(const Series& v, std::int64_t a, std::int64_t b) {
 
 int cmp_row(const Series& v, std::int64_t a, std::int64_t b) {
     // physical_type() routes Date32/Time32 to the Int32 case and
-    // Date64/Time64/Timestamp/Duration to Int64, no case added per type.
-    switch (physical_type(v.type())) {
+    // Date64/Time64/Timestamp/Duration to Int64, no case added per type;
+    // narrow_varwidth_type() routes LargeString to the String case (its own
+    // width is Series::string_at's concern, not this switch's).
+    switch (narrow_varwidth_type(physical_type(v.type()))) {
         case TypeId::Bool:
             return cmp_bool(v, a, b);
         case TypeId::Int8:

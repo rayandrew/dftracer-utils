@@ -502,7 +502,8 @@ class Compiler {
 // Series::slice only supports fixed-width types (dftu_series_slice returns
 // null for String/Binary); fall back to a row-index take for those.
 Series load_slice(const Series& in, std::int64_t offset, std::int64_t len) {
-    if (in.type() != TypeId::String && in.type() != TypeId::Binary)
+    const TypeId kind = narrow_varwidth_type(in.type());
+    if (kind != TypeId::String && kind != TypeId::Binary)
         return in.slice(offset, len);
     std::vector<std::int64_t> idx(static_cast<std::size_t>(len));
     for (std::int64_t i = 0; i < len; ++i)

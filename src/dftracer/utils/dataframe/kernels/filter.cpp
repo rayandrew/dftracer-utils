@@ -3,6 +3,7 @@
 #include <dftracer/utils/dataframe/internal/filter_simd.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
 #include <dftracer/utils/dataframe/internal/scalar.h>
+#include <dftracer/utils/dataframe/internal/varwidth_offsets.h>
 #include <dftracer/utils/dataframe/kernels/filter.h>
 #include <dftracer/utils/dataframe/parallel.h>
 
@@ -12,6 +13,9 @@
 
 using dftracer::utils::dataframe::Buffer;
 using dftracer::utils::dataframe::Encoding;
+using dftracer::utils::dataframe::is_wide_offset_type;
+using dftracer::utils::dataframe::narrow_varwidth_type;
+using dftracer::utils::dataframe::offsets_of;
 using dftracer::utils::dataframe::scalar_as;
 using dftracer::utils::dataframe::Series;
 using dftracer::utils::dataframe::TypeId;
@@ -145,13 +149,17 @@ static std::shared_ptr<Buffer> gather_validity(const dftu_series& base,
 static dftu_series* gather_column(const dftu_series& base,
                                   const std::int64_t* idx, std::int64_t n);
 
-// String/Binary: concatenate the selected slices, rebuild offsets.
-static dftu_series* gather_varwidth(const dftu_series& base,
-                                    const std::int64_t* idx, std::int64_t n) {
-    const std::int32_t* boff =
-        reinterpret_cast<const std::int32_t*>(base.offsets->data());
+// String/Binary(/Large): concatenate the selected slices, rebuild offsets at
+// the same width as `base` (int32 for String/Binary, int64 for LargeString/
+// LargeBinary) - take/gather reproduces the source column reordered, so it
+// must not narrow a Large column's offsets.
+template <class Off>
+static dftu_series* gather_varwidth_w(const dftu_series& base,
+                                      const std::int64_t* idx, std::int64_t n) {
+    const Off* boff =
+        reinterpret_cast<const Off*>(offsets_of<Off>(base)->data());
     const char* bdata = reinterpret_cast<const char*>(base.data->data());
-    std::vector<std::int32_t> offsets{0};
+    std::vector<Off> offsets{0};
     offsets.reserve(static_cast<std::size_t>(n) + 1);
     std::string out;
     for (std::int64_t i = 0; i < n; ++i) {
@@ -159,13 +167,30 @@ static dftu_series* gather_varwidth(const dftu_series& base,
         if (k >= 0)  // negative = null: an empty slice
             out.append(bdata + boff[k],
                        static_cast<std::size_t>(boff[k + 1] - boff[k]));
-        offsets.push_back(static_cast<std::int32_t>(out.size()));
+        offsets.push_back(static_cast<Off>(out.size()));
     }
     std::int64_t nulls = 0;
     auto validity = gather_validity(base, idx, n, nulls);
-    return dftu_series_new_string(static_cast<dftu_dtype>(base.type),
-                                  offsets.data(), out.data(), n,
-                                  validity ? validity->data() : nullptr);
+
+    auto* result = new dftu_series();
+    result->type = base.type;
+    result->encoding = Encoding::Flat;
+    result->length = n;
+    result->null_count = nulls;
+    result->validity = validity;
+    const std::size_t off_bytes = offsets.size() * sizeof(Off);
+    offsets_of<Off>(*result) = Buffer::allocate(off_bytes);
+    std::memcpy(offsets_of<Off>(*result)->data(), offsets.data(), off_bytes);
+    result->data = Buffer::allocate(out.size());
+    if (!out.empty()) std::memcpy(result->data->data(), out.data(), out.size());
+    return result;
+}
+
+static dftu_series* gather_varwidth(const dftu_series& base,
+                                    const std::int64_t* idx, std::int64_t n) {
+    return is_wide_offset_type(base.type)
+               ? gather_varwidth_w<std::int64_t>(base, idx, n)
+               : gather_varwidth_w<std::int32_t>(base, idx, n);
 }
 
 // Struct: gather every field column by the same row indices.
@@ -184,30 +209,30 @@ static dftu_series* gather_struct(const dftu_series& base,
     return out;
 }
 
-// List: expand the selected rows to child-row indices (each row's sublist),
-// gather the child by them, and rebuild per-row offsets.
-static dftu_series* gather_list(const dftu_series& base,
-                                const std::int64_t* idx, std::int64_t n) {
-    const std::int32_t* boff =
-        reinterpret_cast<const std::int32_t*>(base.offsets->data());
+// List(/LargeList): expand the selected rows to child-row indices (each row's
+// sublist), gather the child by them, and rebuild per-row offsets at the same
+// width as `base`.
+template <class Off>
+static dftu_series* gather_list_w(const dftu_series& base,
+                                  const std::int64_t* idx, std::int64_t n) {
+    const Off* boff =
+        reinterpret_cast<const Off*>(offsets_of<Off>(base)->data());
     std::vector<std::int64_t> child_idx;
-    std::vector<std::int32_t> offsets{0};
+    std::vector<Off> offsets{0};
     offsets.reserve(static_cast<std::size_t>(n) + 1);
     for (std::int64_t i = 0; i < n; ++i) {
         const std::int64_t r = idx[i];
         if (r >= 0)  // negative = null: an empty sublist
-            for (std::int32_t j = boff[r]; j < boff[r + 1]; ++j)
-                child_idx.push_back(j);
-        offsets.push_back(static_cast<std::int32_t>(child_idx.size()));
+            for (Off j = boff[r]; j < boff[r + 1]; ++j) child_idx.push_back(j);
+        offsets.push_back(static_cast<Off>(child_idx.size()));
     }
     auto* out = new dftu_series();
-    out->type = TypeId::List;
+    out->type = base.type;
     out->encoding = Encoding::Flat;
     out->length = n;
-    out->offsets = Buffer::allocate((static_cast<std::size_t>(n) + 1) *
-                                    sizeof(std::int32_t));
-    std::memcpy(out->offsets->data(), offsets.data(),
-                offsets.size() * sizeof(std::int32_t));
+    const std::size_t off_bytes = offsets.size() * sizeof(Off);
+    offsets_of<Off>(*out) = Buffer::allocate(off_bytes);
+    std::memcpy(offsets_of<Off>(*out)->data(), offsets.data(), off_bytes);
     out->child = std::shared_ptr<dftu_series>(
         gather_column(*base.child, child_idx.data(),
                       static_cast<std::int64_t>(child_idx.size())));
@@ -215,14 +240,22 @@ static dftu_series* gather_list(const dftu_series& base,
     return out;
 }
 
+static dftu_series* gather_list(const dftu_series& base,
+                                const std::int64_t* idx, std::int64_t n) {
+    return is_wide_offset_type(base.type)
+               ? gather_list_w<std::int64_t>(base, idx, n)
+               : gather_list_w<std::int32_t>(base, idx, n);
+}
+
 // Gather `n` rows of a FLAT `base` at row indices `idx`, recursively for nested
 // types. Propagates validity. Returns null for a non-gatherable base (Bool).
 static dftu_series* gather_column(const dftu_series& base,
                                   const std::int64_t* idx, std::int64_t n) {
-    if (base.type == TypeId::String || base.type == TypeId::Binary)
+    const TypeId base_kind = narrow_varwidth_type(base.type);
+    if (base_kind == TypeId::String || base_kind == TypeId::Binary)
         return gather_varwidth(base, idx, n);
     if (base.type == TypeId::Struct) return gather_struct(base, idx, n);
-    if (base.type == TypeId::List) return gather_list(base, idx, n);
+    if (base_kind == TypeId::List) return gather_list(base, idx, n);
 
     // FixedSizeBinary's width is a DataType parameter, not a per-TypeId
     // constant (byte_width returns 0 for it); every other fixed-width type

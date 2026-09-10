@@ -1,5 +1,6 @@
 #include <dftracer/utils/core/common/filesystem.h>  // fs:: portability alias
 #include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/spill.h>
 #include <dftracer/utils/dataframe/types.h>
 #include <unistd.h>
@@ -60,10 +61,18 @@ std::size_t columns_bytes(const std::vector<Series>& cols) {
     std::size_t total = 0;
     for (const Series& c : cols) {
         const std::int64_t n = c.length();
-        if (byte_width(c.type()) == 0) {  // String / Binary
+        if (is_wide_offset_type(c.type())) {  // LargeString / LargeBinary
+            const std::int64_t* offs = c.offsets64();
+            total +=
+                static_cast<std::size_t>(n + 1) * sizeof(std::int64_t) +
+                (n > 0 && offs != nullptr ? static_cast<std::size_t>(offs[n])
+                                          : 0);
+        } else if (byte_width(c.type()) == 0) {  // String / Binary
             const std::int32_t* offs = dftu_series_offsets(c.handle());
-            total += static_cast<std::size_t>(n + 1) * sizeof(std::int32_t) +
-                     (n > 0 ? static_cast<std::size_t>(offs[n]) : 0);
+            total +=
+                static_cast<std::size_t>(n + 1) * sizeof(std::int32_t) +
+                (n > 0 && offs != nullptr ? static_cast<std::size_t>(offs[n])
+                                          : 0);
         } else {
             total += buffer_bytes(c.type(), n);
         }
@@ -112,9 +121,17 @@ void put_series(std::string& out, const Series& s_in) {
         std::vector<std::uint8_t> v = validity_bitmap(s);
         put_bytes(out, v.data(), v.size());
     }
-    if (t == TypeId::List || t == TypeId::Struct)
+    if (t == TypeId::List || t == TypeId::LargeList || t == TypeId::Struct)
         throw std::invalid_argument("spill: nested columns unsupported");
-    if (byte_width(t) == 0) {  // String / Binary
+    if (is_wide_offset_type(t)) {  // LargeString / LargeBinary
+        const std::int64_t* offs = s.offsets64();
+        const std::int64_t nbytes = n > 0 ? offs[n] : 0;
+        put_pod<std::int64_t>(out, nbytes);
+        put_bytes(out, offs,
+                  static_cast<std::size_t>(n + 1) * sizeof(std::int64_t));
+        put_bytes(out, dftu_series_data(s.handle()),
+                  static_cast<std::size_t>(nbytes));
+    } else if (byte_width(t) == 0) {  // String / Binary
         const std::int32_t* offs = dftu_series_offsets(s.handle());
         const std::int64_t nbytes = n > 0 ? offs[n] : 0;
         put_pod<std::int64_t>(out, nbytes);
@@ -136,6 +153,32 @@ Series get_series(const std::uint8_t*& p, const std::uint8_t* end) {
     if (nulls > 0)
         validity = take_bytes(p, end, static_cast<std::size_t>((n + 7) / 8));
     const auto dt = static_cast<dftu_dtype>(static_cast<std::int32_t>(type));
+    if (is_wide_offset_type(type)) {  // LargeString / LargeBinary
+        const std::int64_t nbytes = get_pod<std::int64_t>(p, end);
+        const auto* offs = reinterpret_cast<const std::int64_t*>(take_bytes(
+            p, end, static_cast<std::size_t>(n + 1) * sizeof(std::int64_t)));
+        const std::uint8_t* data =
+            take_bytes(p, end, static_cast<std::size_t>(nbytes));
+        auto* col = new dftu_series();
+        col->type = type;
+        col->encoding = Encoding::Flat;
+        col->length = n;
+        col->offsets64 = Buffer::allocate(static_cast<std::size_t>(n + 1) *
+                                          sizeof(std::int64_t));
+        std::memcpy(col->offsets64->data(), offs,
+                    static_cast<std::size_t>(n + 1) * sizeof(std::int64_t));
+        col->data = Buffer::allocate(static_cast<std::size_t>(nbytes));
+        if (nbytes != 0)
+            std::memcpy(col->data->data(), data,
+                        static_cast<std::size_t>(nbytes));
+        if (validity != nullptr) {
+            const std::size_t vbytes = static_cast<std::size_t>((n + 7) / 8);
+            col->validity = Buffer::allocate(vbytes);
+            std::memcpy(col->validity->data(), validity, vbytes);
+            col->null_count = nulls;
+        }
+        return Series{col};
+    }
     if (byte_width(type) == 0) {  // String / Binary
         const std::int64_t nbytes = get_pod<std::int64_t>(p, end);
         const auto* offs = reinterpret_cast<const std::int32_t*>(take_bytes(

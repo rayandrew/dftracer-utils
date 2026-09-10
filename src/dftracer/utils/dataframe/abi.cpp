@@ -171,6 +171,11 @@ const int32_t* dftu_series_offsets(const dftu_series* col) {
     return reinterpret_cast<const int32_t*>(col->offsets->data());
 }
 
+const int64_t* dftu_series_offsets64(const dftu_series* col) {
+    if (!col->offsets64) return nullptr;
+    return reinterpret_cast<const int64_t*>(col->offsets64->data());
+}
+
 int32_t dftu_series_is_null(const dftu_series* col, int64_t i) {
     if (!col->validity) return 0;
     const std::uint8_t* bm = col->validity->data();

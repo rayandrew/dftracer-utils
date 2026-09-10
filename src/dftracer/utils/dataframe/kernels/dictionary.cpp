@@ -1,5 +1,6 @@
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
+#include <dftracer/utils/dataframe/internal/varwidth_offsets.h>
 #include <dftracer/utils/dataframe/kernels/dictionary.h>
 #include <dftracer/utils/dataframe/parallel.h>
 
@@ -27,10 +28,15 @@ constexpr std::int64_t DICT_ENCODE_GRAIN = 1 << 18;
 // codes), computed with two parallel passes: each chunk builds a local
 // first-seen map, then the chunks are merged by picking, for each distinct
 // value, the smallest global row index it first appeared at - that ordering
-// is exactly what the serial single pass would have assigned.
+// is exactly what the serial single pass would have assigned. `Off` is the
+// source column's offset width (int32 for String/Binary, int64 for
+// LargeString/LargeBinary); the dictionary's own offsets are built at the
+// same width, so a DICTIONARY-encoded Large column's child is still a
+// Large-typed, wide-offset column downstream ops can read.
+template <class Off>
 std::vector<std::int32_t> dictionary_encode_parallel(
-    const std::int32_t* off, const char* data, std::int64_t n,
-    std::vector<std::int32_t>& dict_offsets, std::string& dict_data) {
+    const Off* off, const char* data, std::int64_t n,
+    std::vector<Off>& dict_offsets, std::string& dict_data) {
     const std::int64_t nchunks =
         (n + DICT_ENCODE_GRAIN - 1) / DICT_ENCODE_GRAIN;
     std::vector<std::unordered_map<std::string_view, std::int64_t>> local(
@@ -63,7 +69,7 @@ std::vector<std::int32_t> dictionary_encode_parallel(
         const std::string_view s = ordered[c].second;
         code_of.emplace(s, static_cast<std::int32_t>(c));
         dict_data.append(s);
-        dict_offsets.push_back(static_cast<std::int32_t>(dict_data.size()));
+        dict_offsets.push_back(static_cast<Off>(dict_data.size()));
     }
 
     std::vector<std::int32_t> codes(static_cast<std::size_t>(n));
@@ -77,29 +83,17 @@ std::vector<std::int32_t> dictionary_encode_parallel(
     return codes;
 }
 
-}  // namespace
-
-}  // namespace dftracer::utils::dataframe
-
-dftu_series* dftu_series_dictionary_encode(const dftu_series* v) {
-    using dftracer::utils::dataframe::Buffer;
-    using dftracer::utils::dataframe::Encoding;
-    using dftracer::utils::dataframe::TypeId;
-    if (v->encoding != Encoding::Flat) return nullptr;
-    if (v->type != TypeId::String && v->type != TypeId::Binary) return nullptr;
-    if (!v->offsets || !v->data) return nullptr;
-
-    const std::int32_t* off =
-        reinterpret_cast<const std::int32_t*>(v->offsets->data());
+template <class Off>
+dftu_series* dictionary_encode_w(const dftu_series* v) {
+    const Off* off = reinterpret_cast<const Off*>(offsets_of<Off>(*v)->data());
     const char* data = reinterpret_cast<const char*>(v->data->data());
 
     std::vector<std::int32_t> codes;
-    std::vector<std::int32_t> dict_offsets{0};
+    std::vector<Off> dict_offsets{0};
     std::string dict_data;
-    if (dftracer::utils::dataframe::parallel_backend_installed() &&
-        v->length > dftracer::utils::dataframe::DICT_ENCODE_GRAIN) {
-        codes = dftracer::utils::dataframe::dictionary_encode_parallel(
-            off, data, v->length, dict_offsets, dict_data);
+    if (parallel_backend_installed() && v->length > DICT_ENCODE_GRAIN) {
+        codes = dictionary_encode_parallel<Off>(off, data, v->length,
+                                                dict_offsets, dict_data);
     } else {
         codes.resize(static_cast<std::size_t>(v->length));
         std::unordered_map<std::string_view, std::int32_t> codes_of;
@@ -112,8 +106,7 @@ dftu_series* dftu_series_dictionary_encode(const dftu_series* v) {
                 code = static_cast<std::int32_t>(codes_of.size());
                 codes_of.emplace(s, code);
                 dict_data.append(s);
-                dict_offsets.push_back(
-                    static_cast<std::int32_t>(dict_data.size()));
+                dict_offsets.push_back(static_cast<Off>(dict_data.size()));
             } else {
                 code = it->second;
             }
@@ -121,10 +114,16 @@ dftu_series* dftu_series_dictionary_encode(const dftu_series* v) {
         }
     }
 
-    dftu_series* dict = dftu_series_new_string(
-        static_cast<dftu_dtype>(v->type), dict_offsets.data(), dict_data.data(),
-        static_cast<std::int64_t>(dict_offsets.size() - 1), nullptr);
-    if (dict == nullptr) return nullptr;
+    auto* dict = new dftu_series();
+    dict->type = v->type;
+    dict->encoding = Encoding::Flat;
+    dict->length = static_cast<std::int64_t>(dict_offsets.size() - 1);
+    std::size_t off_bytes = dict_offsets.size() * sizeof(Off);
+    offsets_of<Off>(*dict) = Buffer::allocate(off_bytes);
+    std::memcpy(offsets_of<Off>(*dict)->data(), dict_offsets.data(), off_bytes);
+    dict->data = Buffer::allocate(dict_data.size());
+    if (!dict_data.empty())
+        std::memcpy(dict->data->data(), dict_data.data(), dict_data.size());
 
     auto* out = new dftu_series();
     out->type = v->type;
@@ -137,4 +136,20 @@ dftu_series* dftu_series_dictionary_encode(const dftu_series* v) {
                 codes.size() * sizeof(std::int32_t));
     out->child = std::shared_ptr<dftu_series>(dict);
     return out;
+}
+
+}  // namespace
+
+}  // namespace dftracer::utils::dataframe
+
+dftu_series* dftu_series_dictionary_encode(const dftu_series* v) {
+    using namespace dftracer::utils::dataframe;
+    if (v->encoding != Encoding::Flat) return nullptr;
+    const TypeId base = narrow_varwidth_type(v->type);
+    if (base != TypeId::String && base != TypeId::Binary) return nullptr;
+    const bool wide = is_wide_offset_type(v->type);
+    if ((wide && !v->offsets64) || (!wide && !v->offsets) || !v->data)
+        return nullptr;
+    return wide ? dictionary_encode_w<std::int64_t>(v)
+                : dictionary_encode_w<std::int32_t>(v);
 }

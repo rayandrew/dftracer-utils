@@ -162,7 +162,7 @@ int cmp_cell(const Series& a, std::int64_t ia, const Series& b, std::int64_t ib,
     const bool na = a.is_null(ia), nb = b.is_null(ib);
     if (na || nb) return na && nb ? 0 : (na ? 1 : -1);
     int c;
-    if (a.type() == TypeId::String) {
+    if (narrow_varwidth_type(a.type()) == TypeId::String) {
         const std::string_view x = a.string_at(ia), y = b.string_at(ib);
         c = x < y ? -1 : (x > y ? 1 : 0);
     } else {
@@ -177,10 +177,18 @@ std::size_t morsel_bytes(const std::vector<Series>& cols) {
     std::size_t total = 0;
     for (const Series& c : cols) {
         const std::int64_t n = c.length();
-        if (byte_width(c.type()) == 0) {  // String / Binary
+        if (is_wide_offset_type(c.type())) {  // LargeString / LargeBinary
+            const std::int64_t* offs = c.offsets64();
+            total +=
+                static_cast<std::size_t>(n + 1) * sizeof(std::int64_t) +
+                (n > 0 && offs != nullptr ? static_cast<std::size_t>(offs[n])
+                                          : 0);
+        } else if (byte_width(c.type()) == 0) {  // String / Binary
             const std::int32_t* offs = dftu_series_offsets(c.handle());
-            total += static_cast<std::size_t>(n + 1) * sizeof(std::int32_t) +
-                     (n > 0 ? static_cast<std::size_t>(offs[n]) : 0);
+            total +=
+                static_cast<std::size_t>(n + 1) * sizeof(std::int32_t) +
+                (n > 0 && offs != nullptr ? static_cast<std::size_t>(offs[n])
+                                          : 0);
         } else {
             total += buffer_bytes(c.type(), n);
         }
