@@ -30,6 +30,7 @@ set(UTILITIES_TEST_SOURCES
     # Indexer
     indexer/test_rocksdb_storage.cpp
     indexer/test_scan_prefix.cpp
+    indexer/test_column_type_codec.cpp
     indexer/test_index_database.cpp
     indexer/test_index_builder.cpp
     indexer/test_hash_table_aggregation.cpp
