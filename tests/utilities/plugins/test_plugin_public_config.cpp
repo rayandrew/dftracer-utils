@@ -20,14 +20,17 @@
 #include <fstream>
 #include <string>
 
+#include "test_plugin_common.h"
+
 using dftracer::utils::CoroScope;
 using dftracer::utils::Runtime;
 using dftracer::utils::plugins::PluginRun;
 using dftracer::utils::plugins::Plugins;
-using dftracer::utils::trace::internal::determine_index_path;
 using View = dftracer::utils::trace::views::View;
 using ViewFile = dftracer::utils::trace::views::ViewFile;
-using ExportSink = dftracer::utils::trace::views::ExportSink;
+using test_plugin_common::index_trace;
+using test_plugin_common::result_text;
+using test_plugin_common::run_set;
 namespace coro = dftracer::utils::coro;
 namespace fs = std::filesystem;
 
@@ -53,35 +56,7 @@ ViewFile make_trace(dftu_utils_test::TestEnvironment& env) {
     dftu_utils_test::compress_file_to_gzip(pfw, gz);
     fs::remove(pfw);
 
-    const std::string idx = determine_index_path(gz, "");
-    struct Sink : ExportSink {
-        void write(std::string_view) override {}
-    } sink;
-    View::from_file(gz, idx).metadata(false).export_json(sink).get();
-    return ViewFile{gz, idx};
-}
-
-PluginRun run_set(const Plugins& set, const View& view) {
-    PluginRun out;
-    Runtime rt(2);
-    auto task = dftracer::utils::run_coro_scope(
-        rt.executor(), [&](CoroScope&) -> coro::CoroTask<void> {
-            auto run = co_await set.run(view);
-            REQUIRE(run.has_value());
-            out = std::move(*run);
-            co_return;
-        });
-    rt.submit(std::move(task), "public-config").wait();
-    rt.shutdown();
-    return out;
-}
-
-std::string result_text(PluginRun& run, const char* name) {
-    auto it = run.results.results().find(name);
-    if (it == run.results.results().end()) return "(missing)";
-    const auto& bytes = std::get<std::vector<std::byte>>(it->second);
-    return std::string(reinterpret_cast<const char*>(bytes.data()),
-                       bytes.size());
+    return index_trace(gz);
 }
 
 }  // namespace
@@ -99,7 +74,7 @@ TEST_CASE(
     dftu_utils_test::TestEnvironment env(0);
     REQUIRE(env.is_valid());
     View view = View::from_files({make_trace(env)});
-    PluginRun run = run_set(*set, view);
+    PluginRun run = run_set(*set, view, "public-config");
 
     // rows = NUM_EVENTS * stride; a wrong stride (the config default is 1)
     // would report NUM_EVENTS instead.

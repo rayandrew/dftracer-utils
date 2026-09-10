@@ -20,14 +20,15 @@
 #include <string>
 #include <vector>
 
+#include "test_plugin_common.h"
+
 using dftracer::utils::CoroScope;
 using dftracer::utils::Runtime;
 using dftracer::utils::plugins::build_injected_plugins;
 using dftracer::utils::plugins::fold_order;
-using dftracer::utils::trace::internal::determine_index_path;
 using View = dftracer::utils::trace::views::View;
 using ViewFile = dftracer::utils::trace::views::ViewFile;
-using ExportSink = dftracer::utils::trace::views::ExportSink;
+using test_plugin_common::index_trace;
 namespace coro = dftracer::utils::coro;
 
 namespace {
@@ -142,15 +143,6 @@ std::string make_trace(dftu_utils_test::TestEnvironment& env,
     dftu_utils_test::compress_file_to_gzip(pfw, gz);
     fs::remove(pfw);
     return gz;
-}
-
-ViewFile index_trace(const std::string& gz) {
-    std::string idx = determine_index_path(gz, "");
-    struct Sink : ExportSink {
-        void write(std::string_view) override {}
-    } sink;
-    View::from_file(gz, idx).metadata(false).export_json(sink).get();
-    return ViewFile{gz, idx};
 }
 
 void run_host(std::vector<dftu_plugin*> plugins, std::vector<ViewFile> files) {

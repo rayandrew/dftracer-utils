@@ -23,15 +23,18 @@
 #include <variant>
 #include <vector>
 
+#include "test_plugin_common.h"
+
 using dftracer::utils::CoroScope;
 using dftracer::utils::Runtime;
 using dftracer::utils::plugins::NamedResult;
 using dftracer::utils::plugins::PluginRun;
 using dftracer::utils::plugins::Plugins;
-using dftracer::utils::trace::internal::determine_index_path;
 using View = dftracer::utils::trace::views::View;
 using ViewFile = dftracer::utils::trace::views::ViewFile;
-using ExportSink = dftracer::utils::trace::views::ExportSink;
+using test_plugin_common::index_trace;
+using test_plugin_common::result_text;
+using test_plugin_common::run_set;
 namespace coro = dftracer::utils::coro;
 namespace fs = std::filesystem;
 
@@ -64,35 +67,7 @@ ViewFile make_trace(dftu_utils_test::TestEnvironment& env,
     dftu_utils_test::compress_file_to_gzip(pfw, gz);
     fs::remove(pfw);
 
-    const std::string idx = determine_index_path(gz, "");
-    struct Sink : ExportSink {
-        void write(std::string_view) override {}
-    } sink;
-    View::from_file(gz, idx).metadata(false).export_json(sink).get();
-    return ViewFile{gz, idx};
-}
-
-PluginRun run_set(const Plugins& set, const View& view) {
-    PluginRun out;
-    Runtime rt(2);
-    auto task = dftracer::utils::run_coro_scope(
-        rt.executor(), [&](CoroScope&) -> coro::CoroTask<void> {
-            auto run = co_await set.run(view);
-            REQUIRE(run.has_value());
-            out = std::move(*run);
-            co_return;
-        });
-    rt.submit(std::move(task), "factory-host").wait();
-    rt.shutdown();
-    return out;
-}
-
-std::string result_text(PluginRun& run, const char* name) {
-    auto it = run.results.results().find(name);
-    if (it == run.results.results().end()) return "(missing)";
-    const auto& bytes = std::get<std::vector<std::byte>>(it->second);
-    return std::string(reinterpret_cast<const char*>(bytes.data()),
-                       bytes.size());
+    return index_trace(gz);
 }
 
 }  // namespace
@@ -110,7 +85,7 @@ TEST_CASE("an op registered by the factory is live before the scan") {
     dftu_utils_test::TestEnvironment env(0);
     REQUIRE(env.is_valid());
     View view = View::from_files({make_trace(env, "regop")});
-    PluginRun run = run_set(*set, view);
+    PluginRun run = run_set(*set, view, "factory-host");
 
     auto it = run.results.results().find("doubled_rows");
     REQUIRE(it != run.results.results().end());
@@ -170,7 +145,7 @@ TEST_CASE("the scan-time host refuses to register an op") {
     dftu_utils_test::TestEnvironment env(0);
     REQUIRE(env.is_valid());
     View view = View::from_files({make_trace(env, "scanreg")});
-    PluginRun run = run_set(*set, view);
+    PluginRun run = run_set(*set, view, "factory-host");
 
     // The plugin records whether register_op said no from on_batch.
     auto it = run.results.results().find("scan_register_refused");
@@ -195,7 +170,7 @@ TEST_CASE("the C++ builder registers a fold, an op and a state at once") {
     dftu_utils_test::TestEnvironment env(0);
     REQUIRE(env.is_valid());
     View view = View::from_files({make_trace(env, "builder")});
-    PluginRun run = run_set(*set, view);
+    PluginRun run = run_set(*set, view, "factory-host");
 
     // The fold half and the registered-state half of the same factory.
     CHECK(result_text(run, "builder_plugin.rows") == std::to_string(EVENTS));
