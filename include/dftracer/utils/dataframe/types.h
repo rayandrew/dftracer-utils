@@ -408,6 +408,63 @@ constexpr bool is_temporal_type(TypeId t) noexcept {
     return false;
 }
 
+/// How a column's rows compare, hash and count as values. Numeric: one number
+/// per row, read by read_f64. Bytes: an opaque byte string per row, compared
+/// by memcmp (read_bytes); Decimal128/256 belong here because two distinct
+/// decimals can round to the same double. None: a nested type with no per-row
+/// value, which a kernel must refuse rather than read as a zero.
+enum class ValueDomain : std::int32_t {
+    None,
+    Numeric,
+    Bytes,
+};
+
+/// The comparison and hashing domain of `t`.
+constexpr ValueDomain value_domain(TypeId t) noexcept {
+    switch (t) {
+        case TypeId::Bool:
+        case TypeId::Int8:
+        case TypeId::Int16:
+        case TypeId::Int32:
+        case TypeId::Int64:
+        case TypeId::Uint8:
+        case TypeId::Uint16:
+        case TypeId::Uint32:
+        case TypeId::Uint64:
+        case TypeId::Float16:
+        case TypeId::Float32:
+        case TypeId::Float64:
+        case TypeId::Date32:
+        case TypeId::Date64:
+        case TypeId::Time32:
+        case TypeId::Time64:
+        case TypeId::Timestamp:
+        case TypeId::Duration:
+            return ValueDomain::Numeric;
+        case TypeId::String:
+        case TypeId::Binary:
+        case TypeId::LargeString:
+        case TypeId::LargeBinary:
+        case TypeId::FixedSizeBinary:
+        case TypeId::Decimal128:
+        case TypeId::Decimal256:
+            return ValueDomain::Bytes;
+        case TypeId::List:
+        case TypeId::LargeList:
+        case TypeId::FixedSizeList:
+        case TypeId::Struct:
+        case TypeId::Map:
+        case TypeId::Unknown:
+            return ValueDomain::None;
+    }
+    return ValueDomain::None;
+}
+
+/// True if `t` has a total order the sort and compare kernels implement.
+constexpr bool is_orderable_type(TypeId t) noexcept {
+    return value_domain(t) != ValueDomain::None;
+}
+
 /// The TypeId whose buffer layout `t` shares, for kernel dispatch: a logical
 /// type maps to the physical type its data is actually stored as (e.g.
 /// Timestamp -> Int64, Map -> List); every other type maps to itself.
