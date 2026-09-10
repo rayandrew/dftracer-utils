@@ -58,7 +58,7 @@ ALLOWLIST = {
         "column", "column_index", "num_columns", "num_rows",
         "from_arrow", "to_arrow", "to_ipc",
         "stream", "lazy",
-        "group_by", "melt",
+        "melt",
     },
     "LazyFrame": {
         "collect", "collect_group_state", "explain",

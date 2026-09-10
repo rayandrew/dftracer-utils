@@ -476,6 +476,11 @@ dftu_dataframe* dftu_op_run_frame(const dftu_op_desc* op,
             return as_op<DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32LIST)>(op->fn)(
                 df, g[1].list.items, g[1].list.n, g[2].i32list.items,
                 g[2].i32list.n);
+        case DFTU_OP_SIG(FRAME, FRAME, STRLIST, AGGLIST):
+            if (!g[2].agglist.items) return nullptr;
+            return as_op<DFTU_OP_SIG(FRAME, FRAME, STRLIST, AGGLIST)>(op->fn)(
+                df, g[1].list.items, g[1].list.n, g[2].agglist.items,
+                g[2].agglist.n);
         case DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE):
             return as_op<DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE)>(
                 op->fn)(df, g[1].str.ptr, g[2].i64, g[3].i32);

@@ -106,6 +106,9 @@ DFTU_OP_FN(DFTU_OP_SIG(FRAME, FRAME, STRLIST, STRLIST),
                   int32_t))
 DFTU_OP_FN(DFTU_OP_SIG(FRAME, FRAME, STRLIST, I32LIST),
            DF (*)(CDF, const char* const*, int32_t, const int32_t*, int32_t))
+DFTU_OP_FN(DFTU_OP_SIG(FRAME, FRAME, STRLIST, AGGLIST),
+           DF (*)(CDF, const char* const*, int32_t, const dftu_group_agg*,
+                  int32_t))
 DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE),
            DF (*)(CDF, const char*, int64_t, int32_t))
 DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, STR, STR, STR, STR),

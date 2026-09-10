@@ -162,10 +162,9 @@ void aggregate(const dftu_series& v, const std::vector<std::int32_t>& group_of,
 
 }  // namespace
 
-int32_t dftu_dataframe_group_by(const dftu_series* keys,
-                                const dftu_series* values, int32_t op_mask,
-                                dftu_series** out_keys,
-                                dftu_series** out_values, int32_t max_values) {
+int32_t dftu_series_group_by(const dftu_series* keys, const dftu_series* values,
+                             int32_t op_mask, dftu_series** out_keys,
+                             dftu_series** out_values, int32_t max_values) {
     *out_keys = nullptr;
     if (keys->length != values->length) return 0;
     if (values->encoding != Encoding::Flat) return 0;
@@ -186,8 +185,8 @@ namespace dftracer::utils::dataframe {
 DataFrame group_by(const Series& keys, const Series& values, std::int32_t ops) {
     dftu_series* k = nullptr;
     dftu_series* vals[5] = {};
-    std::int32_t n = dftu_dataframe_group_by(keys.handle(), values.handle(),
-                                             ops, &k, vals, 5);
+    std::int32_t n =
+        dftu_series_group_by(keys.handle(), values.handle(), ops, &k, vals, 5);
 
     DataFrame b;
     b.names.push_back("key");

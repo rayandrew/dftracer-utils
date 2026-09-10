@@ -446,7 +446,7 @@ TEST_CASE("DFTU_SVC_AGG: cross-batch grouped aggregation, engine-backed") {
     dftu_series_free(p50);
     dftu_series_free(names);
 
-    // Parity: the same grouped sum via the dftu_dataframe_group_by primitive,
+    // Parity: the same grouped sum via the dftu_series_group_by primitive,
     // over the concatenated rows.
     const char* cats[] = {"POSIX", "POSIX", "STDIO", "POSIX", "STDIO"};
     const std::uint64_t durs[] = {10, 20, 5, 30, 7};
@@ -464,7 +464,7 @@ TEST_CASE("DFTU_SVC_AGG: cross-batch grouped aggregation, engine-backed") {
     dftu_series* gk = nullptr;
     dftu_series* gv[1] = {nullptr};
     std::int32_t nout =
-        dftu_dataframe_group_by(keycol, valcol, DFTU_REDUCE_SUM, &gk, gv, 1);
+        dftu_series_group_by(keycol, valcol, DFTU_REDUCE_SUM, &gk, gv, 1);
     REQUIRE(nout == 1);
     REQUIRE(gk);
     REQUIRE(gv[0]);

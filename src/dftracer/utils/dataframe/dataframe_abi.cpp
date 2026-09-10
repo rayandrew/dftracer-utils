@@ -306,6 +306,32 @@ dftu_dataframe* dftu_dataframe_group_by_dynamic(const dftu_dataframe* df,
         return nullptr;
     }
 }
+dftu_dataframe* dftu_dataframe_group_by(const dftu_dataframe* df,
+                                        const char* const* keys, int32_t n_keys,
+                                        const dftu_group_agg* aggs,
+                                        int32_t n_aggs) {
+    if (!df || n_keys < 0 || n_aggs < 0 || (n_keys > 0 && !keys) ||
+        (n_aggs > 0 && !aggs))
+        return nullptr;
+    try {
+        std::vector<std::string> ks;
+        ks.reserve(static_cast<std::size_t>(n_keys));
+        for (int32_t i = 0; i < n_keys; ++i) ks.emplace_back(keys[i]);
+        std::vector<GroupAgg> ag;
+        ag.reserve(static_cast<std::size_t>(n_aggs));
+        for (int32_t i = 0; i < n_aggs; ++i) {
+            GroupAgg a;
+            a.op = dftracer::utils::dataframe::agg_from_string(
+                aggs[i].op ? aggs[i].op : "");
+            a.column = aggs[i].column ? aggs[i].column : "";
+            a.out = aggs[i].out ? aggs[i].out : "";
+            ag.push_back(std::move(a));
+        }
+        return wrap(df->df.group_by(std::move(ks), std::move(ag)));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
 
 dftu_lazyframe* dftu_dataframe_lazy(const dftu_dataframe* df) {
     if (!df) return nullptr;

@@ -370,7 +370,7 @@ DFTU_EXPORT dftu_scalar dftu_series_mode(const dftu_series* v);
  * the number written. The caller owns every returned column. SUM keeps the
  * value's wide domain type, COUNT is int64, MEAN is float64, MIN/MAX keep the
  * value type. */
-DFTU_EXPORT int32_t dftu_dataframe_group_by(
+DFTU_EXPORT int32_t dftu_series_group_by(
     const dftu_series* keys, const dftu_series* values, int32_t op_mask,
     dftu_series** out_keys, dftu_series** out_values, int32_t max_values);
 
@@ -766,6 +766,15 @@ typedef struct dftu_group_agg {
 DFTU_EXPORT dftu_dataframe* dftu_dataframe_group_by_dynamic(
     const dftu_dataframe* df, const char* time_col, int64_t every,
     int64_t period, const dftu_group_agg* aggs, int32_t n_aggs);
+
+/** Group by the `n_keys` key columns named by `keys` (a composite key) and
+ * compute each aggregate in `aggs` (op|column|out, as
+ * dftu_dataframe_group_by_dynamic). NULL on an unknown column/op. */
+DFTU_EXPORT dftu_dataframe* dftu_dataframe_group_by(const dftu_dataframe* df,
+                                                    const char* const* keys,
+                                                    int32_t n_keys,
+                                                    const dftu_group_agg* aggs,
+                                                    int32_t n_aggs);
 
 /*
  * dftu_lazyframe: an opaque handle to a deferred query over a dftu_dataframe

@@ -11,9 +11,6 @@
  *                   (SERIES -> series0/series1, STR -> s0..s3, STRLIST ->
  *                   slist/slist2, I64 -> i0/i1, I32/enum -> op_code, SCALAR ->
  *                   scalar).
- *
- * Deferred (a bespoke C shape, not a value-operand fit): group_by
- * (out-params). Use its dftu_dataframe_* ABI / DataFrame method.
  */
 
 #ifndef DFTU_FRAME_OP
@@ -64,5 +61,6 @@ DFTU_FRAME_OP(mask, dftu_dataframe_mask_frame, SERIES, FRAME, QUERY, NONE, NONE,
 DFTU_FRAME_OP(take, dftu_dataframe_take_i32, FRAME, FRAME, I64LIST, NONE, NONE, NONE)
 DFTU_FRAME_OP(sample, dftu_dataframe_sample, FRAME, FRAME, I64, U64, NONE, NONE)
 DFTU_FRAME_OP(group_by_dynamic, dftu_dataframe_group_by_dynamic, FRAME, FRAME, STR, I64, I64, AGGLIST)
+DFTU_FRAME_OP(group_by, dftu_dataframe_group_by, FRAME, FRAME, STRLIST, AGGLIST, NONE, NONE)
 
 #undef DFTU_FRAME_OP

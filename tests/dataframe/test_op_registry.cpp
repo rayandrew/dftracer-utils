@@ -1,14 +1,20 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/op.h>
 #include <dftracer/utils/query/abi.h>
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <vector>
 
+using dftracer::utils::dataframe::Agg;
+using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::find_op;
+using dftracer::utils::dataframe::GroupAgg;
 using dftracer::utils::dataframe::OpArgs;
 using dftracer::utils::dataframe::OpKind;
+using dftracer::utils::dataframe::Series;
 
 namespace {
 
@@ -435,6 +441,63 @@ TEST_SUITE("op_registry") {
         dftu_dataframe_free(windowed);
         dftu_dataframe_free(windowedDirect);
 
+        dftu_dataframe_free(df);
+    }
+
+    TEST_CASE(
+        "dftu.frame.group_by runs via the registry and matches the direct "
+        "C ABI call and DataFrame::group_by") {
+        std::int64_t k[5] = {1, 2, 1, 2, 1};
+        std::int64_t v[5] = {10, 20, 30, 40, 50};
+        const char* names[2] = {"k", "v"};
+        dftu_series* cols[2] = {i64_col(k, 5), i64_col(v, 5)};  // moved into df
+        dftu_dataframe* df = dftu_dataframe_new(names, cols, 2);
+        REQUIRE(df != nullptr);
+        const dftu_dataframe* fin[1] = {df};
+
+        const char* keys[1] = {"k"};
+        dftu_group_agg aggs[1] = {{"sum", "v", "total"}};
+
+        OpArgs gbArg;
+        gbArg.strlist(1, keys, 1).agglist(2, aggs);
+        dftu_dataframe* viaRegistry = dftu_op_run_frame(
+            dftu_op_find("dftu.frame.group_by"), fin, 1, gbArg);
+        dftu_dataframe* viaDirect =
+            dftu_dataframe_group_by(df, keys, 1, aggs, 1);
+        REQUIRE(viaRegistry != nullptr);
+        REQUIRE(viaDirect != nullptr);
+        REQUIRE(dftu_dataframe_num_rows(viaRegistry) ==
+                dftu_dataframe_num_rows(viaDirect));
+
+        dftu_series* kCol = dftu_dataframe_column(df, "k");
+        dftu_series* vCol = dftu_dataframe_column(df, "v");
+        DataFrame cppDf;
+        cppDf.names = {"k", "v"};
+        cppDf.columns.emplace_back(kCol);
+        cppDf.columns.emplace_back(vCol);
+        DataFrame viaCpp = cppDf.group_by(std::vector<std::string>{"k"},
+                                          {GroupAgg{Agg::Sum, "v", "total"}});
+        REQUIRE(static_cast<std::int64_t>(viaCpp.num_rows()) ==
+                dftu_dataframe_num_rows(viaRegistry));
+
+        dftu_series* rk = dftu_dataframe_column(viaRegistry, "k");
+        dftu_series* rt = dftu_dataframe_column(viaRegistry, "total");
+        dftu_series* dk = dftu_dataframe_column(viaDirect, "k");
+        dftu_series* dt = dftu_dataframe_column(viaDirect, "total");
+        Series ck = viaCpp.column("k");
+        Series ct = viaCpp.column("total");
+        for (std::int64_t i = 0; i < dftu_series_length(rk); ++i) {
+            CHECK(i64_of(rk)[i] == i64_of(dk)[i]);
+            CHECK(i64_of(rt)[i] == i64_of(dt)[i]);
+            CHECK(i64_of(rk)[i] == i64_of(ck.handle())[i]);
+            CHECK(i64_of(rt)[i] == i64_of(ct.handle())[i]);
+        }
+        dftu_series_free(rk);
+        dftu_series_free(rt);
+        dftu_series_free(dk);
+        dftu_series_free(dt);
+        dftu_dataframe_free(viaRegistry);
+        dftu_dataframe_free(viaDirect);
         dftu_dataframe_free(df);
     }
 
