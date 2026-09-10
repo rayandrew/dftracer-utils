@@ -194,6 +194,13 @@ dftu_series* dftu_series_child(const dftu_series* col, int32_t i) {
     return new dftu_series(**ch);
 }
 
+const char* dftu_series_field_name(const dftu_series* col, int32_t i) {
+    if (!col || col->type != TypeId::Struct) return nullptr;
+    if (i < 0 || static_cast<std::size_t>(i) >= col->field_names.size())
+        return nullptr;
+    return col->field_names[static_cast<std::size_t>(i)].c_str();
+}
+
 dftu_series* dftu_series_share(const dftu_series* col) {
     if (!col) return nullptr;
     // Copy the handle struct; its buffer/child shared_ptr members bump their

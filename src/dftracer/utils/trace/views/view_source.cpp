@@ -343,7 +343,8 @@ std::vector<std::string> ViewSource::row_schema() const {
 }
 
 dftracer::utils::dataframe::Schema ViewSource::schema() const {
-    dftracer::utils::dataframe::Schema s;
+    namespace df = dftracer::utils::dataframe;
+    df::Schema s;
     if (can_stream_rows()) {
         // A non-empty select fixes every streamed morsel's columns to exactly
         // this list (see open_stream()), so the schema must match it, not the
@@ -352,27 +353,28 @@ dftracer::utils::dataframe::Schema ViewSource::schema() const {
         // colliding with a top-level field) resolves to the same column name
         // the producer actually emits.
         if (!view_.plan_->select.empty()) {
-            s.names.reserve(view_.plan_->select.size());
-            s.types.reserve(view_.plan_->select.size());
+            s.fields.reserve(view_.plan_->select.size());
             for (const std::string& sel : view_.plan_->select) {
-                s.names.push_back(detail::canonical_row_column_name(sel));
-                s.types.push_back(detail::row_column_type(sel));
+                s.fields.push_back(
+                    df::Field{detail::canonical_row_column_name(sel),
+                              df::scalar(detail::row_column_type(sel)), true});
             }
         } else {
-            s.names = row_schema();
-            s.types.reserve(s.names.size());
-            for (const std::string& name : s.names)
-                s.types.push_back(detail::row_column_type(name));
+            std::vector<std::string> names = row_schema();
+            s.fields.reserve(names.size());
+            for (const std::string& name : names)
+                s.fields.push_back(df::Field{
+                    name, df::scalar(detail::row_column_type(name)), true});
         }
         return s;
     }
     // Aggregated / post-scan-op view: buffer() already ran the scan, so its
     // columns' real types are known (unlike the row-query branches above).
-    const dftracer::utils::dataframe::DataFrame& buf = *buffer();
-    s.names = buf.names;
-    s.types.reserve(buf.columns.size());
-    for (const dftracer::utils::dataframe::Series& col : buf.columns)
-        s.types.push_back(col.type());
+    const df::DataFrame& buf = *buffer();
+    s.fields.reserve(buf.columns.size());
+    for (std::size_t i = 0; i < buf.columns.size(); ++i)
+        s.fields.push_back(
+            df::Field{buf.names[i], buf.columns[i].data_type(), true});
     return s;
 }
 

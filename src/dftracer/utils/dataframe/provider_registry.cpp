@@ -143,9 +143,10 @@ class ProviderSource final : public Source {
         const char* const* names = nullptr;
         const std::int32_t n = entry_.vt.schema(entry_.self, &names);
         if (n > 0 && names) {
-            s.names.reserve(static_cast<std::size_t>(n));
+            s.fields.reserve(static_cast<std::size_t>(n));
             for (std::int32_t i = 0; i < n; ++i)
-                s.names.emplace_back(names[i] ? names[i] : "");
+                s.fields.push_back(Field{names[i] ? names[i] : "",
+                                         scalar(TypeId::Unknown), true});
         }
         return s;
     }

@@ -52,14 +52,11 @@ class Cursor {
     }
 };
 
-/// The static, scan-free schema of a Source: column names and (best-effort)
-/// types. `names` is always populated. `types` is either empty (the source
-/// reports no type information at all) or exactly `names.size()` long, one
-/// entry per column in order; a column whose type is not knowable without
-/// scanning gets `TypeId::Unknown`, never a guessed concrete type.
+/// The static, scan-free schema of a Source: one Field per column, in order.
+/// A column whose type is not knowable without scanning gets a `Field` whose
+/// `type.id == TypeId::Unknown`, never a guessed concrete type.
 struct Schema {
-    std::vector<std::string> names;
-    std::vector<TypeId> types;
+    std::vector<Field> fields;
 };
 
 /// How completely a source applied a pushed-down filter, per ScanRequest
@@ -121,7 +118,13 @@ class Source {
 
     /// Convenience: the schema's column names. Non-virtual; a caller that only
     /// needs names reads this instead of building a full scan.
-    std::vector<std::string> names() const { return schema().names; }
+    std::vector<std::string> names() const {
+        std::vector<std::string> out;
+        Schema s = schema();
+        out.reserve(s.fields.size());
+        for (const Field& f : s.fields) out.push_back(f.name);
+        return out;
+    }
 };
 
 /// A Source over an already-materialized in-memory frame.

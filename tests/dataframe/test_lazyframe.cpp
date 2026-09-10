@@ -134,7 +134,11 @@ class RaggedCursor : public Cursor {
 class RaggedSource : public Source {
    public:
     dftracer::utils::dataframe::Schema schema() const override {
-        return {{"a"}, {}};
+        return {{dftracer::utils::dataframe::Field{
+            "a",
+            dftracer::utils::dataframe::scalar(
+                dftracer::utils::dataframe::TypeId::Unknown),
+            true}}};
     }
     dftracer::utils::dataframe::ScanResult scan(
         const dftracer::utils::dataframe::ScanRequest& req) const override {
@@ -1289,6 +1293,38 @@ TEST_SUITE("lazyframe") {
         const std::int64_t* bv = got.columns[0].data<std::int64_t>();
         CHECK(bv[0] == 10);
         CHECK(bv[5] == 60);
+    }
+
+    TEST_CASE("InMemorySource schema() round-trips a nested Struct column") {
+        using dftracer::utils::dataframe::Field;
+        using dftracer::utils::dataframe::InMemorySource;
+        using dftracer::utils::dataframe::Schema;
+        using dftracer::utils::dataframe::TypeId;
+
+        std::vector<std::int64_t> lo{1, 2};
+        std::vector<double> hi{1.5, 2.5};
+        std::vector<Series> fields;
+        fields.push_back(Series::flat_i64(lo.data(), 2));
+        fields.push_back(Series::flat_f64(hi.data(), 2));
+        Series st = Series::structs({"lo", "hi"}, std::move(fields));
+
+        DataFrame df;
+        df.names = {"a", "range"};
+        df.columns.push_back(Series::flat_i64(lo.data(), 2));
+        df.columns.push_back(std::move(st));
+
+        InMemorySource src(std::move(df));
+        Schema schema = src.schema();
+        REQUIRE(schema.fields.size() == 2);
+        CHECK(schema.fields[0].name == "a");
+        CHECK(schema.fields[0].type.id == TypeId::Int64);
+        CHECK(schema.fields[1].name == "range");
+        REQUIRE(schema.fields[1].type.id == TypeId::Struct);
+        REQUIRE(schema.fields[1].type.fields.size() == 2);
+        CHECK(schema.fields[1].type.fields[0].name == "lo");
+        CHECK(schema.fields[1].type.fields[0].type.id == TypeId::Int64);
+        CHECK(schema.fields[1].type.fields[1].name == "hi");
+        CHECK(schema.fields[1].type.fields[1].type.id == TypeId::Float64);
     }
 
     TEST_CASE("streaming source with per-morsel schema reconciles by name") {

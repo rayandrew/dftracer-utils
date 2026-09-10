@@ -137,6 +137,12 @@ DFTU_EXPORT int32_t dftu_series_num_children(const dftu_series* col);
  * column sharing the child's buffers. NULL if out of range. */
 DFTU_EXPORT dftu_series* dftu_series_child(const dftu_series* col, int32_t i);
 
+/** Name of child `i` (a Struct field's name; a List's element has none). NULL
+ * if `col` has no name for that child or `i` is out of range. Borrowed,
+ * valid while `col` is. */
+DFTU_EXPORT const char* dftu_series_field_name(const dftu_series* col,
+                                               int32_t i);
+
 /** A new owned column sharing `col`'s buffers zero-copy (a reference-count
  * bump, no data copy). NULL if `col` is NULL. Underpins projection/rename frame
  * ops.

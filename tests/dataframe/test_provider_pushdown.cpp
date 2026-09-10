@@ -344,7 +344,11 @@ class LimitRecordingSource : public dftracer::utils::dataframe::Source {
     mutable std::int64_t seen_limit = -2;  // -2 = scan() never ran
 
     dftracer::utils::dataframe::Schema schema() const override {
-        return {{"id"}, {}};
+        return {{dftracer::utils::dataframe::Field{
+            "id",
+            dftracer::utils::dataframe::scalar(
+                dftracer::utils::dataframe::TypeId::Unknown),
+            true}}};
     }
 
     dftracer::utils::dataframe::ScanResult scan(

@@ -20,6 +20,21 @@ double scalar_as_double(dftu_scalar s) {
 }
 }  // namespace
 
+DataType Series::data_type() const {
+    DataType dt;
+    dt.id = type();
+    const std::int64_t n = num_children();
+    for (std::int64_t i = 0; i < n; ++i) {
+        Series c = child(i);
+        const char* name =
+            dftu_series_field_name(handle_, static_cast<int32_t>(i));
+        dt.fields.push_back(
+            Field{name ? name : (dt.id == TypeId::List ? "item" : ""),
+                  c.data_type(), true});
+    }
+    return dt;
+}
+
 Series Series::add(const Series& o) const {
     return Series{dftu_series_add(handle_, o.handle_)};
 }

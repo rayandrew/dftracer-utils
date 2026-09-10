@@ -3,6 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace dftracer::utils::dataframe {
 
@@ -28,6 +31,56 @@ enum class TypeId : std::int32_t {
     List,
     Struct,
 };
+
+struct Field;
+
+/// A column's full type. `id` is the tag; `fields` carries the nested
+/// structure - exactly one entry for List (the element), one per field for
+/// Struct, and none for a scalar.
+struct DataType {
+    TypeId id = TypeId::Unknown;
+    std::vector<Field> fields;
+
+    bool operator==(const DataType& other) const;
+    bool operator!=(const DataType& other) const { return !(*this == other); }
+};
+
+/// A named member of a nested type: a Struct field, or a List's element.
+struct Field {
+    std::string name;
+    DataType type;
+    bool nullable = true;
+
+    bool operator==(const Field& other) const {
+        return name == other.name && nullable == other.nullable &&
+               type == other.type;
+    }
+    bool operator!=(const Field& other) const { return !(*this == other); }
+};
+
+inline bool DataType::operator==(const DataType& other) const {
+    return id == other.id && fields == other.fields;
+}
+
+/// A scalar DataType with no nested fields.
+constexpr DataType scalar(TypeId id) noexcept { return DataType{id, {}}; }
+
+/// A List<item_type> DataType, with the element named `item_name`.
+inline DataType list_of(DataType item_type, std::string item_name = "item") {
+    DataType dt;
+    dt.id = TypeId::List;
+    dt.fields.push_back(
+        Field{std::move(item_name), std::move(item_type), true});
+    return dt;
+}
+
+/// A Struct DataType with the given fields, in order.
+inline DataType struct_of(std::vector<Field> fields) {
+    DataType dt;
+    dt.id = TypeId::Struct;
+    dt.fields = std::move(fields);
+    return dt;
+}
 
 /// FLAT: values contiguous. CONSTANT: one value, logical length N. DICTIONARY:
 /// value[i] = base[codes[i]]. SELECTION: value[i] = base[sel[i]], a view over a

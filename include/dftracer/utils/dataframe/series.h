@@ -290,6 +290,11 @@ class Series {
         return Series{dftu_series_child(handle_, static_cast<std::int32_t>(i))};
     }
 
+    /// The full nested DataType, walking `num_children()`/`child()` and each
+    /// Struct field's name. A List's single child becomes its (unnamed)
+    /// element Field; a Struct's children become named Fields in order.
+    DataType data_type() const;
+
     /// A new owned column sharing this column's buffers zero-copy (refcount
     /// bump, no data copy).
     Series share() const noexcept { return Series{dftu_series_share(handle_)}; }

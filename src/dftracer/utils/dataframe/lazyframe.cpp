@@ -2875,9 +2875,10 @@ InMemorySource::InMemorySource(DataFrame frame)
 
 Schema InMemorySource::schema() const {
     Schema s;
-    s.names = frame_->names;
-    s.types.reserve(frame_->columns.size());
-    for (const Series& c : frame_->columns) s.types.push_back(c.type());
+    s.fields.reserve(frame_->columns.size());
+    for (std::size_t i = 0; i < frame_->columns.size(); ++i)
+        s.fields.push_back(
+            Field{frame_->names[i], frame_->columns[i].data_type(), true});
     return s;
 }
 

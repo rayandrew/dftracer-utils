@@ -444,15 +444,14 @@ TEST_SUITE("View - streaming row query") {
         auto src = std::make_shared<ViewSource>(v);
 
         df::Schema schema = src->schema();
-        REQUIRE(schema.names.size() == 5);
-        REQUIRE(schema.types.size() == schema.names.size());
+        REQUIRE(schema.fields.size() == 5);
 
         df::DataFrame got = run(df::LazyFrame::scan(src).collect());
-        REQUIRE(got.columns.size() == schema.names.size());
-        for (std::size_t i = 0; i < schema.names.size(); ++i) {
-            const std::int64_t ci = bcol(got, schema.names[i]);
+        REQUIRE(got.columns.size() == schema.fields.size());
+        for (std::size_t i = 0; i < schema.fields.size(); ++i) {
+            const std::int64_t ci = bcol(got, schema.fields[i].name);
             REQUIRE(ci >= 0);
-            CHECK(schema.types[i] ==
+            CHECK(schema.fields[i].type.id ==
                   got.columns[static_cast<std::size_t>(ci)].type());
         }
     }
@@ -469,15 +468,19 @@ TEST_SUITE("View - streaming row query") {
         auto src = std::make_shared<ViewSource>(v);
 
         df::Schema schema = src->schema();
-        REQUIRE(schema.names.size() == 2);
-        CHECK(schema.names[0] == "name");
-        CHECK(schema.names[1] == "args.x");
-        // types is always parallel to names: every column gets an entry, and
-        // a column whose type the scan infers per batch says so rather than
+        REQUIRE(schema.fields.size() == 2);
+        CHECK(schema.fields[0].name == "name");
+        CHECK(schema.fields[1].name == "args.x");
+        // A column whose type the scan infers per batch says so rather than
         // silencing the whole schema.
-        REQUIRE(schema.types.size() == schema.names.size());
-        CHECK(schema.types[0] == df::TypeId::String);
-        CHECK(schema.types[1] == df::TypeId::Unknown);
+        CHECK(schema.fields[0].type.id == df::TypeId::String);
+        CHECK(schema.fields[1].type.id == df::TypeId::Unknown);
+
+        // schema() may report Unknown for a data-dependent column, but the
+        // collected frame always resolves to a concrete type.
+        df::DataFrame got = run(df::LazyFrame::scan(src).collect());
+        for (const df::Series& c : got.columns)
+            CHECK(c.type() != df::TypeId::Unknown);
     }
 
     TEST_CASE(
@@ -494,10 +497,11 @@ TEST_SUITE("View - streaming row query") {
 
         df::Schema schema = src->schema();
         df::DataFrame buf = run(v.collect_frame());
-        REQUIRE(schema.names == buf.names);
-        REQUIRE(schema.types.size() == buf.columns.size());
-        for (std::size_t i = 0; i < buf.columns.size(); ++i)
-            CHECK(schema.types[i] == buf.columns[i].type());
+        REQUIRE(schema.fields.size() == buf.names.size());
+        for (std::size_t i = 0; i < buf.columns.size(); ++i) {
+            CHECK(schema.fields[i].name == buf.names[i]);
+            CHECK(schema.fields[i].type.id == buf.columns[i].type());
+        }
     }
 
     TEST_CASE("View::stream() over a histogram aggregation yields one chunk") {

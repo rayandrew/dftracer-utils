@@ -2575,3 +2575,72 @@ TEST_CASE("slicing a Bool column respects bit packing") {
         }
     }
 }
+
+TEST_CASE("Series::data_type() round-trips a List<Int64> column") {
+    namespace df = dftracer::utils::dataframe;
+    std::vector<std::int64_t> items{1, 2, 3, 4};
+    std::vector<std::int32_t> offsets{0, 2, 4};
+    df::Series list_col =
+        df::Series::list(offsets, df::Series::flat_i64(items.data(), 4));
+    REQUIRE(list_col.valid());
+
+    df::DataType dt = list_col.data_type();
+    CHECK(dt.id == df::TypeId::List);
+    REQUIRE(dt.fields.size() == 1);
+    CHECK(dt.fields[0].type.id == df::TypeId::Int64);
+    CHECK(dt.fields[0].type.fields.empty());
+}
+
+TEST_CASE("Series::data_type() round-trips a Struct{a:Int64,b:String}") {
+    namespace df = dftracer::utils::dataframe;
+    std::vector<std::int64_t> a{1, 2, 3};
+    std::vector<Series> fields;
+    fields.push_back(df::Series::flat_i64(a.data(), 3));
+    fields.push_back(df::Series::strings({"x", "y", "z"}));
+    df::Series st = df::Series::structs({"a", "b"}, std::move(fields));
+    REQUIRE(st.valid());
+
+    df::DataType dt = st.data_type();
+    CHECK(dt.id == df::TypeId::Struct);
+    REQUIRE(dt.fields.size() == 2);
+    CHECK(dt.fields[0].name == "a");
+    CHECK(dt.fields[0].type.id == df::TypeId::Int64);
+    CHECK(dt.fields[1].name == "b");
+    CHECK(dt.fields[1].type.id == df::TypeId::String);
+}
+
+TEST_CASE("List<Int64> and List<String> report different DataTypes") {
+    namespace df = dftracer::utils::dataframe;
+    std::vector<std::int32_t> offsets{0, 2};
+    std::vector<std::int64_t> ints{1, 2};
+    df::Series int_list =
+        df::Series::list(offsets, df::Series::flat_i64(ints.data(), 2));
+    df::Series str_list =
+        df::Series::list(offsets, df::Series::strings({"a", "b"}));
+
+    CHECK(int_list.data_type() != str_list.data_type());
+    CHECK(int_list.data_type() == df::list_of(df::scalar(df::TypeId::Int64)));
+    CHECK(str_list.data_type() == df::list_of(df::scalar(df::TypeId::String)));
+}
+
+TEST_CASE(
+    "dftu_series_field_name reports a struct's field names, NULL out of "
+    "range") {
+    namespace df = dftracer::utils::dataframe;
+    std::vector<std::int64_t> a{1};
+    std::vector<double> b{2.0};
+    std::vector<Series> fields;
+    fields.push_back(df::Series::flat_i64(a.data(), 1));
+    fields.push_back(df::Series::flat_f64(b.data(), 1));
+    df::Series st = df::Series::structs({"first", "second"}, std::move(fields));
+    REQUIRE(st.valid());
+
+    const char* n0 = dftu_series_field_name(st.handle(), 0);
+    const char* n1 = dftu_series_field_name(st.handle(), 1);
+    REQUIRE(n0 != nullptr);
+    REQUIRE(n1 != nullptr);
+    CHECK(std::string(n0) == "first");
+    CHECK(std::string(n1) == "second");
+    CHECK(dftu_series_field_name(st.handle(), 2) == nullptr);
+    CHECK(dftu_series_field_name(st.handle(), -1) == nullptr);
+}
