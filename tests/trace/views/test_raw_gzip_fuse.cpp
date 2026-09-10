@@ -15,7 +15,6 @@
 #include <dftracer/utils/utilities/indexer/internal/indexer.h>
 #include <doctest/doctest.h>
 
-#include <algorithm>
 #include <array>
 #include <optional>
 #include <string>
@@ -25,8 +24,6 @@
 #include "testing_runtime.h"
 
 using namespace dftracer::utils::trace::views::detail;
-using dftracer::utils::CoroScope;
-using dftracer::utils::Runtime;
 using dftracer::utils::StringIntern;
 using dftu_utils_test::run_coro;
 namespace dataframe = dftracer::utils::dataframe;

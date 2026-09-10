@@ -15,15 +15,12 @@
 #include <doctest/doctest.h>
 #include <testing_utilities.h>
 
-#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
 
 #include "test_plugin_common.h"
 
-using dftracer::utils::CoroScope;
-using dftracer::utils::Runtime;
 using dftracer::utils::plugins::PluginRun;
 using dftracer::utils::plugins::Plugins;
 using View = dftracer::utils::trace::views::View;
@@ -31,7 +28,6 @@ using ViewFile = dftracer::utils::trace::views::ViewFile;
 using test_plugin_common::index_trace;
 using test_plugin_common::result_text;
 using test_plugin_common::run_set;
-namespace coro = dftracer::utils::coro;
 namespace fs = std::filesystem;
 
 #ifndef CONFIG_KEYS_PLUGIN_PATH
