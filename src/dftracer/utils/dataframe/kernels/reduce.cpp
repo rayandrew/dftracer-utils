@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
@@ -249,10 +250,27 @@ void mode_one(const dftu_series& v, dftu_scalar& out) {
 
 dftu_scalar dftu_series_reduce(const dftu_series* v, dftu_reduce_op op) {
     using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::is_temporal_type;
+    using dftracer::utils::dataframe::physical_type;
     using dftracer::utils::dataframe::promote_for_arithmetic;
+    using dftracer::utils::dataframe::type_name;
     dftu_scalar out{};
     out.kind = DFTU_SCALAR_TAG_I64;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return out;
+
+    // MIN/MAX on a temporal column dispatches on its physical Int32/Int64
+    // layout; every other op is temporal arithmetic, refused below.
+    if (is_temporal_type(v->type)) {
+        if (op != DFTU_REDUCE_MIN && op != DFTU_REDUCE_MAX) {
+            DFTRACER_UTILS_LOG_ERROR(
+                "reduce: op %d is not defined for temporal type '%s'",
+                static_cast<int>(op), type_name(v->type));
+            return out;
+        }
+        DF_NUMERIC_DISPATCH(physical_type(v->type), reduce_one, *v, op, out)
+        return out;
+    }
+
     if (!is_arithmetic_type(v->type)) return out;
 
     // Float16 has no reduction kernel; Decimal128/256 have no exact one. Both
@@ -275,10 +293,17 @@ int64_t dftu_series_count(const dftu_series* v) {
 
 dftu_scalar dftu_series_product(const dftu_series* v) {
     using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::is_temporal_type;
     using dftracer::utils::dataframe::promote_for_arithmetic;
+    using dftracer::utils::dataframe::type_name;
     dftu_scalar out{};
     out.kind = DFTU_SCALAR_TAG_I64;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return out;
+    if (is_temporal_type(v->type)) {
+        DFTRACER_UTILS_LOG_ERROR("product: not defined for temporal type '%s'",
+                                 type_name(v->type));
+        return out;
+    }
     if (!is_arithmetic_type(v->type)) return out;
     dftu_series* promoted = nullptr;
     v = promote_for_arithmetic(v, promoted);
@@ -309,10 +334,17 @@ int32_t dftu_series_any(const dftu_series* v) {
 
 int64_t dftu_series_arg_min(const dftu_series* v) {
     using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::is_temporal_type;
+    using dftracer::utils::dataframe::physical_type;
     using dftracer::utils::dataframe::promote_for_arithmetic;
-    if (v->encoding != dftracer::utils::dataframe::Encoding::Flat ||
-        !is_arithmetic_type(v->type))
-        return -1;
+    if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return -1;
+    if (is_temporal_type(v->type)) {
+        std::int64_t idx = -1;
+        DF_NUMERIC_DISPATCH(physical_type(v->type), argextreme_one, *v, true,
+                            idx)
+        return idx;
+    }
+    if (!is_arithmetic_type(v->type)) return -1;
     dftu_series* promoted = nullptr;
     v = promote_for_arithmetic(v, promoted);
     std::int64_t idx = -1;
@@ -324,10 +356,17 @@ int64_t dftu_series_arg_min(const dftu_series* v) {
 
 int64_t dftu_series_arg_max(const dftu_series* v) {
     using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::is_temporal_type;
+    using dftracer::utils::dataframe::physical_type;
     using dftracer::utils::dataframe::promote_for_arithmetic;
-    if (v->encoding != dftracer::utils::dataframe::Encoding::Flat ||
-        !is_arithmetic_type(v->type))
-        return -1;
+    if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return -1;
+    if (is_temporal_type(v->type)) {
+        std::int64_t idx = -1;
+        DF_NUMERIC_DISPATCH(physical_type(v->type), argextreme_one, *v, false,
+                            idx)
+        return idx;
+    }
+    if (!is_arithmetic_type(v->type)) return -1;
     dftu_series* promoted = nullptr;
     v = promote_for_arithmetic(v, promoted);
     std::int64_t idx = -1;
@@ -339,10 +378,16 @@ int64_t dftu_series_arg_max(const dftu_series* v) {
 
 dftu_scalar dftu_series_mode(const dftu_series* v) {
     using dftracer::utils::dataframe::is_arithmetic_type;
+    using dftracer::utils::dataframe::is_temporal_type;
+    using dftracer::utils::dataframe::physical_type;
     using dftracer::utils::dataframe::promote_for_arithmetic;
     dftu_scalar out{};
     out.kind = DFTU_SCALAR_TAG_I64;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return out;
+    if (is_temporal_type(v->type)) {
+        DF_NUMERIC_DISPATCH(physical_type(v->type), mode_one, *v, out)
+        return out;
+    }
     if (!is_arithmetic_type(v->type)) return out;
     dftu_series* promoted = nullptr;
     v = promote_for_arithmetic(v, promoted);

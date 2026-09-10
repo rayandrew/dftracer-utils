@@ -10,9 +10,12 @@
 // (stats, aggregation, hashing, ...) so the per-type switch lives in one place.
 namespace dftracer::utils::dataframe {
 
-/// Cell `i` widened to int64 (Bool -> 0/1). 0 for non-integer columns.
+/// Cell `i` widened to int64 (Bool -> 0/1). Dispatches on physical_type(),
+/// so Date32/Time32 read as Int32 and Date64/Time64/Timestamp/Duration read
+/// as Int64: their exact on-disk value, not a lossy conversion. 0 for a
+/// column with no integer physical layout.
 inline std::int64_t read_i64(const Series& c, std::int64_t i) {
-    switch (c.type()) {
+    switch (physical_type(c.type())) {
         case TypeId::Bool: {
             const std::uint8_t* b = c.data<std::uint8_t>();
             return (b[i >> 3] >> (i & 7)) & 1;

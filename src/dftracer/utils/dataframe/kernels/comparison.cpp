@@ -71,9 +71,8 @@ dftu_series* dftu_series_compare(const dftu_series* v, dftu_cmp_op op,
     }
 
     if (v->encoding != Encoding::Flat) return nullptr;
-    if (v->type == TypeId::Bool || v->type == TypeId::String ||
-        v->type == TypeId::Binary)
-        return nullptr;
+    const TypeId phys = physical_type(v->type);
+    if (!is_numeric_dispatchable(phys)) return nullptr;
     if (op < static_cast<int32_t>(CmpOp::Gt) ||
         op > static_cast<int32_t>(CmpOp::Ne))
         return nullptr;
@@ -93,7 +92,7 @@ dftu_series* dftu_series_compare(const dftu_series* v, dftu_cmp_op op,
     std::int64_t n = v->length;
 
     if (!dftracer::utils::dataframe::compare(*v, op, rhs, bits)) {
-        DF_NUMERIC_DISPATCH(v->type, compare_impl, data, n, op, rhs, bits)
+        DF_NUMERIC_DISPATCH(phys, compare_impl, data, n, op, rhs, bits)
     }
     return out;
 }

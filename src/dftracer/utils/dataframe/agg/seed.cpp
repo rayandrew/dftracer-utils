@@ -94,6 +94,7 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
     out->nkeys = st.nkeys;
     out->key_is_str = st.key_is_str;
     out->key_domain = st.key_domain;
+    out->key_type = st.key_type;
     out->ikey_cols.assign(out->nkeys, {});
     out->skey_cols.assign(out->nkeys, {});
     out->field_domain = st.field_domain;
@@ -241,6 +242,7 @@ void agg_seed_begin(AggState& st, std::size_t nkeys) {
     st.nkeys = nkeys;
     st.key_is_str.assign(nkeys, 1);
     st.key_domain.assign(nkeys, FieldStatDomain::I64);
+    st.key_type.assign(nkeys, TypeId::Int64);
     st.ikey_cols.assign(nkeys, {});
     st.skey_cols.assign(nkeys, {});
     st.field_domain.assign(st.nf, FieldStatDomain::F64);

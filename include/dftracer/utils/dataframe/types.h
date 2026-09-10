@@ -35,20 +35,31 @@ enum class TypeId : std::int32_t {
     /// every half value has a precise float32 representation), so the result
     /// of e.g. adding two Float16 columns is a Float32 column, not Float16.
     Float16,
-    /// Days since the Unix epoch, stored as Int32 (DataType::physical_type()).
+    /// Days since the Unix epoch, stored as Int32 (physical_type()).
+    /// Compare/sort/min/max/group_by/hash dispatch on that Int32 value and
+    /// keep the Date32 tag on the result. Arithmetic is refused (see
+    /// arithmetic.cpp): a day offset or a date difference are real
+    /// operations this engine does not define yet.
     Date32,
-    /// Milliseconds since the Unix epoch, stored as Int64.
+    /// Milliseconds since the Unix epoch, stored as Int64 (physical_type()).
+    /// Same compute and arithmetic behavior as Date32.
     Date64,
     /// Time of day since midnight in `DataType::time_unit` (Second or Milli),
-    /// stored as Int32.
+    /// stored as Int32 (physical_type()). Same compute and arithmetic
+    /// behavior as Date32.
     Time32,
     /// Time of day since midnight in `DataType::time_unit` (Micro or Nano),
-    /// stored as Int64.
+    /// stored as Int64 (physical_type()). Same compute and arithmetic
+    /// behavior as Date32.
     Time64,
     /// Instant since the Unix epoch in `DataType::time_unit`, with an
-    /// optional `DataType::timezone`, stored as Int64.
+    /// optional `DataType::timezone`, stored as Int64 (physical_type()).
+    /// Same compute behavior as Date32. Arithmetic is refused: adding two
+    /// timestamps is meaningless, and subtracting them into a Duration is a
+    /// rule this engine does not implement yet.
     Timestamp,
-    /// Elapsed time in `DataType::time_unit`, stored as Int64.
+    /// Elapsed time in `DataType::time_unit`, stored as Int64
+    /// (physical_type()). Same compute and arithmetic behavior as Timestamp.
     Duration,
     /// 128-bit fixed-point decimal; `DataType::decimal_precision` and
     /// `decimal_scale` give its meaning. Compare/sort/group_by/hash work on
@@ -66,11 +77,17 @@ enum class TypeId : std::int32_t {
     /// arithmetic or string kernel applies.
     FixedSizeBinary,
     /// String with 64-bit offsets, for payloads too large for String's
-    /// 32-bit offsets. Its own physical layout, not String's.
+    /// 32-bit offsets. Its own physical layout, not String's. STORAGE ONLY:
+    /// it round-trips through Arrow import/export, but every string,
+    /// compare, sort, and group_by kernel is written against 32-bit
+    /// offsets; giving them a 64-bit-offset path is a templating job across
+    /// several SIMD files, not yet done.
     LargeString,
     /// Binary with 64-bit offsets. Its own physical layout, not Binary's.
+    /// STORAGE ONLY, see LargeString.
     LargeBinary,
     /// List with 64-bit offsets. Its own physical layout, not List's.
+    /// STORAGE ONLY, see LargeString.
     LargeList,
     /// Fixed-count list: `DataType::fixed_size` elements of the single entry
     /// in `DataType::fields` per row. No offsets buffer.
@@ -286,6 +303,95 @@ constexpr bool is_arithmetic_type(TypeId t) noexcept {
         case TypeId::Time64:
         case TypeId::Timestamp:
         case TypeId::Duration:
+        case TypeId::FixedSizeBinary:
+        case TypeId::LargeString:
+        case TypeId::LargeBinary:
+        case TypeId::LargeList:
+        case TypeId::FixedSizeList:
+        case TypeId::Map:
+            return false;
+    }
+    return false;
+}
+
+/// True for the exact set DF_NUMERIC_DISPATCH (internal/numeric_dispatch.h)
+/// has a case for: Int8-64, Uint8-64, Float32, Float64. A kernel that
+/// dispatches on physical_type(t) checks this first, so an opaque or
+/// unmapped type (Bool, Decimal128/256, FixedSizeBinary, ...) is refused
+/// instead of silently reaching the macro's default no-op.
+constexpr bool is_numeric_dispatchable(TypeId t) noexcept {
+    switch (t) {
+        case TypeId::Int8:
+        case TypeId::Int16:
+        case TypeId::Int32:
+        case TypeId::Int64:
+        case TypeId::Uint8:
+        case TypeId::Uint16:
+        case TypeId::Uint32:
+        case TypeId::Uint64:
+        case TypeId::Float32:
+        case TypeId::Float64:
+            return true;
+        case TypeId::Unknown:
+        case TypeId::Bool:
+        case TypeId::String:
+        case TypeId::Binary:
+        case TypeId::List:
+        case TypeId::Struct:
+        case TypeId::Float16:
+        case TypeId::Date32:
+        case TypeId::Date64:
+        case TypeId::Time32:
+        case TypeId::Time64:
+        case TypeId::Timestamp:
+        case TypeId::Duration:
+        case TypeId::Decimal128:
+        case TypeId::Decimal256:
+        case TypeId::FixedSizeBinary:
+        case TypeId::LargeString:
+        case TypeId::LargeBinary:
+        case TypeId::LargeList:
+        case TypeId::FixedSizeList:
+        case TypeId::Map:
+            return false;
+    }
+    return false;
+}
+
+/// True for the temporal family (Date32/64, Time32/64, Timestamp, Duration):
+/// physical_type() maps each to Int32 or Int64, so compare/sort/min/max/
+/// group_by/hash work on the exact value via that mapping. Arithmetic is
+/// refused (see arithmetic.cpp): timestamp + timestamp is meaningless, and
+/// timestamp - timestamp -> Duration is a rule this engine does not
+/// implement yet.
+constexpr bool is_temporal_type(TypeId t) noexcept {
+    switch (t) {
+        case TypeId::Date32:
+        case TypeId::Date64:
+        case TypeId::Time32:
+        case TypeId::Time64:
+        case TypeId::Timestamp:
+        case TypeId::Duration:
+            return true;
+        case TypeId::Unknown:
+        case TypeId::Bool:
+        case TypeId::Int8:
+        case TypeId::Int16:
+        case TypeId::Int32:
+        case TypeId::Int64:
+        case TypeId::Uint8:
+        case TypeId::Uint16:
+        case TypeId::Uint32:
+        case TypeId::Uint64:
+        case TypeId::Float32:
+        case TypeId::Float64:
+        case TypeId::String:
+        case TypeId::Binary:
+        case TypeId::List:
+        case TypeId::Struct:
+        case TypeId::Float16:
+        case TypeId::Decimal128:
+        case TypeId::Decimal256:
         case TypeId::FixedSizeBinary:
         case TypeId::LargeString:
         case TypeId::LargeBinary:

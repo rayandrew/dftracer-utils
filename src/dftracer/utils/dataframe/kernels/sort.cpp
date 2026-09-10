@@ -33,7 +33,9 @@ int cmp_bool(const Series& v, std::int64_t a, std::int64_t b) {
 }
 
 int cmp_row(const Series& v, std::int64_t a, std::int64_t b) {
-    switch (v.type()) {
+    // physical_type() routes Date32/Time32 to the Int32 case and
+    // Date64/Time64/Timestamp/Duration to Int64, no case added per type.
+    switch (physical_type(v.type())) {
         case TypeId::Bool:
             return cmp_bool(v, a, b);
         case TypeId::Int8:
@@ -187,7 +189,7 @@ Series argsort_simd(const Series& v, bool descending, std::int64_t k) {
     if (v.null_count() > 0) return Series{};
     const bool wide_index = n > std::numeric_limits<std::uint32_t>::max();
 
-    switch (v.type()) {
+    switch (physical_type(v.type())) {
         case TypeId::Bool: {
             const std::uint8_t* b = v.data<std::uint8_t>();
             if (wide_index) return Series{};

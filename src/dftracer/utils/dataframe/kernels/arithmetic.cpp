@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
@@ -218,7 +219,15 @@ TypeId promote_common(TypeId a, TypeId b) {
 // Weak-scalar promotion: a Python int scalar never forces a wider column
 // dtype (numpy semantics), but a float scalar against an integer column does.
 dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
-    if (a->encoding != Encoding::Flat || !is_numeric(a->type)) return nullptr;
+    if (a->encoding != Encoding::Flat) return nullptr;
+    if (is_temporal_type(a->type)) {
+        // Neither calendar-shift nor duration arithmetic is defined yet.
+        DFTRACER_UTILS_LOG_ERROR(
+            "arithmetic: op not defined for temporal type '%s'",
+            type_name(a->type));
+        return nullptr;
+    }
+    if (!is_numeric(a->type)) return nullptr;
 
     // Float16 has no arithmetic kernel; Decimal128/256 have no exact one.
     // Both promote here, once, before any dispatch below sees them.
@@ -269,6 +278,13 @@ dftu_series* binop(const dftu_series* a, const dftu_series* b, BinOp op) {
     if (a->encoding != Encoding::Flat || b->encoding != Encoding::Flat)
         return nullptr;
     if (a->length != b->length) return nullptr;
+    if (is_temporal_type(a->type) || is_temporal_type(b->type)) {
+        // See scalar_op above: no temporal arithmetic rule defined yet.
+        DFTRACER_UTILS_LOG_ERROR(
+            "arithmetic: op not defined for temporal type '%s'",
+            type_name(is_temporal_type(a->type) ? a->type : b->type));
+        return nullptr;
+    }
     if (!is_numeric(a->type) || !is_numeric(b->type)) return nullptr;
 
     dftu_series* promoted_a = nullptr;

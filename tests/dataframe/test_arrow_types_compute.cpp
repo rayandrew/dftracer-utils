@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -22,8 +23,11 @@
 #include <dftracer/utils/dataframe/scalar.h>
 // clang-format on
 
+using dftracer::utils::dataframe::Agg;
+using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::DataType;
 using dftracer::utils::dataframe::fixed_size_binary;
+using dftracer::utils::dataframe::GroupAgg;
 using dftracer::utils::dataframe::OwnedArrow;
 using dftracer::utils::dataframe::Scalar;
 using dftracer::utils::dataframe::Series;
@@ -77,6 +81,21 @@ Series make_fixed_size_binary(const std::vector<std::string>& values,
         bv.size_bytes = width;
         REQUIRE(ArrowArrayAppendBytes(&b.array, bv) == NANOARROW_OK);
     }
+    finish(&b.array);
+    return Series::from_arrow(&b.schema, &b.array);
+}
+
+Series make_timestamp(const std::vector<std::int64_t>& values) {
+    BuiltArrow b;
+    ArrowSchemaInit(&b.schema);
+    REQUIRE(ArrowSchemaSetTypeDateTime(&b.schema, NANOARROW_TYPE_TIMESTAMP,
+                                       NANOARROW_TIME_UNIT_MICRO,
+                                       "UTC") == NANOARROW_OK);
+    REQUIRE(ArrowArrayInitFromSchema(&b.array, &b.schema, nullptr) ==
+            NANOARROW_OK);
+    REQUIRE(ArrowArrayStartAppending(&b.array) == NANOARROW_OK);
+    for (std::int64_t v : values)
+        REQUIRE(ArrowArrayAppendInt(&b.array, v) == NANOARROW_OK);
     finish(&b.array);
     return Series::from_arrow(&b.schema, &b.array);
 }
@@ -245,6 +264,146 @@ TEST_SUITE("dataframe_arrow_types_compute") {
         Series a = Series::flat_f64(vals.data(), 2);
         Series casted = a.cast(TypeId::Decimal128);
         CHECK_FALSE(casted.valid());
+    }
+
+    TEST_CASE("Timestamp sorts on its exact physical Int64 value") {
+        Series s = make_timestamp({300, -1, 100});
+        REQUIRE(s.valid());
+        Series sorted = s.sort(false);
+        REQUIRE(sorted.valid());
+        REQUIRE(sorted.type() ==
+                TypeId::Timestamp);  // stays Timestamp, not Int64
+        const std::int64_t* d = sorted.data<std::int64_t>();
+        REQUIRE(d != nullptr);
+        CHECK(d[0] == -1);
+        CHECK(d[1] == 100);
+        CHECK(d[2] == 300);
+    }
+
+    TEST_CASE("Timestamp min/max compute on the exact value") {
+        Series s = make_timestamp({300, -1, 100});
+        REQUIRE(s.valid());
+        Scalar mn = s.min();
+        Scalar mx = s.max();
+        CHECK(mn.i64() == -1);
+        CHECK(mx.i64() == 300);
+    }
+
+    TEST_CASE("Timestamp comparison works against a scalar threshold") {
+        Series s = make_timestamp({300, -1, 100});
+        REQUIRE(s.valid());
+        dftu_scalar rhs{};
+        rhs.kind = DFTU_SCALAR_TAG_I64;
+        rhs.value.i = 100;
+        dftu_series* mask = dftu_series_compare(s.handle(), DFTU_CMP_GT, rhs);
+        REQUIRE(mask != nullptr);
+        Series m{mask};
+        REQUIRE(m.length() == 3);
+        const std::uint8_t* bits = m.data<std::uint8_t>();
+        REQUIRE(bits != nullptr);
+        auto bit = [&](std::int64_t i) {
+            return ((bits[i >> 3] >> (i & 7)) & 1) != 0;
+        };
+        CHECK(bit(0) == true);   // 300 > 100
+        CHECK(bit(1) == false);  // -1 > 100
+        CHECK(bit(2) == false);  // 100 > 100
+    }
+
+    TEST_CASE("Timestamp is_in matches on the exact value") {
+        Series s = make_timestamp({300, -1, 100});
+        Series needles = make_timestamp({100});
+        REQUIRE(s.valid());
+        Series mask = s.is_in(needles);
+        REQUIRE(mask.valid());
+        REQUIRE(mask.length() == 3);
+        const std::uint8_t* bits = mask.data<std::uint8_t>();
+        REQUIRE(bits != nullptr);
+        auto bit = [&](std::int64_t i) {
+            return ((bits[i >> 3] >> (i & 7)) & 1) != 0;
+        };
+        CHECK(bit(0) == false);
+        CHECK(bit(1) == false);
+        CHECK(bit(2) == true);
+    }
+
+    TEST_CASE("Timestamp groups on the exact value, via both group_by paths") {
+        Series keys = make_timestamp({100, 300, 100});
+        std::vector<std::int64_t> ones = {1, 1, 1};
+        Series values = Series::flat_i64(ones.data(), 3);
+        REQUIRE(keys.valid());
+
+        // Low-level ABI primitive (kernels/group_by.cpp).
+        dftu_series* out_keys = nullptr;
+        dftu_series* out_values[5] = {};
+        std::int32_t n =
+            dftu_series_group_by(keys.handle(), values.handle(),
+                                 DFTU_REDUCE_COUNT, &out_keys, out_values, 5);
+        REQUIRE(n == 1);
+        REQUIRE(dftu_series_length(out_keys) == 2);
+        Series counts{out_values[0]};
+        const std::int64_t* c = counts.data<std::int64_t>();
+        CHECK(c[0] == 2);  // 100 first-seen
+        CHECK(c[1] == 1);  // 300
+        dftu_series_free(out_keys);
+
+        // DataFrame::group_by (AggState/group_agg engine).
+        DataFrame df;
+        df.names = {"ts", "v"};
+        df.columns.push_back(keys.share());
+        df.columns.push_back(values.share());
+        DataFrame grouped = df.group_by("ts", {GroupAgg{Agg::Count, "v", "n"}});
+        REQUIRE(grouped.num_rows() == 2);
+        Series gkeys = grouped.column("ts");
+        Series gn = grouped.column("n");
+        REQUIRE(gkeys.type() == TypeId::Timestamp);
+        const std::int64_t* kp = gkeys.data<std::int64_t>();
+        const std::int64_t* np = gn.data<std::int64_t>();
+        REQUIRE(kp != nullptr);
+        REQUIRE(np != nullptr);
+        for (std::int64_t i = 0; i < 2; ++i) {
+            if (kp[i] == 100)
+                CHECK(np[i] == 2);
+            else if (kp[i] == 300)
+                CHECK(np[i] == 1);
+            else
+                FAIL("unexpected group key");
+        }
+    }
+
+    TEST_CASE("Timestamp arithmetic is refused, not silently an integer") {
+        Series a = make_timestamp({100, 200});
+        Series b = make_timestamp({1, 1});
+        REQUIRE(a.valid());
+        Series sum = a.add(b);
+        CHECK_FALSE(sum.valid());
+    }
+
+    TEST_CASE(
+        "DataFrame::group_by refuses a FixedSizeBinary key loudly, not "
+        "wrong groups") {
+        Series keys = make_fixed_size_binary({"aaaa", "bbbb", "aaaa"}, 4);
+        std::vector<std::int64_t> ones = {1, 1, 1};
+        Series values = Series::flat_i64(ones.data(), 3);
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(keys.share());
+        df.columns.push_back(values.share());
+        CHECK_THROWS_AS(df.group_by("k", {GroupAgg{Agg::Count, "v", "n"}}),
+                        std::invalid_argument);
+    }
+
+    TEST_CASE(
+        "DataFrame::group_by refuses a Decimal128 key loudly, not wrong "
+        "groups") {
+        Series keys = make_decimal128({100, 300, 100});
+        std::vector<std::int64_t> ones = {1, 1, 1};
+        Series values = Series::flat_i64(ones.data(), 3);
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(keys.share());
+        df.columns.push_back(values.share());
+        CHECK_THROWS_AS(df.group_by("k", {GroupAgg{Agg::Count, "v", "n"}}),
+                        std::invalid_argument);
     }
 }
 #else

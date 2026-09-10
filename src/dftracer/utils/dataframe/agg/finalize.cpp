@@ -151,7 +151,24 @@ DataFrame agg_finalize(const AggState& st,
                     std::bit_cast<double>(bits[static_cast<std::size_t>(g)]);
             out.columns.push_back(Series::flat_f64(v.data(), ng));
         } else {
-            out.columns.push_back(Series::flat_i64(bits.data(), ng));
+            // I64 domain: retag with key_type so a temporal key stays
+            // Date32/64/Time32/64/Timestamp/Duration, not a bare Int64.
+            // bits is always sign-extended to 64, so the 4-byte types narrow
+            // back down.
+            const TypeId kt =
+                k < st.key_type.size() ? st.key_type[k] : TypeId::Int64;
+            if (kt == TypeId::Date32 || kt == TypeId::Time32) {
+                std::vector<std::int32_t> v(static_cast<std::size_t>(ng));
+                for (std::int64_t g = 0; g < ng; ++g)
+                    v[static_cast<std::size_t>(g)] = static_cast<std::int32_t>(
+                        bits[static_cast<std::size_t>(g)]);
+                out.columns.push_back(Series::flat(kt, v.data(), ng));
+            } else if (kt == TypeId::Date64 || kt == TypeId::Time64 ||
+                       kt == TypeId::Timestamp || kt == TypeId::Duration) {
+                out.columns.push_back(Series::flat(kt, bits.data(), ng));
+            } else {
+                out.columns.push_back(Series::flat_i64(bits.data(), ng));
+            }
         }
     }
 

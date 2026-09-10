@@ -46,6 +46,9 @@ std::string agg_serialize(const AggState& st) {
         put(s, static_cast<std::uint8_t>(k < st.key_domain.size()
                                              ? st.key_domain[k]
                                              : FieldStatDomain::I64));
+    for (std::size_t k = 0; k < st.nkeys; ++k)
+        put(s, static_cast<std::uint8_t>(
+                   k < st.key_type.size() ? st.key_type[k] : TypeId::Int64));
     for (const AggSpec& sp : st.specs) {
         put(s, static_cast<std::int32_t>(sp.op));
         put(s, sp.value_col);
@@ -211,6 +214,9 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     st->key_domain.resize(nkeys);
     for (std::uint32_t k = 0; k < nkeys; ++k)
         st->key_domain[k] = static_cast<FieldStatDomain>(r.get<std::uint8_t>());
+    st->key_type.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k)
+        st->key_type[k] = static_cast<TypeId>(r.get<std::uint8_t>());
     st->specs.resize(ns);
     for (std::uint32_t i = 0; i < ns; ++i) {
         st->specs[i].op = static_cast<AggOp>(r.get<std::int32_t>());

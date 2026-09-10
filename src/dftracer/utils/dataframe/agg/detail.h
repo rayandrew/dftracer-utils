@@ -127,7 +127,11 @@ class AggState {
     std::vector<char> key_is_str;  // nkeys
     // Domain the raw bits in ikey_cols reinterpret to on finalize/render, so a
     // Uint64 hash key > 2^63 or a Float64 key keeps its real type.
-    std::vector<FieldStatDomain> key_domain;           // nkeys
+    std::vector<FieldStatDomain> key_domain;  // nkeys
+    // The key column's exact TypeId (Date32/64, Time32/64, Timestamp,
+    // Duration all widen to the I64 domain above); finalize retags the group
+    // key with this instead of a bare Int64.
+    std::vector<TypeId> key_type;                      // nkeys
     std::vector<std::vector<std::int64_t>> ikey_cols;  // nkeys * ngroups
     std::vector<std::vector<std::string>> skey_cols;   // nkeys * ngroups
     std::unordered_map<std::uint64_t, std::vector<std::int64_t>> key_buckets;
