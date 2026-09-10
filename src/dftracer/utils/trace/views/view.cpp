@@ -225,6 +225,32 @@ std::vector<View::ColumnInfo> View::schema() const {
     return out;
 }
 
+std::unordered_map<std::string, dataframe::TypeId> View::column_types() const {
+    namespace df = dftracer::utils::dataframe;
+    ColTypeMap m = harvest_column_types(plan_->files);
+    std::unordered_map<std::string, df::TypeId> out;
+    out.reserve(m.size());
+    for (auto& [name, t] : m) {
+        df::TypeId id = df::TypeId::Unknown;
+        switch (t) {
+            case idx::ColumnType::Int64:
+                id = df::TypeId::Int64;
+                break;
+            case idx::ColumnType::Float64:
+                id = df::TypeId::Float64;
+                break;
+            case idx::ColumnType::String:
+                id = df::TypeId::String;
+                break;
+            case idx::ColumnType::Unknown:
+                id = df::TypeId::Unknown;
+                break;
+        }
+        out.emplace(name, id);
+    }
+    return out;
+}
+
 TimeMetric View::time_metric() const {
     if (plan_->files.empty()) return TimeMetric::US;
     return trace::read_time_metric(plan_->files.front().file_path);

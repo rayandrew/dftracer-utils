@@ -22,6 +22,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace dftracer::utils::trace::views {
@@ -346,6 +348,21 @@ dftracer::utils::dataframe::Schema ViewSource::schema() const {
     namespace df = dftracer::utils::dataframe;
     df::Schema s;
     if (can_stream_rows()) {
+        // row_column_type() reports TypeId::Unknown for a flattened arg
+        // column, since it is data-dependent and the function has no index
+        // access; fill those in from the same harvest columns()/schema() use,
+        // so name and type cannot disagree.
+        std::unordered_map<std::string, df::TypeId> harvested;
+        auto resolve = [&](const std::string& name) {
+            df::TypeId id = detail::row_column_type(name);
+            if (id != df::TypeId::Unknown) return id;
+            if (harvested.empty()) harvested = view_.column_types();
+            std::string_view key = name;
+            if (key.rfind(dftracer::utils::ARGS_PREFIX, 0) == 0)
+                key.remove_prefix(dftracer::utils::ARGS_PREFIX.size());
+            auto it = harvested.find(std::string(key));
+            return it == harvested.end() ? id : it->second;
+        };
         // A non-empty select fixes every streamed morsel's columns to exactly
         // this list (see open_stream()), so the schema must match it, not the
         // broader index-derived row_schema(). Canonicalize each select entry
@@ -355,16 +372,16 @@ dftracer::utils::dataframe::Schema ViewSource::schema() const {
         if (!view_.plan_->select.empty()) {
             s.fields.reserve(view_.plan_->select.size());
             for (const std::string& sel : view_.plan_->select) {
+                std::string col_name = detail::canonical_row_column_name(sel);
                 s.fields.push_back(
-                    df::Field{detail::canonical_row_column_name(sel),
-                              df::scalar(detail::row_column_type(sel)), true});
+                    df::Field{col_name, df::scalar(resolve(col_name)), true});
             }
         } else {
             std::vector<std::string> names = row_schema();
             s.fields.reserve(names.size());
             for (const std::string& name : names)
-                s.fields.push_back(df::Field{
-                    name, df::scalar(detail::row_column_type(name)), true});
+                s.fields.push_back(
+                    df::Field{name, df::scalar(resolve(name)), true});
         }
         return s;
     }

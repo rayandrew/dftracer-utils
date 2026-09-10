@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -667,6 +668,12 @@ class View {
     /// (numeric widens to float64, any mix with a string widens to string); a
     /// column from a pre-v12 index that stored no type reads as "string".
     std::vector<ColumnInfo> schema() const;
+
+    /// As schema(), keyed by name with the full dataframe::TypeId rather than
+    /// schema()'s type-name string. Used internally so a flattened
+    /// "args.<key>" column can report its concrete harvested type instead of
+    /// TypeId::Unknown.
+    std::unordered_map<std::string, dataframe::TypeId> column_types() const;
 
     /// The trace's native time unit, from the CM metadata record: a head-read
     /// of the first file only, no scan. US when the view has no files or the

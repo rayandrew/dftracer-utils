@@ -524,4 +524,37 @@ TEST_SUITE("View - streaming row query") {
 
         CHECK(chunks == 1);
     }
+
+    TEST_CASE(
+        "ViewSource schema() reports a concrete type for an args column once "
+        "the index has harvested it") {
+        namespace df = dftracer::utils::dataframe;
+        TestEnvironment env(200);
+        std::string gz = create_mixed_arg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+
+        // Build the index (and its harvested column types) before asking for
+        // the schema, so the "x" arg's type is known from the index rather
+        // than data-dependent.
+        {
+            StringSink sink;
+            View::from_file(gz, idx)
+                .emit_all_metadata(true)
+                .export_json(sink)
+                .get();
+        }
+
+        View v =
+            View::from_file(gz, idx).metadata(false).select({"name", "args.x"});
+        auto src = std::make_shared<ViewSource>(v);
+
+        df::Schema schema = src->schema();
+        REQUIRE(schema.fields.size() == 2);
+        CHECK(schema.fields[0].name == "name");
+        CHECK(schema.fields[1].name == "args.x");
+        CHECK(schema.fields[0].type.id == df::TypeId::String);
+        // The index harvested "x" as an integer column; schema() must report
+        // that concretely instead of falling back to Unknown.
+        CHECK(schema.fields[1].type.id == df::TypeId::Int64);
+    }
 }
