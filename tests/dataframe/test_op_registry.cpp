@@ -299,6 +299,145 @@ TEST_SUITE("op_registry") {
         dftu_series_free(c);
     }
 
+    TEST_CASE(
+        "newly-registered slice/materialize/take/sample ops run and "
+        "match the direct C ABI call") {
+        std::int64_t v[5] = {10, 20, 30, 40, 50};
+        dftu_series* c = i64_col(v, 5);
+        const dftu_series* in1[1] = {c};
+
+        // dftu.series.slice
+        OpArgs sliceArg;
+        sliceArg.i64(1, 1).i64(2, 3);
+        dftu_series* sliced =
+            dftu_op_run(dftu_op_find("dftu.series.slice"), in1, 1, sliceArg);
+        dftu_series* slicedDirect = dftu_series_slice(c, 1, 3);
+        REQUIRE(sliced != nullptr);
+        REQUIRE(slicedDirect != nullptr);
+        REQUIRE(dftu_series_length(sliced) == dftu_series_length(slicedDirect));
+        for (std::int64_t i = 0; i < dftu_series_length(sliced); ++i)
+            CHECK(i64_of(sliced)[i] == i64_of(slicedDirect)[i]);
+        dftu_series_free(sliced);
+        dftu_series_free(slicedDirect);
+
+        // dftu.series.materialize
+        dftu_series* mat = dftu_op_run(dftu_op_find("dftu.series.materialize"),
+                                       in1, 1, nullptr);
+        dftu_series* matDirect = dftu_series_materialize(c);
+        REQUIRE(mat != nullptr);
+        REQUIRE(matDirect != nullptr);
+        REQUIRE(dftu_series_length(mat) == dftu_series_length(matDirect));
+        for (std::int64_t i = 0; i < dftu_series_length(mat); ++i)
+            CHECK(i64_of(mat)[i] == i64_of(matDirect)[i]);
+        dftu_series_free(mat);
+        dftu_series_free(matDirect);
+
+        // dftu.series.take
+        std::int64_t idx[3] = {3, 0, 4};
+        OpArgs takeArg;
+        takeArg.i64list(1, idx);
+        dftu_series* taken =
+            dftu_op_run(dftu_op_find("dftu.series.take"), in1, 1, takeArg);
+        dftu_series* takenDirect = dftu_series_take(c, idx, 3);
+        REQUIRE(taken != nullptr);
+        REQUIRE(takenDirect != nullptr);
+        REQUIRE(dftu_series_length(taken) == dftu_series_length(takenDirect));
+        for (std::int64_t i = 0; i < dftu_series_length(taken); ++i)
+            CHECK(i64_of(taken)[i] == i64_of(takenDirect)[i]);
+        dftu_series_free(taken);
+        dftu_series_free(takenDirect);
+
+        // dftu.series.sample: deterministic (mix64 hash), so a fixed seed
+        // matches the direct call bit-for-bit.
+        OpArgs sampleArg;
+        sampleArg.i64(1, 2).u64(2, 42);
+        dftu_series* sampled =
+            dftu_op_run(dftu_op_find("dftu.series.sample"), in1, 1, sampleArg);
+        dftu_series* sampledDirect = dftu_series_sample(c, 2, 42);
+        REQUIRE(sampled != nullptr);
+        REQUIRE(sampledDirect != nullptr);
+        REQUIRE(dftu_series_length(sampled) ==
+                dftu_series_length(sampledDirect));
+        for (std::int64_t i = 0; i < dftu_series_length(sampled); ++i)
+            CHECK(i64_of(sampled)[i] == i64_of(sampledDirect)[i]);
+        dftu_series_free(sampled);
+        dftu_series_free(sampledDirect);
+
+        dftu_series_free(c);
+    }
+
+    TEST_CASE(
+        "newly-registered frame take/sample/group_by_dynamic ops run "
+        "and match the direct C ABI call") {
+        std::int64_t a[5] = {1, 2, 3, 4, 5};
+        std::int64_t t[5] = {0, 1, 2, 10, 11};
+        const char* names[2] = {"a", "t"};
+        dftu_series* cols[2] = {i64_col(a, 5), i64_col(t, 5)};  // moved into df
+        dftu_dataframe* df = dftu_dataframe_new(names, cols, 2);
+        REQUIRE(df != nullptr);
+        const dftu_dataframe* fin[1] = {df};
+
+        // dftu.frame.take
+        std::int64_t idx[2] = {4, 1};
+        OpArgs takeArg;
+        takeArg.i64list(1, idx);
+        dftu_dataframe* taken =
+            dftu_op_run_frame(dftu_op_find("dftu.frame.take"), fin, 1, takeArg);
+        dftu_dataframe* takenDirect = dftu_dataframe_take(df, idx, 2);
+        REQUIRE(taken != nullptr);
+        REQUIRE(takenDirect != nullptr);
+        CHECK(dftu_dataframe_num_rows(taken) ==
+              dftu_dataframe_num_rows(takenDirect));
+        dftu_series* takenCol = dftu_dataframe_column(taken, "a");
+        dftu_series* takenDirectCol = dftu_dataframe_column(takenDirect, "a");
+        for (std::int64_t i = 0; i < dftu_series_length(takenCol); ++i)
+            CHECK(i64_of(takenCol)[i] == i64_of(takenDirectCol)[i]);
+        dftu_series_free(takenCol);
+        dftu_series_free(takenDirectCol);
+        dftu_dataframe_free(taken);
+        dftu_dataframe_free(takenDirect);
+
+        // dftu.frame.sample: deterministic, same seed matches bit-for-bit.
+        OpArgs sampleArg;
+        sampleArg.i64(1, 2).u64(2, 7);
+        dftu_dataframe* sampled = dftu_op_run_frame(
+            dftu_op_find("dftu.frame.sample"), fin, 1, sampleArg);
+        dftu_dataframe* sampledDirect = dftu_dataframe_sample(df, 2, 7);
+        REQUIRE(sampled != nullptr);
+        REQUIRE(sampledDirect != nullptr);
+        CHECK(dftu_dataframe_num_rows(sampled) ==
+              dftu_dataframe_num_rows(sampledDirect));
+        dftu_dataframe_free(sampled);
+        dftu_dataframe_free(sampledDirect);
+
+        // dftu.frame.group_by_dynamic
+        dftu_group_agg aggs[1] = {{"sum", "a", "asum"}};
+        OpArgs gbdArg;
+        gbdArg.str(1, "t").i64(2, 5).i64(3, -1).agglist(4, aggs);
+        dftu_dataframe* windowed = dftu_op_run_frame(
+            dftu_op_find("dftu.frame.group_by_dynamic"), fin, 1, gbdArg);
+        dftu_dataframe* windowedDirect =
+            dftu_dataframe_group_by_dynamic(df, "t", 5, -1, aggs, 1);
+        REQUIRE(windowed != nullptr);
+        REQUIRE(windowedDirect != nullptr);
+        CHECK(dftu_dataframe_num_rows(windowed) ==
+              dftu_dataframe_num_rows(windowedDirect));
+        CHECK(dftu_dataframe_num_columns(windowed) ==
+              dftu_dataframe_num_columns(windowedDirect));
+        dftu_series* wsum = dftu_dataframe_column(windowed, "asum");
+        dftu_series* wsumDirect = dftu_dataframe_column(windowedDirect, "asum");
+        REQUIRE(wsum != nullptr);
+        REQUIRE(wsumDirect != nullptr);
+        for (std::int64_t i = 0; i < dftu_series_length(wsum); ++i)
+            CHECK(i64_of(wsum)[i] == i64_of(wsumDirect)[i]);
+        dftu_series_free(wsum);
+        dftu_series_free(wsumDirect);
+        dftu_dataframe_free(windowed);
+        dftu_dataframe_free(windowedDirect);
+
+        dftu_dataframe_free(df);
+    }
+
     TEST_CASE("DFTU_OP_SIG8 round-trips all 8 tokens of a widest signature") {
         dftu_op_sig sig =
             DFTU_OP_SIG8(LAZY, LAZY, STR, I64, I64, AGGLIST, I64, I32);

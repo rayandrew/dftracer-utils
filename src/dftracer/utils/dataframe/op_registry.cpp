@@ -8,6 +8,24 @@
 #include <type_traits>
 #include <vector>
 
+extern "C" {
+
+// dftu_series_take/dftu_dataframe_take take a widening int64_t count; the
+// I64LIST operand token unpacks an int32_t count (dftu_op_val::i64list.n), so
+// the op registry routes through these trampolines rather than change the
+// public ABI signature.
+DFTU_EXPORT dftu_series* dftu_series_take_i32(const dftu_series* v,
+                                              const int64_t* idx, int32_t n) {
+    return dftu_series_take(v, idx, n);
+}
+DFTU_EXPORT dftu_dataframe* dftu_dataframe_take_i32(const dftu_dataframe* df,
+                                                    const int64_t* idx,
+                                                    int32_t n) {
+    return dftu_dataframe_take(df, idx, n);
+}
+
+}  // extern "C"
+
 namespace {
 
 using dftracer::utils::dataframe::internal::op_fn;
@@ -317,6 +335,12 @@ dftu_series* dftu_op_run(const dftu_op_desc* op, const dftu_series* const* in,
             return as_op<DFTU_OP_SIG(SERIES, SERIES, RANK, I64)>(op->fn)(
                 in[0], static_cast<dftu_rank_method>(g[1].i32),
                 static_cast<int32_t>(g[2].i64));
+        case DFTU_OP_SIG(SERIES, SERIES, I64, U64):
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, I64, U64)>(op->fn)(
+                in[0], g[1].i64, g[2].u64);
+        case DFTU_OP_SIG(SERIES, SERIES, I64LIST, NONE):
+            return as_op<DFTU_OP_SIG(SERIES, SERIES, I64LIST, NONE)>(op->fn)(
+                in[0], g[1].i64list.items, g[1].i64list.n);
         default:
             return nullptr;
     }
@@ -446,6 +470,17 @@ dftu_dataframe* dftu_op_run_frame(const dftu_op_desc* op,
             if (!g[0].series) return nullptr;
             return as_op<DFTU_OP_SIG(FRAME, SERIES, NONE, NONE)>(op->fn)(
                 g[0].series);
+        case DFTU_OP_SIG6(FRAME, FRAME, I64LIST, NONE, NONE, NONE):
+            return as_op<DFTU_OP_SIG6(FRAME, FRAME, I64LIST, NONE, NONE, NONE)>(
+                op->fn)(df, g[1].i64list.items, g[1].i64list.n);
+        case DFTU_OP_SIG6(FRAME, FRAME, I64, U64, NONE, NONE):
+            return as_op<DFTU_OP_SIG6(FRAME, FRAME, I64, U64, NONE, NONE)>(
+                op->fn)(df, g[1].i64, g[2].u64);
+        case DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I64, AGGLIST):
+            if (!g[4].agglist.items) return nullptr;
+            return as_op<DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I64, AGGLIST)>(
+                op->fn)(df, g[1].str.ptr, g[2].i64, g[3].i64,
+                        g[4].agglist.items, g[4].agglist.n);
         default:
             return nullptr;
     }

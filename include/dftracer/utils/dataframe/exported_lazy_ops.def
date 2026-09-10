@@ -12,9 +12,8 @@
  *                   SCALAR -> scalar).
  *
  * dftu_lazyframe_sample's seed and dftu_lazyframe_memory_budget's bytes are
- * uint64_t; there is no dedicated U64 token (widening the token set is out of
- * scope), so both ride the I64 token and go through an _i64 trampoline that
- * reinterprets the bit pattern - lossless for a byte count or a hash seed.
+ * uint64_t and ride the dedicated U64 token (dftu_op_val::u64) directly - both
+ * functions already take a uint64_t, so no trampoline is needed.
  *
  * collect/schema/explain/free are terminal accessors (they return a
  * dataframe, a string, or nothing, not a lazyframe), not plan nodes, so they

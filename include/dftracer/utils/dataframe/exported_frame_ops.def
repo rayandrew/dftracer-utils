@@ -13,9 +13,8 @@
  *                   scalar).
  *
  * Deferred (bespoke C shapes, not a value-operand fit): group_by (out-params),
- * group_by_dynamic (dftu_group_agg[] array), mask (a compiled dftu_query),
- * take (int64 index array), sample (uint64 seed), is_duplicated/is_unique
- * (frame -> series). Use their dftu_dataframe_* ABI / DataFrame methods.
+ * mask (a compiled dftu_query), is_duplicated/is_unique (frame -> series).
+ * Use their dftu_dataframe_* ABI / DataFrame methods.
  */
 
 #ifndef DFTU_FRAME_OP
@@ -55,5 +54,10 @@ DFTU_FRAME_OP(pivot, dftu_dataframe_pivot, FRAME, FRAME, STR, STR, STR, STR)
 
 /* series -> table. */
 DFTU_FRAME_OP(value_counts, dftu_series_value_counts, FRAME, SERIES, NONE, NONE, NONE, NONE)
+
+/* table + int64-index list / sampling / dynamic windowed aggregation. */
+DFTU_FRAME_OP(take, dftu_dataframe_take_i32, FRAME, FRAME, I64LIST, NONE, NONE, NONE)
+DFTU_FRAME_OP(sample, dftu_dataframe_sample, FRAME, FRAME, I64, U64, NONE, NONE)
+DFTU_FRAME_OP(group_by_dynamic, dftu_dataframe_group_by_dynamic, FRAME, FRAME, STR, I64, I64, AGGLIST)
 
 #undef DFTU_FRAME_OP

@@ -51,16 +51,15 @@ ALLOWLIST = {
         "values", "is_flat", "offsets", "offsets_span", "valid", "handle",
         "release", "child", "num_children", "list", "strings", "structs",
         "nulls", "flat", "flat_i64", "flat_f64", "string_at", "share",
-        "materialize",
         "from_arrow", "from_borrowed", "to_arrow",
-        "slice", "take", "sample", "value_counts",
+        "value_counts",
     },
     "DataFrame": {
         "column", "column_index", "num_columns", "num_rows",
         "is_unique", "is_duplicated",
         "from_arrow", "to_arrow", "to_ipc",
         "stream", "lazy",
-        "group_by", "group_by_dynamic", "mask", "melt", "sample", "take",
+        "group_by", "mask", "melt",
     },
     "LazyFrame": {
         "collect", "collect_group_state", "explain",

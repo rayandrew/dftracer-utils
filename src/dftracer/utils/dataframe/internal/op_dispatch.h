@@ -63,6 +63,10 @@ DFTU_OP_FN(DFTU_OP_SIG(SERIES, STR, STR, NONE),
            dftu_series* (*)(const char*, int32_t, const char*, int32_t))
 DFTU_OP_FN(DFTU_OP_SIG(SERIES, SERIES, RANK, I64),
            dftu_series* (*)(CS, dftu_rank_method, int32_t))
+DFTU_OP_FN(DFTU_OP_SIG(SERIES, SERIES, I64, U64),
+           dftu_series* (*)(CS, int64_t, uint64_t))
+DFTU_OP_FN(DFTU_OP_SIG(SERIES, SERIES, I64LIST, NONE),
+           dftu_series* (*)(CS, const int64_t*, int32_t))
 
 // dftu_op_run_aggregate (DFTU_OP_KIND_AGGREGATE).
 DFTU_OP_FN(DFTU_OP_SIG(SCALAR, SERIES, NONE, NONE), dftu_scalar (*)(CS))
@@ -102,6 +106,13 @@ DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I32, NONE),
 DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, STR, STR, STR, STR),
            DF (*)(CDF, const char*, const char*, const char*, const char*))
 DFTU_OP_FN(DFTU_OP_SIG(FRAME, SERIES, NONE, NONE), DF (*)(CS))
+DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, I64LIST, NONE, NONE, NONE),
+           DF (*)(CDF, const int64_t*, int32_t))
+DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, I64, U64, NONE, NONE),
+           DF (*)(CDF, int64_t, uint64_t))
+DFTU_OP_FN(DFTU_OP_SIG6(FRAME, FRAME, STR, I64, I64, AGGLIST),
+           DF (*)(CDF, const char*, int64_t, int64_t, const dftu_group_agg*,
+                  int32_t))
 
 // dftu_op_run_lazy (DFTU_OP_KIND_LAZY).
 DFTU_OP_FN(DFTU_OP_SIG(LAZY, LAZY, NONE, NONE), LF (*)(CLF))
