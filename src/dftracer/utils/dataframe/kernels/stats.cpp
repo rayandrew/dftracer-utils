@@ -68,25 +68,62 @@ bool equal_at(const Series& v, std::int64_t a, std::int64_t b) {
     return false;
 }
 
+// Decimal128/256 are ValueDomain::Bytes (exact compare needs the scaled
+// integer) but read_f64 decodes them to a real number, so they window like
+// Float16; every other Bytes/None type has no numeric magnitude to widen.
+bool refuse_non_numeric(const char* op, TypeId t) {
+    if (value_domain(t) == ValueDomain::Numeric || t == TypeId::Decimal128 ||
+        t == TypeId::Decimal256)
+        return false;
+    DFTRACER_UTILS_LOG_ERROR("%s: no numeric value for type '%s'", op,
+                             type_name(t));
+    return true;
+}
+
+// field_stat_reduce's scalar fallback only takes the double branch for
+// Float32/Float64; Float16 and Decimal128/256 fall to read_i64's default-0
+// case. Fold those two through read_f64 by hand instead.
+FieldStat moment_stat(const Series& v) {
+    FieldStat fs;
+    const std::int64_t n = v.length();
+    const bool has_nulls = v.null_count() > 0;
+    for (std::int64_t i = 0; i < n; ++i)
+        if (!has_nulls || !v.is_null(i)) fs.add(read_f64(v, i));
+    return fs;
+}
+
+FieldStat moment_stat_for(const Series& v) {
+    const TypeId t = v.type();
+    if (t == TypeId::Float16 || t == TypeId::Decimal128 ||
+        t == TypeId::Decimal256)
+        return moment_stat(v);
+    return field_stat_reduce(v, 0, v.length());
+}
+
 }  // namespace
 
 double variance(const Series& v, bool sample) {
-    return field_stat_reduce(v, 0, v.length()).variance(sample);
+    if (refuse_non_numeric("variance", v.type())) return 0.0;
+    return moment_stat_for(v).variance(sample);
 }
 
 double stddev(const Series& v, bool sample) {
-    return field_stat_reduce(v, 0, v.length()).stddev(sample);
+    if (refuse_non_numeric("stddev", v.type())) return 0.0;
+    return moment_stat_for(v).stddev(sample);
 }
 
 double skewness(const Series& v) {
-    return field_stat_reduce(v, 0, v.length()).skewness();
+    if (refuse_non_numeric("skewness", v.type())) return 0.0;
+    return moment_stat_for(v).skewness();
 }
 
 double kurtosis(const Series& v) {
-    return field_stat_reduce(v, 0, v.length()).kurtosis();
+    if (refuse_non_numeric("kurtosis", v.type())) return 0.0;
+    return moment_stat_for(v).kurtosis();
 }
 
 double quantile(const Series& v, double q) {
+    if (refuse_non_numeric("quantile", v.type())) return std::nan("");
     std::vector<double> x = nonnull_values(v);
     const std::size_t n = x.size();
     if (n == 0) return std::nan("");
@@ -183,6 +220,7 @@ Series rank(const Series& v, RankMethod method, bool descending) {
 }
 
 Series rolling(const Series& v, std::int64_t window, RollingOp op) {
+    if (refuse_non_numeric("rolling", v.type())) return Series{};
     const std::int64_t n = v.length();
     if (window < 1) window = 1;
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
@@ -290,7 +328,9 @@ double window_sample_var(const std::vector<double>& x) {
 // valid mask is filled in bulk first so worker threads only ever touch their
 // own disjoint `out` slots.
 template <class Agg>
-Series rolling_window(const Series& v, std::int64_t window, Agg agg) {
+Series rolling_window(const Series& v, std::int64_t window, Agg agg,
+                      const char* op_name) {
+    if (refuse_non_numeric(op_name, v.type())) return Series{};
     const std::int64_t n = v.length();
     if (window < 1) window = 1;
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
@@ -350,27 +390,33 @@ Series rolling_window(const Series& v, std::int64_t window, Agg agg) {
 }  // namespace
 
 Series rolling_var(const Series& v, std::int64_t window) {
-    return rolling_window(v, window, [](const std::vector<double>& w) {
-        return window_sample_var(w);
-    });
+    return rolling_window(
+        v, window,
+        [](const std::vector<double>& w) { return window_sample_var(w); },
+        "rolling_var");
 }
 
 Series rolling_std(const Series& v, std::int64_t window) {
-    return rolling_window(v, window, [](const std::vector<double>& w) {
-        return std::sqrt(window_sample_var(w));
-    });
+    return rolling_window(
+        v, window,
+        [](const std::vector<double>& w) {
+            return std::sqrt(window_sample_var(w));
+        },
+        "rolling_std");
 }
 
 Series rolling_median(const Series& v, std::int64_t window) {
-    return rolling_window(v, window, [](std::vector<double>& w) {
-        return quantile_sorted(w, 0.5);
-    });
+    return rolling_window(
+        v, window,
+        [](std::vector<double>& w) { return quantile_sorted(w, 0.5); },
+        "rolling_median");
 }
 
 Series rolling_quantile(const Series& v, std::int64_t window, double q) {
-    return rolling_window(v, window, [q](std::vector<double>& w) {
-        return quantile_sorted(w, q);
-    });
+    return rolling_window(
+        v, window,
+        [q](std::vector<double>& w) { return quantile_sorted(w, q); },
+        "rolling_quantile");
 }
 
 // Two chunk-transform composers shared by the EWM family: `y -> a*y + c`
@@ -474,6 +520,7 @@ void affine_scan_var_a(std::int64_t n, std::int64_t grain, A&& a, C&& c,
 }
 
 Series ewm_mean(const Series& v, double alpha) {
+    if (refuse_non_numeric("ewm_mean", v.type())) return Series{};
     const std::int64_t n = v.length();
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
     if (n == 0) return Series::flat(TypeId::Float64, out.data(), n);
@@ -488,6 +535,7 @@ Series ewm_mean(const Series& v, double alpha) {
 }
 
 Series ewm_std(const Series& v, double alpha) {
+    if (refuse_non_numeric("ewm_std", v.type())) return Series{};
     const std::int64_t n = v.length();
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
     std::vector<std::uint8_t> valid(static_cast<std::size_t>((n + 7) / 8), 0);
@@ -580,6 +628,7 @@ Series ewm_std(const Series& v, double alpha) {
 }
 
 Series cut(const Series& v, const Series& breaks) {
+    if (refuse_non_numeric("cut", v.type())) return Series{};
     const std::int64_t n = v.length();
     const std::int64_t nb = breaks.length();
     std::vector<double> edges(static_cast<std::size_t>(nb));
@@ -601,6 +650,7 @@ Series cut(const Series& v, const Series& breaks) {
 }
 
 Series qcut(const Series& v, std::int32_t q) {
+    if (refuse_non_numeric("qcut", v.type())) return Series{};
     if (q < 1) q = 1;
     std::vector<double> vals = nonnull_values(v);
     std::vector<double> edges;
