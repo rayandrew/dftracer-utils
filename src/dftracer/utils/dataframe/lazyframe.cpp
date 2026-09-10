@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <deque>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <stdexcept>
@@ -3241,6 +3242,41 @@ CursorChain lower_cursor_chain(
         if (!f) break;
         req.filters.push_back(f->pred);
         cand_pos.push_back(i);
+    }
+
+    // A slice reachable from the scan through row-preserving ops bounds how
+    // many rows the source need produce. Only when NOTHING removes rows on the
+    // way: the source applies the request as a whole, and whether it honored a
+    // filter is only known from the ScanResult it has not returned yet, so a
+    // limit sent alongside an unapplied filter would truncate the source before
+    // the engine ever filters. req.filters being empty is what rules that out.
+    // The Slice op still runs below - limit is a hint, and a source may return
+    // more rows than asked (or ignore it entirely).
+    if (req.filters.empty()) {
+        for (std::size_t i = first; i < ops.size(); ++i) {
+            const auto& n = ops[i]->node;
+            if (const auto* s = std::get_if<SliceOp>(&n)) {
+                // offset + len is how many rows must be produced to satisfy
+                // the window. Signed overflow is UB, so leave the limit unset
+                // when the sum would not fit; unset just means the source
+                // produces everything, which is what a window that large
+                // wanted anyway.
+                if (s->offset >= 0 && s->len >= 0 &&
+                    s->offset <=
+                        std::numeric_limits<std::int64_t>::max() - s->len)
+                    req.limit = s->offset + s->len;
+                break;
+            }
+            // Row-count- and order-preserving ops keep a source prefix a valid
+            // prefix of this op's output; anything else (filter, sort, group,
+            // explode, unique, sample, take, reverse) does not.
+            if (!std::holds_alternative<SelectOp>(n) &&
+                !std::holds_alternative<WithColumnOp>(n) &&
+                !std::holds_alternative<RenameOp>(n) &&
+                !std::holds_alternative<FillNullOp>(n) &&
+                !std::holds_alternative<WithRowIndexOp>(n))
+                break;
+        }
     }
 
     ScanResult r = source.scan(req);

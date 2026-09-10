@@ -16,6 +16,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -332,5 +333,91 @@ TEST_SUITE("provider pushdown") {
         DataFrame got2 = run(drain_cursor(
             std::move(make_fixture_source(ignored)->scan(req2).cursor)));
         CHECK(got2.num_rows() == 10);
+    }
+}
+
+namespace {
+
+// Records the limit the optimizer put in the request, and yields a fixed frame.
+class LimitRecordingSource : public dftracer::utils::dataframe::Source {
+   public:
+    mutable std::int64_t seen_limit = -2;  // -2 = scan() never ran
+
+    dftracer::utils::dataframe::Schema schema() const override {
+        return {{"id"}, {}};
+    }
+
+    dftracer::utils::dataframe::ScanResult scan(
+        const ScanRequest& req) const override {
+        seen_limit = req.limit;
+        dftracer::utils::dataframe::ScanResult r;
+        r.cursor = std::make_unique<OneShot>();
+        r.filters.assign(req.filters.size(),
+                         dftracer::utils::dataframe::Pushed::No);
+        return r;
+    }
+
+   private:
+    struct OneShot : Cursor {
+        bool done = false;
+        CoroTask<std::optional<Morsel>> next(std::int64_t) override {
+            if (done) co_return std::nullopt;
+            done = true;
+            std::vector<std::int64_t> v{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+            dftracer::utils::dataframe::Morsel m;
+            m.rows = static_cast<std::int64_t>(v.size());
+            m.columns.push_back(
+                dftracer::utils::dataframe::Series{dftu_series_new_flat(
+                    DFTU_TYPE_INT64, v.data(),
+                    static_cast<std::int64_t>(v.size()), nullptr)});
+            co_return m;
+        }
+    };
+};
+
+}  // namespace
+
+TEST_SUITE("provider_pushdown") {
+    TEST_CASE("the optimizer pushes a reachable slice as req.limit") {
+        auto src = std::make_shared<LimitRecordingSource>();
+        DataFrame got = run(LazyFrame::scan(src).head(3).collect());
+        CHECK(got.num_rows() == 3);
+        // head(3) is slice(0,3): the source only ever needed 3 rows.
+        CHECK(src->seen_limit == 3);
+    }
+
+    TEST_CASE("a filter before the slice blocks the limit") {
+        auto src = std::make_shared<LimitRecordingSource>();
+        DataFrame got = run(LazyFrame::scan(src)
+                                .filter(col(0) > std::int64_t{5})
+                                .head(3)
+                                .collect());
+        // Whether the source honored the filter is only known from the result
+        // it has not returned yet, so truncating it here could starve the
+        // engine of rows the filter would have kept.
+        CHECK(src->seen_limit == -1);
+        CHECK(got.num_rows() == 3);  // 6,7,8 survive filter then head
+    }
+
+    TEST_CASE("a row-reordering op before the slice blocks the limit") {
+        auto src = std::make_shared<LimitRecordingSource>();
+        DataFrame got =
+            run(LazyFrame::scan(src).sort_by("id", true).head(3).collect());
+        CHECK(src->seen_limit == -1);  // sorting needs every row
+        CHECK(got.num_rows() == 3);
+    }
+}
+
+TEST_SUITE("provider_pushdown") {
+    TEST_CASE("a slice window too large to sum leaves the limit unset") {
+        auto src = std::make_shared<LimitRecordingSource>();
+        // offset + len would overflow int64; unset means "produce everything",
+        // which is what a window that large asked for anyway.
+        DataFrame got =
+            run(LazyFrame::scan(src)
+                    .slice(std::numeric_limits<std::int64_t>::max(), 10)
+                    .collect());
+        CHECK(src->seen_limit == -1);
+        CHECK(got.num_rows() == 0);  // the window starts past the last row
     }
 }
