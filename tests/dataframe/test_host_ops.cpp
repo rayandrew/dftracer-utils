@@ -3,6 +3,7 @@
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/utilities/host_ops.h>
 #include <doctest/doctest.h>
+#include <testing_utilities.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -54,25 +55,7 @@ void write_file(const sfs::path& p, const std::string& text) {
     f << text;
 }
 
-/// A fresh directory under the test's working directory, removed on scope exit.
-class TempDir {
-   public:
-    explicit TempDir(const std::string& tag)
-        : path_(sfs::current_path() / ("dftu_host_ops_" + tag)) {
-        sfs::remove_all(path_);
-        sfs::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ec;
-        sfs::remove_all(path_, ec);
-    }
-    TempDir(const TempDir&) = delete;
-    TempDir& operator=(const TempDir&) = delete;
-    const sfs::path& path() const { return path_; }
-
-   private:
-    sfs::path path_;
-};
+using dftu_utils_test::ScopedTestDir;
 
 }  // namespace
 
@@ -106,7 +89,7 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.fs.scan_dir lists a directory as a String column") {
-        TempDir dir("scan");
+        ScopedTestDir dir("dftu_host_ops_scan");
         write_file(dir.path() / "a.log", "x");
         write_file(dir.path() / "b.txt", "y");
 
@@ -132,7 +115,7 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.fs.scan_dir_pattern keeps only matching files") {
-        TempDir dir("pattern");
+        ScopedTestDir dir("dftu_host_ops_pattern");
         write_file(dir.path() / "a.log", "x");
         write_file(dir.path() / "b.txt", "y");
         write_file(dir.path() / "c.log", "z");
@@ -151,7 +134,7 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.file.compress and dftu.file.decompress round trip") {
-        TempDir dir("gzip");
+        ScopedTestDir dir("dftu_host_ops_gzip");
         const std::string text(64 * 1024, 'q');
         const std::string src = (dir.path() / "in.txt").string();
         const std::string gz = (dir.path() / "in.txt.gz").string();
@@ -176,7 +159,7 @@ TEST_SUITE("host_ops") {
     }
 
     TEST_CASE("dftu.file.compress reports a missing input as false") {
-        TempDir dir("gzip_missing");
+        ScopedTestDir dir("dftu_host_ops_gzip_missing");
         const std::string src = (dir.path() / "absent.txt").string();
         const std::string gz = (dir.path() / "absent.txt.gz").string();
         dftu_op_arg arg{};
