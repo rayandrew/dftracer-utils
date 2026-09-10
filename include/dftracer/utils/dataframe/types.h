@@ -174,13 +174,15 @@ inline DataType struct_of(std::vector<Field> fields) {
 
 /// A Map<key_type, value_type> DataType, physically List<Struct{key, value}>.
 /// The single field in `fields` (named "item", matching List's convention) is
-/// that Struct type.
+/// that Struct type. Every field built here is marked nullable: Series::
+/// data_type() does not track per-field nullability through the C ABI (it
+/// always reports true), so a non-nullable field could never round-trip equal.
 inline DataType map_of(DataType key_type, DataType value_type) {
-    DataType entry = struct_of({Field{"key", std::move(key_type), false},
+    DataType entry = struct_of({Field{"key", std::move(key_type), true},
                                 Field{"value", std::move(value_type), true}});
     DataType dt;
     dt.id = TypeId::Map;
-    dt.fields.push_back(Field{"item", std::move(entry), false});
+    dt.fields.push_back(Field{"item", std::move(entry), true});
     return dt;
 }
 

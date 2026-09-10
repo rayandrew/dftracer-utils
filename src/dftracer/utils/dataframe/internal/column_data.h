@@ -21,9 +21,15 @@ struct dftu_series {
     /// FLAT/CONSTANT values, the SELECTION/DICTIONARY index buffer (int32), or
     /// the byte data of a variable-width String/Binary column.
     std::shared_ptr<dftracer::utils::dataframe::Buffer> data;
-    /// int32 offsets (length+1 entries) for a variable-width String/Binary
-    /// column; null for fixed-width types.
+    /// int32 offsets (length+1 entries) for a variable-width String/Binary/List
+    /// column; null for fixed-width types and for the 64-bit-offset Large*
+    /// variants, which use `offsets64` instead.
     std::shared_ptr<dftracer::utils::dataframe::Buffer> offsets;
+    /// int64 offsets (length+1 entries) for LargeString/LargeBinary/LargeList,
+    /// whose 64-bit-offset layout is a distinct physical type from String/
+    /// Binary/List's 32-bit offsets; null otherwise. Not exposed through the
+    /// public dftu_series_offsets ABI, which is int32-only.
+    std::shared_ptr<dftracer::utils::dataframe::Buffer> offsets64;
     /// Arrow-layout validity bitmap (1 = valid); null when there are no nulls.
     std::shared_ptr<dftracer::utils::dataframe::Buffer> validity;
     /// Base for SELECTION/DICTIONARY, or the flattened values of a LIST column;
