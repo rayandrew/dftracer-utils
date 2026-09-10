@@ -1,4 +1,5 @@
 #include <dftracer/utils/binaries/common_cli.h>
+#include <dftracer/utils/binaries/json_cell_printer.h>
 #include <dftracer/utils/core/common/config.h>
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/core/common/memory_budget.h>  // NO_SPILL_BUDGET
@@ -519,34 +520,6 @@ static bool parse_agg(const std::string& spec, std::vector<AggSpec>& out) {
     return true;
 }
 
-// Append one Batch cell as a JSON value (strings quoted, numerics bare). List
-// and struct columns (histograms) are not emitted by the CLI.
-static void append_cell_json(std::string& s, const dataframe::Series& c,
-                             std::int64_t i) {
-    switch (c.type()) {
-        case dataframe::TypeId::String:
-        case dataframe::TypeId::Binary:
-            s += "\"" + std::string(c.string_at(i)) + "\"";
-            break;
-        case dataframe::TypeId::Int64:
-            s += std::to_string(c.data<std::int64_t>()[i]);
-            break;
-        case dataframe::TypeId::Uint64:
-            s += std::to_string(c.data<std::uint64_t>()[i]);
-            break;
-        default: {
-            const double v = c.data<double>()[i];
-            s += (v == static_cast<double>(static_cast<std::int64_t>(v)))
-                     ? std::to_string(static_cast<std::int64_t>(v))
-                     : std::to_string(v);
-        }
-    }
-}
-
-static bool cli_emittable(dataframe::TypeId t) {
-    return t != dataframe::TypeId::List && t != dataframe::TypeId::Struct;
-}
-
 // Print a collect() result as one JSON object per row.
 static void print_table(FILE* out, const dataframe::DataFrame& table) {
     const std::int64_t nrows = table.num_rows();
@@ -554,11 +527,11 @@ static void print_table(FILE* out, const dataframe::DataFrame& table) {
         std::string s = "{";
         bool first = true;
         for (std::size_t c = 0; c < table.columns.size(); ++c) {
-            if (!cli_emittable(table.columns[c].type())) continue;
+            if (!binaries::cli_emittable(table.columns[c].type())) continue;
             if (!first) s += ",";
             first = false;
             s += "\"" + table.names[c] + "\":";
-            append_cell_json(s, table.columns[c], r);
+            binaries::append_cell_json(s, table.columns[c], r);
         }
         s += "}\n";
         std::fwrite(s.data(), 1, s.size(), out);
