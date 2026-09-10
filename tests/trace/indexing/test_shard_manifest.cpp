@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/trace/indexing/shard_manifest.h>
 #include <doctest/doctest.h>
+#include <testing_utilities.h>
 
 #include <string>
 
@@ -28,9 +29,8 @@ IndexShardManifest sample() {
 struct TempDir {
     fs::path path;
     TempDir()
-        : path(fs::temp_directory_path() /
-               ("dftu_shard_manifest_test_" +
-                std::to_string(reinterpret_cast<std::uintptr_t>(this)))) {
+        : path(dftu_utils_test::make_unique_test_path(
+              "dftu_shard_manifest_test")) {
         fs::create_directories(path);
     }
     ~TempDir() {

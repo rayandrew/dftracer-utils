@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <dftracer/utils/utilities/filesystem/pattern_directory_scanner_utility.h>
 #include <doctest/doctest.h>
+#include <testing_utilities.h>
 
 #include <fstream>
 #include <memory>
@@ -29,14 +30,8 @@ class TestDirectoryFixture {
     fs::path test_root;
 
     TestDirectoryFixture() {
-        // Create a unique test directory
-        test_root = fs::temp_directory_path() / "dftracer_test_pattern_scanner";
-
-        // Clean up if it exists from a previous run
-        if (fs::exists(test_root)) {
-            fs::remove_all(test_root);
-        }
-
+        test_root = dftu_utils_test::make_unique_test_path(
+            "dftracer_test_pattern_scanner");
         fs::create_directories(test_root);
     }
 

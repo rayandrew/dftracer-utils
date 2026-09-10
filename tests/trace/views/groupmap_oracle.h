@@ -27,11 +27,11 @@
 #include <dftracer/utils/trace/views/view_executor.h>
 #include <dftracer/utils/trace/views/view_scan.h>
 #include <dftracer/utils/utilities/common/statistics/ddsketch.h>
+#include <testing_utilities.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -816,11 +816,8 @@ inline dataframe::DataFrame groupmap_oracle(
     // the engine's index (which would make the engine see non-fresh files and
     // skip its bootstrap). The oracle resolves names from harvested metadata,
     // so it needs no name tables of its own.
-    static std::atomic<std::uint64_t> seq{0};
-    const std::string base = (std::filesystem::temp_directory_path() /
-                              ("gmoracle_" + std::to_string(::getpid()) + "_" +
-                               std::to_string(seq.fetch_add(1))))
-                                 .string();
+    const std::string base =
+        dftu_utils_test::make_unique_test_path("gmoracle").string();
     std::filesystem::create_directories(base);
     for (std::size_t i = 0; i < plan.files.size(); ++i)
         plan.files[i].index_path = base + "/idx_" + std::to_string(i);

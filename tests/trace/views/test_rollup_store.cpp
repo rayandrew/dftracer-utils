@@ -6,6 +6,7 @@
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/trace/views/rollup_store.h>
 #include <doctest/doctest.h>
+#include <testing_utilities.h>
 
 #include <cstdint>
 #include <map>
@@ -77,7 +78,8 @@ TEST_SUITE("RollupStore") {
     TEST_CASE("agg_merge of rank partials persists and reads back") {
         namespace rdb = dftracer::utils::rocksdb;
         const std::string dir =
-            (fs::temp_directory_path() / "dftu_rollup_store_test").string();
+            dftu_utils_test::make_unique_test_path("dftu_rollup_store_test")
+                .string();
         fs::remove_all(dir);
         rdb::RocksDBManager::instance().reset(dir);
 
@@ -111,9 +113,9 @@ TEST_SUITE("RollupStore") {
     // per-group blob persists and reads back into an equivalent merged state.
     TEST_CASE("multiple groups persist and read back") {
         namespace rdb = dftracer::utils::rocksdb;
-        const std::string dir =
-            (fs::temp_directory_path() / "dftu_rollup_store_multi_test")
-                .string();
+        const std::string dir = dftu_utils_test::make_unique_test_path(
+                                    "dftu_rollup_store_multi_test")
+                                    .string();
         fs::remove_all(dir);
         rdb::RocksDBManager::instance().reset(dir);
 
