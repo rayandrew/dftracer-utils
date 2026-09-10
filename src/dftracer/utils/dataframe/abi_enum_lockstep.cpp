@@ -58,12 +58,32 @@ static_assert(code(TypeId::String) == DFTU_TYPE_STRING);
 static_assert(code(TypeId::Binary) == DFTU_TYPE_BINARY);
 static_assert(code(TypeId::List) == DFTU_TYPE_LIST);
 static_assert(code(TypeId::Struct) == DFTU_TYPE_STRUCT);
-// TypeId::Struct is declared last in types.h, so its ordinal is the count of
-// TypeId values minus one; pinning DFTU_TYPE_STRUCT to that ordinal makes a
+static_assert(code(TypeId::Float16) == DFTU_TYPE_FLOAT16);
+static_assert(code(TypeId::Date32) == DFTU_TYPE_DATE32);
+static_assert(code(TypeId::Date64) == DFTU_TYPE_DATE64);
+static_assert(code(TypeId::Time32) == DFTU_TYPE_TIME32);
+static_assert(code(TypeId::Time64) == DFTU_TYPE_TIME64);
+static_assert(code(TypeId::Timestamp) == DFTU_TYPE_TIMESTAMP);
+static_assert(code(TypeId::Duration) == DFTU_TYPE_DURATION);
+static_assert(code(TypeId::Decimal128) == DFTU_TYPE_DECIMAL128);
+static_assert(code(TypeId::Decimal256) == DFTU_TYPE_DECIMAL256);
+static_assert(code(TypeId::FixedSizeBinary) == DFTU_TYPE_FIXED_SIZE_BINARY);
+static_assert(code(TypeId::LargeString) == DFTU_TYPE_LARGE_STRING);
+static_assert(code(TypeId::LargeBinary) == DFTU_TYPE_LARGE_BINARY);
+static_assert(code(TypeId::LargeList) == DFTU_TYPE_LARGE_LIST);
+static_assert(code(TypeId::FixedSizeList) == DFTU_TYPE_FIXED_SIZE_LIST);
+static_assert(code(TypeId::Map) == DFTU_TYPE_MAP);
+// TypeId::Map is declared last in types.h, so its ordinal is the count of
+// TypeId values minus one; pinning DFTU_TYPE_MAP to that ordinal makes a
 // TypeId appended without a matching dftu_dtype member fail this assert
-// instead of silently reusing 15.
-static_assert(DFTU_TYPE_STRUCT == 15,
+// instead of silently reusing 30.
+static_assert(DFTU_TYPE_MAP == 30,
               "a TypeId was added without mirroring it into dftu_dtype");
+
+static_assert(code(TimeUnit::Second) == DFTU_TIME_UNIT_SECOND);
+static_assert(code(TimeUnit::Milli) == DFTU_TIME_UNIT_MILLI);
+static_assert(code(TimeUnit::Micro) == DFTU_TIME_UNIT_MICRO);
+static_assert(code(TimeUnit::Nano) == DFTU_TIME_UNIT_NANO);
 
 }  // namespace
 }  // namespace dftracer::utils::dataframe

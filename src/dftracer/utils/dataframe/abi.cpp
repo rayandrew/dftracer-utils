@@ -177,14 +177,21 @@ int32_t dftu_series_is_null(const dftu_series* col, int64_t i) {
     return ((bm[i >> 3] >> (i & 7)) & 1) ? 0 : 1;
 }
 
+namespace {
+bool is_single_child_container(TypeId t) {
+    return t == TypeId::List || t == TypeId::LargeList ||
+           t == TypeId::FixedSizeList || t == TypeId::Map;
+}
+}  // namespace
+
 int32_t dftu_series_num_children(const dftu_series* col) {
-    if (col->type == TypeId::List) return col->child ? 1 : 0;
+    if (is_single_child_container(col->type)) return col->child ? 1 : 0;
     return static_cast<int32_t>(col->children.size());
 }
 
 dftu_series* dftu_series_child(const dftu_series* col, int32_t i) {
     const std::shared_ptr<dftu_series>* ch = nullptr;
-    if (col->type == TypeId::List) {
+    if (is_single_child_container(col->type)) {
         if (i == 0 && col->child) ch = &col->child;
     } else if (i >= 0 && static_cast<std::size_t>(i) < col->children.size()) {
         ch = &col->children[static_cast<std::size_t>(i)];
@@ -199,6 +206,29 @@ const char* dftu_series_field_name(const dftu_series* col, int32_t i) {
     if (i < 0 || static_cast<std::size_t>(i) >= col->field_names.size())
         return nullptr;
     return col->field_names[static_cast<std::size_t>(i)].c_str();
+}
+
+int32_t dftu_series_time_unit(const dftu_series* col) {
+    return col ? static_cast<int32_t>(col->time_unit)
+               : static_cast<int32_t>(
+                     dftracer::utils::dataframe::TimeUnit::Micro);
+}
+
+const char* dftu_series_timezone(const dftu_series* col) {
+    static const char empty[] = "";
+    return col ? col->timezone.c_str() : empty;
+}
+
+int32_t dftu_series_decimal_precision(const dftu_series* col) {
+    return col ? col->decimal_precision : 0;
+}
+
+int32_t dftu_series_decimal_scale(const dftu_series* col) {
+    return col ? col->decimal_scale : 0;
+}
+
+int32_t dftu_series_fixed_size(const dftu_series* col) {
+    return col ? col->fixed_size : 0;
 }
 
 dftu_series* dftu_series_share(const dftu_series* col) {

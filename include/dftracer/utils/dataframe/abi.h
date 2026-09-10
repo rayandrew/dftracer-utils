@@ -70,8 +70,32 @@ typedef enum {
     DFTU_TYPE_STRING = 12,
     DFTU_TYPE_BINARY = 13,
     DFTU_TYPE_LIST = 14,
-    DFTU_TYPE_STRUCT = 15
+    DFTU_TYPE_STRUCT = 15,
+    DFTU_TYPE_FLOAT16 = 16,
+    DFTU_TYPE_DATE32 = 17,
+    DFTU_TYPE_DATE64 = 18,
+    DFTU_TYPE_TIME32 = 19,
+    DFTU_TYPE_TIME64 = 20,
+    DFTU_TYPE_TIMESTAMP = 21,
+    DFTU_TYPE_DURATION = 22,
+    DFTU_TYPE_DECIMAL128 = 23,
+    DFTU_TYPE_DECIMAL256 = 24,
+    DFTU_TYPE_FIXED_SIZE_BINARY = 25,
+    DFTU_TYPE_LARGE_STRING = 26,
+    DFTU_TYPE_LARGE_BINARY = 27,
+    DFTU_TYPE_LARGE_LIST = 28,
+    DFTU_TYPE_FIXED_SIZE_LIST = 29,
+    DFTU_TYPE_MAP = 30
 } dftu_dtype;
+
+/** Second/Milli/Micro/Nano granularity (mirrors dataframe::TimeUnit), for
+ * Timestamp, Time32, Time64, and Duration columns. */
+typedef enum {
+    DFTU_TIME_UNIT_SECOND = 0,
+    DFTU_TIME_UNIT_MILLI = 1,
+    DFTU_TIME_UNIT_MICRO = 2,
+    DFTU_TIME_UNIT_NANO = 3
+} dftu_time_unit;
 
 /** Create a FLAT column copying `n` values of `type` from `data`. `validity` is
  * an Arrow-layout bitmap (1 = valid) or NULL for no nulls. */
@@ -142,6 +166,25 @@ DFTU_EXPORT dftu_series* dftu_series_child(const dftu_series* col, int32_t i);
  * valid while `col` is. */
 DFTU_EXPORT const char* dftu_series_field_name(const dftu_series* col,
                                                int32_t i);
+
+/** Time unit (a dftu_time_unit code) of a Timestamp/Time32/Time64/Duration
+ * column; DFTU_TIME_UNIT_MICRO for any other type. */
+DFTU_EXPORT int32_t dftu_series_time_unit(const dftu_series* col);
+
+/** Timezone of a Timestamp column, or "" (never NULL) for a naive timestamp
+ * or any other type. Borrowed, valid while `col` is. */
+DFTU_EXPORT const char* dftu_series_timezone(const dftu_series* col);
+
+/** Decimal precision of a Decimal128/Decimal256 column; 0 for any other
+ * type. */
+DFTU_EXPORT int32_t dftu_series_decimal_precision(const dftu_series* col);
+
+/** Decimal scale of a Decimal128/Decimal256 column; 0 for any other type. */
+DFTU_EXPORT int32_t dftu_series_decimal_scale(const dftu_series* col);
+
+/** Element byte width of a FixedSizeBinary column, or element count per row
+ * of a FixedSizeList column; 0 for any other type. */
+DFTU_EXPORT int32_t dftu_series_fixed_size(const dftu_series* col);
 
 /** A new owned column sharing `col`'s buffers zero-copy (a reference-count
  * bump, no data copy). NULL if `col` is NULL. Underpins projection/rename frame

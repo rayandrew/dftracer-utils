@@ -33,6 +33,16 @@ struct dftu_series {
     std::vector<std::shared_ptr<dftu_series>> children;
     /// Field names of a STRUCT, aligned to `children`.
     std::vector<std::string> field_names;
+    /// Timestamp/Time32/Time64/Duration only.
+    dftracer::utils::dataframe::TimeUnit time_unit =
+        dftracer::utils::dataframe::TimeUnit::Micro;
+    /// Timestamp only; empty means no timezone.
+    std::string timezone;
+    /// Decimal128/Decimal256 only.
+    std::int32_t decimal_precision = 0;
+    std::int32_t decimal_scale = 0;
+    /// FixedSizeBinary (byte width) or FixedSizeList (element count) only.
+    std::int32_t fixed_size = 0;
 };
 
 #endif  // DFTRACER_UTILS_DATAFRAME_INTERNAL_COLUMN_DATA_H

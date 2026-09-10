@@ -23,14 +23,22 @@ double scalar_as_double(dftu_scalar s) {
 DataType Series::data_type() const {
     DataType dt;
     dt.id = type();
+    dt.time_unit = static_cast<TimeUnit>(dftu_series_time_unit(handle_));
+    const char* tz = dftu_series_timezone(handle_);
+    dt.timezone = tz ? tz : "";
+    dt.decimal_precision = dftu_series_decimal_precision(handle_);
+    dt.decimal_scale = dftu_series_decimal_scale(handle_);
+    dt.fixed_size = dftu_series_fixed_size(handle_);
     const std::int64_t n = num_children();
     for (std::int64_t i = 0; i < n; ++i) {
         Series c = child(i);
         const char* name =
             dftu_series_field_name(handle_, static_cast<int32_t>(i));
-        dt.fields.push_back(
-            Field{name ? name : (dt.id == TypeId::List ? "item" : ""),
-                  c.data_type(), true});
+        bool default_named =
+            dt.id == TypeId::List || dt.id == TypeId::LargeList ||
+            dt.id == TypeId::FixedSizeList || dt.id == TypeId::Map;
+        dt.fields.push_back(Field{name ? name : (default_named ? "item" : ""),
+                                  c.data_type(), true});
     }
     return dt;
 }
