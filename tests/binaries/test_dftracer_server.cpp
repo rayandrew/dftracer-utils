@@ -78,24 +78,8 @@ std::string create_ns_pfw_gz(const std::string& dir) {
 /// Find the dftracer_server binary. Checks DFTRACER_SERVER_PATH env first,
 /// then common build paths relative to the test binary.
 std::string find_server_binary() {
-    const char* env_path = std::getenv("DFTRACER_SERVER_PATH");
-    if (env_path != nullptr && ::access(env_path, X_OK) == 0) {
-        return env_path;
-    }
-
-    std::vector<std::string> candidates = {
-        "./dftracer_server",         "../dftracer_server",
-        "../../dftracer_server",     "../bin/dftracer_server",
-        "../../bin/dftracer_server",
-    };
-
-    for (const auto& path : candidates) {
-        if (::access(path.c_str(), X_OK) == 0) {
-            return path;
-        }
-    }
-
-    return "";
+    return dftu_utils_test::find_binary_by_name("DFTRACER_SERVER_PATH",
+                                                "dftracer_server");
 }
 
 /// Check if a TCP port is accepting connections.

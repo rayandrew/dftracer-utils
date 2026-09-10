@@ -51,18 +51,8 @@ std::string make_multimember_pfw_gz(dftu_utils_test::TestEnvironment& env,
 }
 
 std::string find_view_binary() {
-    const char* env_path = std::getenv("DFTRACER_VIEW_PATH");
-    if (env_path != nullptr && ::access(env_path, X_OK) == 0) return env_path;
-
-    std::vector<std::string> candidates = {
-        "./dftracer_view",         "../dftracer_view",
-        "../../dftracer_view",     "../bin/dftracer_view",
-        "../../bin/dftracer_view",
-    };
-    for (const auto& path : candidates) {
-        if (::access(path.c_str(), X_OK) == 0) return path;
-    }
-    return "";
+    return dftu_utils_test::find_binary_by_name("DFTRACER_VIEW_PATH",
+                                                "dftracer_view");
 }
 
 int run_view(const std::string& binary, const std::vector<std::string>& args) {
