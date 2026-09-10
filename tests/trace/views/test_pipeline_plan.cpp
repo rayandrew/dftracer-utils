@@ -1,5 +1,4 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/trace/views/pipeline.h>
 #include <doctest/doctest.h>
 
@@ -9,15 +8,6 @@
 #include "test_view_common.h"
 
 namespace views_detail = dftracer::utils::trace::views::detail;
-
-namespace {
-
-template <class T>
-T run(coro::CoroTask<T> task) {
-    return dftracer::utils::default_runtime().submit(std::move(task)).get();
-}
-
-}  // namespace
 
 TEST_SUITE("Pipeline plan") {
     TEST_CASE("execute rejects a shape no lowering handles") {

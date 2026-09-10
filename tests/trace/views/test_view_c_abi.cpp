@@ -3,7 +3,6 @@
 // call, and a builder must never consume its input.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/dataframe/op.h>
 #include <dftracer/utils/trace/views/abi.h>
 #include <doctest/doctest.h>
@@ -20,11 +19,6 @@ using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::OpArgs;
 
 namespace {
-
-template <class T>
-T run(coro::CoroTask<T> task) {
-    return dftracer::utils::default_runtime().submit(std::move(task)).get();
-}
 
 // Widens a FLAT numeric column's row `row` to double regardless of its
 // stored width, matching test_view_common.h's bnum() so a value can be

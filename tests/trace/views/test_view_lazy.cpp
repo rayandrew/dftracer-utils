@@ -1,17 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <dftracer/utils/core/runtime.h>
 #include <doctest/doctest.h>
 
 #include "test_view_common.h"
-
-namespace {
-
-template <class T>
-T run(coro::CoroTask<T> task) {
-    return dftracer::utils::default_runtime().submit(std::move(task)).get();
-}
-
-}  // namespace
 
 TEST_SUITE("View - lazy collect") {
     TEST_CASE("View::collect() returns a LazyFrame matching collect_frame()") {

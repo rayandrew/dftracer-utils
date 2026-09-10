@@ -16,11 +16,6 @@
 
 namespace {
 
-template <class T>
-T run(coro::CoroTask<T> task) {
-    return dftracer::utils::default_runtime().submit(std::move(task)).get();
-}
-
 // A multi-member trace whose members carry different arg keys (x on the
 // first half, y on the second), so a per-batch morsel's columns differ and
 // the streaming path must exercise name-based reconciliation.

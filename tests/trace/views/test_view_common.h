@@ -3,6 +3,7 @@
 #include <dftracer/utils/core/common/filesystem.h>
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/rocksdb/database.h>
+#include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/json/json_value.h>
 #include <dftracer/utils/query/query.h>
 #include <dftracer/utils/trace/indexing/chunk_statistics.h>
@@ -54,6 +55,11 @@ DOCTEST_REGISTER_LISTENER("rocksdb_cleanup", 1,
                           test_view_common_detail::RocksDbCleanupListener);
 
 namespace test_view_common {
+
+template <class T>
+T run(coro::CoroTask<T> task) {
+    return dftracer::utils::default_runtime().submit(std::move(task)).get();
+}
 
 // A trace mixing POSIX and STDIO events so filters have something to cut.
 inline std::string create_mixed_trace(TestEnvironment& env, int posix_n,
