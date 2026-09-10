@@ -172,8 +172,11 @@ Series concat_columns(const std::vector<const Series*>& parts) {
     for (const Series& m : mats) {
         if (m.type() != t)
             throw std::invalid_argument("concat: columns must share a type");
-        if (t == TypeId::List || t == TypeId::Struct)
-            throw std::invalid_argument("concat: nested columns unsupported");
+        // Every other branch below has an offset-aware path (String) or
+        // memcpy's byte_width(t) bytes per row; refuse anything with neither.
+        if (t != TypeId::String && t != TypeId::Bool && byte_width(t) == 0)
+            throw std::invalid_argument(std::string("concat: column type '") +
+                                        type_name(t) + "' is unsupported");
         total += m.length();
         any_null |= m.null_count() > 0;
     }
@@ -582,52 +585,6 @@ std::vector<std::string> row_keys(const std::vector<Series>& cols,
     return keys;
 }
 
-template <class T>
-int cmp_num(const Series& c, std::int64_t a, std::int64_t b) {
-    const T va = c.data<T>()[a];
-    const T vb = c.data<T>()[b];
-    return va < vb ? -1 : (va > vb ? 1 : 0);
-}
-
-// Ordering of two non-null cells of the same column (ascending value order).
-int raw_cmp(const Series& c, std::int64_t a, std::int64_t b) {
-    switch (c.type()) {
-        case TypeId::Bool: {
-            const std::uint8_t* p = c.data<std::uint8_t>();
-            int va = (p[a >> 3] >> (a & 7)) & 1;
-            int vb = (p[b >> 3] >> (b & 7)) & 1;
-            return va < vb ? -1 : (va > vb ? 1 : 0);
-        }
-        case TypeId::Int8:
-            return cmp_num<std::int8_t>(c, a, b);
-        case TypeId::Int16:
-            return cmp_num<std::int16_t>(c, a, b);
-        case TypeId::Int32:
-            return cmp_num<std::int32_t>(c, a, b);
-        case TypeId::Int64:
-            return cmp_num<std::int64_t>(c, a, b);
-        case TypeId::Uint8:
-            return cmp_num<std::uint8_t>(c, a, b);
-        case TypeId::Uint16:
-            return cmp_num<std::uint16_t>(c, a, b);
-        case TypeId::Uint32:
-            return cmp_num<std::uint32_t>(c, a, b);
-        case TypeId::Uint64:
-            return cmp_num<std::uint64_t>(c, a, b);
-        case TypeId::Float32:
-            return cmp_num<float>(c, a, b);
-        case TypeId::Float64:
-            return cmp_num<double>(c, a, b);
-        case TypeId::String:
-        case TypeId::Binary: {
-            int r = c.string_at(a).compare(c.string_at(b));
-            return r < 0 ? -1 : (r > 0 ? 1 : 0);
-        }
-        default:
-            return 0;
-    }
-}
-
 Series row_mask(const DataFrame& b, bool want_unique) {
     const std::int64_t n = b.num_rows();
     std::vector<Series> cols = materialized_columns(b);
@@ -755,6 +712,12 @@ DataFrame sort_by_multi(const DataFrame& b,
             throw std::out_of_range("sort_by_multi: no column named " + name);
         keys.push_back(&b.columns[static_cast<std::size_t>(k)]);
     }
+    for (std::size_t i = 0; i < keys.size(); ++i)
+        if (!is_orderable_type(keys[i]->type()))
+            throw std::invalid_argument(std::string("sort_by_multi: column '") +
+                                        names[i] + "' has type '" +
+                                        type_name(keys[i]->type()) +
+                                        "' with no per-row order");
     const bool broadcast = descending.size() == 1;
     const std::int64_t n = b.num_rows();
     std::vector<std::int64_t> order(static_cast<std::size_t>(n));
@@ -768,7 +731,7 @@ DataFrame sort_by_multi(const DataFrame& b,
                 if (na && nb) continue;
                 return !na;  // nulls last in both directions
             }
-            int r = raw_cmp(*c, a, bb);
+            int r = compare_rows(*c, a, bb);
             if (broadcast ? descending[0] : descending[i]) r = -r;
             if (r != 0) return r < 0;
         }
@@ -1044,6 +1007,10 @@ DataFrame to_dummies(const DataFrame& b, const std::string& column) {
     if (ci < 0)
         throw std::out_of_range("to_dummies: no column named " + column);
     Series mat = flat_copy(b.columns[static_cast<std::size_t>(ci)]);
+    if (!is_orderable_type(mat.type()))
+        throw std::invalid_argument(
+            std::string("to_dummies: column '") + column + "' has type '" +
+            type_name(mat.type()) + "' with no per-row value to key on");
     const std::int64_t n = mat.length();
 
     // Distinct non-null values, ascending, for a deterministic column order.
@@ -1125,6 +1092,15 @@ DataFrame pivot(const DataFrame& b, const std::string& index_name,
     Series idx_col = flat_copy(b.columns[static_cast<std::size_t>(ii)]);
     Series col_col = flat_copy(b.columns[static_cast<std::size_t>(ci)]);
     Series val_col = flat_copy(b.columns[static_cast<std::size_t>(vi)]);
+    if (!is_orderable_type(idx_col.type()))
+        throw std::invalid_argument(
+            std::string("pivot: index column '") + index_name + "' has type '" +
+            type_name(idx_col.type()) + "' with no per-row value to key on");
+    if (!is_orderable_type(col_col.type()))
+        throw std::invalid_argument(std::string("pivot: columns column '") +
+                                    columns_name + "' has type '" +
+                                    type_name(col_col.type()) +
+                                    "' with no per-row value to key on");
     const std::int64_t n = idx_col.length();
 
     // Output rows = distinct index values (sorted asc, non-null); output value

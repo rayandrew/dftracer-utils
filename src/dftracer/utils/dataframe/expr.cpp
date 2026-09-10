@@ -499,11 +499,13 @@ class Compiler {
         memo_;
 };
 
-// Series::slice only supports fixed-width types (dftu_series_slice returns
-// null for String/Binary); fall back to a row-index take for those.
+// dftu_series_slice only knows a per-TypeId byte_width, so it returns null
+// for String/Binary/List and for FixedSizeBinary (whose width is a per-column
+// DataType field, not a TypeId constant); take()'s gather_column handles all
+// of those correctly instead, so route them there.
 Series load_slice(const Series& in, std::int64_t offset, std::int64_t len) {
-    const TypeId kind = narrow_varwidth_type(in.type());
-    if (kind != TypeId::String && kind != TypeId::Binary)
+    const TypeId t = in.type();
+    if (t != TypeId::FixedSizeBinary && byte_width(t) != 0)
         return in.slice(offset, len);
     std::vector<std::int64_t> idx(static_cast<std::size_t>(len));
     for (std::int64_t i = 0; i < len; ++i)

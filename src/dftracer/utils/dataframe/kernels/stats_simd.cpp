@@ -150,9 +150,10 @@ HWY_EXPORT(dot_f64);
 
 namespace {
 
+// Exactly the types read_f64 decodes to a real value; anything else must
+// refuse rather than compare against its default-case 0.
 bool between_numeric(TypeId t) {
-    return t != TypeId::Bool && t != TypeId::String && t != TypeId::Binary &&
-           t != TypeId::List && t != TypeId::Struct;
+    return is_arithmetic_type(t) || is_temporal_type(t);
 }
 
 }  // namespace

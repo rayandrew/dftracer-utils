@@ -1,3 +1,4 @@
+#include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/dataframe/internal/column_read.h>
 #include <dftracer/utils/dataframe/internal/field_stat_simd.h>
 #include <dftracer/utils/dataframe/kernels/field_stat.h>
@@ -116,14 +117,28 @@ bool is_uint(TypeId t) {
            t == TypeId::Uint64;
 }
 
+// Float16/Decimal128/Decimal256 have no integer physical layout, so they must
+// go through read_f64 like Float32/Float64 rather than falling into
+// read_i64's default (which would silently sum 0 for every row).
+bool is_double_decoded(TypeId t) {
+    return t == TypeId::Float32 || t == TypeId::Float64 ||
+           t == TypeId::Float16 || t == TypeId::Decimal128 ||
+           t == TypeId::Decimal256;
+}
+
 void scalar_reduce(FieldStat& fs, const Series& c, std::int64_t b,
                    std::int64_t e) {
     const TypeId t = c.type();
-    const bool is_float = t == TypeId::Float32 || t == TypeId::Float64;
+    if (!is_arithmetic_type(t) && !is_temporal_type(t)) {
+        DFTRACER_UTILS_LOG_ERROR("field_stat: no numeric value for type '%s'",
+                                 type_name(t));
+        return;
+    }
+    const bool is_double = is_double_decoded(t);
     const bool is_u = is_uint(t);
     for (std::int64_t i = b; i < e; ++i) {
         if (c.is_null(i)) continue;
-        if (is_float)
+        if (is_double)
             fs.add(read_f64(c, i));
         else if (is_u)
             fs.add(read_u64(c, i));

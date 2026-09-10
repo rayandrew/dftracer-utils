@@ -121,9 +121,26 @@ void put_series(std::string& out, const Series& s_in) {
         std::vector<std::uint8_t> v = validity_bitmap(s);
         put_bytes(out, v.data(), v.size());
     }
-    if (t == TypeId::List || t == TypeId::LargeList || t == TypeId::Struct)
+    // FixedSizeList and Map are nested (Map is physically a List of
+    // key/value structs) like List/LargeList/Struct; all five must refuse
+    // here rather than fall into the FixedSizeBinary/String byte paths
+    // below, which would misread their null offsets/child data.
+    if (t == TypeId::List || t == TypeId::LargeList || t == TypeId::Struct ||
+        t == TypeId::FixedSizeList || t == TypeId::Map)
         throw std::invalid_argument("spill: nested columns unsupported");
-    if (is_wide_offset_type(t)) {  // LargeString / LargeBinary
+    if (t == TypeId::Decimal128 || t == TypeId::Decimal256) {
+        // read_f64 divides by 10^decimal_scale, so it must round-trip too.
+        const DataType dt = s.data_type();
+        put_pod<std::int32_t>(out, dt.decimal_precision);
+        put_pod<std::int32_t>(out, dt.decimal_scale);
+        put_bytes(out, dftu_series_data(s.handle()), buffer_bytes(t, n));
+    } else if (t == TypeId::FixedSizeBinary) {
+        const std::int32_t width = dftu_series_fixed_size(s.handle());
+        put_pod<std::int32_t>(out, width);
+        put_bytes(
+            out, dftu_series_data(s.handle()),
+            static_cast<std::size_t>(n) * static_cast<std::size_t>(width));
+    } else if (is_wide_offset_type(t)) {  // LargeString / LargeBinary
         const std::int64_t* offs = s.offsets64();
         const std::int64_t nbytes = n > 0 ? offs[n] : 0;
         put_pod<std::int64_t>(out, nbytes);
@@ -153,6 +170,47 @@ Series get_series(const std::uint8_t*& p, const std::uint8_t* end) {
     if (nulls > 0)
         validity = take_bytes(p, end, static_cast<std::size_t>((n + 7) / 8));
     const auto dt = static_cast<dftu_dtype>(static_cast<std::int32_t>(type));
+    if (type == TypeId::Decimal128 || type == TypeId::Decimal256) {
+        const std::int32_t precision = get_pod<std::int32_t>(p, end);
+        const std::int32_t scale = get_pod<std::int32_t>(p, end);
+        const std::size_t bytes = buffer_bytes(type, n);
+        const std::uint8_t* data = take_bytes(p, end, bytes);
+        auto* col = new dftu_series();
+        col->type = type;
+        col->encoding = Encoding::Flat;
+        col->length = n;
+        col->decimal_precision = precision;
+        col->decimal_scale = scale;
+        col->data = Buffer::allocate(bytes);
+        if (bytes != 0) std::memcpy(col->data->data(), data, bytes);
+        if (validity != nullptr) {
+            const std::size_t vbytes = static_cast<std::size_t>((n + 7) / 8);
+            col->validity = Buffer::allocate(vbytes);
+            std::memcpy(col->validity->data(), validity, vbytes);
+            col->null_count = nulls;
+        }
+        return Series{col};
+    }
+    if (type == TypeId::FixedSizeBinary) {
+        const std::int32_t width = get_pod<std::int32_t>(p, end);
+        const std::size_t bytes =
+            static_cast<std::size_t>(n) * static_cast<std::size_t>(width);
+        const std::uint8_t* data = take_bytes(p, end, bytes);
+        auto* col = new dftu_series();
+        col->type = type;
+        col->encoding = Encoding::Flat;
+        col->length = n;
+        col->fixed_size = width;
+        col->data = Buffer::allocate(bytes);
+        if (bytes != 0) std::memcpy(col->data->data(), data, bytes);
+        if (validity != nullptr) {
+            const std::size_t vbytes = static_cast<std::size_t>((n + 7) / 8);
+            col->validity = Buffer::allocate(vbytes);
+            std::memcpy(col->validity->data(), validity, vbytes);
+            col->null_count = nulls;
+        }
+        return Series{col};
+    }
     if (is_wide_offset_type(type)) {  // LargeString / LargeBinary
         const std::int64_t nbytes = get_pod<std::int64_t>(p, end);
         const auto* offs = reinterpret_cast<const std::int64_t*>(take_bytes(
