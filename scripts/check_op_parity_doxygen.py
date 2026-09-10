@@ -15,7 +15,8 @@ Reads the registered ops straight out of that shared library with ctypes
 (dftu_op_count/dftu_op_at are a plain C ABI), so no helper binary is needed.
 
 Exits non-zero and lists the drifted names when a public method has no op of
-the same leaf name in the registry and is not in the allowlist below.
+the same leaf name in the registry, no entry in FOLDS naming the op that backs
+it under another name, and no entry in the ALLOWLIST of non-ops below.
 """
 
 import argparse
@@ -37,28 +38,40 @@ MEMBER_RE = re.compile(r'<memberdef kind="function"[^>]*>.*?</memberdef>', re.S)
 PROT_RE = re.compile(r'prot="([a-z]+)"')
 NAME_RE = re.compile(r"<name>([^<]*)</name>")
 
-# Debt list: a public method name with no registry op of the same leaf name.
-# Should only shrink - either the op gets registered under this leaf name, or
-# a future version of this script understands the fold/rename that maps it to
-# an existing op.
+# Methods a registered op backs under a different leaf name: an op code folds
+# a family of methods onto one op (compare, logical, reduce), or the registry
+# uses the canonical name for a method spelled as its alias. The value is the
+# registry leaf, looked up across every bucket - Series::value_counts returns a
+# frame, so its op is keyed dftu.frame.value_counts.
+FOLDS = {
+    "Series": {
+        "eq": "compare", "ne": "compare", "lt": "compare",
+        "le": "compare", "gt": "compare", "ge": "compare",
+        "logical_and": "logical", "logical_or": "logical",
+        "hex64_parse": "parse64", "hex64_format": "format64",
+        "sum": "reduce", "mean": "reduce", "median": "reduce",
+        "max": "reduce", "min": "reduce",
+        "value_counts": "value_counts",
+    },
+    "DataFrame": {"melt": "unpivot"},
+    "LazyFrame": {},
+}
+
+# Methods that are not ops and never will be: accessors into a handle, the
+# Arrow/IPC boundary, and the lazy terminals that end a plan instead of
+# extending it.
 ALLOWLIST = {
     "Series": {
-        "eq", "ne", "lt", "le", "gt", "ge",
-        "sum", "mean", "median", "max", "min",
-        "logical_and", "logical_or",
-        "hex64_parse", "hex64_format",
         "type", "encoding", "length", "null_count", "is_null", "data",
         "values", "is_flat", "offsets", "offsets_span", "valid", "handle",
         "release", "child", "num_children", "list", "strings", "structs",
         "nulls", "flat", "flat_i64", "flat_f64", "string_at", "share",
         "from_arrow", "from_borrowed", "to_arrow",
-        "value_counts",
     },
     "DataFrame": {
         "column", "column_index", "num_columns", "num_rows",
         "from_arrow", "to_arrow", "to_ipc",
         "stream", "lazy",
-        "melt",
     },
     "LazyFrame": {
         "collect", "collect_group_state", "explain",
@@ -93,27 +106,27 @@ def public_methods(xml_path: Path, class_name: str) -> set[str]:
 
 
 def registry_leaf_names(lib_path: Path) -> dict[str, set[str]]:
+    # Bucketed by registry name prefix, not by dftu_op_kind: kind comes from
+    # the return token, so a frame -> series op (mask, is_unique) is kind
+    # SERIES while still being a DataFrame method. The prefix is what says
+    # which class owns the op.
     lib = ctypes.CDLL(str(lib_path))
     lib.dftu_op_count.restype = ctypes.c_uint32
     lib.dftu_op_at.restype = ctypes.POINTER(OpDesc)
     lib.dftu_op_at.argtypes = [ctypes.c_uint32]
-    lib.dftu_op_kind_of.restype = ctypes.c_int
-    lib.dftu_op_kind_of.argtypes = [ctypes.c_int64]
-
-    DFTU_OP_KIND_SERIES, DFTU_OP_KIND_AGGREGATE = 0, 1
-    DFTU_OP_KIND_FRAME, DFTU_OP_KIND_LAZY = 2, 3
 
     by_bucket: dict[str, set[str]] = {"series": set(), "frame": set(), "lazy": set()}
     for i in range(lib.dftu_op_count()):
-        desc = lib.dftu_op_at(i).contents
-        leaf = desc.name.decode().rsplit(".", 1)[-1]
-        kind = lib.dftu_op_kind_of(desc.sig)
-        if kind in (DFTU_OP_KIND_SERIES, DFTU_OP_KIND_AGGREGATE):
-            by_bucket["series"].add(leaf)
-        elif kind == DFTU_OP_KIND_FRAME:
+        name = lib.dftu_op_at(i).contents.name.decode()
+        leaf = name.rsplit(".", 1)[-1]
+        if name.startswith("dftu.frame."):
             by_bucket["frame"].add(leaf)
-        elif kind == DFTU_OP_KIND_LAZY:
+        elif name.startswith("dftu.lazy."):
             by_bucket["lazy"].add(leaf)
+        else:
+            # dftu.series.* plus the host utility families (dftu.hash.*,
+            # dftu.hex.*), which are reached as Series methods.
+            by_bucket["series"].add(leaf)
     return by_bucket
 
 
@@ -126,6 +139,7 @@ def main() -> int:
     args = ap.parse_args()
 
     registered = registry_leaf_names(args.dataframe_library)
+    every_leaf = set().union(*registered.values())
 
     failed = False
     for class_name, xml_name in CLASSES.items():
@@ -134,13 +148,16 @@ def main() -> int:
             print(f"missing {xml_path}", file=sys.stderr)
             return 1
         names = public_methods(xml_path, class_name)
-        bucket = REGISTRY_BUCKET[class_name]
-        reg = registered[bucket] if bucket else set()
+        reg = registered[REGISTRY_BUCKET[class_name]]
+        folds = FOLDS[class_name]
         drifted = sorted(
-            n for n in names if n not in reg and n not in ALLOWLIST[class_name]
+            n for n in names
+            if n not in reg
+            and folds.get(n) not in every_leaf
+            and n not in ALLOWLIST[class_name]
         )
         print(f"{class_name}: {len(names)} methods, {len(reg)} registered, "
-             f"{len(ALLOWLIST[class_name])} allowlisted")
+              f"{len(folds)} folded, {len(ALLOWLIST[class_name])} allowlisted")
         if drifted:
             failed = True
             print(f"  DRIFT: {', '.join(drifted)}")
