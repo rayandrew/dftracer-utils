@@ -22,11 +22,13 @@
 
 #include "groupmap_oracle.h"
 #include "test_view_common.h"
+#include "testing_runtime.h"
 
 using namespace dftracer::utils::trace::views::detail;
 using dftracer::utils::CoroScope;
 using dftracer::utils::Runtime;
 using dftracer::utils::StringIntern;
+using dftu_utils_test::run_coro;
 namespace dataframe = dftracer::utils::dataframe;
 
 namespace idx = dftracer::utils::utilities::indexer;
@@ -65,15 +67,6 @@ std::string create_meta_trace(TestEnvironment& env) {
     dftu_utils_test::compress_file_to_gzip_multimember(pfw, gz, 600);
     fs::remove(pfw);
     return gz;
-}
-
-template <typename Fn>
-void run_coro(Fn&& fn) {
-    Runtime rt(4);
-    auto task =
-        dftracer::utils::run_coro_scope(rt.executor(), std::forward<Fn>(fn));
-    rt.submit(std::move(task), "raw-gzip-fuse").wait();
-    rt.shutdown();
 }
 
 // collect() yields a columnar DataFrame; two results are equal when they carry
@@ -161,7 +154,8 @@ TEST_SUITE("RawGzipFuse") {
                 REQUIRE(a.has_value());
                 arts = std::move(*a);
                 co_return;
-            });
+            },
+            "raw-gzip-fuse");
         driver.seal();
 
         // Persist the index this one pass produced.

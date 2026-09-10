@@ -6,6 +6,7 @@
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/core/tasks/coro_scope.h>
 #include <doctest/doctest.h>
+#include <testing_runtime.h>
 
 #include <atomic>
 #include <chrono>
@@ -13,18 +14,7 @@
 #include <vector>
 
 using namespace dftracer::utils;
-
-namespace {
-
-template <typename Fn>
-void run_coro(Fn&& fn) {
-    Runtime rt(4);
-    auto task = run_coro_scope(rt.executor(), std::forward<Fn>(fn));
-    rt.submit(std::move(task), "test").wait();
-    rt.shutdown();
-}
-
-}  // namespace
+using dftu_utils_test::run_coro;
 
 TEST_SUITE("CoroSemaphore") {
     TEST_CASE("never exceeds capacity under contention") {
