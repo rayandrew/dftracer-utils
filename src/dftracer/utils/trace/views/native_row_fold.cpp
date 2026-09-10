@@ -506,6 +506,27 @@ std::string canonical_row_column_name(std::string_view sel) {
     return std::string(dftracer::utils::ARGS_PREFIX) + std::string(key);
 }
 
+dataframe::TypeId row_column_type(std::string_view sel) {
+    std::string_view f;
+    bool arg_only = false;
+    std::string_view num_name;
+    std::string_view deriv_name;
+    if (is_agg_key_field(sel, f, arg_only)) return df::TypeId::String;
+    if (is_num_arg_field(sel, num_name)) return df::TypeId::Float64;
+    if (is_derived_agg_field(sel, deriv_name)) return df::TypeId::Uint64;
+    if (is_top_level(sel)) {
+        if (sel == "name" || sel == "cat") return df::TypeId::String;
+        if (sel == "ph") return df::TypeId::Int64;
+        return df::TypeId::Uint64;  // pid, tid, ts, dur
+    }
+    if (resolved_kind(sel) != ResolvedKind::None) return df::TypeId::String;
+    if (is_iocat_field(sel)) return df::TypeId::Int64;
+    if (is_accpat_field(sel)) return df::TypeId::String;
+    const std::string_view key = strip_args_prefix(sel);
+    if (is_hash_field(key)) return df::TypeId::String;
+    return df::TypeId::Unknown;  // a flattened arg: type is data-dependent
+}
+
 dataframe::DataFrame build_row_frame(
     const std::vector<FoldEvent>& evs,
     const dftracer::utils::StringIntern& intern,

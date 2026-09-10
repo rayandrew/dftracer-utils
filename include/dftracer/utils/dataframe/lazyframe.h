@@ -53,8 +53,10 @@ class Cursor {
 };
 
 /// The static, scan-free schema of a Source: column names and (best-effort)
-/// types. `types` may be empty or hold TypeId::Unknown entries when a type is
-/// not known without scanning; `names` is always populated.
+/// types. `names` is always populated. `types` is either empty (the source
+/// reports no type information at all) or exactly `names.size()` long, one
+/// entry per column in order; a column whose type is not knowable without
+/// scanning gets `TypeId::Unknown`, never a guessed concrete type.
 struct Schema {
     std::vector<std::string> names;
     std::vector<TypeId> types;

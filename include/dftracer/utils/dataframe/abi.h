@@ -52,19 +52,25 @@ typedef struct dftu_scalar {
 
 /** Element type of a dftu_series (mirrors dataframe::TypeId ordinals). */
 typedef enum {
-    DFTU_TYPE_BOOL = 0,
-    DFTU_TYPE_INT8 = 1,
-    DFTU_TYPE_INT16 = 2,
-    DFTU_TYPE_INT32 = 3,
-    DFTU_TYPE_INT64 = 4,
-    DFTU_TYPE_UINT8 = 5,
-    DFTU_TYPE_UINT16 = 6,
-    DFTU_TYPE_UINT32 = 7,
-    DFTU_TYPE_UINT64 = 8,
-    DFTU_TYPE_FLOAT32 = 9,
-    DFTU_TYPE_FLOAT64 = 10,
-    DFTU_TYPE_STRING = 11,
-    DFTU_TYPE_BINARY = 12
+    /** Schema-only marker (mirrors TypeId::Unknown): a type not knowable
+     * without scanning, or an unset/zero-initialized dftu_dtype. Never the
+     * type of a real dftu_series. */
+    DFTU_TYPE_UNKNOWN = 0,
+    DFTU_TYPE_BOOL = 1,
+    DFTU_TYPE_INT8 = 2,
+    DFTU_TYPE_INT16 = 3,
+    DFTU_TYPE_INT32 = 4,
+    DFTU_TYPE_INT64 = 5,
+    DFTU_TYPE_UINT8 = 6,
+    DFTU_TYPE_UINT16 = 7,
+    DFTU_TYPE_UINT32 = 8,
+    DFTU_TYPE_UINT64 = 9,
+    DFTU_TYPE_FLOAT32 = 10,
+    DFTU_TYPE_FLOAT64 = 11,
+    DFTU_TYPE_STRING = 12,
+    DFTU_TYPE_BINARY = 13,
+    DFTU_TYPE_LIST = 14,
+    DFTU_TYPE_STRUCT = 15
 } dftu_dtype;
 
 /** Create a FLAT column copying `n` values of `type` from `data`. `validity` is

@@ -393,6 +393,8 @@ std::string scalar_cell_to_string(const Series& s, std::int64_t i) {
         case TypeId::List:
         case TypeId::Struct:
             return std::string();
+        case TypeId::Unknown:
+            break;  // schema-only marker, never a real Series' type
     }
     return std::string();
 }

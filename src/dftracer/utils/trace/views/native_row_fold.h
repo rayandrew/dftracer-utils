@@ -84,6 +84,13 @@ std::vector<std::string> row_fold_extra_captures(
 /// what build_row_frame actually emits for the same select.
 std::string canonical_row_column_name(std::string_view sel);
 
+/// The statically known type of the column `canonical_row_column_name(sel)`
+/// names, or TypeId::Unknown when it is data-dependent (a flattened args.*
+/// value, whose type build_row_frame infers per batch). Uses the same field
+/// classification as canonical_row_column_name/build_row_frame, so it cannot
+/// drift from what the scan actually emits.
+dataframe::TypeId row_column_type(std::string_view sel);
+
 /// Collect matching raw events straight into a native DataFrame. The
 /// row-query terminal (collect() / stream() with no group_by/agg) folds every
 /// event's top-level fields plus its args into columns; `select` projects a

@@ -40,8 +40,9 @@ static_assert(code(ScalarTag::I64) == DFTU_SCALAR_TAG_I64);
 static_assert(code(ScalarTag::U64) == DFTU_SCALAR_TAG_U64);
 static_assert(code(ScalarTag::F64) == DFTU_SCALAR_TAG_F64);
 
-// TypeId 0-12 mirror dftu_dtype; List(13)/Struct(14) are C++-only (no ABI
-// dtype).
+// Every TypeId mirrors a dftu_dtype, in lockstep, so a plugin can name any
+// type a Series can hold through the C ABI.
+static_assert(code(TypeId::Unknown) == DFTU_TYPE_UNKNOWN);
 static_assert(code(TypeId::Bool) == DFTU_TYPE_BOOL);
 static_assert(code(TypeId::Int8) == DFTU_TYPE_INT8);
 static_assert(code(TypeId::Int16) == DFTU_TYPE_INT16);
@@ -55,6 +56,14 @@ static_assert(code(TypeId::Float32) == DFTU_TYPE_FLOAT32);
 static_assert(code(TypeId::Float64) == DFTU_TYPE_FLOAT64);
 static_assert(code(TypeId::String) == DFTU_TYPE_STRING);
 static_assert(code(TypeId::Binary) == DFTU_TYPE_BINARY);
+static_assert(code(TypeId::List) == DFTU_TYPE_LIST);
+static_assert(code(TypeId::Struct) == DFTU_TYPE_STRUCT);
+// TypeId::Struct is declared last in types.h, so its ordinal is the count of
+// TypeId values minus one; pinning DFTU_TYPE_STRUCT to that ordinal makes a
+// TypeId appended without a matching dftu_dtype member fail this assert
+// instead of silently reusing 15.
+static_assert(DFTU_TYPE_STRUCT == 15,
+              "a TypeId was added without mirroring it into dftu_dtype");
 
 }  // namespace
 }  // namespace dftracer::utils::dataframe

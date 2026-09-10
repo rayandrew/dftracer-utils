@@ -7,6 +7,11 @@
 namespace dftracer::utils::dataframe {
 
 enum class TypeId : std::int32_t {
+    /// Schema-only marker: a type not knowable without scanning, or an
+    /// unset/zero-initialized TypeId. Never the type of a real Series;
+    /// dispatch over actual column data must reject it like any other
+    /// out-of-range value, not handle it as data.
+    Unknown,
     Bool,
     Int8,
     Int16,
@@ -134,6 +139,7 @@ constexpr std::size_t byte_width(TypeId t) noexcept {
         case TypeId::Binary:
         case TypeId::List:
         case TypeId::Struct:
+        case TypeId::Unknown:
             return 0;
     }
     return 0;
@@ -177,6 +183,8 @@ constexpr const char* type_name(TypeId t) noexcept {
             return "list";
         case TypeId::Struct:
             return "struct";
+        case TypeId::Unknown:
+            return "unknown";
     }
     return "unknown";
 }

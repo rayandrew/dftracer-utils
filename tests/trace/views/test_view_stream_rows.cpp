@@ -433,6 +433,73 @@ TEST_SUITE("View - streaming row query") {
         CHECK(h.num_rows() == 10);
     }
 
+    TEST_CASE(
+        "ViewSource schema() types match the actually collected columns "
+        "for a statically-known select") {
+        namespace df = dftracer::utils::dataframe;
+        const auto& s = shared_trace();
+        View v = View::from_file(s.gz, s.idx)
+                     .metadata(false)
+                     .select({"name", "cat", "pid", "ts", "dur"});
+        auto src = std::make_shared<ViewSource>(v);
+
+        df::Schema schema = src->schema();
+        REQUIRE(schema.names.size() == 5);
+        REQUIRE(schema.types.size() == schema.names.size());
+
+        df::DataFrame got = run(df::LazyFrame::scan(src).collect());
+        REQUIRE(got.columns.size() == schema.names.size());
+        for (std::size_t i = 0; i < schema.names.size(); ++i) {
+            const std::int64_t ci = bcol(got, schema.names[i]);
+            REQUIRE(ci >= 0);
+            CHECK(schema.types[i] ==
+                  got.columns[static_cast<std::size_t>(ci)].type());
+        }
+    }
+
+    TEST_CASE(
+        "ViewSource schema() reports every column, marking a data-dependent "
+        "args.* value Unknown") {
+        namespace df = dftracer::utils::dataframe;
+        TestEnvironment env(200);
+        std::string gz = create_mixed_arg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        View v =
+            View::from_file(gz, idx).metadata(false).select({"name", "args.x"});
+        auto src = std::make_shared<ViewSource>(v);
+
+        df::Schema schema = src->schema();
+        REQUIRE(schema.names.size() == 2);
+        CHECK(schema.names[0] == "name");
+        CHECK(schema.names[1] == "args.x");
+        // types is always parallel to names: every column gets an entry, and
+        // a column whose type the scan infers per batch says so rather than
+        // silencing the whole schema.
+        REQUIRE(schema.types.size() == schema.names.size());
+        CHECK(schema.types[0] == df::TypeId::String);
+        CHECK(schema.types[1] == df::TypeId::Unknown);
+    }
+
+    TEST_CASE(
+        "ViewSource schema() types match the buffered frame for an "
+        "aggregated view") {
+        namespace df = dftracer::utils::dataframe;
+        TestEnvironment env(200);
+        std::string gz = create_mixed_arg_trace(env);
+        std::string idx = determine_index_path(gz, "");
+        View v = View::from_file(gz, idx)
+                     .group_by({GroupKey::name()})
+                     .agg({{AggOp::Count, "", "n"}});
+        auto src = std::make_shared<ViewSource>(v);
+
+        df::Schema schema = src->schema();
+        df::DataFrame buf = run(v.collect_frame());
+        REQUIRE(schema.names == buf.names);
+        REQUIRE(schema.types.size() == buf.columns.size());
+        for (std::size_t i = 0; i < buf.columns.size(); ++i)
+            CHECK(schema.types[i] == buf.columns[i].type());
+    }
+
     TEST_CASE("View::stream() over a histogram aggregation yields one chunk") {
         TestEnvironment env(200);
         std::string gz = create_mixed_arg_trace(env);

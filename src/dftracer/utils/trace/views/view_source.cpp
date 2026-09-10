@@ -353,17 +353,26 @@ dftracer::utils::dataframe::Schema ViewSource::schema() const {
         // the producer actually emits.
         if (!view_.plan_->select.empty()) {
             s.names.reserve(view_.plan_->select.size());
-            for (const std::string& sel : view_.plan_->select)
+            s.types.reserve(view_.plan_->select.size());
+            for (const std::string& sel : view_.plan_->select) {
                 s.names.push_back(detail::canonical_row_column_name(sel));
+                s.types.push_back(detail::row_column_type(sel));
+            }
         } else {
             s.names = row_schema();
+            s.types.reserve(s.names.size());
+            for (const std::string& name : s.names)
+                s.types.push_back(detail::row_column_type(name));
         }
         return s;
     }
-    // Aggregated / post-scan-op view: the column set is data-dependent, so the
-    // only faithful schema is the buffered result's (the documented escape
-    // hatch). Types stay empty.
-    s.names = buffer()->names;
+    // Aggregated / post-scan-op view: buffer() already ran the scan, so its
+    // columns' real types are known (unlike the row-query branches above).
+    const dftracer::utils::dataframe::DataFrame& buf = *buffer();
+    s.names = buf.names;
+    s.types.reserve(buf.columns.size());
+    for (const dftracer::utils::dataframe::Series& col : buf.columns)
+        s.types.push_back(col.type());
     return s;
 }
 

@@ -44,6 +44,8 @@ ArrowType to_arrow_type(TypeId t) {
             return NANOARROW_TYPE_LIST;
         case TypeId::Struct:
             return NANOARROW_TYPE_STRUCT;
+        case TypeId::Unknown:
+            break;  // schema-only marker, never a real Series' type
     }
     return NANOARROW_TYPE_UNINITIALIZED;
 }
