@@ -11,8 +11,13 @@
 
 namespace dftracer::utils::dataframe {
 
+/// Three-way order of rows `a` and `b` of `v` (-1/0/1) on the column's own
+/// domain. Only defined for an is_orderable_type() column; 0 for any other.
+int compare_rows(const Series& v, std::int64_t a, std::int64_t b);
+
 /// Stable argsort: an Int64 column of row indices ordering `v` ascending, or
 /// descending when `descending`. Null rows sort last in both directions.
+/// An invalid Series for a nested column, which has no order.
 Series argsort(const Series& v, bool descending);
 
 /// An Int64 column of the k row indices of the k largest (or smallest) values,

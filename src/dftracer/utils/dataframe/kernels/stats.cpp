@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -53,8 +55,17 @@ std::vector<double> nonnull_values(const Series& v) {
 }
 
 bool equal_at(const Series& v, std::int64_t a, std::int64_t b) {
-    if (v.type() == TypeId::String) return v.string_at(a) == v.string_at(b);
-    return read_f64(v, a) == read_f64(v, b);
+    switch (value_domain(v.type())) {
+        case ValueDomain::Bytes:
+            return read_bytes(v, a) == read_bytes(v, b);
+        case ValueDomain::Numeric:
+            return read_f64(v, a) == read_f64(v, b);
+        case ValueDomain::None:
+            throw std::invalid_argument(
+                std::string("column type '") + type_name(v.type()) +
+                "' has no comparable per-row value (nested type)");
+    }
+    return false;
 }
 
 }  // namespace
@@ -94,6 +105,7 @@ double median(const Series& v) { return quantile(v, 0.5); }
 std::int64_t nunique(const Series& v) {
     const std::int64_t n = v.length();
     if (n == 0) return 0;
+    if (refuse_nested_value("nunique", v.type())) return 0;
     Series order = argsort(v, false);  // nulls sort last
     const std::int64_t* idx = order.data<std::int64_t>();
     const bool has_nulls = v.null_count() > 0;
@@ -111,6 +123,7 @@ std::int64_t nunique(const Series& v) {
 
 Series unique(const Series& v) {
     const std::int64_t n = v.length();
+    if (refuse_nested_value("unique", v.type())) return Series{};
     Series order = argsort(v, false);
     const std::int64_t* idx = order.data<std::int64_t>();
     const bool has_nulls = v.null_count() > 0;
@@ -129,6 +142,7 @@ Series unique(const Series& v) {
 
 Series rank(const Series& v, RankMethod method, bool descending) {
     const std::int64_t n = v.length();
+    if (refuse_nested_value("rank", v.type())) return Series{};
     std::vector<double> ranks(static_cast<std::size_t>(n), std::nan(""));
     Series order = argsort(v, descending);  // nulls sort last
     const std::int64_t* idx = order.data<std::int64_t>();

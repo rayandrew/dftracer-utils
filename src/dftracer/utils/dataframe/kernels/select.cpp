@@ -47,7 +47,7 @@ std::vector<std::int64_t> to_index_vector(const Series& idx) {
 // over the non-null rows, mirroring the eager DataFrame dedup helpers.
 std::vector<std::int64_t> count_values(const Series& v) {
     const std::int64_t n = v.length();
-    const bool is_str = narrow_varwidth_type(v.type()) == TypeId::String;
+    const bool is_bytes = value_domain(v.type()) == ValueDomain::Bytes;
     const bool has_nulls = v.null_count() > 0;
     const std::int64_t nullc = v.null_count();
 
@@ -64,13 +64,14 @@ std::vector<std::int64_t> count_values(const Series& v) {
     };
 
     std::vector<std::int64_t> sub_counts =
-        is_str ? radix_counts_by<std::string>(
-                     m,
-                     [&](std::int64_t j) {
-                         return std::string(v.string_at(idx_at(j)));
-                     })
-               : radix_counts_by<double>(
-                     m, [&](std::int64_t j) { return read_f64(v, idx_at(j)); });
+        is_bytes ? radix_counts_by<std::string>(
+                       m,
+                       [&](std::int64_t j) {
+                           return std::string(read_bytes(v, idx_at(j)));
+                       })
+                 : radix_counts_by<double>(m, [&](std::int64_t j) {
+                       return read_f64(v, idx_at(j));
+                   });
 
     std::vector<std::int64_t> counts(static_cast<std::size_t>(n), 0);
     for (std::int64_t j = 0; j < m; ++j)
@@ -84,6 +85,9 @@ std::vector<std::int64_t> count_values(const Series& v) {
 
 // keep_when_unique: true builds is_unique, false builds is_duplicated.
 Series occurrence_mask(const Series& v, bool keep_when_unique) {
+    if (refuse_nested_value(keep_when_unique ? "is_unique" : "is_duplicated",
+                            v.type()))
+        return Series{};
     const std::vector<std::int64_t> counts = count_values(v);
     const std::int64_t n = v.length();
     std::vector<char> flags(static_cast<std::size_t>(n), 0);
@@ -100,68 +104,51 @@ Series occurrence_mask(const Series& v, bool keep_when_unique) {
 bool is_sorted_impl(const Series& v, bool descending) {
     const std::int64_t n = v.length();
     if (n < 2) return true;
+    if (refuse_nested_value("is_sorted", v.type())) return false;
     bool simd = false;
     if (is_sorted_numeric(*v.handle(), descending, &simd)) return simd;
-    const bool is_str = narrow_varwidth_type(v.type()) == TypeId::String;
     for (std::int64_t i = 1; i < n; ++i) {
-        int cmp;
-        if (is_str) {
-            cmp = v.string_at(i - 1).compare(v.string_at(i));
-            cmp = cmp < 0 ? -1 : (cmp > 0 ? 1 : 0);
-        } else {
-            const double a = read_f64(v, i - 1), b = read_f64(v, i);
-            cmp = a < b ? -1 : (a > b ? 1 : 0);
-        }
+        const int cmp = compare_rows(v, i - 1, i);
         if (descending ? cmp < 0 : cmp > 0) return false;
     }
     return true;
 }
-
-// FixedSizeBinary's width is a DataType parameter; Decimal128/256 have a
-// fixed per-TypeId byte_width (16/32). Byte equality is exact for all three
-// (unlike a float64 round-trip, which would collapse distinct decimal values
-// that happen to round to the same double).
-bool is_byte_comparable(TypeId t) {
-    return t == TypeId::FixedSizeBinary || t == TypeId::Decimal128 ||
-           t == TypeId::Decimal256;
-}
-std::size_t byte_row_width(const Series& v) {
-    return v.type() == TypeId::FixedSizeBinary
-               ? static_cast<std::size_t>(v.data_type().fixed_size)
-               : byte_width(v.type());
-}
-std::string row_bytes(const Series& v, std::int64_t i, std::size_t width) {
-    const auto* d = v.data<std::uint8_t>();
-    return std::string(
-        reinterpret_cast<const char*>(d) + static_cast<std::size_t>(i) * width,
-        width);
-}
-
-Series is_in_impl(const Series& v, const Series& values) {
+Series is_in_impl(const Series& v_in, const Series& values_in) {
+    if (refuse_nested_value("is_in", v_in.type())) return Series{};
     // FLAT Float64 with a small needle set: SIMD broadcast-compare.
     {
-        const std::int64_t n = v.length();
+        const std::int64_t n = v_in.length();
         std::vector<std::uint8_t> packed(static_cast<std::size_t>((n + 7) / 8),
                                          0);
-        if (is_in_f64_simd(*v.handle(), *values.handle(), packed.data()))
+        if (is_in_f64_simd(*v_in.handle(), *values_in.handle(), packed.data()))
             return Series::flat(TypeId::Bool, packed.data(), n);
     }
-    const bool is_str = narrow_varwidth_type(v.type()) == TypeId::String;
-    const bool is_bytes = is_byte_comparable(v.type());
-    const std::size_t bw = is_bytes ? byte_row_width(v) : 0;
+    // read_bytes only sees a FLAT column's buffers, so a sliced or dictionary
+    // needle would otherwise read empty and match nothing.
+    auto flatten = [](const Series& c) {
+        return c.encoding() == Encoding::Flat
+                   ? c.share()
+                   : Series{dftu_series_materialize(c.handle())};
+    };
+    const Series v = flatten(v_in);
+    const Series values = flatten(values_in);
+    const bool is_bytes = value_domain(v.type()) == ValueDomain::Bytes;
     std::unordered_set<double> num_set;
     std::unordered_set<std::string> str_set;
     const std::int64_t m = values.length();
     const bool vals_null = values.null_count() > 0;
-    const bool vals_str = narrow_varwidth_type(values.type()) == TypeId::String;
-    const bool vals_bytes = is_bytes && values.type() == v.type();
+    const ValueDomain vals_domain = value_domain(values.type());
+    // A fixed-width byte row only means the same value in a needle column of
+    // the same type and width.
+    const bool vals_bytes = vals_domain == ValueDomain::Bytes &&
+                            (narrow_varwidth_type(v.type()) == TypeId::String ||
+                             narrow_varwidth_type(v.type()) == TypeId::Binary ||
+                             values.data_type() == v.data_type());
     for (std::int64_t j = 0; j < m; ++j) {
         if (vals_null && values.is_null(j)) continue;
-        if (is_str) {
-            if (vals_str) str_set.insert(std::string(values.string_at(j)));
-        } else if (is_bytes) {
-            if (vals_bytes) str_set.insert(row_bytes(values, j, bw));
-        } else if (!vals_str) {
+        if (is_bytes) {
+            if (vals_bytes) str_set.insert(std::string(read_bytes(values, j)));
+        } else if (vals_domain == ValueDomain::Numeric) {
             num_set.insert(read_f64(values, j));
         }
     }
@@ -173,9 +160,8 @@ Series is_in_impl(const Series& v, const Series& values) {
         for (std::int64_t i = b; i < e; ++i) {
             if (has_nulls && v.is_null(i)) continue;
             const bool hit =
-                is_str     ? str_set.count(std::string(v.string_at(i))) > 0
-                : is_bytes ? str_set.count(row_bytes(v, i, bw)) > 0
-                           : num_set.count(read_f64(v, i)) > 0;
+                is_bytes ? str_set.count(std::string(read_bytes(v, i))) > 0
+                         : num_set.count(read_f64(v, i)) > 0;
             flags[static_cast<std::size_t>(i)] = hit ? 1 : 0;
         }
     };
@@ -305,6 +291,10 @@ dftu_series* dftu_series_sort(const dftu_series* v, int32_t descending) {
     if (!v) return nullptr;
     Series c = borrow(v);
     Series order = dftracer::utils::dataframe::argsort(c, descending != 0);
+    if (!order.valid()) {
+        c.release();
+        return nullptr;
+    }
     Series r = c.take(dftracer::utils::dataframe::to_index_vector(order));
     c.release();
     return r.release();
@@ -341,6 +331,10 @@ dftu_series* dftu_series_top_k(const dftu_series* v, int64_t k) {
     if (!v) return nullptr;
     Series c = borrow(v);
     Series idx = dftracer::utils::dataframe::topk_indices(c, k, true);
+    if (!idx.valid()) {
+        c.release();
+        return nullptr;
+    }
     Series r = c.take(dftracer::utils::dataframe::to_index_vector(idx));
     c.release();
     return r.release();
@@ -349,6 +343,10 @@ dftu_series* dftu_series_bottom_k(const dftu_series* v, int64_t k) {
     if (!v) return nullptr;
     Series c = borrow(v);
     Series idx = dftracer::utils::dataframe::topk_indices(c, k, false);
+    if (!idx.valid()) {
+        c.release();
+        return nullptr;
+    }
     Series r = c.take(dftracer::utils::dataframe::to_index_vector(idx));
     c.release();
     return r.release();

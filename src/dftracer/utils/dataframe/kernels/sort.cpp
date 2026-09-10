@@ -1,4 +1,6 @@
+#include <dftracer/utils/dataframe/internal/column_read.h>
 #include <dftracer/utils/dataframe/internal/decimal.h>
+#include <dftracer/utils/dataframe/internal/float16.h>
 #include <dftracer/utils/dataframe/kernels/sort.h>
 #include <dftracer/utils/dataframe/parallel.h>
 #include <hwy/contrib/sort/vqsort.h>
@@ -56,23 +58,21 @@ int cmp_row(const Series& v, std::int64_t a, std::int64_t b) {
             return cmp_numeric<std::uint32_t>(v, a, b);
         case TypeId::Uint64:
             return cmp_numeric<std::uint64_t>(v, a, b);
+        case TypeId::Float16: {
+            const std::uint16_t* d = v.data<std::uint16_t>();
+            const float fa = half_to_float(d[a]), fb = half_to_float(d[b]);
+            return fa < fb ? -1 : (fa > fb ? 1 : 0);
+        }
         case TypeId::Float32:
             return cmp_numeric<float>(v, a, b);
         case TypeId::Float64:
             return cmp_numeric<double>(v, a, b);
-        case TypeId::String: {
-            std::string_view sa = v.string_at(a);
-            std::string_view sb = v.string_at(b);
-            int c = sa.compare(sb);
-            return c < 0 ? -1 : (c > 0 ? 1 : 0);
-        }
+        case TypeId::String:
+        case TypeId::Binary:
         case TypeId::FixedSizeBinary: {
-            // Byte-wise order is well defined for fixed-width opaque bytes.
-            const auto width =
-                static_cast<std::size_t>(v.data_type().fixed_size);
-            const std::uint8_t* d = v.data<std::uint8_t>();
-            int c = std::memcmp(d + static_cast<std::size_t>(a) * width,
-                                d + static_cast<std::size_t>(b) * width, width);
+            // read_bytes gives the row extent for both the offset-backed and
+            // the fixed-width layouts.
+            int c = read_bytes(v, a).compare(read_bytes(v, b));
             return c < 0 ? -1 : (c > 0 ? 1 : 0);
         }
         case TypeId::Decimal128: {
@@ -86,6 +86,8 @@ int cmp_row(const Series& v, std::int64_t a, std::int64_t b) {
                                       d + static_cast<std::size_t>(b) * 32);
         }
         default:
+            // Nested and Unknown reach no case: they have no total order, and
+            // every entry point refuses them before comparing a row.
             return 0;
     }
 }
@@ -259,13 +261,19 @@ Series argsort_simd(const Series& v, bool descending, std::int64_t k) {
 
 }  // namespace
 
+int compare_rows(const Series& v, std::int64_t a, std::int64_t b) {
+    return cmp_row(v, a, b);
+}
+
 Series argsort(const Series& v, bool descending) {
+    if (refuse_nested_value("argsort", v.type())) return Series{};
     Series simd = argsort_simd(v, descending, -1);
     if (simd.valid()) return simd;
     return argsort_scalar(v, descending);
 }
 
 Series topk_indices(const Series& v, std::int64_t k, bool largest) {
+    if (refuse_nested_value("top_k", v.type())) return Series{};
     const std::int64_t n = v.length();
     k = k < 0 ? 0 : (k > n ? n : k);
     // largest -> descending key order; the first k are the k largest.

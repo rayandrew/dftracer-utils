@@ -2,10 +2,12 @@
 #define DFTRACER_UTILS_DATAFRAME_INTERNAL_CELL_OPS_H
 
 #include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/internal/column_read.h>
 #include <dftracer/utils/dataframe/series.h>
 #include <dftracer/utils/dataframe/types.h>
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -78,17 +80,22 @@ inline std::string cell_to_string(const Series& c, std::int64_t i) {
 }
 
 /// Append an exact byte encoding of cell `i` of `c` to `key`: a null flag then
-/// the raw bytes (length-prefixed for strings), so distinct cells never collide
-/// and equal cells always match. The building block for row dedupe keys.
+/// the raw bytes (length-prefixed for byte-domain cells), so distinct cells
+/// never collide and equal cells always match. The building block for row
+/// dedupe keys. Throws std::invalid_argument for a nested column.
 inline void append_cell(std::string& key, const Series& c, std::int64_t i) {
+    if (!is_orderable_type(c.type()))
+        throw std::invalid_argument(std::string("column type '") +
+                                    type_name(c.type()) +
+                                    "' has no per-row value to key on");
     if (c.is_null(i)) {
         key.push_back('\0');
         return;
     }
     key.push_back('\1');
     const TypeId t = c.type();
-    if (t == TypeId::String || t == TypeId::Binary) {
-        const std::string_view s = c.string_at(i);
+    if (value_domain(t) == ValueDomain::Bytes) {
+        const std::string_view s = read_bytes(c, i);
         const auto len = static_cast<std::int32_t>(s.size());
         key.append(reinterpret_cast<const char*>(&len), sizeof(len));
         key.append(s.data(), s.size());
