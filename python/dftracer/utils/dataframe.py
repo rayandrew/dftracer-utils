@@ -1316,7 +1316,9 @@ class Session:
     :meth:`execute` (or a ``with`` block, or the first ``Handle.result()``) runs
     every branch over one scan, so several views of the same trace cost one
     decompression, not one per view. Branches are independent: each has its own
-    schema.
+    schema. ``stats`` (set once executed) is the shared scan's own event/chunk
+    counters, including ``chunks_skipped`` when an attach()'d plugin set was
+    the session's sole branch and its prune applied.
 
     ::
 
@@ -1335,6 +1337,10 @@ class Session:
         self._branches: List[Tuple[str, Any, Optional[str]]] = []
         self._handles: List[Optional[Handle]] = []
         self._executed = False
+        # The shared scan's own counters (events/chunks, including
+        # chunks_skipped when a lone attach()'d branch's prune applied); set by
+        # execute().
+        self.stats: Optional[Dict[str, int]] = None
 
     def view(self) -> SessionView:
         """Start a new branch view off the session's base (shares its files and
@@ -1440,7 +1446,8 @@ class Session:
             (kind, v if kind in ("join", "compare") else v._native, sink)
             for kind, v, sink in self._branches
         ]
-        results = self._viewer._native._session_execute(spec)
+        results, stats = self._viewer._native._session_execute(spec)
+        self.stats = stats
         for handle, native in zip(self._handles, results):
             if handle is not None:
                 value = _wrap(native)

@@ -2339,6 +2339,99 @@ def test_session_attach_same_set_twice_raises(tmp_path):
         s.attach(plugins)
 
 
+@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
+def test_session_attach_handle_read_before_execute_triggers_it(tmp_path):
+    # Session Handles (collect/export/.../attach) all share one contract: a
+    # read before an explicit execute() triggers it rather than raising, so
+    # `attached.result()` alone - with no `with` block and no s.execute() call
+    # - still resolves correctly.
+    import dftracer.utils as dftu
+
+    gz = str(tmp_path / "t.pfw.gz")
+    _write_trace(gz, 6, [100], ["f0"])
+    with dftu.Indexer(files=[gz], index_dir=str(tmp_path)) as ix:
+        ix.ensure_indexed()
+
+    plugins = Plugins([_SessionCounts])
+    tv = dftu.TraceViewer(gz, index_path=str(tmp_path))
+    s = tv.session()
+    attached = s.attach(plugins)
+    assert s.stats is None  # nothing has run yet
+
+    res = attached.result()
+    assert s.stats is not None  # result() drove execute()
+    hits = pa.table(res["hits"]).to_pandas()
+    assert int(hits["value"].sum()) == 6
+
+
+@jit.plugin
+class _SessionCountsPosix:
+    plan_query = 'cat == "POSIX"'
+    hits = jit.map(key=(jit.i64,), value=jit.count())
+
+    @jit.each_event
+    def step(self, e):
+        self.hits[(e.pid,)] += 1
+
+
+def _write_two_category_traces(tmp_path, n: int):
+    posix_dir = tmp_path / "posix"
+    stdio_dir = tmp_path / "stdio"
+    posix_dir.mkdir()
+    stdio_dir.mkdir()
+    _write_homog_trace(str(posix_dir / "trace.pfw.gz"), n, "read", "POSIX")
+    _write_homog_trace(str(stdio_dir / "trace.pfw.gz"), n, "fwrite", "STDIO")
+    return [str(posix_dir / "trace.pfw.gz"), str(stdio_dir / "trace.pfw.gz")]
+
+
+@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
+def test_session_attach_alone_prunes_the_scan(tmp_path):
+    import dftracer.utils as dftu
+
+    n = 200
+    files = _write_two_category_traces(tmp_path, n)
+    with dftu.Indexer(files=files, index_dir=str(tmp_path)) as ix:
+        ix.ensure_indexed()
+
+    plugins = Plugins([_SessionCountsPosix])
+    tv = dftu.TraceViewer(files, index_path=str(tmp_path))
+    with tv.session() as s:
+        attached = s.attach(plugins)
+
+    res = attached.result()
+    hits = pa.table(res["hits"]).to_pandas()
+    assert int(hits["value"].sum()) == n  # the plugin's own filter still applies
+    # Sole branch: execute() applies the prune attach() offered, so the index
+    # skips whole chunks.
+    assert s.stats["chunks_skipped"] > 0
+
+
+@pytest.mark.skipif(not _HAS_CXX, reason="no C++ compiler available for the jit backend")
+def test_session_attach_coscan_does_not_prune_the_scan(tmp_path):
+    import dftracer.utils as dftu
+
+    n = 200
+    files = _write_two_category_traces(tmp_path, n)
+    with dftu.Indexer(files=files, index_dir=str(tmp_path)) as ix:
+        ix.ensure_indexed()
+
+    plugins = Plugins([_SessionCountsPosix])
+    tv = dftu.TraceViewer(files, index_path=str(tmp_path))
+    with tv.session() as s:
+        all_events = s.view().group_by().agg("count").collect()
+        attached = s.attach(plugins)
+
+    # The collect branch joined, so execute() drops the narrowing attach()
+    # offered: nothing is skipped, and the branch still sees both files.
+    assert s.stats["chunks_skipped"] == 0
+    total = pa.table(all_events.result()).to_pandas()
+    assert int(total["count"].sum()) == 2 * n
+
+    res = attached.result()
+    hits = pa.table(res["hits"]).to_pandas()
+    assert int(hits["value"].sum()) == n  # plugin's own filter is unaffected
+
+
 def _reads_and_resolved(src: str) -> "tuple[builtins.set[str], builtins.set[str]]":
     """The declared g_reads[] entries and the columns on_batch actually resolves.
 

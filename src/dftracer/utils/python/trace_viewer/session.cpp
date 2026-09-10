@@ -38,8 +38,10 @@ class SessionFileSink : public dftracer::utils::trace::views::ExportSink {
 
 // One shared scan driving several ViewSession branches. `branches` is a list of
 // (kind:str, viewer:_TraceViewer, sink:str|None) tuples; each viewer carries
-// the branch's full plan. Results come back in branch order. The base viewer's
-// files/phase/time settings scope the shared scan.
+// the branch's full plan. Returns (results, stats): results come back in
+// branch order, stats is the shared scan's own ExportStats (events/chunks
+// counters, including chunks_skipped when a base prune applied). The base
+// viewer's files/phase/time settings scope the shared scan.
 PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
 #ifndef DFTRACER_UTILS_ENABLE_ARROW
     PyErr_SetString(PyExc_RuntimeError,
@@ -214,6 +216,7 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
     std::vector<DataFrame> results2(nb);  // containment's second (flamegraph)
     std::vector<ExportStats> export_stats(nb);
     std::vector<std::string> partial_results(nb);
+    ExportStats session_stats{};
     std::string err;
     if (!run_blocking([&] {
             View base = build_view_from_data(base_files, base_index, base_plan,
@@ -318,7 +321,7 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
                         break;
                 }
             }
-            rt->submit(sess.execute()).get();
+            session_stats = rt->submit(sess.execute()).get();
             for (Py_ssize_t i = 0; i < nb; ++i) {
                 if (bdata[i].kind == Kind::Collect ||
                     bdata[i].kind == Kind::Events ||
@@ -397,7 +400,20 @@ PyObject* tv_session_run(TraceViewerObject* self, PyObject* branches) {
         }
         PyList_SET_ITEM(out, i, item);
     }
-    return out;
+    PyObject* stats_dict = Py_BuildValue(
+        "{s:K,s:K,s:K,s:K}", "events_matched",
+        (unsigned long long)session_stats.events_matched, "events_scanned",
+        (unsigned long long)session_stats.events_scanned, "chunks_scanned",
+        (unsigned long long)session_stats.chunks_scanned, "chunks_skipped",
+        (unsigned long long)session_stats.chunks_skipped);
+    if (!stats_dict) {
+        Py_DECREF(out);
+        return nullptr;
+    }
+    PyObject* ret = PyTuple_Pack(2, out, stats_dict);
+    Py_DECREF(out);
+    Py_DECREF(stats_dict);
+    return ret;
 #endif
 }
 
