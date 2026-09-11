@@ -378,6 +378,140 @@ class ThrowingAsyncCursor : public Cursor {
     int calls_ = 0;
 };
 
+// ---- Multi-morsel resident/streaming/hybrid sources for the try_next
+// propagation tests: a chain of transforms (filter/select/with_column) over
+// each of these must take the same fast/slow path its source does. ----------
+
+std::vector<std::int64_t> multi_morsel_data() {
+    return {1, 2, 3, 4, 5, 6, 7, 8, 9};
+}
+
+// Answers every call via try_next: `chunk` rows at a time until exhausted.
+class MultiSyncCursor : public Cursor {
+   public:
+    MultiSyncCursor(std::vector<std::int64_t> data, std::int64_t chunk)
+        : data_(std::move(data)), chunk_(chunk) {}
+    CoroTask<std::optional<Morsel>> next(std::int64_t) override {
+        std::optional<Morsel> out;
+        fill(out);
+        co_return out;
+    }
+    bool try_next(std::int64_t, std::optional<Morsel>& out) override {
+        fill(out);
+        return true;
+    }
+
+   private:
+    void fill(std::optional<Morsel>& out) {
+        const auto n64 = static_cast<std::int64_t>(data_.size());
+        if (off_ >= n64) {
+            out.reset();
+            return;
+        }
+        const std::int64_t n = std::min(chunk_, n64 - off_);
+        Morsel m;
+        m.columns.push_back(Series::flat_i64(data_.data() + off_, n));
+        m.rows = n;
+        off_ += n;
+        out = std::move(m);
+    }
+    std::vector<std::int64_t> data_;
+    std::int64_t chunk_;
+    std::int64_t off_ = 0;
+};
+
+// Genuinely suspends on every call (try_next always false, the Cursor
+// default): `chunk` rows at a time until exhausted.
+class MultiAsyncCursor : public Cursor {
+   public:
+    MultiAsyncCursor(std::vector<std::int64_t> data, std::int64_t chunk)
+        : data_(std::move(data)), chunk_(chunk) {}
+    CoroTask<std::optional<Morsel>> next(std::int64_t) override {
+        co_await dftracer::utils::coro::yield();
+        std::optional<Morsel> out;
+        const auto n64 = static_cast<std::int64_t>(data_.size());
+        if (off_ < n64) {
+            const std::int64_t n = std::min(chunk_, n64 - off_);
+            Morsel m;
+            m.columns.push_back(Series::flat_i64(data_.data() + off_, n));
+            m.rows = n;
+            off_ += n;
+            out = std::move(m);
+        }
+        co_return out;
+    }
+
+   private:
+    std::vector<std::int64_t> data_;
+    std::int64_t chunk_;
+    std::int64_t off_ = 0;
+};
+
+// The SpoolReader shape: answers the first `sync_rows` rows via try_next
+// (resident prefix), then genuinely suspends for the remainder (as if it had
+// fallen through to a spilled run on disk).
+class SyncThenAsyncCursor : public Cursor {
+   public:
+    SyncThenAsyncCursor(std::vector<std::int64_t> data, std::int64_t chunk,
+                        std::int64_t sync_rows)
+        : data_(std::move(data)), chunk_(chunk), sync_rows_(sync_rows) {}
+
+    CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        std::optional<Morsel> out;
+        if (try_next(max_rows, out)) co_return out;
+        co_await dftracer::utils::coro::yield();
+        fill(out);
+        co_return out;
+    }
+
+    bool try_next(std::int64_t, std::optional<Morsel>& out) override {
+        if (off_ >= sync_rows_) return false;
+        fill(out);
+        return true;
+    }
+
+   private:
+    void fill(std::optional<Morsel>& out) {
+        const auto n64 = static_cast<std::int64_t>(data_.size());
+        if (off_ >= n64) {
+            out.reset();
+            return;
+        }
+        const std::int64_t n = std::min(chunk_, n64 - off_);
+        Morsel m;
+        m.columns.push_back(Series::flat_i64(data_.data() + off_, n));
+        m.rows = n;
+        off_ += n;
+        out = std::move(m);
+    }
+    std::vector<std::int64_t> data_;
+    std::int64_t chunk_, sync_rows_;
+    std::int64_t off_ = 0;
+};
+
+// The chain the fast-path propagation tests all drive: filter (keep
+// everything) -> select "val" -> with_column "doubled" = val * 2 -> the sync
+// probe node. Exercises FilterCursor, SelectCursor and WithColumnCursor's
+// try_next in series over whatever source cursor is handed in.
+LazyFrame build_probe_chain(std::shared_ptr<Source> src,
+                            const char* node_name) {
+    return LazyFrame::scan(src)
+        .filter(col(0) > std::int64_t{0})
+        .select({"val"})
+        .with_column("doubled",
+                     col(0) * dftracer::utils::dataframe::lit(std::int64_t{2}))
+        .op(node_name, OpArgs());
+}
+
+void check_multi_morsel_output(const DataFrame& out) {
+    REQUIRE(out.num_rows() == 9);
+    REQUIRE(out.columns.size() == 2);
+    for (std::int64_t i = 0; i < 9; ++i) {
+        CHECK(out.columns[0].data<std::int64_t>()[i] == i + 1);
+        CHECK(out.columns[1].data<std::int64_t>()[i] == (i + 1) * 2);
+    }
+}
+
 }  // namespace
 
 TEST_SUITE("lazyframe plugin node") {
@@ -723,5 +857,114 @@ TEST_SUITE("lazyframe plugin node") {
         }
 
         CHECK(dftu_node_unregister("test.sync_probe.err") == 0);
+    }
+
+    TEST_CASE(
+        "a resident multi-stage chain (filter/select/with_column) takes the "
+        "sync path for every call") {
+        std::vector<bool> sync_flags;
+        dftu_node_vt vt = make_probe_vt();
+        REQUIRE(dftu_node_register("test.sync_probe.chain.resident", &vt,
+                                   &sync_flags) == 0);
+
+        auto src = std::make_shared<CursorSource>([] {
+            return std::make_unique<MultiSyncCursor>(multi_morsel_data(), 3);
+        });
+        DataFrame out = run(
+            build_probe_chain(src, "test.sync_probe.chain.resident").collect());
+        check_multi_morsel_output(out);
+
+        REQUIRE(!sync_flags.empty());
+        for (bool synced : sync_flags) CHECK(synced);
+
+        CHECK(dftu_node_unregister("test.sync_probe.chain.resident") == 0);
+    }
+
+    TEST_CASE(
+        "a genuinely suspending multi-stage chain takes the async path "
+        "throughout and produces identical values") {
+        std::vector<bool> sync_flags;
+        dftu_node_vt vt = make_probe_vt();
+        REQUIRE(dftu_node_register("test.sync_probe.chain.async", &vt,
+                                   &sync_flags) == 0);
+
+        auto src = std::make_shared<CursorSource>([] {
+            return std::make_unique<MultiAsyncCursor>(multi_morsel_data(), 3);
+        });
+        DataFrame out = run(
+            build_probe_chain(src, "test.sync_probe.chain.async").collect());
+        check_multi_morsel_output(out);
+
+        REQUIRE(!sync_flags.empty());
+        for (bool synced : sync_flags) CHECK_FALSE(synced);
+
+        CHECK(dftu_node_unregister("test.sync_probe.chain.async") == 0);
+    }
+
+    TEST_CASE(
+        "a chain that starts resident and becomes async partway (the "
+        "SpoolReader shape) produces correct values across the transition") {
+        std::vector<bool> sync_flags;
+        dftu_node_vt vt = make_probe_vt();
+        REQUIRE(dftu_node_register("test.sync_probe.chain.hybrid", &vt,
+                                   &sync_flags) == 0);
+
+        auto src = std::make_shared<CursorSource>([] {
+            return std::make_unique<SyncThenAsyncCursor>(multi_morsel_data(), 3,
+                                                         3);
+        });
+        DataFrame out = run(
+            build_probe_chain(src, "test.sync_probe.chain.hybrid").collect());
+        check_multi_morsel_output(out);
+
+        // The first morsel (3 rows) is answered by the resident prefix; every
+        // call after the transition must genuinely suspend. try_next never
+        // silently claims a synchronous answer for data it had to await.
+        REQUIRE(sync_flags.size() >= 2);
+        CHECK(sync_flags.front());
+        for (std::size_t i = 1; i < sync_flags.size(); ++i)
+            CHECK_FALSE(sync_flags[i]);
+
+        CHECK(dftu_node_unregister("test.sync_probe.chain.hybrid") == 0);
+    }
+
+    TEST_CASE(
+        "an upstream error through the filter/select/with_column chain is "
+        "reported identically on the sync and async paths") {
+        std::vector<bool> sync_flags;
+        dftu_node_vt vt = make_probe_vt();
+        REQUIRE(dftu_node_register("test.sync_probe.chain.err", &vt,
+                                   &sync_flags) == 0);
+
+        {
+            auto src = std::make_shared<CursorSource>(
+                [] { return std::make_unique<ThrowingSyncCursor>(2); });
+            LazyFrame lf = build_probe_chain(src, "test.sync_probe.chain.err");
+            bool threw = false;
+            try {
+                run(lf.collect());
+            } catch (const std::runtime_error& e) {
+                threw = true;
+                CHECK(std::string(e.what()).find("sync boom") !=
+                      std::string::npos);
+            }
+            CHECK(threw);
+        }
+        {
+            auto src = std::make_shared<CursorSource>(
+                [] { return std::make_unique<ThrowingAsyncCursor>(2); });
+            LazyFrame lf = build_probe_chain(src, "test.sync_probe.chain.err");
+            bool threw = false;
+            try {
+                run(lf.collect());
+            } catch (const std::runtime_error& e) {
+                threw = true;
+                CHECK(std::string(e.what()).find("async boom") !=
+                      std::string::npos);
+            }
+            CHECK(threw);
+        }
+
+        CHECK(dftu_node_unregister("test.sync_probe.chain.err") == 0);
     }
 }

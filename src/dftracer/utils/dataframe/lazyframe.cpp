@@ -331,22 +331,51 @@ class FilterCursor : public Cursor {
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         while (auto m = co_await in_->next(max_rows)) {
-            Series mask = eval(pred_, column_ptrs(m->columns));
-            DataFrame tmp;
-            tmp.names.assign(m->columns.size(), std::string());
-            for (Series& c : m->columns) tmp.columns.push_back(c.share());
-            DataFrame kept = tmp.filter(mask);
-            Morsel out;
-            out.columns.reserve(kept.columns.size());
-            for (const Series& c : kept.columns)
-                out.columns.push_back(c.materialize());
-            out.rows = out.columns.empty() ? 0 : out.columns.front().length();
-            if (out.rows > 0) co_return out;
+            std::optional<Morsel> filtered = apply(std::move(*m));
+            if (filtered) co_return filtered;
         }
         co_return std::nullopt;
     }
 
+    // Loops on the upstream's own try_next, exactly as next() loops on
+    // next(): a morsel that filters to zero rows contributed nothing to the
+    // output, so consuming it synchronously and moving on is observationally
+    // identical to consuming it via next() - the row it produced (none)
+    // does not depend on which path pulled it. Returns false the moment
+    // upstream cannot answer synchronously, leaving nothing consumed-but-
+    // unaccounted-for behind.
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        for (;;) {
+            std::optional<Morsel> m;
+            if (!in_->try_next(max_rows, m)) return false;
+            if (!m) {
+                out.reset();
+                return true;
+            }
+            std::optional<Morsel> filtered = apply(std::move(*m));
+            if (filtered) {
+                out = std::move(filtered);
+                return true;
+            }
+        }
+    }
+
    private:
+    std::optional<Morsel> apply(Morsel&& m) {
+        Series mask = eval(pred_, column_ptrs(m.columns));
+        DataFrame tmp;
+        tmp.names.assign(m.columns.size(), std::string());
+        for (Series& c : m.columns) tmp.columns.push_back(c.share());
+        DataFrame kept = tmp.filter(mask);
+        Morsel out;
+        out.columns.reserve(kept.columns.size());
+        for (const Series& c : kept.columns)
+            out.columns.push_back(c.materialize());
+        out.rows = out.columns.empty() ? 0 : out.columns.front().length();
+        if (out.rows == 0) return std::nullopt;
+        return out;
+    }
+
     std::unique_ptr<Cursor> in_;
     Expr pred_;
 };
@@ -361,38 +390,62 @@ class FilterMaskCursor : public Cursor {
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         while (auto m = co_await in_->next(max_rows)) {
-            const std::int64_t n = m->rows;
-            if (off_ + n > mask_.length())
-                throw std::out_of_range("filter_mask: mask shorter than input");
-            // Series::slice only supports byte-per-element FLAT types, not the
-            // bit-packed Bool layout, so the sub-mask is re-packed by hand
-            // instead (same bit math as IsDupCursor's mask build).
-            const std::uint8_t* bits = mask_.data<std::uint8_t>();
-            std::vector<std::uint8_t> sub(static_cast<std::size_t>((n + 7) / 8),
-                                          0);
-            for (std::int64_t i = 0; i < n; ++i) {
-                const std::int64_t p = off_ + i;
-                if ((bits[p >> 3] >> (p & 7)) & 1u)
-                    sub[static_cast<std::size_t>(i >> 3)] |=
-                        static_cast<std::uint8_t>(1u << (i & 7));
-            }
-            off_ += n;
-            Series sub_mask = Series::flat(TypeId::Bool, sub.data(), n);
-            DataFrame tmp;
-            tmp.names.assign(m->columns.size(), std::string());
-            for (Series& c : m->columns) tmp.columns.push_back(c.share());
-            DataFrame kept = tmp.filter(sub_mask);
-            Morsel out;
-            out.columns.reserve(kept.columns.size());
-            for (const Series& c : kept.columns)
-                out.columns.push_back(c.materialize());
-            out.rows = out.columns.empty() ? 0 : out.columns.front().length();
-            if (out.rows > 0) co_return out;
+            std::optional<Morsel> filtered = apply(std::move(*m));
+            if (filtered) co_return filtered;
         }
         co_return std::nullopt;
     }
 
+    // Same argument as FilterCursor::try_next: `off_` advances in lockstep
+    // with whichever morsels were actually consumed, sync or async, and an
+    // empty-after-mask morsel contributes nothing either way.
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        for (;;) {
+            std::optional<Morsel> m;
+            if (!in_->try_next(max_rows, m)) return false;
+            if (!m) {
+                out.reset();
+                return true;
+            }
+            std::optional<Morsel> filtered = apply(std::move(*m));
+            if (filtered) {
+                out = std::move(filtered);
+                return true;
+            }
+        }
+    }
+
    private:
+    std::optional<Morsel> apply(Morsel&& m) {
+        const std::int64_t n = m.rows;
+        if (off_ + n > mask_.length())
+            throw std::out_of_range("filter_mask: mask shorter than input");
+        // Series::slice only supports byte-per-element FLAT types, not the
+        // bit-packed Bool layout, so the sub-mask is re-packed by hand
+        // instead (same bit math as IsDupCursor's mask build).
+        const std::uint8_t* bits = mask_.data<std::uint8_t>();
+        std::vector<std::uint8_t> sub(static_cast<std::size_t>((n + 7) / 8), 0);
+        for (std::int64_t i = 0; i < n; ++i) {
+            const std::int64_t p = off_ + i;
+            if ((bits[p >> 3] >> (p & 7)) & 1u)
+                sub[static_cast<std::size_t>(i >> 3)] |=
+                    static_cast<std::uint8_t>(1u << (i & 7));
+        }
+        off_ += n;
+        Series sub_mask = Series::flat(TypeId::Bool, sub.data(), n);
+        DataFrame tmp;
+        tmp.names.assign(m.columns.size(), std::string());
+        for (Series& c : m.columns) tmp.columns.push_back(c.share());
+        DataFrame kept = tmp.filter(sub_mask);
+        Morsel out;
+        out.columns.reserve(kept.columns.size());
+        for (const Series& c : kept.columns)
+            out.columns.push_back(c.materialize());
+        out.rows = out.columns.empty() ? 0 : out.columns.front().length();
+        if (out.rows == 0) return std::nullopt;
+        return out;
+    }
+
     std::unique_ptr<Cursor> in_;
     Series mask_;
     std::int64_t off_ = 0;
@@ -407,14 +460,25 @@ class SelectCursor : public Cursor {
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         auto m = co_await in_->next(max_rows);
         if (!m) co_return std::nullopt;
-        Morsel out;
-        out.rows = m->rows;
-        out.columns.reserve(idx_.size());
-        for (int i : idx_) out.columns.push_back(m->columns[i].share());
-        co_return out;
+        co_return apply(std::move(*m));
+    }
+
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        std::optional<Morsel> m;
+        if (!in_->try_next(max_rows, m)) return false;
+        out = m ? std::optional<Morsel>(apply(std::move(*m))) : std::nullopt;
+        return true;
     }
 
    private:
+    Morsel apply(Morsel&& m) {
+        Morsel out;
+        out.rows = m.rows;
+        out.columns.reserve(idx_.size());
+        for (int i : idx_) out.columns.push_back(m.columns[i].share());
+        return out;
+    }
+
     std::unique_ptr<Cursor> in_;
     std::vector<int> idx_;
 };
@@ -428,20 +492,31 @@ class WithColumnCursor : public Cursor {
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         auto m = co_await in_->next(max_rows);
         if (!m) co_return std::nullopt;
-        Series nc = eval(expr_, column_ptrs(m->columns));
+        co_return apply(std::move(*m));
+    }
+
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        std::optional<Morsel> m;
+        if (!in_->try_next(max_rows, m)) return false;
+        out = m ? std::optional<Morsel>(apply(std::move(*m))) : std::nullopt;
+        return true;
+    }
+
+   private:
+    Morsel apply(Morsel&& m) {
+        Series nc = eval(expr_, column_ptrs(m.columns));
         Morsel out;
-        out.rows = m->rows;
-        out.columns = std::move(m->columns);
-        out.dyn_names = std::move(m->dyn_names);
-        out.dyn_columns = std::move(m->dyn_columns);
+        out.rows = m.rows;
+        out.columns = std::move(m.columns);
+        out.dyn_names = std::move(m.dyn_names);
+        out.dyn_columns = std::move(m.dyn_columns);
         if (replace_ >= 0)
             out.columns[static_cast<std::size_t>(replace_)] = std::move(nc);
         else
             out.columns.push_back(std::move(nc));
-        co_return out;
+        return out;
     }
 
-   private:
     std::unique_ptr<Cursor> in_;
     Expr expr_;
     int replace_;
@@ -472,18 +547,45 @@ class SliceCursor : public Cursor {
         while (emitted_ < len_) {
             auto m = co_await in_->next(max_rows);
             if (!m) co_return std::nullopt;
-            const std::int64_t start = seen_;
-            seen_ += m->rows;
-            const std::int64_t w_start = std::max(offset_, start);
-            const std::int64_t w_end = std::min(offset_ + len_, seen_);
-            if (w_end <= w_start) continue;
-            emitted_ += w_end - w_start;
-            co_return slice_morsel(*m, w_start - start, w_end - w_start);
+            std::optional<Morsel> windowed = apply(*m);
+            if (windowed) co_return windowed;
         }
         co_return std::nullopt;
     }
 
+    // seen_/emitted_ track total rows consumed and rows emitted so far, both
+    // of which advance identically whether a morsel arrived via try_next or
+    // next(); a morsel entirely outside [offset_, offset_+len_) is skipped
+    // (loop continues) with no output either way, exactly like FilterCursor.
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        while (emitted_ < len_) {
+            std::optional<Morsel> m;
+            if (!in_->try_next(max_rows, m)) return false;
+            if (!m) {
+                out.reset();
+                return true;
+            }
+            std::optional<Morsel> windowed = apply(*m);
+            if (windowed) {
+                out = std::move(windowed);
+                return true;
+            }
+        }
+        out.reset();
+        return true;
+    }
+
    private:
+    std::optional<Morsel> apply(const Morsel& m) {
+        const std::int64_t start = seen_;
+        seen_ += m.rows;
+        const std::int64_t w_start = std::max(offset_, start);
+        const std::int64_t w_end = std::min(offset_ + len_, seen_);
+        if (w_end <= w_start) return std::nullopt;
+        emitted_ += w_end - w_start;
+        return slice_morsel(m, w_start - start, w_end - w_start);
+    }
+
     std::unique_ptr<Cursor> in_;
     std::int64_t offset_, len_;
     std::int64_t seen_ = 0, emitted_ = 0;
@@ -498,37 +600,74 @@ class TailCursor : public Cursor {
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         if (done_) co_return std::nullopt;
+        if (n_ <= 0) {
+            done_ = true;
+            co_return std::nullopt;
+        }
+        while (auto m = co_await in_->next(max_rows)) accumulate(std::move(*m));
         done_ = true;
-        if (n_ <= 0) co_return std::nullopt;
-        std::deque<Morsel> buf;
-        std::int64_t total = 0;
-        while (auto m = co_await in_->next(max_rows)) {
-            total += m->rows;
-            buf.push_back(std::move(*m));
-            while (!buf.empty() && total - buf.front().rows >= n_) {
-                total -= buf.front().rows;
-                buf.pop_front();
-            }
+        co_return finish();
+    }
+
+    // The ring-buffer fold below (accumulate) is a pure function of the
+    // ORDERED sequence of upstream morsels: it does not care whether a given
+    // morsel arrived via try_next or next(), only the order they arrived in.
+    // buf_/total_ are members, so a partial synchronous drain here leaves
+    // exactly the state next() would have reached pulling the same prefix via
+    // co_await, and next() (or another try_next call) resumes the same fold
+    // from there - never a re-drain, never a skipped morsel.
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        if (done_) {
+            out.reset();
+            return true;
         }
-        if (buf.empty()) co_return std::nullopt;
-        const std::size_t ncols = buf.front().columns.size();
-        Morsel out;
-        out.rows = total;
-        out.columns.reserve(ncols);
-        for (std::size_t c = 0; c < ncols; ++c) {
-            std::vector<const Series*> parts;
-            parts.reserve(buf.size());
-            for (Morsel& m : buf) parts.push_back(&m.columns[c]);
-            out.columns.push_back(concat_columns(parts));
+        if (n_ <= 0) {
+            done_ = true;
+            out.reset();
+            return true;
         }
-        if (total > n_) co_return slice_morsel(out, total - n_, n_);
-        co_return out;
+        for (;;) {
+            std::optional<Morsel> m;
+            if (!in_->try_next(max_rows, m)) return false;
+            if (!m) break;
+            accumulate(std::move(*m));
+        }
+        done_ = true;
+        out = finish();
+        return true;
     }
 
    private:
+    void accumulate(Morsel&& m) {
+        total_ += m.rows;
+        buf_.push_back(std::move(m));
+        while (!buf_.empty() && total_ - buf_.front().rows >= n_) {
+            total_ -= buf_.front().rows;
+            buf_.pop_front();
+        }
+    }
+
+    std::optional<Morsel> finish() {
+        if (buf_.empty()) return std::nullopt;
+        const std::size_t ncols = buf_.front().columns.size();
+        Morsel out;
+        out.rows = total_;
+        out.columns.reserve(ncols);
+        for (std::size_t c = 0; c < ncols; ++c) {
+            std::vector<const Series*> parts;
+            parts.reserve(buf_.size());
+            for (Morsel& m : buf_) parts.push_back(&m.columns[c]);
+            out.columns.push_back(concat_columns(parts));
+        }
+        if (total_ > n_) return slice_morsel(out, total_ - n_, n_);
+        return out;
+    }
+
     std::unique_ptr<Cursor> in_;
     std::int64_t n_;
     bool done_ = false;
+    std::deque<Morsel> buf_;
+    std::int64_t total_ = 0;
 };
 
 // Wrap a morsel's columns in a DataFrame (dummy names), apply `fn`, and return
@@ -559,6 +698,25 @@ class DropNullsCursor : public Cursor {
         co_return std::nullopt;
     }
 
+    // A morsel dropped to zero rows contributes nothing, same argument as
+    // FilterCursor::try_next.
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        for (;;) {
+            std::optional<Morsel> m;
+            if (!in_->try_next(max_rows, m)) return false;
+            if (!m) {
+                out.reset();
+                return true;
+            }
+            Morsel filtered = map_frame(
+                std::move(*m), [](DataFrame f) { return f.drop_nulls(); });
+            if (filtered.rows > 0) {
+                out = std::move(filtered);
+                return true;
+            }
+        }
+    }
+
    private:
     std::unique_ptr<Cursor> in_;
 };
@@ -575,6 +733,16 @@ class FillNullCursor : public Cursor {
                             [&](DataFrame f) { return f.fill_null(value_); });
     }
 
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        std::optional<Morsel> m;
+        if (!in_->try_next(max_rows, m)) return false;
+        out = m ? std::optional<Morsel>(map_frame(
+                      std::move(*m),
+                      [&](DataFrame f) { return f.fill_null(value_); }))
+                : std::nullopt;
+        return true;
+    }
+
    private:
     std::unique_ptr<Cursor> in_;
     dftu_scalar value_;
@@ -588,18 +756,29 @@ class WithRowIndexCursor : public Cursor {
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         auto m = co_await in_->next(max_rows);
         if (!m) co_return std::nullopt;
-        std::vector<std::int64_t> idx(static_cast<std::size_t>(m->rows));
-        for (std::int64_t i = 0; i < m->rows; ++i) idx[i] = pos_ + i;
-        pos_ += m->rows;
-        Morsel out;
-        out.rows = m->rows;
-        out.columns.reserve(m->columns.size() + 1);
-        out.columns.push_back(Series::flat_i64(idx.data(), m->rows));
-        for (Series& c : m->columns) out.columns.push_back(std::move(c));
-        co_return out;
+        co_return apply(std::move(*m));
+    }
+
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        std::optional<Morsel> m;
+        if (!in_->try_next(max_rows, m)) return false;
+        out = m ? std::optional<Morsel>(apply(std::move(*m))) : std::nullopt;
+        return true;
     }
 
    private:
+    Morsel apply(Morsel&& m) {
+        std::vector<std::int64_t> idx(static_cast<std::size_t>(m.rows));
+        for (std::int64_t i = 0; i < m.rows; ++i) idx[i] = pos_ + i;
+        pos_ += m.rows;
+        Morsel out;
+        out.rows = m.rows;
+        out.columns.reserve(m.columns.size() + 1);
+        out.columns.push_back(Series::flat_i64(idx.data(), m.rows));
+        for (Series& c : m.columns) out.columns.push_back(std::move(c));
+        return out;
+    }
+
     std::unique_ptr<Cursor> in_;
     std::int64_t pos_ = 0;
 };
@@ -661,6 +840,16 @@ class ExplodeCursor : public Cursor {
                            [&](DataFrame f) { return f.explode(column_); });
     }
 
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        std::optional<Morsel> m;
+        if (!in_->try_next(max_rows, m)) return false;
+        out = m ? std::optional<Morsel>(
+                      frame_op(std::move(*m), sch_,
+                               [&](DataFrame f) { return f.explode(column_); }))
+                : std::nullopt;
+        return true;
+    }
+
    private:
     std::unique_ptr<Cursor> in_;
     std::vector<std::string> sch_;
@@ -681,6 +870,16 @@ class UnpivotCursor : public Cursor {
         if (!m) co_return std::nullopt;
         co_return frame_op(std::move(*m), sch_,
                            [&](DataFrame f) { return f.unpivot(id_, val_); });
+    }
+
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        std::optional<Morsel> m;
+        if (!in_->try_next(max_rows, m)) return false;
+        out = m ? std::optional<Morsel>(frame_op(
+                      std::move(*m), sch_,
+                      [&](DataFrame f) { return f.unpivot(id_, val_); }))
+                : std::nullopt;
+        return true;
     }
 
    private:

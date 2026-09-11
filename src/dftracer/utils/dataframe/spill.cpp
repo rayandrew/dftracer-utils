@@ -93,16 +93,24 @@ class SpoolReader : public Cursor {
         if (!spill_path.empty()) disk_ = std::make_unique<Reader>(spill_path);
     }
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
-        if (pos_ < mem_->size()) {
-            const Morsel& m = (*mem_)[pos_++];
-            Morsel out;
-            out.rows = m.rows;
-            out.columns.reserve(m.columns.size());
-            for (const Series& c : m.columns) out.columns.push_back(c.share());
-            co_return out;
-        }
+        std::optional<Morsel> mem;
+        if (try_next(max_rows, mem)) co_return mem;
         if (disk_) co_return co_await disk_->next(max_rows);
         co_return std::nullopt;
+    }
+
+    // True only while replaying the in-memory prefix, which shares buffers and
+    // never suspends. Once that is drained the run continues on disk, where
+    // next() must do the awaiting.
+    bool try_next(std::int64_t, std::optional<Morsel>& out) override {
+        if (pos_ >= mem_->size()) return false;
+        const Morsel& m = (*mem_)[pos_++];
+        Morsel o;
+        o.rows = m.rows;
+        o.columns.reserve(m.columns.size());
+        for (const Series& c : m.columns) o.columns.push_back(c.share());
+        out = std::move(o);
+        return true;
     }
 
    private:

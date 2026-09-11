@@ -187,17 +187,41 @@ class ProviderCursor final : public Cursor {
     ProviderCursor& operator=(const ProviderCursor&) = delete;
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
-        ::dftu_result_frame out{};
-        if (::dftu_task* t = vt_->next(self_, max_rows, &out)) {
-            auto* task = reinterpret_cast<coro::CoroTask<void>*>(t);
-            co_await *task;
-            delete task;
+        std::optional<Morsel> out;
+        if (try_next(max_rows, out)) co_return out;
+        auto* task = reinterpret_cast<coro::CoroTask<void>*>(pending_task_);
+        pending_task_ = nullptr;
+        co_await *task;
+        delete task;
+        co_return finish(pending_result_);
+    }
+
+    // Calls the provider's next() exactly once. A NULL returned task is the
+    // documented dftu_cursor_vt::next contract for "answered without
+    // suspending": *pending_result_* is already filled, so it can be
+    // finished and returned here. A non-NULL task means the provider began a
+    // genuinely async operation; that call cannot be repeated (it already
+    // ran), so the task and its still-pending result are stashed in members
+    // for next() to await and finish. Callers must fall back to next()
+    // immediately on a false return rather than calling try_next again,
+    // exactly as the Cursor::try_next contract requires.
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        pending_result_ = ::dftu_result_frame{};
+        if (::dftu_task* t = vt_->next(self_, max_rows, &pending_result_)) {
+            pending_task_ = t;
+            return false;
         }
+        out = finish(pending_result_);
+        return true;
+    }
+
+   private:
+    std::optional<Morsel> finish(const ::dftu_result_frame& out) {
         if (!DFTU_RESULT_OK(out))
             throw std::runtime_error(describe(DFTU_RESULT_ERROR(out)));
 
         ::dftu_dataframe* frame = DFTU_RESULT_VALUE(out);
-        if (!frame) co_return std::nullopt;
+        if (!frame) return std::nullopt;
 
         DataFrame df = dataframe_handle_take(frame);
         // Checked on every morsel, not just the first: the check is
@@ -213,13 +237,14 @@ class ProviderCursor final : public Cursor {
         Morsel m;
         m.rows = df.num_rows();
         m.columns = std::move(df.columns);
-        co_return m;
+        return m;
     }
 
-   private:
     const ::dftu_cursor_vt* vt_;
     void* self_;
     std::vector<std::string> expected_projection_;
+    ::dftu_result_frame pending_result_{};
+    ::dftu_task* pending_task_ = nullptr;
 };
 
 class ProviderSource final : public Source {
