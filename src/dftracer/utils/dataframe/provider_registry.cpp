@@ -11,6 +11,7 @@
 #include <dftracer/utils/dataframe/internal/expr_handle.h>
 #include <dftracer/utils/dataframe/internal/lazyframe_handle.h>
 #include <dftracer/utils/dataframe/internal/provider_source.h>
+#include <dftracer/utils/dataframe/internal/schema_types.h>
 #include <dftracer/utils/dataframe/lazyframe.h>
 
 #include <cstdint>
@@ -23,17 +24,6 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
-// Built by a provider's dftu_source_vt::schema_types, one dftu_schema_add_*
-// call at a time, and read back by ProviderSource::schema(). A field's
-// position - in `top`, or in an ancestor's DataType::fields - is fixed at the
-// call that appended it, so `paths[i]` (the sequence of vector indices from
-// `top` down to field `i`) resolves it correctly even after a later sibling
-// insertion has reallocated some vector along that path.
-struct dftu_schema {
-    std::vector<dftracer::utils::dataframe::Field> top;
-    std::vector<std::vector<std::int32_t>> paths;
-};
 
 namespace dftracer::utils::dataframe {
 namespace {
@@ -363,6 +353,21 @@ int32_t dftu_schema_add_child_field(dftu_schema* schema, int32_t parent_index,
     path.push_back(static_cast<int32_t>(parent->type.fields.size() - 1));
     const int32_t idx = static_cast<int32_t>(schema->paths.size());
     schema->paths.push_back(std::move(path));
+    return idx;
+}
+
+int32_t dftu_schema_field_count(const dftu_schema* schema) {
+    if (!schema) return -1;
+    return static_cast<int32_t>(schema->top.size());
+}
+
+int32_t dftu_schema_copy_field(dftu_schema* out, const dftu_schema* schema,
+                               int32_t i) {
+    if (!out || !schema) return -1;
+    if (i < 0 || static_cast<std::size_t>(i) >= schema->top.size()) return -1;
+    out->top.push_back(schema->top[static_cast<std::size_t>(i)]);
+    const int32_t idx = static_cast<int32_t>(out->paths.size());
+    out->paths.push_back({static_cast<int32_t>(out->top.size() - 1)});
     return idx;
 }
 

@@ -151,6 +151,9 @@ inline OpDesc op_at(std::uint32_t i) noexcept { return OpDesc(dftu_op_at(i)); }
 class OpArgs {
    public:
     OpArgs() noexcept : arg_{} {}
+    /// Copies `raw` verbatim, including any pointer-bearing slot it carries -
+    /// the borrow contract for that slot is unchanged by wrapping it here.
+    explicit OpArgs(const dftu_op_arg& raw) noexcept : arg_(raw) {}
 
     OpArgs& scalar(std::uint32_t i, Scalar s) noexcept {
         arg_.args[i].scalar = s;

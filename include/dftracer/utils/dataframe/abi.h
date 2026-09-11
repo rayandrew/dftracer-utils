@@ -1141,6 +1141,20 @@ DFTU_EXPORT int32_t dftu_schema_add_child_field(
     dftu_dtype type, int32_t nullable, dftu_time_unit time_unit, const char* tz,
     int32_t decimal_precision, int32_t decimal_scale, int32_t fixed_size);
 
+/** Number of top-level fields in `schema`, or -1 if `schema` is NULL. Reads a
+   schema a caller was only handed (dftu_node_vt::output_schema's `in`), which
+   otherwise exposes no way to enumerate what an upstream stage declared. */
+DFTU_EXPORT int32_t dftu_schema_field_count(const dftu_schema* schema);
+
+/** Appends top-level field `i` of `schema` (name, type, and every parameter,
+   including nested children) as a new field of `out`. Returns the new
+   field's index in `out` (same convention as dftu_schema_add_field), or -1 if
+   `out`/`schema` is NULL or `i` is out of range. The pass-through a node's
+   output_schema uses to declare a column unchanged from its input. */
+DFTU_EXPORT int32_t dftu_schema_copy_field(dftu_schema* out,
+                                           const dftu_schema* schema,
+                                           int32_t i);
+
 /** A pushdown-aware data source a plugin registers under a name. Immutable:
    schema() reports columns without scanning and scan() may be called many
    times to open independent cursors, so one registered source can back many
@@ -1447,6 +1461,88 @@ DFTU_EXPORT dftu_lazyframe* dftu_op_run_lazy(const dftu_op_desc* op,
                                              const dftu_lazyframe* const* in,
                                              uint32_t n,
                                              const dftu_op_arg* arg);
+
+/* ---- Node registry (plugin plan nodes) ----------------------------------- */
+/* dftu_op_run_lazy (above) runs a LAZY-kind op eagerly at the call site and
+ * returns a new plan. A node is different: it is a step the ENGINE executes
+ * later, inside the pull chain a collect()/stream() drives, the same protocol
+ * a built-in op (filter, select, group_by, ...) already runs on - a Cursor
+ * pulled with next(). One name-keyed registry, mirroring the provider
+ * registry above: process-lifetime, named, and a name already taken is
+ * refused rather than replaced. */
+
+/** A cursor-shaped plan node a plugin registers under a name, so
+ * dftu_lazyframe_op(lf, name, args) becomes a step lower_cursor_chain stacks
+ * on the plan like any other op. A streaming node transforms each morsel and
+ * passes it on; a breaker node drains its input on the first next() and emits
+ * one frame - both are ordinary Cursor implementations on the plugin side, so
+ * one protocol covers both shapes. */
+typedef struct dftu_node_vt {
+    /** Declare the node's output schema given the plan's input schema and
+       `args`, without running: append to `out` with the dftu_schema builders,
+       the same convention as dftu_source_vt::schema_types. Required (unlike a
+       source's optional schema_types) - a node has no separate name-only
+       schema() call, so this is the only way the plan learns what columns it
+       produces. A column whose type the node cannot determine statically is
+       appended with DFTU_TYPE_UNKNOWN rather than guessed. */
+    void (*output_schema)(void* self, const dftu_schema* in,
+                          const dftu_op_arg* args, dftu_schema* out);
+    /** Open an output cursor over an already-open input cursor. Same
+       convention as dftu_source_vt::scan: returns non-NULL on success (a
+       status sentinel, since a stateless cursor's own `self` may legitimately
+       be NULL) and writes *out_cursor_self and *out_vt, which must outlive
+       the cursor. `in_cursor_self`/`in_vt` is the upstream stage, already
+       open:
+       pull it with in_vt->next(in_cursor_self, ...) the same way the engine
+       pulls any cursor. On success the node takes ownership of the input
+       cursor and must call in_vt->destroy(in_cursor_self) exactly once,
+       whenever the node's own output cursor is destroyed (or earlier, once
+       fully drained); on failure (returning the NULL sentinel) the node must
+       not have taken that ownership - the caller still owns and destroys the
+       input cursor. */
+    void* (*open)(void* self, void* in_cursor_self, const dftu_cursor_vt* in_vt,
+                  const dftu_op_arg* args, void** out_cursor_self,
+                  const dftu_cursor_vt** out_vt);
+    /** Release the node; called once, after every cursor opened against it
+       has been destroyed. May be NULL for a stateless node. */
+    void (*destroy)(void* self);
+} dftu_node_vt;
+
+/** Register `vt`/`self` as a named plan node. Same contract as
+ * dftu_provider_register: `vt` is copied so it need not outlive the call, but
+ * `self` must outlive every cursor opened against the node until
+ * dftu_node_unregister removes it. Returns 0 on success, non-zero if
+ * `name`/`vt` is NULL, `vt->output_schema` or `vt->open` is NULL, or `name` is
+ * already registered - a second registration under the same name is refused,
+ * never a silent replace. */
+DFTU_EXPORT int dftu_node_register(const char* name, const dftu_node_vt* vt,
+                                   void* self);
+
+/** Remove a node added with dftu_node_register. A caller that can unload (a
+ * plugin's shared object) must call this before unloading, the same
+ * requirement dftu_provider_unregister documents for a provider - otherwise a
+ * later dftu_lazyframe_op call, or a plan still holding the node from an
+ * earlier call, opens or drives a cursor into unmapped memory. A no-op
+ * (returns nonzero) if `name` was never registered. */
+DFTU_EXPORT int dftu_node_unregister(const char* name);
+
+/** Append a step running the node registered as `name` over `lf`, with `args`
+ * (NULL when the node needs none) copied into the plan by value - a
+ * pointer-bearing operand (str/strlist/i32list/i64list/agglist/expr/query)
+ * must therefore point at storage that outlives every future execution of the
+ * returned LazyFrame, not merely this call. Returns a new owned dftu_lazyframe
+ * (free with dftu_lazyframe_free), or NULL if `lf`/`name` is NULL or no node
+ * is registered under that name - an unknown name fails here, loudly, rather
+ * than building a plan that fails later. A node is an optimization barrier:
+ * the engine never pushes a filter or a projection through it and never
+ * reorders around it, since it has no way to know whether that is safe for an
+ * opaque node. An open() that returns the NULL sentinel, or a node whose
+ * produced frame does not match the column count output_schema() declared,
+ * surfaces as an error the first time the plan is driven (collect() or
+ * stream()), naming the node. */
+DFTU_EXPORT dftu_lazyframe* dftu_lazyframe_op(const dftu_lazyframe* lf,
+                                              const char* name,
+                                              const dftu_op_arg* args);
 
 #ifdef __cplusplus
 } /* extern "C" */

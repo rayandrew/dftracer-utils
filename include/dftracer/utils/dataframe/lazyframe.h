@@ -7,6 +7,7 @@
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/expr.h>
+#include <dftracer/utils/dataframe/op.h>
 
 #include <cstdint>
 #include <memory>
@@ -267,6 +268,21 @@ class LazyFrame {
     /// Explicitly set the budget to ~1/3 of available memory (same as the
     /// default); sugar for readers who want spilling stated at the call site.
     LazyFrame auto_spill() const;
+
+    /// Append a step running the plan node registered under `name`
+    /// (dftu_node_register) as the next stage in the pull chain
+    /// lower_cursor_chain builds - a step the engine executes when this plan
+    /// is driven, not eagerly here. Resolves and captures the node's vt/self
+    /// now, so a later dftu_node_unregister of the same name is the same
+    /// dangling-registration hazard dftu_provider_unregister documents for a
+    /// captured provider, not a lookup that could fail at drive time.
+    /// Throws std::invalid_argument immediately if no node is registered
+    /// under `name`. The node is an optimization barrier: no filter or
+    /// projection is ever pushed through it, and the engine never reorders
+    /// around it. `args` is copied by value; a pointer-bearing operand it
+    /// carries must outlive every future execution of the returned
+    /// LazyFrame, not merely this call.
+    LazyFrame op(std::string name, OpArgs args) const;
 
     /// Output column names without running the query. Empty for a plan ending
     /// in a data-dependent op (pivot/to_dummies/describe).

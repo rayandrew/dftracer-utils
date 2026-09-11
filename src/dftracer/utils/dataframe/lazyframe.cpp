@@ -1,11 +1,15 @@
 #include <ankerl/unordered_dense.h>
 #include <dftracer/utils/core/common/hash/splitmix64.h>  // sample row keys
 #include <dftracer/utils/core/common/memory_budget.h>  // compute_memory_budget
+#include <dftracer/utils/core/coro/task_abi.h>         // task_to_abi
 #include <dftracer/utils/dataframe/agg.h>        // streaming group-by state
 #include <dftracer/utils/dataframe/batch_ops.h>  // concat_columns, take, concat
 #include <dftracer/utils/dataframe/field_stat.h>         // FieldStat (describe)
 #include <dftracer/utils/dataframe/internal/cell_ops.h>  // row_key, cell_to_string
-#include <dftracer/utils/dataframe/internal/spill.h>     // external-merge spill
+#include <dftracer/utils/dataframe/internal/dataframe_handle.h>  // dataframe_handle_wrap/take
+#include <dftracer/utils/dataframe/internal/node_registry.h>  // find_node
+#include <dftracer/utils/dataframe/internal/schema_types.h>   // dftu_schema
+#include <dftracer/utils/dataframe/internal/spill.h>  // external-merge spill
 #include <dftracer/utils/dataframe/kernels/field_stat.h>  // field_stat_reduce (SIMD)
 #include <dftracer/utils/dataframe/lazyframe.h>
 #include <dftracer/utils/dataframe/parallel.h>  // parallel_for (parallel sinks)
@@ -1657,6 +1661,16 @@ class UniqueCursor : public Cursor {
     std::vector<std::int64_t> pos_;
 };
 
+// A plugin-registered plan node (dftu_node_register): vt/self captured at the
+// .op() call, args copied by value (see LazyFrame::op's Doxygen for the
+// pointer-operand borrow contract).
+struct NodeOp {
+    std::string name;
+    ::dftu_node_vt vt;
+    void* self;
+    ::dftu_op_arg args;
+};
+
 // Streaming per-column summary statistics, matching DataFrame::describe. One
 // pass with O(numeric columns) state: count/null_count and running min/max plus
 // Welford (mean, M2) for mean/sample-std. Output columns are data-dependent
@@ -1719,6 +1733,138 @@ class DescribeCursor : public Cursor {
     std::vector<std::string> sch_;
     bool done_ = false;
     std::vector<std::string> produced_;
+};
+
+std::string describe_dftu_error(const ::dftu_error& err) {
+    return err.message && *err.message ? err.message : "plan node failed";
+}
+
+// Adapts a host-native Cursor as a dftu_cursor_vt, the reverse of
+// ProviderCursor (provider_registry.cpp): a registered node's open() pulls its
+// input through this bridge exactly as it would pull from any other node's
+// input, so the host and a plugin node speak the same cursor protocol in
+// either direction. On success, ownership of `cursor_` passes to whichever
+// side ends up calling destroy() (see dftu_node_vt::open's Doxygen); on a
+// failed open() the caller still holds the owning unique_ptr and this object
+// is destroyed normally.
+class HostCursorBridge {
+   public:
+    HostCursorBridge(std::unique_ptr<Cursor> cursor,
+                     std::vector<std::string> schema)
+        : cursor_(std::move(cursor)), schema_(std::move(schema)) {}
+
+    static const ::dftu_cursor_vt* vt() {
+        static const ::dftu_cursor_vt v{&HostCursorBridge::next_thunk,
+                                        &HostCursorBridge::destroy_thunk};
+        return &v;
+    }
+    void* self() { return this; }
+
+   private:
+    coro::CoroTask<void> next_task(std::int64_t max_rows,
+                                   ::dftu_result_frame* out) {
+        try {
+            std::optional<Morsel> m = co_await cursor_->next(max_rows);
+            if (!m) {
+                out->ok = 1;
+                out->u.value = nullptr;
+                co_return;
+            }
+            DataFrame df =
+                frame_from_morsel(std::move(*m), schema_, cursor_->out_names());
+            out->ok = 1;
+            out->u.value = dataframe_handle_wrap(std::move(df));
+        } catch (const std::exception& e) {
+            last_error_ = e.what();
+            out->ok = 0;
+            out->u.err =
+                ::dftu_error{0, 0, DFTU_COND_INTERNAL, last_error_.c_str()};
+        }
+    }
+
+    static ::dftu_task* next_thunk(void* self, std::int64_t max_rows,
+                                   ::dftu_result_frame* out) {
+        auto* self_ = static_cast<HostCursorBridge*>(self);
+        return task_to_abi(self_->next_task(max_rows, out));
+    }
+    static void destroy_thunk(void* self) {
+        delete static_cast<HostCursorBridge*>(self);
+    }
+
+    std::unique_ptr<Cursor> cursor_;
+    std::vector<std::string> schema_;
+    std::string last_error_;
+};
+
+// Drives a registered plugin node as one stage of the pull chain: opens the
+// node's output cursor over `in` at construction (eagerly, like
+// ProviderSource::scan), then pulls it exactly like any built-in cursor.
+// Verifies every produced frame's column count against the node's own
+// declared schema, so a node that lies about what it produces is caught here
+// rather than corrupting whatever the optimizer built on the declaration.
+class NodeCursor final : public Cursor {
+   public:
+    NodeCursor(const NodeOp& node, std::unique_ptr<Cursor> in,
+               std::vector<std::string> in_schema, Schema declared_out)
+        : name_(node.name), declared_(std::move(declared_out)) {
+        auto bridge = std::make_unique<HostCursorBridge>(std::move(in),
+                                                         std::move(in_schema));
+        void* out_self = nullptr;
+        const ::dftu_cursor_vt* out_vt = nullptr;
+        void* ok =
+            node.vt.open(node.self, bridge->self(), HostCursorBridge::vt(),
+                         &node.args, &out_self, &out_vt);
+        if (!ok || !out_vt)
+            throw std::runtime_error("lazy op '" + name_ + "': open() failed");
+        // The node took ownership of the input cursor on success: it (not us)
+        // now owns destroying it, via out_vt_->destroy eventually reaching
+        // HostCursorBridge::destroy_thunk.
+        bridge.release();
+        out_self_ = out_self;
+        out_vt_ = out_vt;
+    }
+
+    ~NodeCursor() override {
+        if (out_vt_ && out_vt_->destroy) out_vt_->destroy(out_self_);
+    }
+
+    NodeCursor(const NodeCursor&) = delete;
+    NodeCursor& operator=(const NodeCursor&) = delete;
+
+    coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        ::dftu_result_frame out{};
+        if (::dftu_task* t = out_vt_->next(out_self_, max_rows, &out)) {
+            auto* task = reinterpret_cast<coro::CoroTask<void>*>(t);
+            co_await *task;
+            delete task;
+        }
+        if (!DFTU_RESULT_OK(out))
+            throw std::runtime_error(
+                "lazy op '" + name_ +
+                "': " + describe_dftu_error(DFTU_RESULT_ERROR(out)));
+
+        ::dftu_dataframe* frame = DFTU_RESULT_VALUE(out);
+        if (!frame) co_return std::nullopt;
+
+        DataFrame df = dataframe_handle_take(frame);
+        if (!declared_.fields.empty() &&
+            df.columns.size() != declared_.fields.size())
+            throw std::runtime_error("lazy op '" + name_ + "': produced " +
+                                     std::to_string(df.columns.size()) +
+                                     " columns but output_schema declared " +
+                                     std::to_string(declared_.fields.size()));
+
+        Morsel m;
+        m.rows = df.num_rows();
+        m.columns = std::move(df.columns);
+        co_return m;
+    }
+
+   private:
+    std::string name_;
+    Schema declared_;
+    void* out_self_ = nullptr;
+    const ::dftu_cursor_vt* out_vt_ = nullptr;
 };
 
 // Two-pass per-row mask: pass 1 counts each row key while spooling the input
@@ -2307,11 +2453,40 @@ class LazyOp {
                  DropNullsOp, FillNullOp, WithRowIndexOp, NullCountOp,
                  ExplodeOp, UnpivotOp, TopkOp, GroupByOp, SortByOp, UniqueOp,
                  SampleOp, IsDupOp, GroupByDynamicOp, PivotOp, ToDummiesOp,
-                 DescribeOp, ReverseOp, TakeOp, FilterMaskOp, SortByMultiOp>
+                 DescribeOp, ReverseOp, TakeOp, FilterMaskOp, SortByMultiOp,
+                 NodeOp>
         node;
 };
 
 namespace {
+
+// Runs a node's mandatory output_schema over `in`, returning exactly the
+// Schema it declares. dftu_schema::top mirrors dataframe::Schema::fields, so
+// the call is a plain copy in and out, no per-field translation needed.
+Schema call_node_output_schema(const NodeOp& node, const Schema& in) {
+    ::dftu_schema in_built;
+    in_built.top = in.fields;
+    ::dftu_schema out_built;
+    node.vt.output_schema(node.self, &in_built, &node.args, &out_built);
+    Schema out;
+    out.fields = std::move(out_built.top);
+    return out;
+}
+
+// Names-only callers (out_schema below, and lower_cursor_chain at drive time)
+// have no typed input Schema to hand a node - only the column names already
+// resolved for this point in the plan - so every input field reports Unknown.
+// A node whose output_schema logic needs real input types should be driven
+// through LazyFrame::output_schema() instead, which always calls it with the
+// typed Schema.
+Schema call_node_output_schema(const NodeOp& node,
+                               const std::vector<std::string>& names) {
+    Schema in;
+    in.fields.reserve(names.size());
+    for (const std::string& n : names)
+        in.fields.push_back(Field{n, scalar(TypeId::Unknown), true});
+    return call_node_output_schema(node, in);
+}
 
 std::string join_names(const std::vector<std::string>& v) {
     std::string s;
@@ -2379,7 +2554,14 @@ std::vector<std::string> out_schema(const LazyOp& op,
             [&](const ReverseOp&) { return in; },
             [&](const TakeOp&) { return in; },
             [&](const FilterMaskOp&) { return in; },
-            [&](const SortByMultiOp&) { return in; }},
+            [&](const SortByMultiOp&) { return in; },
+            [&](const NodeOp& o) {
+                Schema s = call_node_output_schema(o, in);
+                std::vector<std::string> names;
+                names.reserve(s.fields.size());
+                for (const Field& f : s.fields) names.push_back(f.name);
+                return names;
+            }},
         op.node);
 }
 
@@ -2548,7 +2730,8 @@ Schema out_types(const LazyOp& op, Schema in) {
             [&](const ReverseOp&) { return in; },
             [&](const TakeOp&) { return in; },
             [&](const FilterMaskOp&) { return in; },
-            [&](const SortByMultiOp&) { return in; }},
+            [&](const SortByMultiOp&) { return in; },
+            [&](const NodeOp& o) { return call_node_output_schema(o, in); }},
         op.node);
 }
 
@@ -2592,7 +2775,8 @@ std::string describe_op(const LazyOp& op) {
             [](const FilterMaskOp&) { return std::string("filter_mask"); },
             [](const SortByMultiOp& o) {
                 return "sort_by_multi [" + join_names(o.by) + "]";
-            }},
+            },
+            [](const NodeOp& o) { return "op " + o.name; }},
         op.node);
 }
 
@@ -2632,7 +2816,10 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
     // so sort_by_multi/reverse commute with it exactly as sort_by/rename do.
     // take and filter_mask get no branch: both are keyed by row position
     // against whatever stream reaches them, so hoisting a filter above them
-    // would shift those positions and change which rows they act on.
+    // would shift those positions and change which rows they act on. A
+    // plugin NodeOp gets no branch either, for a stronger reason: it is
+    // opaque, so the engine cannot know whether reordering around it is
+    // safe and must always treat it as a barrier.
     bool changed = true;
     while (changed) {
         changed = false;
@@ -2666,9 +2853,10 @@ std::vector<std::shared_ptr<const LazyOp>> pushdown_predicates(
 // topk/sample/reverse/take/filter_mask/sort_by_multi) that ends in a select,
 // insert a projection after the source
 // keeping only the columns the output and ops read, renumbering the filters
-// into it. Any other op leaves the plan unchanged; pushdown is an optimization,
-// so bailing is always correct. Biggest payoff is a scan source that then reads
-// only the kept columns.
+// into it. Any other op - including a plugin NodeOp, deliberately absent from
+// the whitelist below since it is opaque - leaves the plan unchanged; pushdown
+// is an optimization, so bailing is always correct. Biggest payoff is a scan
+// source that then reads only the kept columns.
 std::vector<std::shared_ptr<const LazyOp>> pushdown_projections(
     const std::vector<std::string>& source_names,
     const std::vector<std::shared_ptr<const LazyOp>>& ops) {
@@ -3046,6 +3234,11 @@ std::unique_ptr<Cursor> make_cursor(const LazyOp& op,
             },
             [&](const DescribeOp&) -> std::unique_ptr<Cursor> {
                 return std::make_unique<DescribeCursor>(std::move(in), sch);
+            },
+            [&](const NodeOp& o) -> std::unique_ptr<Cursor> {
+                Schema declared = call_node_output_schema(o, sch);
+                return std::make_unique<NodeCursor>(o, std::move(in), sch,
+                                                    std::move(declared));
             }},
         op.node);
 }
@@ -3388,6 +3581,17 @@ LazyFrame LazyFrame::memory_budget(std::uint64_t bytes) const {
 LazyFrame LazyFrame::auto_spill() const {
     // Same policy as the default (0) and as View: ~1/3 of available memory.
     return LazyFrame(source_, ops_, resolve_spill_budget(0));
+}
+
+LazyFrame LazyFrame::op(std::string name, OpArgs args) const {
+    std::optional<NodeEntry> entry = find_node(name.c_str());
+    if (!entry)
+        throw std::invalid_argument("lazy op '" + name +
+                                    "': no node registered under this name");
+    auto ops = ops_;
+    ops.push_back(std::make_shared<LazyOp>(
+        LazyOp{NodeOp{std::move(name), entry->vt, entry->self, args.raw()}}));
+    return with_ops(std::move(ops));
 }
 
 namespace {

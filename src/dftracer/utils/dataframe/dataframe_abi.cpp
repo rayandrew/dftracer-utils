@@ -761,4 +761,16 @@ dftu_lazyframe* dftu_lazyframe_sort_by_multi(const dftu_lazyframe* lf,
     }
 }
 
+dftu_lazyframe* dftu_lazyframe_op(const dftu_lazyframe* lf, const char* name,
+                                  const dftu_op_arg* args) {
+    if (!lf || !name) return nullptr;
+    static const dftu_op_arg EMPTY_ARGS{};
+    try {
+        return wrap_lazy(lf->lf.op(name, dftracer::utils::dataframe::OpArgs(
+                                             args ? *args : EMPTY_ARGS)));
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
 }  // extern "C"
