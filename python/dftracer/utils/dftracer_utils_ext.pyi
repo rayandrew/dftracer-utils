@@ -1193,6 +1193,16 @@ def interval(
     """Point-in-range join of two batches."""
     ...
 
+def vec_eval(ast: List[tuple], columns: List[_Series]) -> _Series:
+    """Compile a post-order columnar expression AST (type inference + CSE) and
+    run it over `columns` as one fused chunked evaluation."""
+    ...
+
+def vec_eval_many(asts: List[List[tuple]], columns: List[_Series]) -> List[_Series]:
+    """Compile several `asts` into one CSE'd program over a shared `columns`
+    list and evaluate in one pass."""
+    ...
+
 def jit_run_op(so_path: str, in_bytes: bytes, out_size: int) -> bytes:
     """Run a compiled jit_op ``.so`` (exposing ``dftracer_build_op``) over
     ``in_bytes`` on a standalone compose host, returning ``out_size`` bytes.
