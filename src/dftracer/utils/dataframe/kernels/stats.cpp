@@ -80,46 +80,26 @@ bool refuse_non_numeric(const char* op, TypeId t) {
     return true;
 }
 
-// field_stat_reduce's scalar fallback only takes the double branch for
-// Float32/Float64; Float16 and Decimal128/256 fall to read_i64's default-0
-// case. Fold those two through read_f64 by hand instead.
-FieldStat moment_stat(const Series& v) {
-    FieldStat fs;
-    const std::int64_t n = v.length();
-    const bool has_nulls = v.null_count() > 0;
-    for (std::int64_t i = 0; i < n; ++i)
-        if (!has_nulls || !v.is_null(i)) fs.add(read_f64(v, i));
-    return fs;
-}
-
-FieldStat moment_stat_for(const Series& v) {
-    const TypeId t = v.type();
-    if (t == TypeId::Float16 || t == TypeId::Decimal128 ||
-        t == TypeId::Decimal256)
-        return moment_stat(v);
-    return field_stat_reduce(v, 0, v.length());
-}
-
 }  // namespace
 
 double variance(const Series& v, bool sample) {
     if (refuse_non_numeric("variance", v.type())) return 0.0;
-    return moment_stat_for(v).variance(sample);
+    return field_stat_reduce(v, 0, v.length()).variance(sample);
 }
 
 double stddev(const Series& v, bool sample) {
     if (refuse_non_numeric("stddev", v.type())) return 0.0;
-    return moment_stat_for(v).stddev(sample);
+    return field_stat_reduce(v, 0, v.length()).stddev(sample);
 }
 
 double skewness(const Series& v) {
     if (refuse_non_numeric("skewness", v.type())) return 0.0;
-    return moment_stat_for(v).skewness();
+    return field_stat_reduce(v, 0, v.length()).skewness();
 }
 
 double kurtosis(const Series& v) {
     if (refuse_non_numeric("kurtosis", v.type())) return 0.0;
-    return moment_stat_for(v).kurtosis();
+    return field_stat_reduce(v, 0, v.length()).kurtosis();
 }
 
 double quantile(const Series& v, double q) {
