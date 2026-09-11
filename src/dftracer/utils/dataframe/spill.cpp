@@ -61,20 +61,25 @@ std::size_t columns_bytes(const std::vector<Series>& cols) {
     std::size_t total = 0;
     for (const Series& c : cols) {
         const std::int64_t n = c.length();
-        if (is_wide_offset_type(c.type())) {  // LargeString / LargeBinary
+        const TypeId t = c.type();
+        if (is_wide_offset_type(t)) {  // LargeString / LargeBinary
             const std::int64_t* offs = c.offsets64();
             total +=
                 static_cast<std::size_t>(n + 1) * sizeof(std::int64_t) +
                 (n > 0 && offs != nullptr ? static_cast<std::size_t>(offs[n])
                                           : 0);
-        } else if (byte_width(c.type()) == 0) {  // String / Binary
+        } else if (t == TypeId::String || t == TypeId::Binary) {
             const std::int32_t* offs = dftu_series_offsets(c.handle());
             total +=
                 static_cast<std::size_t>(n + 1) * sizeof(std::int32_t) +
                 (n > 0 && offs != nullptr ? static_cast<std::size_t>(offs[n])
                                           : 0);
+        } else if (t == TypeId::FixedSizeBinary) {
+            total +=
+                static_cast<std::size_t>(n) *
+                static_cast<std::size_t>(dftu_series_fixed_size(c.handle()));
         } else {
-            total += buffer_bytes(c.type(), n);
+            total += buffer_bytes(t, n);
         }
     }
     return total;
@@ -148,7 +153,7 @@ void put_series(std::string& out, const Series& s_in) {
                   static_cast<std::size_t>(n + 1) * sizeof(std::int64_t));
         put_bytes(out, dftu_series_data(s.handle()),
                   static_cast<std::size_t>(nbytes));
-    } else if (byte_width(t) == 0) {  // String / Binary
+    } else if (!byte_width(t)) {  // String / Binary
         const std::int32_t* offs = dftu_series_offsets(s.handle());
         const std::int64_t nbytes = n > 0 ? offs[n] : 0;
         put_pod<std::int64_t>(out, nbytes);
@@ -237,7 +242,7 @@ Series get_series(const std::uint8_t*& p, const std::uint8_t* end) {
         }
         return Series{col};
     }
-    if (byte_width(type) == 0) {  // String / Binary
+    if (!byte_width(type)) {  // String / Binary
         const std::int64_t nbytes = get_pod<std::int64_t>(p, end);
         const auto* offs = reinterpret_cast<const std::int32_t*>(take_bytes(
             p, end, static_cast<std::size_t>(n + 1) * sizeof(std::int32_t)));

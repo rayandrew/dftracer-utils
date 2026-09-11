@@ -561,29 +561,19 @@ Series import_flat(const ArrowSchema* schema, const ArrowArray* arr,
         return Series{col};
     }
 
-    if (type == TypeId::FixedSizeBinary) {
-        // Single flat buffer, but the per-row width is view.fixed_size, not a
-        // per-TypeId constant (byte_width(FixedSizeBinary) == 0).
-        std::size_t width = static_cast<std::size_t>(view.fixed_size);
-        std::size_t ptr_off = static_cast<std::size_t>(arr->offset) * width;
-        auto* data =
-            static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[1]));
-        col->data =
-            Buffer::wrap(data + ptr_off, static_cast<std::size_t>(n) * width,
-                         [owner](void*) {});
-        wrap_validity();
-        return Series{col};
-    }
-
     // Bool is bit-packed, so its data buffer is sized by buffer_bytes and a
     // (rare) nonzero Arrow offset would be bit-level; we only import offset 0.
-    std::size_t width = byte_width(type);
+    // FixedSizeBinary's per-row width is col->fixed_size, not a per-TypeId
+    // constant, so byte_width needs it passed alongside the type.
+    std::size_t width = byte_width(type, col->fixed_size).value_or(0);
     std::size_t ptr_off = (type == TypeId::Bool)
                               ? 0
                               : static_cast<std::size_t>(arr->offset) * width;
     auto* data = static_cast<std::uint8_t*>(const_cast<void*>(arr->buffers[1]));
-    col->data =
-        Buffer::wrap(data + ptr_off, buffer_bytes(type, n), [owner](void*) {});
+    std::size_t data_len = (type == TypeId::FixedSizeBinary)
+                               ? static_cast<std::size_t>(n) * width
+                               : buffer_bytes(type, n);
+    col->data = Buffer::wrap(data + ptr_off, data_len, [owner](void*) {});
     wrap_validity();
     return Series{col};
 }
@@ -762,7 +752,7 @@ Series import_dict(const ArrowSchema* schema, const ArrowArray* arr,
     col->data =
         Buffer::allocate(static_cast<std::size_t>(n) * sizeof(std::int32_t));
     auto* codes = reinterpret_cast<std::int32_t*>(col->data->data());
-    const std::size_t w = byte_width(index_type);
+    const std::size_t w = byte_width(index_type).value_or(0);
     const auto* raw =
         static_cast<const std::uint8_t*>(arr->buffers[1]) + off * w;
     const bool is_signed =

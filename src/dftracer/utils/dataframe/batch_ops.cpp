@@ -174,7 +174,10 @@ Series concat_columns(const std::vector<const Series*>& parts) {
             throw std::invalid_argument("concat: columns must share a type");
         // Every other branch below has an offset-aware path (String) or
         // memcpy's byte_width(t) bytes per row; refuse anything with neither.
-        if (t != TypeId::String && t != TypeId::Bool && byte_width(t) == 0)
+        // FixedSizeBinary also refuses here: dftu_series_new_flat below has no
+        // fixed_size parameter to record on the result, so it cannot build one
+        // even when the width itself is known.
+        if (t != TypeId::String && t != TypeId::Bool && !byte_width(t))
             throw std::invalid_argument(std::string("concat: column type '") +
                                         type_name(t) + "' is unsupported");
         total += m.length();
@@ -229,7 +232,7 @@ Series concat_columns(const std::vector<const Series*>& parts) {
             static_cast<dftu_dtype>(TypeId::Bool), bits.data(), total, vptr)};
     }
 
-    const std::size_t w = byte_width(t);
+    const std::size_t w = byte_width(t).value_or(0);
     std::vector<std::uint8_t> buf(static_cast<std::size_t>(total) * w);
     std::int64_t off = 0;
     for (const Series& m : mats) {

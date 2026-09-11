@@ -28,8 +28,9 @@ dftu_series* dftu_series_new_flat(dftu_dtype type, const void* data, int64_t n,
                                   const uint8_t* validity) {
     TypeId t = static_cast<TypeId>(type);
     // Fixed-width only; String/Binary are offset+data and need their own
-    // builder.
-    if (byte_width(t) == 0) return nullptr;
+    // builder. FixedSizeBinary also has no builder here: this signature has
+    // no fixed_size parameter to record on the result.
+    if (!byte_width(t)) return nullptr;
 
     auto* col = new dftu_series();
     col->type = t;
@@ -56,7 +57,8 @@ dftu_series* dftu_series_new_flat_borrowed(dftu_dtype type, const void* data,
                                            void (*release)(void* ctx),
                                            void* release_ctx) {
     TypeId t = static_cast<TypeId>(type);
-    if (byte_width(t) == 0) {
+    // Same fixed_size limitation as dftu_series_new_flat above.
+    if (!byte_width(t)) {
         if (release != nullptr) release(release_ctx);
         return nullptr;
     }
@@ -246,7 +248,7 @@ dftu_series* dftu_series_share(const dftu_series* col) {
 dftu_series* dftu_series_slice(const dftu_series* col, int64_t offset,
                                int64_t len) {
     if (!col || col->encoding != Encoding::Flat) return nullptr;
-    const std::size_t w = byte_width(col->type);
+    const std::size_t w = byte_width(col->type, col->fixed_size).value_or(0);
     if (w == 0 || !col->data) return nullptr;  // variable-width unsupported
     if (offset < 0) offset = 0;
     if (offset > col->length) offset = col->length;

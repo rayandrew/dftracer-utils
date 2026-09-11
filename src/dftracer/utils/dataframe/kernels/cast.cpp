@@ -144,7 +144,7 @@ dftu_series* dftu_series_cast(const dftu_series* v, dftu_dtype target) {
             sv, static_cast<std::int32_t>(dst), dv, n);
     } else if (src == TypeId::Decimal128 || src == TypeId::Decimal256) {
         dftracer::utils::dataframe::cast_from_decimal(
-            src, sv, static_cast<std::int32_t>(byte_width(src)),
+            src, sv, static_cast<std::int32_t>(byte_width(src).value_or(0)),
             v->decimal_scale, static_cast<std::int32_t>(dst), dv, n);
     } else if (dst == TypeId::Float16) {
         auto tmp = std::vector<float>(n);

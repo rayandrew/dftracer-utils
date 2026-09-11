@@ -121,7 +121,7 @@ inline void append_cell(std::string& key, const Series& c, std::int64_t i) {
         key.push_back((d[i >> 3] >> (i & 7)) & 1 ? '\1' : '\0');
         return;
     }
-    const std::size_t w = byte_width(t);
+    const std::size_t w = byte_width(t).value_or(0);
     key.append(
         reinterpret_cast<const char*>(d + static_cast<std::size_t>(i) * w), w);
 }

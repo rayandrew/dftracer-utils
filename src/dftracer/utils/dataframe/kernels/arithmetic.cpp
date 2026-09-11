@@ -205,15 +205,16 @@ bool is_unsigned_int_type(TypeId t) {
 TypeId promote_common(TypeId a, TypeId b) {
     if (a == b) return a;
     if (is_float_type(a) || is_float_type(b)) return TypeId::Float64;
-    const std::size_t wa = byte_width(a);
-    const std::size_t wb = byte_width(b);
+    const std::size_t wa = byte_width(a).value_or(0);
+    const std::size_t wb = byte_width(b).value_or(0);
     if (is_signed_int_type(a) && is_signed_int_type(b)) return wa >= wb ? a : b;
     if (is_unsigned_int_type(a) && is_unsigned_int_type(b))
         return wa >= wb ? a : b;
     TypeId signed_t = is_signed_int_type(a) ? a : b;
     TypeId unsigned_t = is_unsigned_int_type(a) ? a : b;
-    return byte_width(signed_t) > byte_width(unsigned_t) ? signed_t
-                                                         : TypeId::Float64;
+    return byte_width(signed_t).value_or(0) > byte_width(unsigned_t).value_or(0)
+               ? signed_t
+               : TypeId::Float64;
 }
 
 // Weak-scalar promotion: a Python int scalar never forces a wider column
@@ -249,7 +250,7 @@ dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
     out->null_count = src->null_count;
     out->validity = src->validity;
     out->data = Buffer::allocate(static_cast<std::size_t>(src->length) *
-                                 byte_width(src->type));
+                                 byte_width(src->type).value_or(0));
 
     std::int32_t t = static_cast<std::int32_t>(src->type);
     const void* pa = src->data->data();
@@ -318,7 +319,7 @@ dftu_series* binop(const dftu_series* a, const dftu_series* b, BinOp op) {
     out->encoding = Encoding::Flat;
     out->length = pa_src->length;
     out->data = Buffer::allocate(static_cast<std::size_t>(pa_src->length) *
-                                 byte_width(pa_src->type));
+                                 byte_width(pa_src->type).value_or(0));
 
     std::int32_t t = static_cast<std::int32_t>(pa_src->type);
     const void* pa = pa_src->data->data();

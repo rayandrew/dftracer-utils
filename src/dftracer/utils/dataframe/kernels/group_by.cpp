@@ -96,14 +96,8 @@ Groups build_groups(const dftu_series* keys_in) {
 
     const TypeId key_kind = narrow_varwidth_type(k->type);
     bool str = (key_kind == TypeId::String || key_kind == TypeId::Binary);
-    // FixedSizeBinary's width is a DataType parameter, not a per-TypeId
-    // constant (byte_width returns 0 for it); every other fixed-width type,
-    // Decimal128/256 included, already has a correct per-TypeId byte_width,
-    // so an equal-bytes key groups them correctly with no extra case.
-    std::size_t width = str ? 0
-                        : k->type == TypeId::FixedSizeBinary
-                            ? static_cast<std::size_t>(k->fixed_size)
-                            : byte_width(k->type);
+    std::size_t width =
+        str ? 0 : byte_width(k->type, k->fixed_size).value_or(0);
 
     std::vector<std::string> distinct;
     Groups g;

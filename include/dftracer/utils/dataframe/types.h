@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -622,13 +623,20 @@ enum class ScalarTag : std::int32_t {
 /// Bytes to hold `n` values of `t` in Arrow layout. Bool is bit-packed
 /// (ceil(n/8)); other fixed-width types are n * byte_width; String/Binary
 /// (variable-width) return 0 - their sizing is offset-driven, not by this.
+/// FixedSizeBinary, whose width is not a per-TypeId constant, also returns 0
+/// here; use the DataType or (TypeId, fixed_size) overload for it.
 constexpr std::size_t buffer_bytes(TypeId t, std::int64_t n) noexcept;
 
-/// Byte width of a fixed-width type; 0 for variable-width (String/Binary and
-/// every type whose width is not a per-TypeId constant: FixedSizeBinary and
-/// FixedSizeList size by DataType::fixed_size, LargeString/LargeBinary/
-/// LargeList by their own 64-bit-offset layout).
-constexpr std::size_t byte_width(TypeId t) noexcept {
+/// Byte width of a fixed-width type. std::nullopt for a variable-width type
+/// (String/Binary/List/Struct/Map, their Large* counterparts) and for a type
+/// whose width is a DataType parameter rather than a per-TypeId constant
+/// (FixedSizeBinary, FixedSizeList): a TypeId alone cannot answer for those,
+/// and returning 0 for "cannot answer" is indistinguishable from 0 meaning
+/// "not fixed width", which is how this used to silently mis-size buffers and
+/// mis-key rows for FixedSizeBinary. Callers holding a DataType or a
+/// dftu_series/Series (has `fixed_size`) should use one of the overloads
+/// below instead, which can always answer for FixedSizeBinary.
+constexpr std::optional<std::size_t> byte_width(TypeId t) noexcept {
     switch (t) {
         case TypeId::Bool:
         case TypeId::Int8:
@@ -667,14 +675,33 @@ constexpr std::size_t byte_width(TypeId t) noexcept {
         case TypeId::FixedSizeList:
         case TypeId::Map:
         case TypeId::Unknown:
-            return 0;
+            return std::nullopt;
     }
-    return 0;
+    return std::nullopt;
+}
+
+/// Byte width of `t`, given its own `fixed_size` DataType parameter. Answers
+/// correctly for FixedSizeBinary (width = `fixed_size`); every other type
+/// ignores `fixed_size` and defers to the TypeId-only overload. The shape
+/// most callers holding a dftu_series/Series/DataType want, since all three
+/// carry a `fixed_size` field alongside the type.
+constexpr std::optional<std::size_t> byte_width(
+    TypeId t, std::int32_t fixed_size) noexcept {
+    if (t == TypeId::FixedSizeBinary)
+        return fixed_size >= 0 ? std::optional<std::size_t>(
+                                     static_cast<std::size_t>(fixed_size))
+                               : std::nullopt;
+    return byte_width(t);
+}
+
+/// Byte width of `dt`, resolving FixedSizeBinary via `dt.fixed_size`.
+constexpr std::optional<std::size_t> byte_width(const DataType& dt) noexcept {
+    return byte_width(dt.id, dt.fixed_size);
 }
 
 constexpr std::size_t buffer_bytes(TypeId t, std::int64_t n) noexcept {
     if (t == TypeId::Bool) return static_cast<std::size_t>((n + 7) / 8);
-    return static_cast<std::size_t>(n) * byte_width(t);
+    return static_cast<std::size_t>(n) * byte_width(t).value_or(0);
 }
 
 /// The lowercase dtype name (e.g. "int64", "float64"), for diagnostics.

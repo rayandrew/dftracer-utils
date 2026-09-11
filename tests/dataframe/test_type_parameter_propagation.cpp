@@ -181,10 +181,6 @@ struct Case {
     Series source;
     DataType expected;
     std::size_t width;
-    // Series::slice is FLAT-fixed-width only (byte_width(FixedSizeBinary) is
-    // 0, a pre-existing limitation unrelated to type propagation); every
-    // other op reaches FixedSizeBinary through gather_column instead.
-    bool series_slice_supported = true;
 };
 
 // Every op that gathers/reindexes rows and so must carry type parameters
@@ -206,7 +202,7 @@ void check_all_ops(const Case& c) {
     check_op(c, c.source.head(3), 0, "head");
     check_op(c, c.source.tail(2), 3, "tail");
     check_op(c, c.source.take({4, 1}), 4, "take");
-    if (c.series_slice_supported) check_op(c, c.source.slice(2, 2), 2, "slice");
+    check_op(c, c.source.slice(2, 2), 2, "slice");
     check_op(c, c.source.reverse(), -1, "reverse");
     check_op(c, c.source.sort(false), -1, "sort");
     check_op(c, c.source.unique(), -1, "unique");
@@ -275,7 +271,7 @@ TEST_SUITE("dataframe_type_parameter_propagation") {
         std::vector<std::string> v{"aaaaaaa", "bbbbbbb", "ccccccc", "ddddddd",
                                    "eeeeeee"};
         check_all_ops({"FixedSizeBinary", make_fixed_size_binary(v, 7),
-                       fixed_size_binary(7), 7, false});
+                       fixed_size_binary(7), 7});
     }
 
     TEST_CASE("group_by keeps a Timestamp key's unit and timezone") {

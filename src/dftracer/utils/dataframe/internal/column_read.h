@@ -94,10 +94,12 @@ inline std::string_view read_bytes(const Series& c, std::int64_t i) {
     if (narrow_varwidth_type(t) == TypeId::String ||
         narrow_varwidth_type(t) == TypeId::Binary)
         return c.string_at(i);
-    std::size_t width = byte_width(t);
+    std::size_t width;
     if (t == TypeId::FixedSizeBinary)
         width = static_cast<std::size_t>(c.data_type().fixed_size);
-    else if (t != TypeId::Decimal128 && t != TypeId::Decimal256)
+    else if (t == TypeId::Decimal128 || t == TypeId::Decimal256)
+        width = byte_width(t).value_or(0);
+    else
         return {};
     const char* d = static_cast<const char*>(dftu_series_data(c.handle()));
     if (d == nullptr || width == 0) return {};
