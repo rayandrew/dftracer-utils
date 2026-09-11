@@ -97,13 +97,14 @@ typedef struct dftu_plugin {
    NULL when none was given.
 
    `h` is a BUILD-PHASE host: its get_service answers only the registration
-   groups (DFTU_SVC_OPS, DFTU_SVC_AGG, DFTU_SVC_PORTS) and, within those, only
-   the registration slots - register_op, register_state and port_key. Every
-   other group, every non-registration slot, and resolve/intern return
-   NULL/failure, and the host fails the load naming what was denied. Scanning,
-   spawning, I/O and emitting belong to the run-time host the fold callbacks
-   receive. `h` and anything obtained from it die when the factory returns; only
-   log() is safe to keep using, and only for the duration of the call.
+   groups (DFTU_SVC_OPS, DFTU_SVC_AGG, DFTU_SVC_PORTS, DFTU_SVC_PROVIDERS) and,
+   within those, only the registration slots - register_op, register_state,
+   port_key and register_provider. Every other group, every non-registration
+   slot, and resolve/intern return NULL/failure, and the host fails the load
+   naming what was denied. Scanning, spawning, I/O and emitting belong to the
+   run-time host the fold callbacks receive. `h` and anything obtained from it
+   die when the factory returns; only log() is safe to keep using, and only
+   for the duration of the call.
 
    The returned descriptor is still pure data: plan_query, provides and consumes
    are read after every factory has run, so registering here does not reorder
