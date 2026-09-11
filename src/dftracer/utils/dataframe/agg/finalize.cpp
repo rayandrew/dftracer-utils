@@ -2,6 +2,7 @@
 #include <dftracer/utils/dataframe/agg/detail.h>
 #include <dftracer/utils/dataframe/dataframe.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
+#include <dftracer/utils/dataframe/internal/float16.h>
 
 #include <algorithm>
 #include <bit>
@@ -90,13 +91,35 @@ Series flat_temporal(TypeId type, TimeUnit unit, const std::string& timezone,
     return Series{col};
 }
 
-// A LargeString group key column: skey_cols already holds each group's raw
-// bytes (its distinct value). dftu_series_new_string only builds the 32-bit
-// offset String/Binary pair, so this is built directly, mirroring
-// flat_temporal above.
-Series large_string_key(const std::vector<std::string>& values) {
+// A String/Binary (32-bit offset) group key column: skey_cols already holds
+// each group's raw bytes. Series::strings hardcodes TypeId::String, so a
+// Binary key is built directly, mirroring wide_bytes_key below.
+Series bytes_key(TypeId type, const std::vector<std::string>& values) {
     auto* col = new dftu_series();
-    col->type = TypeId::LargeString;
+    col->type = type;
+    col->encoding = Encoding::Flat;
+    col->length = static_cast<std::int64_t>(values.size());
+    std::vector<std::int32_t> off(values.size() + 1, 0);
+    std::string data;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        data += values[i];
+        off[i + 1] = static_cast<std::int32_t>(data.size());
+    }
+    col->offsets = Buffer::allocate(off.size() * sizeof(std::int32_t));
+    std::memcpy(col->offsets->data(), off.data(),
+                off.size() * sizeof(std::int32_t));
+    col->data = Buffer::allocate(data.size());
+    if (!data.empty()) std::memcpy(col->data->data(), data.data(), data.size());
+    return Series{col};
+}
+
+// A LargeString/LargeBinary group key column: skey_cols already holds each
+// group's raw bytes (its distinct value). dftu_series_new_string only builds
+// the 32-bit offset String/Binary pair, so this is built directly, mirroring
+// flat_temporal above.
+Series wide_bytes_key(TypeId type, const std::vector<std::string>& values) {
+    auto* col = new dftu_series();
+    col->type = type;
     col->encoding = Encoding::Flat;
     col->length = static_cast<std::int64_t>(values.size());
     std::vector<std::int64_t> off(values.size() + 1, 0);
@@ -201,20 +224,29 @@ DataFrame agg_finalize(const AggState& st,
         if (st.key_is_bytes[k]) {
             const TypeId kt =
                 k < st.key_type.size() ? st.key_type[k] : TypeId::String;
-            if (kt == TypeId::LargeString) {
-                out.columns.push_back(large_string_key(st.skey_cols[k]));
+            if (kt == TypeId::LargeString || kt == TypeId::LargeBinary) {
+                out.columns.push_back(wide_bytes_key(kt, st.skey_cols[k]));
             } else if (kt == TypeId::FixedSizeBinary ||
                        kt == TypeId::Decimal128 || kt == TypeId::Decimal256) {
                 out.columns.push_back(bytes_flat_key(
                     kt, st.key_byte_width[k], st.key_decimal_precision[k],
                     st.key_decimal_scale[k], st.skey_cols[k]));
             } else {
-                out.columns.push_back(Series::strings(st.skey_cols[k]));
+                // The seed path (agg_seed_begin) marks every key bytes-domain
+                // with a placeholder key_type of Int64, since it never sees
+                // the source column's real type; String is the only safe
+                // default for that case, so only a genuine Binary key (from
+                // accumulate on a real Binary column) retags as Binary.
+                const TypeId bt =
+                    kt == TypeId::Binary ? TypeId::Binary : TypeId::String;
+                out.columns.push_back(bytes_key(bt, st.skey_cols[k]));
             }
             continue;
         }
         const FieldStatDomain kd =
             k < st.key_domain.size() ? st.key_domain[k] : FieldStatDomain::I64;
+        const TypeId kt =
+            k < st.key_type.size() ? st.key_type[k] : TypeId::Int64;
         const std::vector<std::int64_t>& bits = st.ikey_cols[k];
         if (kd == FieldStatDomain::U64) {
             std::vector<std::uint64_t> v(static_cast<std::size_t>(ng));
@@ -222,6 +254,19 @@ DataFrame agg_finalize(const AggState& st,
                 v[static_cast<std::size_t>(g)] = std::bit_cast<std::uint64_t>(
                     bits[static_cast<std::size_t>(g)]);
             out.columns.push_back(Series::flat(TypeId::Uint64, v.data(), ng));
+        } else if (kd == FieldStatDomain::F64 && kt == TypeId::Float16) {
+            // Keyed on the exact half->double promotion (see col_domain), so
+            // narrowing back is exact for every value that round-tripped
+            // through accumulate: zero, subnormals, normals and infinities
+            // all recover their original bits. A NaN key's payload does not
+            // survive (float_to_half canonicalizes any NaN mantissa), only
+            // that the group stays NaN with its original sign.
+            std::vector<std::uint16_t> v(static_cast<std::size_t>(ng));
+            for (std::int64_t g = 0; g < ng; ++g)
+                v[static_cast<std::size_t>(g)] =
+                    float_to_half(static_cast<float>(std::bit_cast<double>(
+                        bits[static_cast<std::size_t>(g)])));
+            out.columns.push_back(Series::flat(TypeId::Float16, v.data(), ng));
         } else if (kd == FieldStatDomain::F64) {
             std::vector<double> v(static_cast<std::size_t>(ng));
             for (std::int64_t g = 0; g < ng; ++g)
@@ -233,8 +278,6 @@ DataFrame agg_finalize(const AggState& st,
             // Date32/64/Time32/64/Timestamp/Duration, not a bare Int64.
             // bits is always sign-extended to 64, so the 4-byte types narrow
             // back down.
-            const TypeId kt =
-                k < st.key_type.size() ? st.key_type[k] : TypeId::Int64;
             const TimeUnit ku = k < st.key_time_unit.size()
                                     ? st.key_time_unit[k]
                                     : TimeUnit::Micro;

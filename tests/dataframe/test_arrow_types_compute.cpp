@@ -2,6 +2,7 @@
 #include <dftracer/utils/core/common/config.h>
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -21,6 +22,7 @@
 #include <nanoarrow/nanoarrow.h>
 #include <dftracer/utils/dataframe/agg.h>
 #include <dftracer/utils/dataframe/arrow.h>
+#include <dftracer/utils/dataframe/internal/float16.h>
 #include <dftracer/utils/dataframe/scalar.h>
 // clang-format on
 
@@ -85,6 +87,42 @@ Series make_fixed_size_binary(const std::vector<std::string>& values,
         ArrowBufferView bv;
         bv.data.data = v.data();
         bv.size_bytes = width;
+        REQUIRE(ArrowArrayAppendBytes(&b.array, bv) == NANOARROW_OK);
+    }
+    finish(&b.array);
+    return Series::from_arrow(&b.schema, &b.array);
+}
+
+Series make_binary(const std::vector<std::string>& values) {
+    BuiltArrow b;
+    ArrowSchemaInit(&b.schema);
+    REQUIRE(ArrowSchemaSetType(&b.schema, NANOARROW_TYPE_BINARY) ==
+            NANOARROW_OK);
+    REQUIRE(ArrowArrayInitFromSchema(&b.array, &b.schema, nullptr) ==
+            NANOARROW_OK);
+    REQUIRE(ArrowArrayStartAppending(&b.array) == NANOARROW_OK);
+    for (const std::string& v : values) {
+        ArrowBufferView bv;
+        bv.data.data = v.data();
+        bv.size_bytes = static_cast<int64_t>(v.size());
+        REQUIRE(ArrowArrayAppendBytes(&b.array, bv) == NANOARROW_OK);
+    }
+    finish(&b.array);
+    return Series::from_arrow(&b.schema, &b.array);
+}
+
+Series make_large_binary(const std::vector<std::string>& values) {
+    BuiltArrow b;
+    ArrowSchemaInit(&b.schema);
+    REQUIRE(ArrowSchemaSetType(&b.schema, NANOARROW_TYPE_LARGE_BINARY) ==
+            NANOARROW_OK);
+    REQUIRE(ArrowArrayInitFromSchema(&b.array, &b.schema, nullptr) ==
+            NANOARROW_OK);
+    REQUIRE(ArrowArrayStartAppending(&b.array) == NANOARROW_OK);
+    for (const std::string& v : values) {
+        ArrowBufferView bv;
+        bv.data.data = v.data();
+        bv.size_bytes = static_cast<int64_t>(v.size());
         REQUIRE(ArrowArrayAppendBytes(&b.array, bv) == NANOARROW_OK);
     }
     finish(&b.array);
@@ -1045,6 +1083,251 @@ TEST_SUITE("dataframe_arrow_types_compute") {
             else
                 FAIL("unexpected Decimal256 group key: " << v);
         }
+    }
+
+    TEST_CASE(
+        "DataFrame::group_by groups a Binary key by exact byte equality") {
+        Series keys =
+            make_binary({"aaaa", "bbbb", "aaaa", "cccc", "bbbb", "aaaa"});
+        std::vector<std::int64_t> ones(6, 1);
+        Series values = Series::flat_i64(ones.data(), 6);
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(keys.share());
+        df.columns.push_back(values.share());
+        DataFrame grouped = df.group_by("k", {GroupAgg{Agg::Count, "v", "n"}});
+        REQUIRE(grouped.num_rows() == 3);
+        Series gk = grouped.column("k");
+        REQUIRE(gk.type() == TypeId::Binary);
+        const std::int64_t* n = grouped.column("n").data<std::int64_t>();
+        REQUIRE(n != nullptr);
+        for (std::int64_t r = 0; r < 3; ++r) {
+            const std::string key(gk.string_at(r));
+            if (key == "aaaa")
+                CHECK(n[r] == 3);
+            else if (key == "bbbb")
+                CHECK(n[r] == 2);
+            else if (key == "cccc")
+                CHECK(n[r] == 1);
+            else
+                FAIL("unexpected Binary group key: " << key);
+        }
+    }
+
+    TEST_CASE(
+        "Binary group keys merge correctly across two partial AggStates and "
+        "survive a spill round trip") {
+        Series k1 = make_binary({"aaaa", "bbbb", "aaaa"});
+        Series k2 = make_binary({"cccc", "bbbb", "aaaa"});
+        std::vector<std::int64_t> ones3(3, 1);
+        Series v1 = Series::flat_i64(ones3.data(), 3);
+        Series v2 = Series::flat_i64(ones3.data(), 3);
+
+        AggStatePtr st1 = df::agg_new({AggSpec{AggOp::Count, -1, "n"}});
+        df::agg_accumulate(*st1, std::vector<const Series*>{&k1},
+                           std::vector<const Series*>{&v1});
+        AggStatePtr st2 = df::agg_new({AggSpec{AggOp::Count, -1, "n"}});
+        df::agg_accumulate(*st2, std::vector<const Series*>{&k2},
+                           std::vector<const Series*>{&v2});
+        df::agg_merge(*st1, *st2);
+        REQUIRE(df::agg_num_groups(*st1) == 3);
+
+        const std::string blob = df::agg_serialize(*st1);
+        AggStatePtr back = df::agg_deserialize(blob);
+        REQUIRE(df::agg_num_groups(*back) == 3);
+
+        DataFrame out = df::agg_finalize(*back, "k");
+        REQUIRE(out.num_rows() == 3);
+        CHECK(out.column("k").type() == TypeId::Binary);
+        const std::int64_t* n = out.column("n").data<std::int64_t>();
+        Series gk = out.column("k");
+        for (std::int64_t r = 0; r < 3; ++r) {
+            const std::string key(gk.string_at(r));
+            if (key == "aaaa")
+                CHECK(n[r] == 3);
+            else if (key == "bbbb")
+                CHECK(n[r] == 2);
+            else if (key == "cccc")
+                CHECK(n[r] == 1);
+            else
+                FAIL("unexpected Binary group key: " << key);
+        }
+    }
+
+    TEST_CASE(
+        "DataFrame::group_by groups a LargeBinary key by exact byte "
+        "equality") {
+        Series keys =
+            make_large_binary({"aaaa", "bbbb", "aaaa", "cccc", "bbbb", "aaaa"});
+        std::vector<std::int64_t> ones(6, 1);
+        Series values = Series::flat_i64(ones.data(), 6);
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(keys.share());
+        df.columns.push_back(values.share());
+        DataFrame grouped = df.group_by("k", {GroupAgg{Agg::Count, "v", "n"}});
+        REQUIRE(grouped.num_rows() == 3);
+        Series gk = grouped.column("k");
+        REQUIRE(gk.type() == TypeId::LargeBinary);
+        const std::int64_t* n = grouped.column("n").data<std::int64_t>();
+        REQUIRE(n != nullptr);
+        for (std::int64_t r = 0; r < 3; ++r) {
+            const std::string key(gk.string_at(r));
+            if (key == "aaaa")
+                CHECK(n[r] == 3);
+            else if (key == "bbbb")
+                CHECK(n[r] == 2);
+            else if (key == "cccc")
+                CHECK(n[r] == 1);
+            else
+                FAIL("unexpected LargeBinary group key: " << key);
+        }
+    }
+
+    TEST_CASE(
+        "LargeBinary group keys merge correctly across two partial "
+        "AggStates and survive a spill round trip") {
+        Series k1 = make_large_binary({"aaaa", "bbbb", "aaaa"});
+        Series k2 = make_large_binary({"cccc", "bbbb", "aaaa"});
+        std::vector<std::int64_t> ones3(3, 1);
+        Series v1 = Series::flat_i64(ones3.data(), 3);
+        Series v2 = Series::flat_i64(ones3.data(), 3);
+
+        AggStatePtr st1 = df::agg_new({AggSpec{AggOp::Count, -1, "n"}});
+        df::agg_accumulate(*st1, std::vector<const Series*>{&k1},
+                           std::vector<const Series*>{&v1});
+        AggStatePtr st2 = df::agg_new({AggSpec{AggOp::Count, -1, "n"}});
+        df::agg_accumulate(*st2, std::vector<const Series*>{&k2},
+                           std::vector<const Series*>{&v2});
+        df::agg_merge(*st1, *st2);
+        REQUIRE(df::agg_num_groups(*st1) == 3);
+
+        const std::string blob = df::agg_serialize(*st1);
+        AggStatePtr back = df::agg_deserialize(blob);
+        REQUIRE(df::agg_num_groups(*back) == 3);
+
+        DataFrame out = df::agg_finalize(*back, "k");
+        REQUIRE(out.num_rows() == 3);
+        CHECK(out.column("k").type() == TypeId::LargeBinary);
+        const std::int64_t* n = out.column("n").data<std::int64_t>();
+        Series gk = out.column("k");
+        for (std::int64_t r = 0; r < 3; ++r) {
+            const std::string key(gk.string_at(r));
+            if (key == "aaaa")
+                CHECK(n[r] == 3);
+            else if (key == "bbbb")
+                CHECK(n[r] == 2);
+            else if (key == "cccc")
+                CHECK(n[r] == 1);
+            else
+                FAIL("unexpected LargeBinary group key: " << key);
+        }
+    }
+
+    TEST_CASE(
+        "DataFrame::group_by groups a Float16 key by exact bit pattern, "
+        "keeping +-0.0 and NaN distinct") {
+        // rows: 1.0, -0.0, 1.0, +0.0, NaN, -0.0 -> four groups: {1.0}x2,
+        // {-0.0}x2, {+0.0}x1, {NaN}x1. -0.0/+0.0 must stay separate groups
+        // (their half bit patterns differ) and NaN must group with itself
+        // (bit-pattern equality, not IEEE float equality where NaN != NaN).
+        Series keys =
+            make_float16({1.0f, -0.0f, 1.0f, 0.0f, std::nanf(""), -0.0f});
+        std::vector<std::int64_t> ones(6, 1);
+        Series values = Series::flat_i64(ones.data(), 6);
+        DataFrame df;
+        df.names = {"k", "v"};
+        df.columns.push_back(keys.share());
+        df.columns.push_back(values.share());
+        DataFrame grouped = df.group_by("k", {GroupAgg{Agg::Count, "v", "n"}});
+        REQUIRE(grouped.num_rows() == 4);
+        Series gk = grouped.column("k");
+        REQUIRE(gk.type() == TypeId::Float16);
+        const std::uint16_t* bits = gk.data<std::uint16_t>();
+        REQUIRE(bits != nullptr);
+        const std::int64_t* n = grouped.column("n").data<std::int64_t>();
+        REQUIRE(n != nullptr);
+        int seen_one = 0, seen_neg_zero = 0, seen_pos_zero = 0, seen_nan = 0;
+        for (std::int64_t r = 0; r < 4; ++r) {
+            const float f = df::half_to_float(bits[r]);
+            if (std::isnan(f)) {
+                ++seen_nan;
+                CHECK(n[r] == 1);
+            } else if (f == 0.0f) {
+                if (std::signbit(f)) {
+                    ++seen_neg_zero;
+                    CHECK(n[r] == 2);
+                } else {
+                    ++seen_pos_zero;
+                    CHECK(n[r] == 1);
+                }
+            } else if (f == 1.0f) {
+                ++seen_one;
+                CHECK(n[r] == 2);
+            } else {
+                FAIL("unexpected Float16 group key bits: " << bits[r]);
+            }
+        }
+        CHECK(seen_one == 1);
+        CHECK(seen_neg_zero == 1);
+        CHECK(seen_pos_zero == 1);
+        CHECK(seen_nan == 1);
+    }
+
+    TEST_CASE(
+        "Float16 group keys merge correctly across two partial AggStates "
+        "and survive a spill round trip") {
+        Series k1 = make_float16({1.0f, -0.0f, std::nanf("")});
+        Series k2 = make_float16({0.0f, -0.0f, 1.0f});
+        std::vector<std::int64_t> ones3(3, 1);
+        Series v1 = Series::flat_i64(ones3.data(), 3);
+        Series v2 = Series::flat_i64(ones3.data(), 3);
+
+        AggStatePtr st1 = df::agg_new({AggSpec{AggOp::Count, -1, "n"}});
+        df::agg_accumulate(*st1, std::vector<const Series*>{&k1},
+                           std::vector<const Series*>{&v1});
+        AggStatePtr st2 = df::agg_new({AggSpec{AggOp::Count, -1, "n"}});
+        df::agg_accumulate(*st2, std::vector<const Series*>{&k2},
+                           std::vector<const Series*>{&v2});
+        df::agg_merge(*st1, *st2);
+        // {1.0}x2, {-0.0}x2, {+0.0}x1, {NaN}x1
+        REQUIRE(df::agg_num_groups(*st1) == 4);
+
+        const std::string blob = df::agg_serialize(*st1);
+        AggStatePtr back = df::agg_deserialize(blob);
+        REQUIRE(df::agg_num_groups(*back) == 4);
+
+        DataFrame out = df::agg_finalize(*back, "k");
+        REQUIRE(out.num_rows() == 4);
+        CHECK(out.column("k").type() == TypeId::Float16);
+        const std::uint16_t* bits = out.column("k").data<std::uint16_t>();
+        REQUIRE(bits != nullptr);
+        const std::int64_t* n = out.column("n").data<std::int64_t>();
+        int seen_one = 0, seen_neg_zero = 0, seen_pos_zero = 0, seen_nan = 0;
+        for (std::int64_t r = 0; r < 4; ++r) {
+            const float f = df::half_to_float(bits[r]);
+            if (std::isnan(f)) {
+                ++seen_nan;
+                CHECK(n[r] == 1);
+            } else if (f == 0.0f) {
+                if (std::signbit(f)) {
+                    ++seen_neg_zero;
+                    CHECK(n[r] == 2);
+                } else {
+                    ++seen_pos_zero;
+                    CHECK(n[r] == 1);
+                }
+            } else if (f == 1.0f) {
+                ++seen_one;
+                CHECK(n[r] == 2);
+            } else {
+                FAIL("unexpected Float16 group key bits: " << bits[r]);
+            }
+        }
+        CHECK(seen_one == 1);
+        CHECK(seen_neg_zero == 1);
+        CHECK(seen_pos_zero == 1);
+        CHECK(seen_nan == 1);
     }
 }
 #else

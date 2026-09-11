@@ -25,6 +25,7 @@ FieldStatDomain col_domain(TypeId t) {
         case TypeId::Uint32:
         case TypeId::Uint64:
             return FieldStatDomain::U64;
+        case TypeId::Float16:
         case TypeId::Float32:
         case TypeId::Float64:
             return FieldStatDomain::F64;
@@ -33,11 +34,14 @@ FieldStatDomain col_domain(TypeId t) {
     }
 }
 
-// Types group_of can key on: String/LargeString/FixedSizeBinary/Decimal128/
-// Decimal256 via the bytes path (length-prefixed or fixed-width raw bytes
-// into the key buffer), the rest read exactly by read_bits. Anything else
-// would key every row on the same zero and collapse the batch into one
-// group. No default, so a new TypeId lands here.
+// Types group_of can key on: String/Binary/LargeString/LargeBinary/
+// FixedSizeBinary/Decimal128/Decimal256 via the bytes path (length-prefixed
+// or fixed-width raw bytes into the key buffer), the rest read exactly by
+// read_bits (Float16 through the F64 domain above, promoted to double so its
+// key bits stay an injective function of the half bit pattern - see
+// read_f64's exact Float16 decode). Anything else would key every row on the
+// same zero and collapse the batch into one group. No default, so a new
+// TypeId lands here.
 bool is_group_key_type(TypeId t) {
     switch (t) {
         case TypeId::Bool:
@@ -49,6 +53,7 @@ bool is_group_key_type(TypeId t) {
         case TypeId::Uint16:
         case TypeId::Uint32:
         case TypeId::Uint64:
+        case TypeId::Float16:
         case TypeId::Float32:
         case TypeId::Float64:
         case TypeId::Date32:
@@ -58,17 +63,16 @@ bool is_group_key_type(TypeId t) {
         case TypeId::Timestamp:
         case TypeId::Duration:
         case TypeId::String:
+        case TypeId::Binary:
         case TypeId::LargeString:
+        case TypeId::LargeBinary:
         case TypeId::FixedSizeBinary:
         case TypeId::Decimal128:
         case TypeId::Decimal256:
             return true;
         case TypeId::Unknown:
-        case TypeId::Binary:
         case TypeId::List:
         case TypeId::Struct:
-        case TypeId::Float16:
-        case TypeId::LargeBinary:
         case TypeId::LargeList:
         case TypeId::FixedSizeList:
         case TypeId::Map:
@@ -80,7 +84,8 @@ bool is_group_key_type(TypeId t) {
 // A group key's byte-domain storage kind: which of skey_cols (bytes) /
 // ikey_cols (int64 read_bits) it keys through.
 bool is_bytes_key_type(TypeId t) {
-    return t == TypeId::String || t == TypeId::LargeString ||
+    return t == TypeId::String || t == TypeId::Binary ||
+           t == TypeId::LargeString || t == TypeId::LargeBinary ||
            t == TypeId::FixedSizeBinary || t == TypeId::Decimal128 ||
            t == TypeId::Decimal256;
 }

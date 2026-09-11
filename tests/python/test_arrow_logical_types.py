@@ -287,6 +287,7 @@ def test_dataframe_filter_and_head(name):
 # naming the type. See src/dftracer/utils/dataframe/agg/state.cpp
 # is_group_key_type.
 _GROUP_KEY_SUPPORTED = {
+    "float16",
     "date32",
     "date64",
     "time32",
@@ -297,6 +298,7 @@ _GROUP_KEY_SUPPORTED = {
     "decimal256",
     "fixed_size_binary",
     "large_string",
+    "large_binary",
 }
 
 
