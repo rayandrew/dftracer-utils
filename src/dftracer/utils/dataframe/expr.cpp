@@ -249,17 +249,25 @@ const int COL_OP[4] = {OP_ADD, OP_SUB, OP_MUL, OP_DIV};
 const int SCALAR_OP[4] = {OP_ADDS, OP_SUBS, OP_MULS, OP_DIVS};
 
 // A compiled subexpression: either a compile-time scalar or a column in slot
-// `slot` of type `type`.
+// `slot` of type `type`. `full` is the complete DataType: a bare column
+// reference passes its input DataType through, every other node reports a
+// scalar DataType (no kernel here can target a parameterized type).
 struct Val {
     bool is_scalar;
     int slot;
     TypeId type;
     dftu_scalar scalar;
+    DataType full;
 };
 
 bool is_float(const Val& v) {
     if (v.is_scalar) return v.scalar.kind == DFTU_SCALAR_TAG_F64;
     return v.type == TypeId::Float32 || v.type == TypeId::Float64;
+}
+
+bool is_unknown(const Val& v) { return v.full.id == TypeId::Unknown; }
+Val unknown_val() {
+    return {false, -1, TypeId::Unknown, {}, scalar(TypeId::Unknown)};
 }
 
 double scalar_to_double(dftu_scalar s) {
@@ -275,40 +283,50 @@ dftu_scalar to_f64_scalar(dftu_scalar s) {
     return r;
 }
 
+// Depends only on each input column's DataType, never its data, so the same
+// compile() drives eval() (Series::data_type()) and infer_type() (a schema
+// with no data) and the two can never disagree.
 class Compiler {
    public:
-    explicit Compiler(const std::vector<const Series*>& inputs)
-        : inputs_(inputs) {}
+    explicit Compiler(const std::vector<DataType>& input_types)
+        : input_types_(input_types) {}
 
     Val compile(const ExprNode* n) {
         switch (n->kind) {
             case ExprKind::LitI64:
             case ExprKind::LitF64:
-                return {true, -1, TypeId::Int64, n->scalar};
+                return {true, -1, TypeId::Int64, n->scalar,
+                        scalar(TypeId::Int64)};
             case ExprKind::Col: {
                 if (n->i < 0 ||
-                    static_cast<std::size_t>(n->i) >= inputs_.size())
+                    static_cast<std::size_t>(n->i) >= input_types_.size())
                     throw std::invalid_argument(
                         "expr: column index out of range");
+                const DataType& dt =
+                    input_types_[static_cast<std::size_t>(n->i)];
+                if (dt.id == TypeId::Unknown)
+                    return {false, -1, TypeId::Unknown, {}, dt};
                 int slot = emit(OP_LOAD, -1, -1, n->i, {});
-                return {false,
-                        slot,
-                        inputs_[static_cast<std::size_t>(n->i)]->type(),
-                        {}};
+                return {false, slot, dt.id, {}, dt};
             }
             case ExprKind::Binary:
                 return compile_binary(n);
             case ExprKind::Prim: {
-                Val a = as_col(compile(n->a.get()), "prim");
+                Val a0 = compile(n->a.get());
+                if (is_unknown(a0)) return unknown_val();
+                Val a = as_col(a0, "prim");
                 if (a.type != TypeId::Int64 && a.type != TypeId::Uint64)
                     a = cast(a, TypeId::Int64);
                 return {false,
                         emit(OP_PRIM, a.slot, -1, n->i, {}),
                         TypeId::Int64,
-                        {}};
+                        {},
+                        scalar(TypeId::Int64)};
             }
             case ExprKind::Unary: {
-                Val a = as_col(compile(n->a.get()), "unary");
+                Val a0 = compile(n->a.get());
+                if (is_unknown(a0)) return unknown_val();
+                Val a = as_col(a0, "unary");
                 // is_nan/is_finite/is_infinite yield a Bool mask; log/sqrt/exp
                 // widen to Float64; the rest keep the input type (integer
                 // floor/ceil/round/trunc are identities).
@@ -329,55 +347,80 @@ class Compiler {
                         t = a.type;
                         break;
                 }
-                return {false, emit(OP_UNARY, a.slot, -1, n->i, {}), t, {}};
+                return {false,
+                        emit(OP_UNARY, a.slot, -1, n->i, {}),
+                        t,
+                        {},
+                        scalar(t)};
             }
             case ExprKind::Clip: {
-                Val a = as_col(compile(n->a.get()), "clip");
+                Val a0 = compile(n->a.get());
+                if (is_unknown(a0)) return unknown_val();
+                Val a = as_col(a0, "clip");
                 return {false,
                         emit(OP_CLIP, a.slot, -1, 0, n->scalar, n->scalar2),
                         a.type,
-                        {}};
+                        {},
+                        scalar(a.type)};
             }
             case ExprKind::Fillna: {
-                Val a = as_col(compile(n->a.get()), "fillna");
+                Val a0 = compile(n->a.get());
+                if (is_unknown(a0)) return unknown_val();
+                Val a = as_col(a0, "fillna");
                 return {false,
                         emit(OP_FILLNA, a.slot, -1, 0, n->scalar),
                         a.type,
-                        {}};
+                        {},
+                        scalar(a.type)};
             }
             case ExprKind::Cmp: {
-                Val a = as_col(compile(n->a.get()), "compare");
+                Val a0 = compile(n->a.get());
+                if (is_unknown(a0)) return unknown_val();
+                Val a = as_col(a0, "compare");
                 return {false,
                         emit(OP_CMP, a.slot, -1, n->i, n->scalar),
                         TypeId::Bool,
-                        {}};
+                        {},
+                        scalar(TypeId::Bool)};
             }
             case ExprKind::Logical: {
-                Val a = as_col(compile(n->a.get()), "logical");
-                Val b = as_col(compile(n->b.get()), "logical");
+                Val a0 = compile(n->a.get());
+                Val b0 = compile(n->b.get());
+                if (is_unknown(a0) || is_unknown(b0)) return unknown_val();
+                Val a = as_col(a0, "logical");
+                Val b = as_col(b0, "logical");
                 return {false,
                         emit(OP_LOGICAL, a.slot, b.slot, n->i, {}),
                         TypeId::Bool,
-                        {}};
+                        {},
+                        scalar(TypeId::Bool)};
             }
             case ExprKind::Not: {
-                Val a = as_col(compile(n->a.get()), "not");
-                return {
-                    false, emit(OP_NOT, a.slot, -1, 0, {}), TypeId::Bool, {}};
+                Val a0 = compile(n->a.get());
+                if (is_unknown(a0)) return unknown_val();
+                Val a = as_col(a0, "not");
+                return {false,
+                        emit(OP_NOT, a.slot, -1, 0, {}),
+                        TypeId::Bool,
+                        {},
+                        scalar(TypeId::Bool)};
             }
             case ExprKind::Cast: {
                 Val a = as_col(compile(n->a.get()), "cast");
                 return cast(a, static_cast<TypeId>(n->i));
             }
             case ExprKind::Lower: {
-                Val a = as_col(compile(n->a.get()), "lower");
+                Val a0 = compile(n->a.get());
+                if (is_unknown(a0)) return unknown_val();
+                Val a = as_col(a0, "lower");
                 if (a.type != TypeId::String)
                     throw std::invalid_argument(
                         "expr: lower needs a String column");
                 return {false,
                         emit(OP_LOWER, a.slot, -1, 0, {}),
                         TypeId::String,
-                        {}};
+                        {},
+                        scalar(TypeId::String)};
             }
         }
         throw std::invalid_argument("expr: unknown node");
@@ -397,13 +440,15 @@ class Compiler {
         return {false,
                 emit(OP_CAST, v.slot, -1, static_cast<std::int32_t>(t), {}),
                 t,
-                {}};
+                {},
+                scalar(t)};
     }
 
     Val compile_binary(const ExprNode* n) {
         const int op = n->i;  // BinaryOp
         Val a = compile(n->a.get());
         Val b = compile(n->b.get());
+        if (is_unknown(a) || is_unknown(b)) return unknown_val();
         if (a.is_scalar && b.is_scalar) return fold(op, a.scalar, b.scalar);
 
         const bool rf =
@@ -422,19 +467,24 @@ class Compiler {
         }
 
         if (!a.is_scalar && !b.is_scalar)
-            return {
-                false, emit(COL_OP[op], a.slot, b.slot, 0, {}), out_type, {}};
+            return {false,
+                    emit(COL_OP[op], a.slot, b.slot, 0, {}),
+                    out_type,
+                    {},
+                    scalar(out_type)};
         if (!a.is_scalar)  // col op scalar
             return {false,
                     emit(SCALAR_OP[op], a.slot, -1, 0, b.scalar),
                     out_type,
-                    {}};
+                    {},
+                    scalar(out_type)};
         if (op == static_cast<int>(BinaryOp::Add) ||
             op == static_cast<int>(BinaryOp::Mul))  // scalar op col commutes
             return {false,
                     emit(SCALAR_OP[op], b.slot, -1, 0, a.scalar),
                     out_type,
-                    {}};
+                    {},
+                    scalar(out_type)};
         throw std::invalid_argument("expr: scalar - / column has no kernel");
     }
 
@@ -466,7 +516,8 @@ class Compiler {
                         : op == 2 ? x * y
                                   : (y != 0 ? x / y : 0);
         }
-        return {true, -1, TypeId::Int64, r};
+        return {true, -1, TypeId::Int64, r,
+                scalar(f ? TypeId::Float64 : TypeId::Int64)};
     }
 
     // Emit an op, hash-consing structurally identical ops to the same slot
@@ -492,7 +543,7 @@ class Compiler {
         return slot;
     }
 
-    const std::vector<const Series*>& inputs_;
+    const std::vector<DataType>& input_types_;
     std::map<std::tuple<int, int, int, int, int, std::int64_t, std::int64_t,
                         std::uint32_t, std::uint32_t>,
              int>
@@ -652,7 +703,10 @@ std::vector<Series> eval_many(const std::vector<Expr>& roots,
         throw std::invalid_argument("expr: needs at least one input column");
 
     // One compiler for all roots: hash-consing (CSE) spans the whole program.
-    Compiler c(inputs);
+    std::vector<DataType> input_types;
+    input_types.reserve(inputs.size());
+    for (const Series* s : inputs) input_types.push_back(s->data_type());
+    Compiler c(input_types);
     std::vector<int> finals;
     finals.reserve(roots.size());
     for (const Expr& root : roots) {
@@ -697,6 +751,17 @@ Series eval(const Expr& root, const std::vector<const Series*>& inputs) {
     if (!root.valid()) throw std::invalid_argument("expr: null expression");
     std::vector<Series> outs = eval_many({root}, inputs);
     return std::move(outs.front());
+}
+
+DataType infer_type(const Expr& root,
+                    const std::vector<DataType>& input_types) {
+    if (!root.valid()) throw std::invalid_argument("expr: null expression");
+    Compiler c(input_types);
+    Val out = c.compile(root.node().get());
+    if (out.is_scalar)
+        throw std::invalid_argument(
+            "expr: a constant expression has no column");
+    return out.full;
 }
 
 }  // namespace dftracer::utils::dataframe
