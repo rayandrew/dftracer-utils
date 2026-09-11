@@ -1110,6 +1110,37 @@ typedef struct dftu_scan_request {
     uint64_t memory_budget; /**< Bytes; most sources ignore it. */
 } dftu_scan_request;
 
+/** Opaque per-column type declaration built during dftu_source_vt::
+   schema_types (mirrors dataframe::Schema/DataType, types.h). The host
+   allocates and frees it; a source only appends fields into the instance it
+   is handed. */
+typedef struct dftu_schema dftu_schema;
+
+/** Append a field to `schema`. `name` is copied; `timezone` is copied if
+   non-NULL and ignored (may be NULL) for every type but Timestamp, where NULL
+   means no timezone. `time_unit`, `decimal_precision`, `decimal_scale`, and
+   `fixed_size` are the matching dataframe::DataType parameters (types.h) and
+   are likewise ignored where `type` does not use them. Returns the field's
+   index within `schema` (>= 0) - pass it as `parent_index` to
+   dftu_schema_add_child_field to nest a child under a List/LargeList/
+   FixedSizeList/Struct/Map field - or -1 if `schema` or `name` is NULL, or
+   `type` is out of range. */
+DFTU_EXPORT int32_t dftu_schema_add_field(
+    dftu_schema* schema, const char* name, dftu_dtype type, int32_t nullable,
+    dftu_time_unit time_unit, const char* tz, int32_t decimal_precision,
+    int32_t decimal_scale, int32_t fixed_size);
+
+/** Append a child field nested under `parent_index`, a field already added to
+   `schema` whose type is List/LargeList/FixedSizeList/Struct/Map: the single
+   element/entry type for a List-like parent, or one member per call for a
+   Struct parent. Same parameters and return convention as
+   dftu_schema_add_field. Returns -1 if `parent_index` is out of range or
+   names a field whose type cannot nest a child. */
+DFTU_EXPORT int32_t dftu_schema_add_child_field(
+    dftu_schema* schema, int32_t parent_index, const char* name,
+    dftu_dtype type, int32_t nullable, dftu_time_unit time_unit, const char* tz,
+    int32_t decimal_precision, int32_t decimal_scale, int32_t fixed_size);
+
 /** A pushdown-aware data source a plugin registers under a name. Immutable:
    schema() reports columns without scanning and scan() may be called many
    times to open independent cursors, so one registered source can back many
@@ -1135,6 +1166,12 @@ typedef struct dftu_source_vt {
     /** Release the source; called once, after every cursor it opened has
        been destroyed. */
     void (*destroy)(void* self);
+    /** Optional (NULL is fine): declare column types by appending exactly
+       schema()'s columns, in the same order and with the same names, to
+       `out_schema` - an empty dftu_schema the host allocates and frees
+       around this one call. A count or name mismatch is discarded: every
+       column reports Unknown, the same as if this were NULL. */
+    void (*schema_types)(void* self, dftu_schema* out_schema);
 } dftu_source_vt;
 
 /** Register `vt`/`self` as a named provider. `vt` is copied, so it need not
