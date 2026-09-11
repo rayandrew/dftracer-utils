@@ -657,6 +657,8 @@ Series qcut(const Series& v, std::int32_t q) {
 }
 
 Series search_sorted(const Series& v, const Series& values) {
+    if (refuse_non_numeric("search_sorted", v.type())) return Series{};
+    if (refuse_non_numeric("search_sorted", values.type())) return Series{};
     const std::int64_t n = v.length();
     std::vector<double> self(static_cast<std::size_t>(n));
     for (std::int64_t i = 0; i < n; ++i)
@@ -673,6 +675,7 @@ Series search_sorted(const Series& v, const Series& values) {
 }
 
 Series interpolate(const Series& v) {
+    if (refuse_non_numeric("interpolate", v.type())) return Series{};
     const std::int64_t n = v.length();
     std::vector<double> out(static_cast<std::size_t>(n), 0.0);
     std::vector<std::uint8_t> valid(static_cast<std::size_t>((n + 7) / 8), 0);
