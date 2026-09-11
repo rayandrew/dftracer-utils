@@ -35,7 +35,8 @@ DFTU_EXPORT void dftu_runtime_free(dftu_runtime* rt);
 DFTU_EXPORT void dftu_set_default_runtime(dftu_runtime* rt);
 
 /* Drive t to completion on rt, blocking the caller (pool-safe when reentrant).
-   Consumes t. 0 on success, -1 if it threw. */
+   A NULL rt runs on the default runtime, as elsewhere in this ABI. Consumes t.
+   0 on success, -1 if it threw or t is NULL. */
 int dftu_task_run(dftu_runtime* rt, dftu_task* t);
 
 /* Combine n tasks into one; consumes the inputs. NULL if n == 0. */

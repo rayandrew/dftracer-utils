@@ -137,8 +137,8 @@ void dftu_set_default_runtime(dftu_runtime* rt) {
 }
 
 int dftu_task_run(dftu_runtime* rt, dftu_task* t) {
-    if (!rt || !t) return -1;
-    auto* runtime = reinterpret_cast<Runtime*>(rt);
+    if (!t) return -1;
+    auto* runtime = rt ? reinterpret_cast<Runtime*>(rt) : &default_runtime();
     auto* task = reinterpret_cast<CoroTask<void>*>(t);
     int rc = 0;
     try {
