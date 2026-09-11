@@ -82,6 +82,28 @@ int32_t reference_ok(PluginRun& run) {
     return ok;
 }
 
+// The reference plugin's tier-2 register_state result: dur summed across
+// every event by the plugin's own dur_sum_update/dur_sum_merge, finalized on
+// the merged master fold.
+std::uint64_t reference_dur_sum(PluginRun& run) {
+    auto it = run.results.results().find("reference_plugin.dur_sum");
+    REQUIRE(it != run.results.results().end());
+    const auto& bytes = std::get<std::vector<std::byte>>(it->second);
+    REQUIRE(bytes.size() == sizeof(std::uint64_t));
+    std::uint64_t sum = 0;
+    std::memcpy(&sum, bytes.data(), sizeof(sum));
+    return sum;
+}
+
+// Independent of the plugin: dur == 10 + i for i in [0, EVENTS), matching
+// make_trace.
+std::uint64_t expected_dur_sum() {
+    std::uint64_t total = 0;
+    for (int i = 0; i < EVENTS; ++i)
+        total += static_cast<std::uint64_t>(10 + i);
+    return total;
+}
+
 }  // namespace
 
 TEST_CASE("reference_plugin: every service reports OK") {
@@ -104,6 +126,7 @@ TEST_CASE("reference_plugin: every service reports OK") {
     CHECK(reference_ok(run) == 1);
     CHECK(report.find("FAIL") == std::string::npos);
     CHECK(report.find("MISSING") == std::string::npos);
+    CHECK(reference_dur_sum(run) == expected_dur_sum());
 }
 
 TEST_CASE("reference_plugin: a forced-missing service fails loudly") {
@@ -126,6 +149,7 @@ TEST_CASE("reference_plugin: a forced-missing service fails loudly") {
     INFO(report);
     CHECK(reference_ok(run) == 0);
     CHECK(report.find("agg: MISSING") != std::string::npos);
+    CHECK(report.find("agg_state: MISSING") != std::string::npos);
 }
 
 #else

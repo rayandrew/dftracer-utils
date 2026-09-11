@@ -122,6 +122,7 @@ static const char* ref_svc_ext_id(ref_svc_id id) {
 static int32_t g_status[REF_SVC_COUNT];
 static int32_t g_provider_ok = REF_PENDING;
 static int32_t g_node_ok = REF_PENDING;
+static int32_t g_state_ok = REF_PENDING;
 static int32_t g_decimal_field_index = -1;
 static char g_force_missing[128];
 
@@ -328,6 +329,94 @@ static dftu_task* double_fn(void* state, const void* in, void* out, int* rc) {
     *rc = 0;
     return NULL;
 }
+
+/* ---- A registered mergeable state (dftu_svc_agg::register_state, tier 2 of
+   the agg service): sums the "dur" column across every batch. Registered from
+   the factory, driven entirely by the host - update per batch, merge at the
+   worker/master fan-in, serialize/deserialize past the memory budget,
+   finalize once - so on_batch and on_finalize never touch it directly. */
+
+#define DUR_SUM_STATE_NAME "reference_plugin.dur_sum"
+
+typedef struct {
+    uint64_t sum;
+} DurSumState;
+
+static void* dur_sum_init(void* self) {
+    (void)self;
+    return calloc(1, sizeof(DurSumState));
+}
+
+static int dur_sum_update(void* state, const dftu_dataframe* df,
+                          dftu_error* err) {
+    DurSumState* s = (DurSumState*)state;
+    dftu_series* dur = dftu_dataframe_column(df, "dur");
+    if (!dur) {
+        if (err) err->message = "reference_plugin.dur_sum: no dur column";
+        return -1;
+    }
+    {
+        const int64_t rows = dftu_series_length(dur);
+        const uint64_t* vals = (const uint64_t*)dftu_series_data(dur);
+        int64_t i;
+        for (i = 0; i < rows; ++i) s->sum += vals[i];
+    }
+    dftu_series_free(dur);
+    return 0;
+}
+
+static int dur_sum_merge(void* into, void* other, dftu_error* err) {
+    (void)err;
+    ((DurSumState*)into)->sum += ((DurSumState*)other)->sum;
+    return 0;
+}
+
+static uint64_t dur_sum_bytes(const void* state) {
+    (void)state;
+    return sizeof(DurSumState);
+}
+
+static void dur_sum_free_buf(void* data, void* ud) {
+    (void)ud;
+    free(data);
+}
+
+static int dur_sum_serialize(const void* state, dftu_bytes* out,
+                             dftu_error* err) {
+    uint64_t* buf;
+    (void)err;
+    buf = (uint64_t*)malloc(sizeof(uint64_t));
+    *buf = ((const DurSumState*)state)->sum;
+    out->data = buf;
+    out->len = sizeof(uint64_t);
+    out->free_fn = dur_sum_free_buf;
+    out->ud = NULL;
+    return 0;
+}
+
+static void* dur_sum_deserialize(void* self, dftu_bytes in, dftu_error* err) {
+    DurSumState* s;
+    (void)self;
+    (void)err;
+    s = (DurSumState*)calloc(1, sizeof(DurSumState));
+    if (in.data && in.len == sizeof(uint64_t))
+        memcpy(&s->sum, in.data, sizeof(uint64_t));
+    return s;
+}
+
+static uint64_t g_dur_sum_result;
+
+static int dur_sum_finalize(void* state, dftu_result_value* out,
+                            dftu_error* err) {
+    (void)err;
+    g_dur_sum_result = ((DurSumState*)state)->sum;
+    out->kind = DFTU_RESULT_KIND_BYTES;
+    out->u.bytes.data = &g_dur_sum_result;
+    out->u.bytes.len = sizeof(g_dur_sum_result);
+    return 0;
+}
+
+static void dur_sum_destroy(void* state) { free(state); }
 
 /* ---- coro run_blocking probe. */
 
@@ -769,10 +858,14 @@ static void finalize_tail(FinalizeCtx* ctx) {
         }
         if (g_provider_ok != REF_OK) all_ok = 0;
         if (g_node_ok != REF_OK) all_ok = 0;
+        if (g_state_ok != REF_OK) all_ok = 0;
         off += snprintf(report + off, sizeof(report) - (size_t)off,
-                        "provider: %s\nnode: %s\n",
+                        "provider: %s\nnode: %s\nagg_state: %s\n",
                         g_provider_ok == REF_OK ? "OK" : "FAIL",
-                        g_node_ok == REF_OK ? "OK" : "FAIL");
+                        g_node_ok == REF_OK ? "OK" : "FAIL",
+                        g_state_ok == REF_OK
+                            ? "OK"
+                            : (g_state_ok == REF_MISSING ? "MISSING" : "FAIL"));
         if (res) {
             dftu_result_value v;
             memset(&v, 0, sizeof(v));
@@ -935,6 +1028,8 @@ static void destroy(void* self) {
     memset(g_status, 0, sizeof(g_status));
     g_provider_ok = REF_PENDING;
     g_node_ok = REF_PENDING;
+    g_state_ok = REF_PENDING;
+    g_dur_sum_result = 0;
     g_decimal_field_index = -1;
     g_force_missing[0] = '\0';
     free(cfg);
@@ -979,6 +1074,33 @@ DFTU_PLUGIN_EXPORT dftu_plugin* dftracer_plugin(dftu_plugin_host* h,
     if (providers && providers->register_provider)
         providers->register_provider(h->h, "reference_plugin.src", &SRC_VT,
                                      NULL);
+
+    /* register_state is callable only from the factory: by run time the
+       registry the host plans from is settled. */
+    {
+        const dftu_svc_agg* agg_reg =
+            (const dftu_svc_agg*)ref_get_service(h, REF_SVC_AGG);
+        if (agg_reg && agg_reg->register_state) {
+            dftu_state_desc desc;
+            memset(&desc, 0, sizeof(desc));
+            desc.name = DUR_SUM_STATE_NAME;
+            desc.init = dur_sum_init;
+            desc.update = dur_sum_update;
+            desc.merge = dur_sum_merge;
+            desc.bytes = dur_sum_bytes;
+            desc.serialize = dur_sum_serialize;
+            desc.deserialize = dur_sum_deserialize;
+            desc.finalize = dur_sum_finalize;
+            desc.destroy = dur_sum_destroy;
+            g_state_ok = agg_reg->register_state(h->h, &desc, NULL) == 0
+                             ? REF_OK
+                             : REF_FAIL;
+        } else if (!agg_reg) {
+            g_state_ok = REF_MISSING;
+        } else {
+            g_state_ok = REF_FAIL;
+        }
+    }
 
     dftu_node_register("reference_plugin.node", &NODE_VT, NULL);
 
