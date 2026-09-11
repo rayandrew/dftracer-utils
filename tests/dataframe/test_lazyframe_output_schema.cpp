@@ -126,6 +126,21 @@ DataFrame basic_frame() {
     return df;
 }
 
+// Two groups of three rows, wide enough to exercise every AggOp: a numeric
+// value column, a by-column linearly related to it (co-moment/argmax/list
+// ops), a raw-repr string column, and a ts/dur pair for occupancy.
+DataFrame mixed_frame() {
+    DataFrame df;
+    df.names = {"cat", "a", "b", "s", "ts", "dur"};
+    df.columns.push_back(Series::strings({"x", "x", "x", "y", "y", "y"}));
+    df.columns.push_back(i64({1, 2, 3, 10, 20, 30}));
+    df.columns.push_back(f64({1.5, 2.5, 3.5, 10.5, 20.5, 30.5}));
+    df.columns.push_back(Series::strings({"p", "q", "r", "m", "n", "o"}));
+    df.columns.push_back(i64({100, 150, 200, 1000, 1050, 1100}));
+    df.columns.push_back(i64({10, 20, 15, 5, 25, 10}));
+    return df;
+}
+
 }  // namespace
 
 TEST_SUITE("LazyFrame output_schema") {
@@ -286,4 +301,167 @@ TEST_SUITE("LazyFrame output_schema") {
                            .head(3);
         check_matches_collect(lf);
     }
+
+    TEST_CASE(
+        "group_by types Var/Std/Skew/Kurt/SumSq/CountValid/Pct/Hist as "
+        "Float64/Int64/nested") {
+        LazyFrame lf =
+            LazyFrame::scan(src(mixed_frame()))
+                .group_by("cat", {GroupAgg{Agg::Var, "a", "var_a"},
+                                  GroupAgg{Agg::Std, "a", "std_a"},
+                                  GroupAgg{Agg::Skew, "a", "skew_a"},
+                                  GroupAgg{Agg::Kurt, "a", "kurt_a"},
+                                  GroupAgg{Agg::SumSq, "a", "sumsq_a"},
+                                  GroupAgg{Agg::CountValid, "a", "cv_a"},
+                                  GroupAgg{Agg::Pct, "a", "p50_a", 0.5},
+                                  GroupAgg{Agg::Hist, "a", "hist_a"}});
+        Schema s = lf.output_schema();
+        REQUIRE(s.fields.size() == 9);
+        CHECK(s.fields[1] == Field{"var_a", scalar(TypeId::Float64), true});
+        CHECK(s.fields[2] == Field{"std_a", scalar(TypeId::Float64), true});
+        CHECK(s.fields[3] == Field{"skew_a", scalar(TypeId::Float64), true});
+        CHECK(s.fields[4] == Field{"kurt_a", scalar(TypeId::Float64), true});
+        CHECK(s.fields[5] == Field{"sumsq_a", scalar(TypeId::Float64), true});
+        CHECK(s.fields[6] == Field{"cv_a", scalar(TypeId::Int64), true});
+        CHECK(s.fields[7] == Field{"p50_a", scalar(TypeId::Float64), true});
+        CHECK(s.fields[8] ==
+              Field{"hist_a",
+                    list_of(struct_of(
+                        {Field{"lo", scalar(TypeId::Float64), true},
+                         Field{"hi", scalar(TypeId::Float64), true},
+                         Field{"count", scalar(TypeId::Uint64), true}})),
+                    true});
+        check_matches_collect(lf);
+    }
+
+    TEST_CASE(
+        "group_by types First/Last from the value column, Int64 widened and "
+        "String passed through") {
+        LazyFrame lf =
+            LazyFrame::scan(src(mixed_frame()))
+                .group_by("cat", {GroupAgg{Agg::First, "a", "first_a"},
+                                  GroupAgg{Agg::Last, "a", "last_a"},
+                                  GroupAgg{Agg::First, "s", "first_s"},
+                                  GroupAgg{Agg::Last, "s", "last_s"}});
+        Schema s = lf.output_schema();
+        REQUIRE(s.fields.size() == 5);
+        CHECK(s.fields[1] == Field{"first_a", scalar(TypeId::Int64), true});
+        CHECK(s.fields[2] == Field{"last_a", scalar(TypeId::Int64), true});
+        CHECK(s.fields[3] == Field{"first_s", scalar(TypeId::String), true});
+        CHECK(s.fields[4] == Field{"last_s", scalar(TypeId::String), true});
+        check_matches_collect(lf);
+    }
+
+    TEST_CASE("group_by types ArgMax/ArgMin/BitOr/Distinct/SetUnion") {
+        LazyFrame lf =
+            LazyFrame::scan(src(mixed_frame()))
+                .group_by("cat",
+                          {GroupAgg{Agg::ArgMax, "s", "argmax_s", 0, "b"},
+                           GroupAgg{Agg::ArgMin, "s", "argmin_s", 0, "b"},
+                           GroupAgg{Agg::BitOr, "a", "bitor_a"},
+                           GroupAgg{Agg::Distinct, "s", "distinct_s", 4},
+                           GroupAgg{Agg::SetUnion, "s", "setunion_s"}});
+        Schema s = lf.output_schema();
+        REQUIRE(s.fields.size() == 6);
+        CHECK(s.fields[1] == Field{"argmax_s", scalar(TypeId::String), true});
+        CHECK(s.fields[2] == Field{"argmin_s", scalar(TypeId::String), true});
+        CHECK(s.fields[3] == Field{"bitor_a", scalar(TypeId::Uint64), true});
+        CHECK(s.fields[4] == Field{"distinct_s", scalar(TypeId::Int64), true});
+        CHECK(s.fields[5] == Field{"setunion_s", scalar(TypeId::String), true});
+        check_matches_collect(lf);
+    }
+
+    TEST_CASE(
+        "group_by types the list-valued aggregates ListSorted/TopK/BottomK/"
+        "ApproxTopK/Sample") {
+        LazyFrame lf =
+            LazyFrame::scan(src(mixed_frame()))
+                .group_by("cat",
+                          {GroupAgg{Agg::ListSorted, "s", "list_s", 0, "b"},
+                           GroupAgg{Agg::TopK, "s", "topk_s", 2, "b"},
+                           GroupAgg{Agg::BottomK, "s", "bottomk_s", 2, "b"},
+                           GroupAgg{Agg::ApproxTopK, "s", "approxtopk_s", 3},
+                           GroupAgg{Agg::Sample, "s", "sample_s", 2}});
+        Schema s = lf.output_schema();
+        REQUIRE(s.fields.size() == 6);
+        CHECK(s.fields[1] ==
+              Field{"list_s", list_of(scalar(TypeId::String)), true});
+        CHECK(s.fields[2] ==
+              Field{"topk_s", list_of(scalar(TypeId::String)), true});
+        CHECK(s.fields[3] ==
+              Field{"bottomk_s", list_of(scalar(TypeId::String)), true});
+        CHECK(s.fields[4] ==
+              Field{"approxtopk_s",
+                    list_of(struct_of(
+                        {Field{"value", scalar(TypeId::String), true},
+                         Field{"count", scalar(TypeId::Uint64), true}})),
+                    true});
+        CHECK(s.fields[5] ==
+              Field{"sample_s", list_of(scalar(TypeId::String)), true});
+        check_matches_collect(lf);
+    }
+
+    TEST_CASE("group_by types the co-moment aggregates as Float64") {
+        LazyFrame lf =
+            LazyFrame::scan(src(mixed_frame()))
+                .group_by(
+                    "cat",
+                    {GroupAgg{Agg::Corr, "b", "corr_ab", 0, "a"},
+                     GroupAgg{Agg::CovarPop, "b", "covpop_ab", 0, "a"},
+                     GroupAgg{Agg::CovarSamp, "b", "covsamp_ab", 0, "a"},
+                     GroupAgg{Agg::RegrSlope, "b", "slope_ab", 0, "a"},
+                     GroupAgg{Agg::RegrIntercept, "b", "intercept_ab", 0, "a"},
+                     GroupAgg{Agg::RegrR2, "b", "r2_ab", 0, "a"}});
+        Schema s = lf.output_schema();
+        REQUIRE(s.fields.size() == 7);
+        for (std::size_t i = 1; i < s.fields.size(); ++i)
+            CHECK(s.fields[i].type == scalar(TypeId::Float64));
+        check_matches_collect(lf);
+    }
+
+    TEST_CASE("group_by types the occupancy aggregates as Float64") {
+        LazyFrame lf =
+            LazyFrame::scan(src(mixed_frame()))
+                .group_by("cat",
+                          {GroupAgg{Agg::Busy, "ts", "busy", 0, "dur"},
+                           GroupAgg{Agg::Concurrency, "ts", "conc", 0, "dur"},
+                           GroupAgg{Agg::Utilization, "ts", "util", 0, "dur"},
+                           GroupAgg{Agg::Active, "ts", "active", 0, "dur"}});
+        Schema s = lf.output_schema();
+        REQUIRE(s.fields.size() == 5);
+        for (std::size_t i = 1; i < s.fields.size(); ++i)
+            CHECK(s.fields[i].type == scalar(TypeId::Float64));
+        check_matches_collect(lf);
+    }
+
+#ifdef DFTRACER_UTILS_ENABLE_ARROW
+    TEST_CASE(
+        "group_by widens a Decimal128 or Timestamp value column through the "
+        "Int64 domain") {
+        DataFrame df;
+        df.names = {"cat", "dec", "ts"};
+        df.columns.push_back(Series::strings({"x", "x", "y"}));
+        df.columns.push_back(make_decimal128(38, 9, {100, 200, 300}));
+        df.columns.push_back(
+            make_timestamp({1, 2, 3}, TimeUnit::Micro, "America/Chicago"));
+        LazyFrame lf =
+            LazyFrame::scan(src(std::move(df)))
+                .group_by("cat", {GroupAgg{Agg::Sum, "dec", "sum_dec"},
+                                  GroupAgg{Agg::First, "dec", "first_dec"},
+                                  GroupAgg{Agg::Sum, "ts", "sum_ts"},
+                                  GroupAgg{Agg::First, "ts", "first_ts"}});
+        Schema s = lf.output_schema();
+        REQUIRE(s.fields.size() == 5);
+        // Decimal128 and Timestamp both fall through col_domain's default
+        // branch to I64, so Sum/First widen to plain Int64: the decimal's
+        // scale and the timestamp's unit/timezone are both lost. Documented
+        // in agg_output_type's contract; agg_finalize does the same, so this
+        // is a real limitation, not a schema/collect() disagreement.
+        CHECK(s.fields[1] == Field{"sum_dec", scalar(TypeId::Int64), true});
+        CHECK(s.fields[2] == Field{"first_dec", scalar(TypeId::Int64), true});
+        CHECK(s.fields[3] == Field{"sum_ts", scalar(TypeId::Int64), true});
+        CHECK(s.fields[4] == Field{"first_ts", scalar(TypeId::Int64), true});
+        check_matches_collect(lf);
+    }
+#endif  // DFTRACER_UTILS_ENABLE_ARROW
 }
