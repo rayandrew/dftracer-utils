@@ -106,6 +106,13 @@ bool is_nestable(TypeId id) {
     }
 }
 
+/// How many children `id` accepts: a Struct takes any number, every other
+/// nestable takes exactly one (the element, or a Map's entries).
+bool accepts_another_child(const DataType& dt) {
+    if (!is_nestable(dt.id)) return false;
+    return dt.id == TypeId::Struct || dt.fields.empty();
+}
+
 Field to_field(const char* name, ::dftu_dtype type, std::int32_t nullable,
                ::dftu_time_unit time_unit, const char* tz,
                std::int32_t decimal_precision, std::int32_t decimal_scale,
@@ -340,7 +347,11 @@ int32_t dftu_schema_add_child_field(dftu_schema* schema, int32_t parent_index,
     if (type < DFTU_TYPE_UNKNOWN || type > DFTU_TYPE_MAP) return -1;
     dftracer::utils::dataframe::Field* parent =
         dftracer::utils::dataframe::resolve_field(schema, parent_index);
-    if (!parent || !dftracer::utils::dataframe::is_nestable(parent->type.id))
+    // Refused at the call that would break the shape, so a schema under
+    // construction is never in a state to_schema has to throw away: a second
+    // element under a List is rejected here rather than discovered at the end.
+    if (!parent ||
+        !dftracer::utils::dataframe::accepts_another_child(parent->type))
         return -1;
 
     parent->type.fields.push_back(dftracer::utils::dataframe::to_field(

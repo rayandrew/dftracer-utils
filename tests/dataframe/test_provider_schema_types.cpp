@@ -134,15 +134,19 @@ void nested(void*, dftu_schema* s) {
                                 DFTU_TIME_UNIT_MICRO, nullptr, 0, 0, 0);
 }
 
-// Claims a List with two children, which is malformed (a List holds exactly
-// one element type): the whole schema must be discarded, not half-applied.
+// A List holds exactly one element type, so the second child is refused at
+// the call. Records both return values so the test can assert the refusal
+// happens there rather than being discovered when the schema is converted.
+std::int32_t g_second_child_result = 0;
+
 void malformed_list(void*, dftu_schema* s) {
     int32_t list_idx = dftu_schema_add_field(
         s, "tags", DFTU_TYPE_LIST, 1, DFTU_TIME_UNIT_MICRO, nullptr, 0, 0, 0);
     dftu_schema_add_child_field(s, list_idx, "a", DFTU_TYPE_INT64, 1,
                                 DFTU_TIME_UNIT_MICRO, nullptr, 0, 0, 0);
-    dftu_schema_add_child_field(s, list_idx, "b", DFTU_TYPE_INT64, 1,
-                                DFTU_TIME_UNIT_MICRO, nullptr, 0, 0, 0);
+    g_second_child_result =
+        dftu_schema_add_child_field(s, list_idx, "b", DFTU_TYPE_INT64, 1,
+                                    DFTU_TIME_UNIT_MICRO, nullptr, 0, 0, 0);
 }
 
 }  // namespace
@@ -200,11 +204,17 @@ TEST_SUITE("provider schema types") {
         CHECK(point.fields[1].type.id == TypeId::String);
     }
 
-    TEST_CASE("a malformed nested declaration discards the whole schema") {
+    TEST_CASE("a second element under a List is refused at the call") {
+        g_second_child_result = 0;
         Fixture fx{{"tags"}, malformed_list};
         Schema s = make_fixture(fx)->schema();
+        // Refused where it happens, so the builder never holds a shape that
+        // would have to be thrown away later.
+        CHECK(g_second_child_result == -1);
         REQUIRE(s.fields.size() == 1);
-        CHECK(s.fields[0].type.id == TypeId::Unknown);
+        CHECK(s.fields[0].type.id == TypeId::List);
+        REQUIRE(s.fields[0].type.fields.size() == 1);
+        CHECK(s.fields[0].type.fields[0].type.id == TypeId::Int64);
     }
 
     TEST_CASE("a provider declaring nothing still works and reports Unknown") {
