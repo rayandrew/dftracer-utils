@@ -38,6 +38,12 @@ std::vector<const Series*> column_ptrs(const std::vector<Series>& cols) {
     return in;
 }
 
+int column_index_of(const std::vector<std::string>& names,
+                    const std::string& name) {
+    auto it = std::find(names.begin(), names.end(), name);
+    return it == names.end() ? -1 : static_cast<int>(it - names.begin());
+}
+
 // Default scan chunk when the caller does not set one (morsel_rows <= 0).
 constexpr std::int64_t DEFAULT_MORSEL_ROWS = 65536;
 
@@ -364,6 +370,9 @@ class FilterCursor : public Cursor {
     }
 
    private:
+    // Dropping rows can only shrink the surviving set of an already-ordered
+    // column - it cannot move one kept row before another - so a ByColumn
+    // claim on the input survives filtering unchanged.
     std::optional<Morsel> apply(Morsel&& m) {
         Series mask = eval(pred_, column_ptrs(m.columns));
         DataFrame tmp;
@@ -376,6 +385,9 @@ class FilterCursor : public Cursor {
             out.columns.push_back(c.materialize());
         out.rows = out.columns.empty() ? 0 : out.columns.front().length();
         if (out.rows == 0) return std::nullopt;
+        out.ordering = m.ordering;
+        out.ordered_column = m.ordered_column;
+        out.ordered_descending = m.ordered_descending;
         return out;
     }
 
@@ -446,6 +458,11 @@ class FilterMaskCursor : public Cursor {
             out.columns.push_back(c.materialize());
         out.rows = out.columns.empty() ? 0 : out.columns.front().length();
         if (out.rows == 0) return std::nullopt;
+        // Same argument as FilterCursor::apply: dropping rows cannot break a
+        // sortedness claim on the survivors.
+        out.ordering = m.ordering;
+        out.ordered_column = m.ordered_column;
+        out.ordered_descending = m.ordered_descending;
         return out;
     }
 
@@ -474,11 +491,23 @@ class SelectCursor : public Cursor {
     }
 
    private:
+    // Selection keeps rows and their order, but renumbers columns; a
+    // ByColumn claim survives only if the ordered column is still present,
+    // and must be remapped to its new position.
     Morsel apply(Morsel&& m) {
         Morsel out;
         out.rows = m.rows;
         out.batch_index = m.batch_index;
         out.ordering = m.ordering;
+        out.ordered_descending = m.ordered_descending;
+        if (m.ordering == Ordering::ByColumn) {
+            auto it = std::find(idx_.begin(), idx_.end(), m.ordered_column);
+            if (it != idx_.end())
+                out.ordered_column =
+                    static_cast<std::int32_t>(it - idx_.begin());
+            else
+                out.ordering = Ordering::Unordered;
+        }
         out.columns.reserve(idx_.size());
         for (int i : idx_) out.columns.push_back(m.columns[i].share());
         return out;
@@ -508,12 +537,20 @@ class WithColumnCursor : public Cursor {
     }
 
    private:
+    // Adding a column, or replacing one other than the ordered column,
+    // leaves row order and every other column's position untouched. Replacing
+    // the ordered column itself invalidates the claim: the new values have no
+    // known relation to it.
     Morsel apply(Morsel&& m) {
         Series nc = eval(expr_, column_ptrs(m.columns));
         Morsel out;
         out.rows = m.rows;
         out.batch_index = m.batch_index;
         out.ordering = m.ordering;
+        out.ordered_column = m.ordered_column;
+        out.ordered_descending = m.ordered_descending;
+        if (m.ordering == Ordering::ByColumn && replace_ == m.ordered_column)
+            out.ordering = Ordering::Unordered;
         out.columns = std::move(m.columns);
         out.dyn_names = std::move(m.dyn_names);
         out.dyn_columns = std::move(m.dyn_columns);
@@ -747,13 +784,25 @@ class FillNullCursor : public Cursor {
     }
 
    private:
+    // Filling nulls keeps rows and columns in place, but nulls sort last
+    // (cmp_cell); replacing them with a concrete value can move what was the
+    // tail of the ordered column anywhere, so the claim only survives when
+    // that column had no nulls to fill.
     Morsel apply(Morsel&& m) {
         const std::int64_t bi = m.batch_index;
         const Ordering ord = m.ordering;
+        const std::int32_t ordered_column = m.ordered_column;
+        const bool ordered_descending = m.ordered_descending;
+        const bool ordered_col_had_nulls =
+            ord == Ordering::ByColumn &&
+            m.columns[static_cast<std::size_t>(ordered_column)].null_count() >
+                0;
         Morsel out = map_frame(
             std::move(m), [&](DataFrame f) { return f.fill_null(value_); });
         out.batch_index = bi;
-        out.ordering = ord;
+        out.ordering = ordered_col_had_nulls ? Ordering::Unordered : ord;
+        out.ordered_column = ordered_column;
+        out.ordered_descending = ordered_descending;
         return out;
     }
 
@@ -780,6 +829,10 @@ class WithRowIndexCursor : public Cursor {
     }
 
    private:
+    // This cursor pulls upstream strictly sequentially (one next() at a
+    // time, no fan-out), so the counter it prepends is genuinely
+    // monotonically increasing across the whole output regardless of what
+    // upstream claimed - always the stronger, always-true claim.
     Morsel apply(Morsel&& m) {
         std::vector<std::int64_t> idx(static_cast<std::size_t>(m.rows));
         for (std::int64_t i = 0; i < m.rows; ++i) idx[i] = pos_ + i;
@@ -787,7 +840,9 @@ class WithRowIndexCursor : public Cursor {
         Morsel out;
         out.rows = m.rows;
         out.batch_index = m.batch_index;
-        out.ordering = m.ordering;
+        out.ordering = Ordering::ByColumn;
+        out.ordered_column = 0;
+        out.ordered_descending = false;
         out.columns.reserve(m.columns.size() + 1);
         out.columns.push_back(Series::flat_i64(idx.data(), m.rows));
         for (Series& c : m.columns) out.columns.push_back(std::move(c));
@@ -1453,6 +1508,13 @@ class SortMergeCursor : public Cursor {
             for (auto& pc : pieces) parts.push_back(&pc[c]);
             out.columns.push_back(concat_columns(parts));
         }
+        // The k-way merge always picks the globally smallest key across the
+        // whole call sequence (pos_/cur_ persist between next() calls), so
+        // the concatenation of every morsel this cursor ever returns is
+        // sorted by key_, not just each one in isolation.
+        out.ordering = Ordering::ByColumn;
+        out.ordered_column = key_idx_;
+        out.ordered_descending = descending_;
         co_return out;
     }
 
@@ -2574,7 +2636,22 @@ class SortByMultiCursor : public Cursor {
         in_.reset();
         std::unique_ptr<Cursor> reader = spool_.reader();
         DataFrame df = co_await drain_cursor(*reader, sch_, max_rows);
-        co_return morsel_of(df.sort_by_multi(by_, descending_));
+        Morsel out = morsel_of(df.sort_by_multi(by_, descending_));
+        // A stable sort keeps the leading key's values non-decreasing (or
+        // non-increasing) across the whole output regardless of how ties are
+        // broken by the trailing keys, so that alone is a true claim.
+        // Recording every key would need a per-morsel vector instead of one
+        // int - real weight on the hot struct for a multi-column claim no
+        // consumer reads yet.
+        if (!by_.empty()) {
+            const int key_idx = column_index_of(sch_, by_.front());
+            if (key_idx >= 0) {
+                out.ordering = Ordering::ByColumn;
+                out.ordered_column = key_idx;
+                out.ordered_descending = descending_.front();
+            }
+        }
+        co_return out;
     }
 
    private:

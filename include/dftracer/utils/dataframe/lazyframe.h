@@ -17,12 +17,15 @@
 
 namespace dftracer::utils::dataframe {
 
-/// Whether `batch_index` says anything about row order. Sequence means it is
-/// contiguous from 0 and morsels arrive in production order; a producer that
-/// cannot promise that reports Unordered.
+/// Whether a morsel says anything about row order. Sequence means
+/// `batch_index` is contiguous from 0 and morsels arrive in production order.
+/// ByColumn means this and every later morsel from the same cursor are ordered
+/// by `Morsel::ordered_column`; the claim covers the whole stream, not one
+/// morsel. A producer that can promise neither reports Unordered.
 enum class Ordering {
     Unordered,
     Sequence,
+    ByColumn,
 };
 
 /// A chunk of columns flowing through the lazy pipeline. Carries no names - the
@@ -44,8 +47,12 @@ struct Morsel {
     std::vector<Series> dyn_columns;
     /// -1 when the producer keeps none.
     std::int64_t batch_index = -1;
-    /// Opt in explicitly; an operation that reorders rows must reset this.
+    /// Opt in explicitly; an operation that reorders, drops, or adds rows
+    /// must reset this unless it can prove the property still holds.
     Ordering ordering = Ordering::Unordered;
+    /// Index into `columns`, valid only when `ordering == ByColumn`.
+    std::int32_t ordered_column = -1;
+    bool ordered_descending = false;
 };
 
 /// A stateful reader over one Source. next() returns the next morsel, or
