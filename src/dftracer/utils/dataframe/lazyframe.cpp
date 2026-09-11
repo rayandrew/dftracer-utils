@@ -288,7 +288,24 @@ class InMemoryCursor : public Cursor {
         : frame_(std::move(frame)), n_(frame_->num_rows()) {}
 
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
-        if (off_ >= n_) co_return std::nullopt;
+        std::optional<Morsel> out;
+        fill(max_rows, out);
+        co_return out;
+    }
+
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        fill(max_rows, out);
+        return true;
+    }
+
+   private:
+    // Never suspends: the whole frame is already resident, so next() and
+    // try_next() share this synchronous slice logic.
+    void fill(std::int64_t max_rows, std::optional<Morsel>& out) {
+        if (off_ >= n_) {
+            out.reset();
+            return;
+        }
         const std::int64_t len =
             std::min(std::max<std::int64_t>(max_rows, 1), n_ - off_);
         DataFrame chunk = frame_->slice(off_, len);
@@ -297,10 +314,9 @@ class InMemoryCursor : public Cursor {
         m.rows = len;
         m.columns.reserve(chunk.columns.size());
         for (Series& c : chunk.columns) m.columns.push_back(std::move(c));
-        co_return m;
+        out = std::move(m);
     }
 
-   private:
     std::shared_ptr<const DataFrame> frame_;
     std::int64_t n_;
     std::int64_t off_ = 0;
@@ -1782,9 +1798,38 @@ class HostCursorBridge {
         }
     }
 
+    // Fills *out and returns true when cursor_->try_next answered without
+    // suspending; false leaves *out untouched so the caller falls back to
+    // next_task. Mirrors next_task's success/error/end-of-stream shapes
+    // exactly, so a plugin node cannot tell which path answered it apart
+    // from the NULL return.
+    bool try_next_sync(std::int64_t max_rows, ::dftu_result_frame* out) {
+        std::optional<Morsel> m;
+        try {
+            if (!cursor_->try_next(max_rows, m)) return false;
+        } catch (const std::exception& e) {
+            last_error_ = e.what();
+            out->ok = 0;
+            out->u.err =
+                ::dftu_error{0, 0, DFTU_COND_INTERNAL, last_error_.c_str()};
+            return true;
+        }
+        if (!m) {
+            out->ok = 1;
+            out->u.value = nullptr;
+            return true;
+        }
+        DataFrame df =
+            frame_from_morsel(std::move(*m), schema_, cursor_->out_names());
+        out->ok = 1;
+        out->u.value = dataframe_handle_wrap(std::move(df));
+        return true;
+    }
+
     static ::dftu_task* next_thunk(void* self, std::int64_t max_rows,
                                    ::dftu_result_frame* out) {
         auto* self_ = static_cast<HostCursorBridge*>(self);
+        if (self_->try_next_sync(max_rows, out)) return nullptr;
         return task_to_abi(self_->next_task(max_rows, out));
     }
     static void destroy_thunk(void* self) {

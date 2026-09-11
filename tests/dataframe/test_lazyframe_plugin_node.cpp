@@ -7,6 +7,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <dftracer/utils/core/coro/task.h>
 #include <dftracer/utils/core/coro/task_abi.h>
+#include <dftracer/utils/core/coro/yield.h>
 #include <dftracer/utils/core/runtime.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/provider_source.h>
@@ -14,17 +15,23 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 using dftracer::utils::coro::CoroTask;
 using dftracer::utils::dataframe::col;
+using dftracer::utils::dataframe::Cursor;
 using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::LazyFrame;
 using dftracer::utils::dataframe::make_provider_source;
+using dftracer::utils::dataframe::Morsel;
 using dftracer::utils::dataframe::OpArgs;
 using dftracer::utils::dataframe::Schema;
+using dftracer::utils::dataframe::Series;
 using dftracer::utils::dataframe::Source;
 using dftracer::utils::dataframe::TimeUnit;
 using dftracer::utils::dataframe::TypeId;
@@ -232,6 +239,144 @@ void* recording_node_open(void* self, void* in_self,
     *out_vt = &DOUBLE_CURSOR_VT;
     return st;
 }
+
+// ---- "test.sync_probe.*": a transparent node that forwards in_vt->next
+// unchanged (same *out, same returned task pointer), recording per-call
+// whether the upstream answered with a NULL task. Exercises the
+// HostCursorBridge::next_thunk fast path from the plugin-node side of the
+// ABI, the same way a real node's own next() would observe it. ----------
+
+struct ProbeCursorState {
+    void* in_self;
+    const dftu_cursor_vt* in_vt;
+    std::vector<bool>* sync_flags;
+};
+
+dftu_task* probe_cursor_next(void* self, std::int64_t max_rows,
+                             dftu_result_frame* out) {
+    auto* st = static_cast<ProbeCursorState*>(self);
+    dftu_task* t = st->in_vt->next(st->in_self, max_rows, out);
+    st->sync_flags->push_back(t == nullptr);
+    return t;
+}
+
+void probe_cursor_destroy(void* self) {
+    auto* st = static_cast<ProbeCursorState*>(self);
+    if (st->in_vt->destroy) st->in_vt->destroy(st->in_self);
+    delete st;
+}
+
+const dftu_cursor_vt PROBE_CURSOR_VT = {probe_cursor_next,
+                                        probe_cursor_destroy};
+
+void probe_node_schema(void*, const dftu_schema* in, const dftu_op_arg*,
+                       dftu_schema* out) {
+    const int32_t n = dftu_schema_field_count(in);
+    for (int32_t i = 0; i < n; ++i) dftu_schema_copy_field(out, in, i);
+}
+
+void* probe_node_open(void* self, void* in_self, const dftu_cursor_vt* in_vt,
+                      const dftu_op_arg*, void** out_self,
+                      const dftu_cursor_vt** out_vt) {
+    auto* flags = static_cast<std::vector<bool>*>(self);
+    auto* st = new ProbeCursorState{in_self, in_vt, flags};
+    *out_self = st;
+    *out_vt = &PROBE_CURSOR_VT;
+    return st;
+}
+
+dftu_node_vt make_probe_vt() {
+    dftu_node_vt vt{};
+    vt.output_schema = probe_node_schema;
+    vt.open = probe_node_open;
+    return vt;
+}
+
+// A Source handing out a fresh Cursor from `factory` per scan(), so a test
+// can drive the probe node over a hand-written host-native Cursor fixture
+// (a resident cursor that answers via try_next, or one that genuinely
+// suspends via coro::yield).
+class CursorSource : public Source {
+   public:
+    explicit CursorSource(std::function<std::unique_ptr<Cursor>()> factory)
+        : factory_(std::move(factory)) {}
+    Schema schema() const override {
+        return {{dftracer::utils::dataframe::Field{
+            "val", dftracer::utils::dataframe::scalar(TypeId::Int64), true}}};
+    }
+    dftracer::utils::dataframe::ScanResult scan(
+        const dftracer::utils::dataframe::ScanRequest& req) const override {
+        dftracer::utils::dataframe::ScanResult r;
+        r.cursor = factory_();
+        r.filters.assign(req.filters.size(),
+                         dftracer::utils::dataframe::Pushed::No);
+        return r;
+    }
+
+   private:
+    std::function<std::unique_ptr<Cursor>()> factory_;
+};
+
+// Answers synchronously via try_next: one row, then end of stream (or, when
+// `throw_on_call` matches, a synchronous exception instead of a morsel).
+class ThrowingSyncCursor : public Cursor {
+   public:
+    explicit ThrowingSyncCursor(int throw_on_call = -1)
+        : throw_on_call_(throw_on_call) {}
+
+    CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
+        std::optional<Morsel> out;
+        fill(max_rows, out);
+        co_return out;
+    }
+    bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
+        fill(max_rows, out);
+        return true;
+    }
+
+   private:
+    void fill(std::int64_t, std::optional<Morsel>& out) {
+        ++calls_;
+        if (calls_ == throw_on_call_) throw std::runtime_error("sync boom");
+        if (calls_ > 1) {
+            out.reset();
+            return;
+        }
+        std::vector<std::int64_t> v{9};
+        Morsel m;
+        m.columns.push_back(Series::flat_i64(v.data(), 1));
+        m.rows = 1;
+        out = std::move(m);
+    }
+
+    int throw_on_call_;
+    int calls_ = 0;
+};
+
+// Genuinely suspends every call (co_await coro::yield() always reschedules
+// on the executor), then answers exactly like ThrowingSyncCursor's data
+// shape so the two are comparable value-for-value.
+class ThrowingAsyncCursor : public Cursor {
+   public:
+    explicit ThrowingAsyncCursor(int throw_on_call = -1)
+        : throw_on_call_(throw_on_call) {}
+
+    CoroTask<std::optional<Morsel>> next(std::int64_t) override {
+        co_await dftracer::utils::coro::yield();
+        ++calls_;
+        if (calls_ == throw_on_call_) throw std::runtime_error("async boom");
+        if (calls_ > 1) co_return std::nullopt;
+        std::vector<std::int64_t> v{9};
+        Morsel m;
+        m.columns.push_back(Series::flat_i64(v.data(), 1));
+        m.rows = 1;
+        co_return m;
+    }
+
+   private:
+    int throw_on_call_;
+    int calls_ = 0;
+};
 
 }  // namespace
 
@@ -478,5 +623,105 @@ TEST_SUITE("lazyframe plugin node") {
         CHECK(out.columns[0].data<std::int64_t>()[0] == 7);
 
         CHECK(dftu_node_unregister("test.count_breaker") == 0);
+    }
+
+    TEST_CASE(
+        "a node over a resident source observes next() returning NULL "
+        "(sync path)") {
+        std::vector<bool> sync_flags;
+        dftu_node_vt vt = make_probe_vt();
+        REQUIRE(dftu_node_register("test.sync_probe.resident", &vt,
+                                   &sync_flags) == 0);
+
+        DataFrame df;
+        df.names = {"val"};
+        std::vector<std::int64_t> v{1, 2, 3};
+        df.columns.push_back(Series::flat_i64(v.data(), 3));
+
+        LazyFrame lf = df.lazy().op("test.sync_probe.resident", OpArgs());
+        DataFrame out = run(lf.collect());
+
+        REQUIRE(out.num_rows() == 3);
+        CHECK(out.columns[0].data<std::int64_t>()[0] == 1);
+        CHECK(out.columns[0].data<std::int64_t>()[1] == 2);
+        CHECK(out.columns[0].data<std::int64_t>()[2] == 3);
+
+        // The defect under test: an in-memory upstream can always answer
+        // without suspending, so the node's own in_vt->next() call must get
+        // a NULL task back every time, never a heap-allocated one it then
+        // has to await for data it already had.
+        REQUIRE(!sync_flags.empty());
+        for (bool synced : sync_flags) CHECK(synced);
+
+        CHECK(dftu_node_unregister("test.sync_probe.resident") == 0);
+    }
+
+    TEST_CASE(
+        "a node over a genuinely suspending source still gets a task and "
+        "the right values") {
+        std::vector<bool> sync_flags;
+        dftu_node_vt vt = make_probe_vt();
+        REQUIRE(dftu_node_register("test.sync_probe.async", &vt, &sync_flags) ==
+                0);
+
+        auto src = std::make_shared<CursorSource>(
+            [] { return std::make_unique<ThrowingAsyncCursor>(); });
+        LazyFrame lf =
+            LazyFrame::scan(src).op("test.sync_probe.async", OpArgs());
+        DataFrame out = run(lf.collect());
+
+        REQUIRE(out.num_rows() == 1);
+        CHECK(out.columns[0].data<std::int64_t>()[0] == 9);
+
+        // Every call genuinely suspended (coro::yield always reschedules),
+        // so the node's in_vt->next() must have gotten a real task back.
+        REQUIRE(!sync_flags.empty());
+        for (bool synced : sync_flags) CHECK_FALSE(synced);
+
+        CHECK(dftu_node_unregister("test.sync_probe.async") == 0);
+    }
+
+    TEST_CASE(
+        "an upstream error is reported identically on the sync and async "
+        "paths") {
+        // Unchecked here: the probe node requires a live self to record into,
+        // not nullptr.
+        std::vector<bool> sync_flags;
+        dftu_node_vt vt = make_probe_vt();
+        REQUIRE(dftu_node_register("test.sync_probe.err", &vt, &sync_flags) ==
+                0);
+
+        {
+            auto src = std::make_shared<CursorSource>(
+                [] { return std::make_unique<ThrowingSyncCursor>(2); });
+            LazyFrame lf =
+                LazyFrame::scan(src).op("test.sync_probe.err", OpArgs());
+            bool threw = false;
+            try {
+                run(lf.collect());
+            } catch (const std::runtime_error& e) {
+                threw = true;
+                CHECK(std::string(e.what()).find("sync boom") !=
+                      std::string::npos);
+            }
+            CHECK(threw);
+        }
+        {
+            auto src = std::make_shared<CursorSource>(
+                [] { return std::make_unique<ThrowingAsyncCursor>(2); });
+            LazyFrame lf =
+                LazyFrame::scan(src).op("test.sync_probe.err", OpArgs());
+            bool threw = false;
+            try {
+                run(lf.collect());
+            } catch (const std::runtime_error& e) {
+                threw = true;
+                CHECK(std::string(e.what()).find("async boom") !=
+                      std::string::npos);
+            }
+            CHECK(threw);
+        }
+
+        CHECK(dftu_node_unregister("test.sync_probe.err") == 0);
     }
 }

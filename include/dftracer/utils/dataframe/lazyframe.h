@@ -45,6 +45,15 @@ class Cursor {
     virtual ~Cursor() = default;
     virtual coro::CoroTask<std::optional<Morsel>> next(
         std::int64_t max_rows) = 0;
+    /// Pull up to `max_rows` rows without suspending, when this cursor can
+    /// answer from data it already holds. Returns false when it cannot, and
+    /// the caller must await next() instead. A true return with `out` unset
+    /// is end of stream, exactly as next() reports it.
+    virtual bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) {
+        (void)max_rows;
+        (void)out;
+        return false;
+    }
     /// Output column names, when they are only known after producing (a
     /// data-dependent schema like pivot/to_dummies). nullopt means the plan's
     /// static schema is authoritative. Valid only after the cursor is drained.
