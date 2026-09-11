@@ -33,9 +33,11 @@ FieldStatDomain col_domain(TypeId t) {
     }
 }
 
-// Types group_of can key on: String via the text path, the rest read exactly
-// by read_bits. Anything else would key every row on the same zero and
-// collapse the batch into one group. No default, so a new TypeId lands here.
+// Types group_of can key on: String/LargeString/FixedSizeBinary/Decimal128/
+// Decimal256 via the bytes path (length-prefixed or fixed-width raw bytes
+// into the key buffer), the rest read exactly by read_bits. Anything else
+// would key every row on the same zero and collapse the batch into one
+// group. No default, so a new TypeId lands here.
 bool is_group_key_type(TypeId t) {
     switch (t) {
         case TypeId::Bool:
@@ -56,16 +58,16 @@ bool is_group_key_type(TypeId t) {
         case TypeId::Timestamp:
         case TypeId::Duration:
         case TypeId::String:
+        case TypeId::LargeString:
+        case TypeId::FixedSizeBinary:
+        case TypeId::Decimal128:
+        case TypeId::Decimal256:
             return true;
         case TypeId::Unknown:
         case TypeId::Binary:
         case TypeId::List:
         case TypeId::Struct:
         case TypeId::Float16:
-        case TypeId::Decimal128:
-        case TypeId::Decimal256:
-        case TypeId::FixedSizeBinary:
-        case TypeId::LargeString:
         case TypeId::LargeBinary:
         case TypeId::LargeList:
         case TypeId::FixedSizeList:
@@ -73,6 +75,14 @@ bool is_group_key_type(TypeId t) {
             return false;
     }
     return false;
+}
+
+// A group key's byte-domain storage kind: which of skey_cols (bytes) /
+// ikey_cols (int64 read_bits) it keys through.
+bool is_bytes_key_type(TypeId t) {
+    return t == TypeId::String || t == TypeId::LargeString ||
+           t == TypeId::FixedSizeBinary || t == TypeId::Decimal128 ||
+           t == TypeId::Decimal256;
 }
 
 // Raw value bits for a fixed-width cell, reinterpreted on finalize by the
@@ -178,11 +188,14 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
             st.dyn_domain.emplace(di.name, col_domain(di.col->type()));
     if (!st.inited) {
         st.nkeys = keys.size();
-        st.key_is_str.resize(st.nkeys);
+        st.key_is_bytes.resize(st.nkeys);
         st.key_domain.resize(st.nkeys);
         st.key_type.resize(st.nkeys);
         st.key_time_unit.resize(st.nkeys);
         st.key_timezone.resize(st.nkeys);
+        st.key_byte_width.resize(st.nkeys);
+        st.key_decimal_precision.resize(st.nkeys);
+        st.key_decimal_scale.resize(st.nkeys);
         st.ikey_cols.resize(st.nkeys);
         st.skey_cols.resize(st.nkeys);
         for (std::size_t k = 0; k < st.nkeys; ++k) {
@@ -193,7 +206,7 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                     "' is not supported as a group key (no int64/double "
                     "domain to hash it in)");
             }
-            st.key_is_str[k] = kt == TypeId::String ? 1 : 0;
+            st.key_is_bytes[k] = is_bytes_key_type(kt) ? 1 : 0;
             st.key_domain[k] = col_domain(kt);
             st.key_type[k] = kt;
             if (kt == TypeId::Time32 || kt == TypeId::Time64 ||
@@ -201,6 +214,13 @@ void agg_accumulate(AggState& st, const std::vector<const Series*>& keys,
                 const DataType dt = keys[k]->data_type();
                 st.key_time_unit[k] = dt.time_unit;
                 st.key_timezone[k] = dt.timezone;
+            } else if (kt == TypeId::FixedSizeBinary ||
+                       kt == TypeId::Decimal128 || kt == TypeId::Decimal256) {
+                const DataType dt = keys[k]->data_type();
+                st.key_byte_width[k] = static_cast<std::int32_t>(
+                    byte_width(kt, dt.fixed_size).value_or(0));
+                st.key_decimal_precision[k] = dt.decimal_precision;
+                st.key_decimal_scale[k] = dt.decimal_scale;
             }
         }
         st.field_domain.resize(st.nf);
@@ -468,11 +488,14 @@ void agg_merge(AggState& into, const AggState& other) {
     if (!into.inited) {
         into.adopt_layout(other);
         into.nkeys = other.nkeys;
-        into.key_is_str = other.key_is_str;
+        into.key_is_bytes = other.key_is_bytes;
         into.key_domain = other.key_domain;
         into.key_type = other.key_type;
         into.key_time_unit = other.key_time_unit;
         into.key_timezone = other.key_timezone;
+        into.key_byte_width = other.key_byte_width;
+        into.key_decimal_precision = other.key_decimal_precision;
+        into.key_decimal_scale = other.key_decimal_scale;
         into.ikey_cols.assign(into.nkeys, {});
         into.skey_cols.assign(into.nkeys, {});
         into.inited = true;
@@ -492,19 +515,24 @@ AggStatePtr agg_regroup(const AggState& src,
     dst->init_layout();
     dst->adopt_layout(src);  // field_domain/field_is_str are value-derived
     dst->nkeys = keep.size();
-    dst->key_is_str.resize(dst->nkeys);
+    dst->key_is_bytes.resize(dst->nkeys);
     dst->key_domain.resize(dst->nkeys);
     dst->key_type.resize(dst->nkeys);
     dst->key_time_unit.resize(dst->nkeys);
     dst->key_timezone.resize(dst->nkeys);
+    dst->key_byte_width.resize(dst->nkeys);
+    dst->key_decimal_precision.resize(dst->nkeys);
+    dst->key_decimal_scale.resize(dst->nkeys);
     for (std::size_t k = 0; k < dst->nkeys; ++k) {
-        dst->key_is_str[k] = src.key_is_str[static_cast<std::size_t>(keep[k])];
-        dst->key_domain[k] = src.key_domain[static_cast<std::size_t>(keep[k])];
-        dst->key_type[k] = src.key_type[static_cast<std::size_t>(keep[k])];
-        dst->key_time_unit[k] =
-            src.key_time_unit[static_cast<std::size_t>(keep[k])];
-        dst->key_timezone[k] =
-            src.key_timezone[static_cast<std::size_t>(keep[k])];
+        const std::size_t s = static_cast<std::size_t>(keep[k]);
+        dst->key_is_bytes[k] = src.key_is_bytes[s];
+        dst->key_domain[k] = src.key_domain[s];
+        dst->key_type[k] = src.key_type[s];
+        dst->key_time_unit[k] = src.key_time_unit[s];
+        dst->key_timezone[k] = src.key_timezone[s];
+        dst->key_byte_width[k] = src.key_byte_width[s];
+        dst->key_decimal_precision[k] = src.key_decimal_precision[s];
+        dst->key_decimal_scale[k] = src.key_decimal_scale[s];
     }
     dst->ikey_cols.assign(dst->nkeys, {});
     dst->skey_cols.assign(dst->nkeys, {});

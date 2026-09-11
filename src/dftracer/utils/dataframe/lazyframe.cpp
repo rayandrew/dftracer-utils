@@ -314,12 +314,15 @@ class InMemoryCursor : public Cursor {
         m.rows = len;
         m.columns.reserve(chunk.columns.size());
         for (Series& c : chunk.columns) m.columns.push_back(std::move(c));
+        m.batch_index = next_index_++;
+        m.ordering = Ordering::Sequence;
         out = std::move(m);
     }
 
     std::shared_ptr<const DataFrame> frame_;
     std::int64_t n_;
     std::int64_t off_ = 0;
+    std::int64_t next_index_ = 0;
 };
 
 // Keeps rows where `pred` is true; pulls upstream until it has a non-empty
@@ -474,6 +477,8 @@ class SelectCursor : public Cursor {
     Morsel apply(Morsel&& m) {
         Morsel out;
         out.rows = m.rows;
+        out.batch_index = m.batch_index;
+        out.ordering = m.ordering;
         out.columns.reserve(idx_.size());
         for (int i : idx_) out.columns.push_back(m.columns[i].share());
         return out;
@@ -507,6 +512,8 @@ class WithColumnCursor : public Cursor {
         Series nc = eval(expr_, column_ptrs(m.columns));
         Morsel out;
         out.rows = m.rows;
+        out.batch_index = m.batch_index;
+        out.ordering = m.ordering;
         out.columns = std::move(m.columns);
         out.dyn_names = std::move(m.dyn_names);
         out.dyn_columns = std::move(m.dyn_columns);
@@ -729,21 +736,27 @@ class FillNullCursor : public Cursor {
     coro::CoroTask<std::optional<Morsel>> next(std::int64_t max_rows) override {
         auto m = co_await in_->next(max_rows);
         if (!m) co_return std::nullopt;
-        co_return map_frame(std::move(*m),
-                            [&](DataFrame f) { return f.fill_null(value_); });
+        co_return apply(std::move(*m));
     }
 
     bool try_next(std::int64_t max_rows, std::optional<Morsel>& out) override {
         std::optional<Morsel> m;
         if (!in_->try_next(max_rows, m)) return false;
-        out = m ? std::optional<Morsel>(map_frame(
-                      std::move(*m),
-                      [&](DataFrame f) { return f.fill_null(value_); }))
-                : std::nullopt;
+        out = m ? std::optional<Morsel>(apply(std::move(*m))) : std::nullopt;
         return true;
     }
 
    private:
+    Morsel apply(Morsel&& m) {
+        const std::int64_t bi = m.batch_index;
+        const Ordering ord = m.ordering;
+        Morsel out = map_frame(
+            std::move(m), [&](DataFrame f) { return f.fill_null(value_); });
+        out.batch_index = bi;
+        out.ordering = ord;
+        return out;
+    }
+
     std::unique_ptr<Cursor> in_;
     dftu_scalar value_;
 };
@@ -773,6 +786,8 @@ class WithRowIndexCursor : public Cursor {
         pos_ += m.rows;
         Morsel out;
         out.rows = m.rows;
+        out.batch_index = m.batch_index;
+        out.ordering = m.ordering;
         out.columns.reserve(m.columns.size() + 1);
         out.columns.push_back(Series::flat_i64(idx.data(), m.rows));
         for (Series& c : m.columns) out.columns.push_back(std::move(c));
@@ -3968,6 +3983,13 @@ coro::AsyncGenerator<DataFrame> LazyFrame::stream(
     // consumer's last pull, which is the scan early-out.
     return drive_cursor_chain(lower_cursor_chain(*source_, ops, budget),
                               eff_rows);
+}
+
+std::unique_ptr<Cursor> LazyFrame::open_cursor() const {
+    const std::vector<std::string> names = source_->names();
+    auto ops = pushdown_projections(names, pushdown_predicates(names, ops_));
+    const std::uint64_t budget = resolve_spill_budget(memory_budget_);
+    return lower_cursor_chain(*source_, ops, budget).cursor;
 }
 
 coro::CoroTask<DataFrame> LazyFrame::collect(std::int64_t morsel_rows) const {

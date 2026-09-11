@@ -39,38 +39,62 @@ enum class TypeId : std::int32_t {
     /// Days since the Unix epoch, stored as Int32 (physical_type()).
     /// Compare/sort/min/max/group_by/hash dispatch on that Int32 value and
     /// keep the Date32 tag on the result. Arithmetic is refused (see
-    /// arithmetic.cpp): a day offset or a date difference are real
-    /// operations this engine does not define yet.
+    /// arithmetic.cpp): Date32/Date64 carry no `DataType::time_unit`, so a
+    /// day offset or a date difference has no Duration granularity to land
+    /// on without inventing one.
     Date32,
     /// Milliseconds since the Unix epoch, stored as Int64 (physical_type()).
     /// Same compute and arithmetic behavior as Date32.
     Date64,
     /// Time of day since midnight in `DataType::time_unit` (Second or Milli),
-    /// stored as Int32 (physical_type()). Same compute and arithmetic
-    /// behavior as Date32.
+    /// stored as Int32 (physical_type()). Same compute behavior as Date32.
+    /// Arithmetic is refused: Time64 (see below) covers Time arithmetic at
+    /// Micro/Nano granularity; extending it to Time32's Int32 physical
+    /// storage needs cross-width widening this engine does not build yet.
     Time32,
     /// Time of day since midnight in `DataType::time_unit` (Micro or Nano),
-    /// stored as Int64 (physical_type()). Same compute and arithmetic
-    /// behavior as Date32.
+    /// stored as Int64 (physical_type()). Same compute behavior as Date32.
+    /// Arithmetic (see arithmetic.cpp, temporal_arith.h): `Time64 - Time64`
+    /// -> Duration, `Time64 +/- Duration` -> Time64, at the finer of the two
+    /// operand units; `Time64 + Time64` stays refused (meaningless).
     Time64,
     /// Instant since the Unix epoch in `DataType::time_unit`, with an
     /// optional `DataType::timezone`, stored as Int64 (physical_type()).
-    /// Same compute behavior as Date32. Arithmetic is refused: adding two
-    /// timestamps is meaningless, and subtracting them into a Duration is a
-    /// rule this engine does not implement yet.
+    /// Same compute behavior as Date32. Arithmetic (see arithmetic.cpp,
+    /// temporal_arith.h): `Timestamp - Timestamp` -> Duration (the operand
+    /// timezones must match exactly, including naive-vs-aware, or the op is
+    /// refused rather than guessed); `Timestamp +/- Duration` -> Timestamp,
+    /// keeping the Timestamp operand's timezone. The result unit is the
+    /// finer of the two operand units. `Timestamp + Timestamp` and any
+    /// `Timestamp * or /` op stay refused: meaningless.
     Timestamp,
     /// Elapsed time in `DataType::time_unit`, stored as Int64
-    /// (physical_type()). Same compute and arithmetic behavior as Timestamp.
+    /// (physical_type()). Same compute behavior as Timestamp. Arithmetic:
+    /// `Duration +/- Duration` -> Duration (finer unit), `Duration *
+    /// scalar`/`Duration / scalar` -> Duration (unit unchanged, the scalar is
+    /// a dimensionless multiplier). `SUM` reduces a Duration column to a
+    /// Duration total in its native unit; `Duration * or / Duration` and
+    /// `PRODUCT` stay refused (not in the defined rule table).
     Duration,
     /// 128-bit fixed-point decimal; `DataType::decimal_precision` and
     /// `decimal_scale` give its meaning. Compare/sort/group_by/hash work on
-    /// the exact scaled integer; arithmetic promotes to Float64, which LOSES
-    /// PRECISION (a double has 53 mantissa bits; a precision-38 decimal
-    /// needs up to 127) - do not use `+`/`-`/`*`/`/` on money-shaped data
-    /// that needs exact decimal math.
+    /// the exact scaled integer. Arithmetic against another Decimal128 (see
+    /// arithmetic.cpp, decimal_arith.h) is EXACT int128 math: add/sub
+    /// rescale the smaller-scale operand up to match, multiply adds the two
+    /// scales, divide extends the dividend's scale by a fixed increment
+    /// (DECIMAL_DIVIDE_SCALE_INCREMENT) truncating toward zero. Overflow past
+    /// the declared precision, or of the 128-bit container, is a loud
+    /// refusal, never a wrapped value. Decimal-against-a-plain-scalar, or
+    /// against a Decimal256/other numeric column, still promotes to Float64
+    /// and LOSES PRECISION (a double has 53 mantissa bits; a precision-38
+    /// decimal needs up to 127) - a bare scalar has no scale of its own to
+    /// compute an exact target scale from.
     Decimal128,
-    /// 256-bit fixed-point decimal; see Decimal128, including the arithmetic
-    /// precision loss.
+    /// 256-bit fixed-point decimal; see Decimal128. Add/sub against another
+    /// Decimal256 are exact (256-bit carry-chain arithmetic). Multiply and
+    /// divide have no exact path here - a correct result needs a 512-bit
+    /// intermediate this pass does not build - so those two ops stay on the
+    /// lossy Float64 path, same as any other Decimal256 arithmetic.
     Decimal256,
     /// Fixed-width byte string; `DataType::fixed_size` is the width in bytes.
     /// No offsets buffer. Equality/comparison/sort/group_by/hash are exact
@@ -366,10 +390,10 @@ constexpr bool is_numeric_dispatchable(TypeId t) noexcept {
 
 /// True for the temporal family (Date32/64, Time32/64, Timestamp, Duration):
 /// physical_type() maps each to Int32 or Int64, so compare/sort/min/max/
-/// group_by/hash work on the exact value via that mapping. Arithmetic is
-/// refused (see arithmetic.cpp): timestamp + timestamp is meaningless, and
-/// timestamp - timestamp -> Duration is a rule this engine does not
-/// implement yet.
+/// group_by/hash work on the exact value via that mapping. Arithmetic among
+/// Timestamp/Duration/Time64 follows the rule table in temporal_arith.h (see
+/// Timestamp's and Duration's doc comments above); Date32/Date64/Time32
+/// arithmetic stays refused (see arithmetic.cpp).
 constexpr bool is_temporal_type(TypeId t) noexcept {
     switch (t) {
         case TypeId::Date32:

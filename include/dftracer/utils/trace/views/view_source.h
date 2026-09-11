@@ -30,6 +30,7 @@ class ViewCursor : public dftracer::utils::dataframe::Cursor {
 
     std::shared_ptr<const dftracer::utils::dataframe::DataFrame> buf_;
     std::int64_t offset_ = 0;
+    std::int64_t next_index_ = 0;
     mutable std::optional<bool> nested_;
 };
 
@@ -63,9 +64,13 @@ class ViewSource : public dftracer::utils::dataframe::Source {
     std::vector<std::string> row_schema() const;
 
     /// Open a bounded-channel streaming cursor over `v` (a row query). Used by
-    /// scan() once projection + filters are folded into `v`.
+    /// scan() once projection + filters are folded into `v`. `fnames` is the
+    /// column list the cursor's morsels carry (schema() when no projection
+    /// was pushed), so the returned cursor's narrow() can translate a
+    /// predicate positional against it the same way scan() does.
     std::unique_ptr<dftracer::utils::dataframe::Cursor> open_stream(
-        const View& v, std::uint64_t memory_budget) const;
+        const View& v, std::uint64_t memory_budget,
+        std::vector<std::string> fnames) const;
 
     std::shared_ptr<const dftracer::utils::dataframe::DataFrame> buffer()
         const {

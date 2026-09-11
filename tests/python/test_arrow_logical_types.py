@@ -285,8 +285,19 @@ def test_dataframe_filter_and_head(name):
 
 # Types the group-key hash path supports today; the rest raise a ValueError
 # naming the type. See src/dftracer/utils/dataframe/agg/state.cpp
-# is_group_key_type (not fixed here, out of the Python-surface lane).
-_GROUP_KEY_SUPPORTED = {"date32", "date64", "time32", "time64", "timestamp", "duration"}
+# is_group_key_type.
+_GROUP_KEY_SUPPORTED = {
+    "date32",
+    "date64",
+    "time32",
+    "time64",
+    "timestamp",
+    "duration",
+    "decimal128",
+    "decimal256",
+    "fixed_size_binary",
+    "large_string",
+}
 
 
 @pytest.mark.parametrize("name", _TYPE_NAMES)

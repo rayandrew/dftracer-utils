@@ -37,7 +37,7 @@ void agg_sort_groups(AggState& st) {
     });
 
     for (std::size_t k = 0; k < st.nkeys; ++k) {
-        if (st.key_is_str[k])
+        if (st.key_is_bytes[k])
             permute_blocks(st.skey_cols[k], perm, 1);
         else
             permute_blocks(st.ikey_cols[k], perm, 1);
@@ -92,15 +92,18 @@ AggStatePtr agg_extract_group(const AggState& st, std::int64_t g) {
     out->dyn_domain = st.dyn_domain;
     out->init_layout();
     out->nkeys = st.nkeys;
-    out->key_is_str = st.key_is_str;
+    out->key_is_bytes = st.key_is_bytes;
     out->key_domain = st.key_domain;
     out->key_type = st.key_type;
+    out->key_byte_width = st.key_byte_width;
+    out->key_decimal_precision = st.key_decimal_precision;
+    out->key_decimal_scale = st.key_decimal_scale;
     out->ikey_cols.assign(out->nkeys, {});
     out->skey_cols.assign(out->nkeys, {});
     out->field_domain = st.field_domain;
     out->field_is_str = st.field_is_str;
     for (std::size_t k = 0; k < st.nkeys; ++k) {
-        if (st.key_is_str[k])
+        if (st.key_is_bytes[k])
             out->skey_cols[k].push_back(
                 st.skey_cols[k][static_cast<std::size_t>(g)]);
         else
@@ -240,7 +243,7 @@ static bool agg_op_seedable(AggOp op) {
 
 void agg_seed_begin(AggState& st, std::size_t nkeys) {
     st.nkeys = nkeys;
-    st.key_is_str.assign(nkeys, 1);
+    st.key_is_bytes.assign(nkeys, 1);
     st.key_domain.assign(nkeys, FieldStatDomain::I64);
     st.key_type.assign(nkeys, TypeId::Int64);
     st.ikey_cols.assign(nkeys, {});

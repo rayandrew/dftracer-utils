@@ -267,6 +267,7 @@ namespace detail {
 /// in the .cpp - no engine surface is exposed in this public header.
 struct ViewPlan;
 class Fold;
+class DynamicPrune;
 struct ViewSessionState;
 
 /// Phase 1 of the View -> dataframe engine aggregation convergence
@@ -830,9 +831,15 @@ class View {
 
     /// Run caller-owned folds over one fused scan, sharing `intern` so their
     /// ids agree and per-worker slices merge. The seam behind the plugin host.
+    /// `dyn_prune` (optional) is the narrowing state behind
+    /// dataframe::Cursor::narrow(); a fold has no reason to pass one itself -
+    /// it is for a scan-owning Cursor (ViewSource's streaming cursor) that
+    /// wants a later narrow() call to prune units this scan has not claimed
+    /// yet.
     coro::CoroTask<ExportStats> run_folds(
         std::span<detail::Fold* const> folds,
-        dftracer::utils::StringIntern& intern) const;
+        dftracer::utils::StringIntern& intern,
+        detail::DynamicPrune* dyn_prune = nullptr) const;
 
     /// The built plan. Exposes the internal representation so a caller can
     /// drive the dataframe-engine collection paths directly

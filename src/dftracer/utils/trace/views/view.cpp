@@ -672,9 +672,9 @@ dataframe::DataFrame View::merge_flamegraph_partials(
 }
 
 coro::CoroTask<ExportStats> View::run_folds(
-    std::span<detail::Fold* const> folds,
-    dftracer::utils::StringIntern& intern) const {
-    co_return co_await detail::run_folds(*plan_, folds, intern);
+    std::span<detail::Fold* const> folds, dftracer::utils::StringIntern& intern,
+    detail::DynamicPrune* dyn_prune) const {
+    co_return co_await detail::run_folds(*plan_, folds, intern, dyn_prune);
 }
 
 coro::CoroTask<ExportStats> View::run(const ProgressFn* progress) const {

@@ -15,6 +15,27 @@
 
 namespace dftracer::utils::trace::views::detail {
 
+void DynamicPrune::exclude_file(const std::string& file_path) {
+    std::lock_guard<std::mutex> lk(mu_);
+    excluded_files_.insert(file_path);
+}
+
+void DynamicPrune::exclude_checkpoints(const std::string& file_path,
+                                       std::vector<std::uint64_t> checkpoints) {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto& set = excluded_checkpoints_[file_path];
+    for (std::uint64_t c : checkpoints) set.insert(c);
+}
+
+bool DynamicPrune::is_excluded(const std::string& file_path,
+                               std::uint64_t checkpoint_idx) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (excluded_files_.count(file_path)) return true;
+    auto it = excluded_checkpoints_.find(file_path);
+    if (it == excluded_checkpoints_.end()) return false;
+    return it->second.count(checkpoint_idx) != 0;
+}
+
 namespace {
 
 struct ScanPermit {
@@ -248,6 +269,7 @@ struct FuseWorkerCtx {
     bool any_wants_raw;
     bool any_wants_fold_event;
     bool any_wants_schema;
+    DynamicPrune* dyn_prune;
 };
 
 // One fuse worker: drains the shared unit queue, decodes each unit, and pushes
@@ -270,6 +292,14 @@ coro::CoroTask<void> fuse_worker(FuseWorkerCtx ctx, std::size_t w) {
         if (ctx.covered && ctx.covered->covers(ctx.units[i].file_path,
                                                ctx.units[i].checkpoint_idx))
             continue;
+        // A narrow() call mid-scan ruled this chunk out after gather_units
+        // already listed it as a candidate.
+        if (ctx.dyn_prune &&
+            ctx.dyn_prune->is_excluded(ctx.units[i].file_path,
+                                       ctx.units[i].checkpoint_idx)) {
+            ctx.dyn_prune->record_skip();
+            continue;
+        }
 
         const std::uint64_t reserve =
             ctx.units[i].end_byte > ctx.units[i].start_byte
@@ -336,7 +366,7 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
                                  std::span<Fold* const> folds,
                                  dftracer::utils::StringIntern& intern,
                                  const CoverageSet* covered,
-                                 std::uint64_t limit) {
+                                 std::uint64_t limit, DynamicPrune* dyn_prune) {
     std::uint64_t skipped = 0;
     auto units = co_await gather_units(plan, vdef, skipped);
     const std::uint64_t cap =
@@ -344,9 +374,9 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
     std::atomic<std::uint64_t> produced{0};
 
     ExportStats st;
-    st.chunks_skipped = skipped;
     st.chunks_scanned = units.size();
     if (units.empty() || folds.empty()) {
+        st.chunks_skipped = skipped;
         for (auto* f : folds) co_await f->finalize(CoverageSet{});
         co_return st;
     }
@@ -412,7 +442,8 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
                       any_needs_args,
                       any_wants_raw,
                       any_wants_fold_event,
-                      any_wants_schema};
+                      any_wants_schema,
+                      dyn_prune};
     co_await run_coro_scope([&](CoroScope& scope) -> coro::CoroTask<void> {
         for (std::size_t w = 0; w < nworkers; ++w)
             scope.spawn([&ctx, w](CoroScope&) -> coro::CoroTask<void> {
@@ -425,11 +456,15 @@ coro::CoroTask<ExportStats> fuse(const ViewPlan& plan,
         for (std::size_t k = 0; k < folds.size(); ++k)
             folds[k]->merge(*fslice[w][k]);
 
+    const std::uint64_t dyn_skipped = dyn_prune ? dyn_prune->skipped() : 0;
+    st.chunks_skipped = skipped + dyn_skipped;
+
     CoverageSet scanned;
     for (auto& c : covered_v) scanned.absorb(std::move(c));
 
-    // A file is whole only if nothing was pruned and every unit of it sealed.
-    if (skipped == 0) {
+    // A file is whole only if nothing was pruned (statically or by a
+    // narrow() call mid-scan) and every unit of it sealed.
+    if (skipped == 0 && dyn_skipped == 0) {
         std::unordered_map<std::string_view,
                            std::pair<std::size_t, std::size_t>>
             per_file;

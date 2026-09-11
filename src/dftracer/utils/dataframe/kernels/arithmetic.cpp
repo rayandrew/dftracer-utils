@@ -1,15 +1,20 @@
 #include <dftracer/utils/core/common/logging.h>
 #include <dftracer/utils/dataframe/abi.h>
 #include <dftracer/utils/dataframe/internal/column_data.h>
+#include <dftracer/utils/dataframe/internal/decimal_arith.h>
 #include <dftracer/utils/dataframe/internal/numeric_dispatch.h>
 #include <dftracer/utils/dataframe/internal/scalar.h>
+#include <dftracer/utils/dataframe/internal/temporal_arith.h>
 #include <dftracer/utils/dataframe/internal/type_promotion.h>
 #include <dftracer/utils/dataframe/kernels/arithmetic.h>
 #include <dftracer/utils/dataframe/parallel.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <type_traits>
+#include <vector>
 
 // Highway runtime dispatch: foreach_target.h recompiles this TU once per ISA,
 // then HWY_DYNAMIC_DISPATCH selects the best at load time.
@@ -182,9 +187,12 @@ HWY_EXPORT(DivScalarKernel);
 
 namespace {
 
-enum class BinOp { Add, Sub, Mul, Div };
+using BinOp = ArithOp;
 
 bool is_numeric(TypeId t) { return is_arithmetic_type(t); }
+bool is_decimal_type(TypeId t) {
+    return t == TypeId::Decimal128 || t == TypeId::Decimal256;
+}
 
 bool is_float_type(TypeId t) {
     return t == TypeId::Float32 || t == TypeId::Float64;
@@ -217,17 +225,40 @@ TypeId promote_common(TypeId a, TypeId b) {
                : TypeId::Float64;
 }
 
-// Weak-scalar promotion: a Python int scalar never forces a wider column
-// dtype (numpy semantics), but a float scalar against an integer column does.
-dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
-    if (a->encoding != Encoding::Flat) return nullptr;
-    if (is_temporal_type(a->type)) {
-        // Neither calendar-shift nor duration arithmetic is defined yet.
+// See temporal_scalarop_result (temporal_arith.h) for the rule.
+dftu_series* temporal_scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
+    auto res = temporal_scalarop_result(a->type, a->time_unit, op);
+    if (!res) {
         DFTRACER_UTILS_LOG_ERROR(
-            "arithmetic: op not defined for temporal type '%s'",
+            "arithmetic: scalar op not defined for temporal type '%s'",
             type_name(a->type));
         return nullptr;
     }
+    auto* out = new dftu_series();
+    out->type = res->id;
+    out->encoding = Encoding::Flat;
+    out->length = a->length;
+    out->null_count = a->null_count;
+    out->validity = a->validity;
+    out->time_unit = res->unit;
+    out->data = Buffer::allocate(static_cast<std::size_t>(a->length) *
+                                 byte_width(TypeId::Int64).value_or(0));
+    const std::int32_t t = static_cast<std::int32_t>(TypeId::Int64);
+    const void* pa = a->data->data();
+    void* po = out->data->data();
+    const std::size_t n = static_cast<std::size_t>(a->length);
+    if (op == BinOp::Mul)
+        HWY_DYNAMIC_DISPATCH(MulScalarKernel)(t, pa, s, po, n);
+    else
+        HWY_DYNAMIC_DISPATCH(DivScalarKernel)(t, pa, s, po, n);
+    return out;
+}
+
+// Decimal-by-scalar deliberately stays on the lossy Float64 path below: a
+// bare scalar has no scale of its own to compute an exact target scale from.
+dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
+    if (a->encoding != Encoding::Flat) return nullptr;
+    if (is_temporal_type(a->type)) return temporal_scalar_op(a, s, op);
     if (!is_numeric(a->type)) return nullptr;
 
     // Float16 has no arithmetic kernel; Decimal128/256 have no exact one.
@@ -275,17 +306,188 @@ dftu_series* scalar_op(const dftu_series* a, dftu_scalar s, BinOp op) {
     return out;
 }
 
+// See temporal_binop_result (temporal_arith.h) for the rule table.
+dftu_series* temporal_binop(const dftu_series* a, const dftu_series* b,
+                            BinOp op) {
+    auto res = temporal_binop_result(a->type, a->time_unit, a->timezone,
+                                     b->type, b->time_unit, b->timezone, op);
+    if (!res) {
+        DFTRACER_UTILS_LOG_ERROR(
+            "arithmetic: op not defined for temporal types '%s' and '%s'",
+            type_name(a->type), type_name(b->type));
+        return nullptr;
+    }
+
+    std::vector<std::int64_t> tmp_a, tmp_b;
+    const auto* pa = static_cast<const std::int64_t*>(
+        static_cast<const void*>(a->data->data()));
+    const auto* pb = static_cast<const std::int64_t*>(
+        static_cast<const void*>(b->data->data()));
+    const std::size_t n = static_cast<std::size_t>(a->length);
+    if (a->time_unit != res->unit) {
+        auto rescaled = rescale_ticks_up(pa, n, a->time_unit, res->unit);
+        if (!rescaled) {
+            DFTRACER_UTILS_LOG_ERROR(
+                "arithmetic: temporal rescale overflowed int64");
+            return nullptr;
+        }
+        tmp_a = std::move(*rescaled);
+        pa = tmp_a.data();
+    }
+    if (b->time_unit != res->unit) {
+        auto rescaled = rescale_ticks_up(pb, n, b->time_unit, res->unit);
+        if (!rescaled) {
+            DFTRACER_UTILS_LOG_ERROR(
+                "arithmetic: temporal rescale overflowed int64");
+            return nullptr;
+        }
+        tmp_b = std::move(*rescaled);
+        pb = tmp_b.data();
+    }
+
+    auto* out = new dftu_series();
+    out->type = res->id;
+    out->encoding = Encoding::Flat;
+    out->length = a->length;
+    out->time_unit = res->unit;
+    out->timezone = res->timezone;
+    out->data = Buffer::allocate(n * byte_width(TypeId::Int64).value_or(0));
+    const std::int32_t t = static_cast<std::int32_t>(TypeId::Int64);
+    void* po = out->data->data();
+    if (op == BinOp::Add)
+        HWY_DYNAMIC_DISPATCH(AddKernel)(t, pa, pb, po, n);
+    else
+        HWY_DYNAMIC_DISPATCH(SubKernel)(t, pa, pb, po, n);
+    return out;
+}
+
+// See decimal_arith.h for the scale/precision rules.
+dftu_series* decimal_binop_exact(const dftu_series* a, const dftu_series* b,
+                                 BinOp op) {
+    const bool is256 = a->type == TypeId::Decimal256;
+    const std::int32_t max_prec =
+        is256 ? DECIMAL256_MAX_PRECISION : DECIMAL128_MAX_PRECISION;
+
+    std::int32_t result_scale = 0;
+    std::int32_t result_precision = 0;
+    switch (op) {
+        case BinOp::Add:
+        case BinOp::Sub:
+            result_scale = std::max(a->decimal_scale, b->decimal_scale);
+            result_precision = std::min(
+                max_prec, std::max(a->decimal_precision - a->decimal_scale,
+                                   b->decimal_precision - b->decimal_scale) +
+                              result_scale + 1);
+            break;
+        case BinOp::Mul:
+            result_scale = a->decimal_scale + b->decimal_scale;
+            result_precision = std::min(
+                max_prec, a->decimal_precision + b->decimal_precision + 1);
+            break;
+        case BinOp::Div:
+            result_scale = a->decimal_scale + DECIMAL_DIVIDE_SCALE_INCREMENT;
+            result_precision =
+                std::min(max_prec, a->decimal_precision + b->decimal_scale +
+                                       DECIMAL_DIVIDE_SCALE_INCREMENT);
+            break;
+    }
+    if (result_scale > max_prec || result_precision <= 0) {
+        DFTRACER_UTILS_LOG_ERROR(
+            "arithmetic: decimal result scale exceeds declared precision");
+        return nullptr;
+    }
+
+    auto* out = new dftu_series();
+    out->type = a->type;
+    out->encoding = Encoding::Flat;
+    out->length = a->length;
+    out->decimal_scale = result_scale;
+    out->decimal_precision = result_precision;
+    const std::size_t width = is256 ? 32 : 16;
+    const std::int64_t n = a->length;
+    out->data = Buffer::allocate(static_cast<std::size_t>(n) * width);
+    const auto* pa = static_cast<const std::uint8_t*>(a->data->data());
+    const auto* pb = static_cast<const std::uint8_t*>(b->data->data());
+    auto* po = static_cast<std::uint8_t*>(out->data->data());
+
+    bool ok = true;
+    if (!is256) {
+        for (std::int64_t i = 0; i < n && ok; ++i) {
+            const i128 va = load_i128(pa + static_cast<std::size_t>(i) * 16);
+            const i128 vb = load_i128(pb + static_cast<std::size_t>(i) * 16);
+            std::optional<i128> r;
+            if (op == BinOp::Add || op == BinOp::Sub) {
+                auto ra = rescale_up_i128(va, a->decimal_scale, result_scale);
+                auto rb = rescale_up_i128(vb, b->decimal_scale, result_scale);
+                if (ra && rb) {
+                    const i128 rhs = op == BinOp::Add ? *rb : -*rb;
+                    const i128 sum = *ra + rhs;
+                    const bool overflow = ((*ra ^ sum) & (rhs ^ sum)) < 0;
+                    if (!overflow && i128_fits_precision(sum, result_precision))
+                        r = sum;
+                }
+            } else if (op == BinOp::Mul) {
+                r = mul_checked_i128(va, vb, result_precision);
+            } else {
+                r = muldiv_checked_i128(
+                    va, b->decimal_scale + DECIMAL_DIVIDE_SCALE_INCREMENT, vb,
+                    result_precision);
+            }
+            if (!r) {
+                ok = false;
+                break;
+            }
+            store_i128(po + static_cast<std::size_t>(i) * 16, *r);
+        }
+    } else {
+        // Decimal256 exact multiply/divide need a 512-bit intermediate this
+        // pass does not build; decimal_binop_exact is only called for those
+        // ops when is256 is false (see binop below), so only Add/Sub reach
+        // here.
+        for (std::int64_t i = 0; i < n && ok; ++i) {
+            const Limbs256 va =
+                load_limbs256(pa + static_cast<std::size_t>(i) * 32);
+            const Limbs256 vb =
+                load_limbs256(pb + static_cast<std::size_t>(i) * 32);
+            auto ra = rescale_up_256(va, a->decimal_scale, result_scale);
+            auto rb = rescale_up_256(vb, b->decimal_scale, result_scale);
+            std::optional<Limbs256> r;
+            if (ra && rb)
+                r = addsub_checked_256(*ra, *rb, op == BinOp::Sub,
+                                       result_precision);
+            if (!r) {
+                ok = false;
+                break;
+            }
+            store_limbs256(po + static_cast<std::size_t>(i) * 32, *r);
+        }
+    }
+
+    if (!ok) {
+        DFTRACER_UTILS_LOG_ERROR(
+            "arithmetic: decimal op overflowed its declared precision");
+        delete out;
+        return nullptr;
+    }
+    return out;
+}
+
 dftu_series* binop(const dftu_series* a, const dftu_series* b, BinOp op) {
     if (a->encoding != Encoding::Flat || b->encoding != Encoding::Flat)
         return nullptr;
     if (a->length != b->length) return nullptr;
-    if (is_temporal_type(a->type) || is_temporal_type(b->type)) {
-        // See scalar_op above: no temporal arithmetic rule defined yet.
-        DFTRACER_UTILS_LOG_ERROR(
-            "arithmetic: op not defined for temporal type '%s'",
-            type_name(is_temporal_type(a->type) ? a->type : b->type));
-        return nullptr;
+    if (is_temporal_type(a->type) || is_temporal_type(b->type))
+        return temporal_binop(a, b, op);
+
+    if (is_decimal_type(a->type) && a->type == b->type) {
+        // Decimal256 has no exact multiply/divide here (see
+        // decimal_binop_exact); those combos fall through to the documented
+        // lossy Float64 path below instead of refusing outright.
+        const bool exact_supported = a->type == TypeId::Decimal128 ||
+                                     op == BinOp::Add || op == BinOp::Sub;
+        if (exact_supported) return decimal_binop_exact(a, b, op);
     }
+
     if (!is_numeric(a->type) || !is_numeric(b->type)) return nullptr;
 
     dftu_series* promoted_a = nullptr;

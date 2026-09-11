@@ -16,7 +16,8 @@ set(DATAFRAME_TEST_SOURCES test_mask.cpp test_series.cpp test_result_batch.cpp t
                            test_provider_pushdown.cpp test_provider_schema_types.cpp
                            test_type_parameter_propagation.cpp
                            test_lazyframe_output_schema.cpp
-                           test_lazyframe_plugin_node.cpp)
+                           test_lazyframe_plugin_node.cpp
+                           test_morsel_ordering.cpp)
 
 foreach(test_file ${DATAFRAME_TEST_SOURCES})
   string(REPLACE ".cpp" "" bin_exec ${test_file})

@@ -8,6 +8,8 @@
 #include <dftracer/utils/dataframe/scalar.h>
 #include <dftracer/utils/query/builder.h>
 #include <dftracer/utils/query/query.h>
+#include <dftracer/utils/trace/indexing/chunk_pruner_utility.h>
+#include <dftracer/utils/trace/views/fold.h>
 #include <dftracer/utils/trace/views/native_row_fold.h>
 #include <dftracer/utils/trace/views/stream_row_fold.h>
 #include <dftracer/utils/trace/views/view_plan.h>
@@ -24,7 +26,9 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace dftracer::utils::trace::views {
 
@@ -52,6 +56,8 @@ ViewCursor::next(std::int64_t max_rows) {
         for (const dftracer::utils::dataframe::Series& c : buf_->columns)
             m.columns.push_back(c.share());
         offset_ = nrows;
+        m.batch_index = next_index_++;
+        m.ordering = dftracer::utils::dataframe::Ordering::Sequence;
         co_return m;
     }
 
@@ -60,6 +66,8 @@ ViewCursor::next(std::int64_t max_rows) {
     m.rows = part.num_rows();
     m.columns = std::move(part.columns);
     offset_ += m.rows;
+    m.batch_index = next_index_++;
+    m.ordering = dftracer::utils::dataframe::Ordering::Sequence;
     co_return m;
 }
 
@@ -126,9 +134,14 @@ std::optional<q::Expr> translate_leaf(const df::Expr& e,
         case DFTU_SCALAR_TAG_U64:
             lit = q::LiteralNode{rhs.u64()};
             break;
-        default:
+        case DFTU_SCALAR_TAG_STR:
+            lit = q::LiteralNode{std::string(rhs.str())};
+            break;
+        case DFTU_SCALAR_TAG_F64:
             lit = q::LiteralNode{rhs.f64()};
             break;
+        default:
+            return std::nullopt;
     }
 
     return q::field_cmp(field, qop, std::move(lit));
@@ -243,11 +256,20 @@ class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
             channel,
         std::shared_ptr<coro::CoroSemaphore> budget,
         std::shared_future<void> producer,
-        std::shared_ptr<std::atomic<bool>> stop)
+        std::shared_ptr<std::atomic<bool>> stop,
+        std::shared_ptr<detail::DynamicPrune> dyn_prune,
+        std::vector<ViewFile> files, double time_scale,
+        std::vector<std::string> fnames,
+        dftracer::utils::trace::indexing::BloomFilterCache* bloom_cache)
         : channel_(std::move(channel)),
           budget_(std::move(budget)),
           producer_(std::move(producer)),
-          stop_(std::move(stop)) {}
+          stop_(std::move(stop)),
+          dyn_prune_(std::move(dyn_prune)),
+          files_(std::move(files)),
+          time_scale_(time_scale),
+          fnames_(std::move(fnames)),
+          bloom_cache_(bloom_cache) {}
 
     // Abandoning the cursor must stop the scan behind it: the producer holds
     // its own channel registration, so nothing else ends it, and the byte
@@ -260,14 +282,24 @@ class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
         budget_->release(std::numeric_limits<std::uint32_t>::max());
     }
 
+    // The fold behind `channel_` fans out across scan workers (see
+    // ViewSource::open_stream / run_folds), so morsels can land here out of
+    // the order the underlying data was produced in. batch_index is still
+    // stamped (this cursor's own receive-order counter, for diagnostics) but
+    // ordering stays Unordered - claiming Sequence here would be a lie a
+    // windowed consumer could act on.
     coro::CoroTask<std::optional<dftracer::utils::dataframe::Morsel>> next(
         std::int64_t max_rows) override {
         if (max_rows <= 0) {
             auto item = co_await channel_->receive();
-            if (item)
+            if (item) {
                 budget_->release(detail::morsel_bytes(*item));
-            else
+                item->batch_index = next_index_++;
+                item->ordering =
+                    dftracer::utils::dataframe::Ordering::Unordered;
+            } else {
                 producer_.get();
+            }
             co_return item;
         }
 
@@ -285,6 +317,8 @@ class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
         const std::int64_t n = std::min(max_rows, pending_->rows - offset_);
         dftracer::utils::dataframe::Morsel out =
             slice_morsel(*pending_, offset_, n);
+        out.batch_index = next_index_++;
+        out.ordering = dftracer::utils::dataframe::Ordering::Unordered;
         offset_ += n;
         if (offset_ >= pending_->rows) {
             budget_->release(pending_bytes_);
@@ -293,14 +327,66 @@ class StreamViewCursor : public dftracer::utils::dataframe::Cursor {
         co_return out;
     }
 
+    // ADVISORY, like every other pushdown here: translate_pred decides what
+    // is even worth pruning with, and a translated predicate only ever
+    // shrinks the candidate checkpoint set the same way the static prune in
+    // scan() does - it never marks a checkpoint excluded on ambiguous
+    // pruner output (a failed lookup, an unindexed file), so a narrow() the
+    // engine misapplies can only cost extra I/O, never a wrong row: every
+    // row this cursor still yields is filtered again by the engine.
+    coro::CoroTask<bool> narrow(
+        const dftracer::utils::dataframe::Expr& predicate) override {
+        if (!dyn_prune_ || files_.empty()) co_return false;
+        std::optional<Pushable> pushed =
+            translate_pred(predicate, fnames_, time_scale_);
+        if (!pushed) co_return false;
+        auto built = std::move(pushed->expr).build();
+        if (!built.has_value()) co_return false;
+
+        bool any = false;
+        for (const ViewFile& f : files_) {
+            dftracer::utils::trace::indexing::ChunkPrunerInput pin{
+                f.index_path, f.file_path, built.value(), bloom_cache_};
+            dftracer::utils::trace::indexing::ChunkPrunerUtility pruner;
+            auto out = co_await pruner(pin);
+            if (!out.success) continue;  // ambiguous - leave every unit as is
+            if (!out.file_may_match) {
+                // A definite bloom/dictionary miss: the file provably has no
+                // matching event, regardless of chunk count.
+                dyn_prune_->exclude_file(f.file_path);
+                any = true;
+                continue;
+            }
+            if (out.total_checkpoints == 0) continue;  // nothing to prune by
+            std::unordered_set<std::uint64_t> keep(
+                out.candidate_checkpoints.begin(),
+                out.candidate_checkpoints.end());
+            std::vector<std::uint64_t> excluded;
+            for (std::uint64_t c = 0; c < out.total_checkpoints; ++c)
+                if (!keep.count(c)) excluded.push_back(c);
+            if (!excluded.empty()) {
+                dyn_prune_->exclude_checkpoints(f.file_path,
+                                                std::move(excluded));
+                any = true;
+            }
+        }
+        co_return any;
+    }
+
    private:
     std::shared_ptr<coro::Channel<dftracer::utils::dataframe::Morsel>> channel_;
     std::shared_ptr<coro::CoroSemaphore> budget_;
     std::shared_future<void> producer_;
     std::shared_ptr<std::atomic<bool>> stop_;
+    std::shared_ptr<detail::DynamicPrune> dyn_prune_;
+    std::vector<ViewFile> files_;
+    double time_scale_ = 1.0;
+    std::vector<std::string> fnames_;
+    dftracer::utils::trace::indexing::BloomFilterCache* bloom_cache_ = nullptr;
     std::optional<dftracer::utils::dataframe::Morsel> pending_;
     std::int64_t offset_ = 0;
     std::uint64_t pending_bytes_ = 0;
+    std::int64_t next_index_ = 0;
 };
 
 }  // namespace
@@ -401,7 +487,8 @@ const dftracer::utils::dataframe::DataFrame* ViewSource::as_frame() const {
 }
 
 std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open_stream(
-    const View& v, std::uint64_t memory_budget) const {
+    const View& v, std::uint64_t memory_budget,
+    std::vector<std::string> fnames) const {
     // Capacity 0 = an effectively unbounded ring (see Channel's ctor); the
     // shared budget semaphore is the sole backpressure, acquired before send
     // and released once the cursor hands a morsel off.
@@ -409,6 +496,10 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open_stream(
     auto budget = std::make_shared<coro::CoroSemaphore>(memory_budget);
     auto intern = std::make_shared<dftracer::utils::StringIntern>();
     const double time_scale = v.plan_->time_scale;
+    // Backing state for Cursor::narrow(): fuse() polls it per unit for as
+    // long as this scan runs, so a narrow() call after the scan has already
+    // started can still prune units it has not claimed yet.
+    auto dyn_prune = std::make_shared<detail::DynamicPrune>();
 
     // The cursor's early-out: fuse polls the plan's cancel predicate per unit
     // and per batch, so the flag is composed into it rather than added beside
@@ -429,19 +520,21 @@ std::unique_ptr<dftracer::utils::dataframe::Cursor> ViewSource::open_stream(
                ch,
            std::shared_ptr<coro::CoroSemaphore> sem,
            std::shared_ptr<dftracer::utils::StringIntern> iv,
+           std::shared_ptr<detail::DynamicPrune> dp,
            bool emit_dyn) -> coro::CoroTask<void> {
         detail::StreamRowFold fold(ch, sem, iv, vv.plan_->select, ts, nullptr,
                                    vv.plan_->phase == Phase::Metadata,
                                    emit_dyn);
         std::array<detail::Fold*, 1> folds{&fold};
-        co_await vv.run_folds(folds, *iv);
-    }(scan_view, time_scale, channel, budget, intern, emit_dyn_);
+        co_await vv.run_folds(folds, *iv, dp.get());
+    }(scan_view, time_scale, channel, budget, intern, dyn_prune, emit_dyn_);
 
     std::shared_future<void> producer =
         spawn_on_current_executor(std::move(task));
     return std::make_unique<StreamViewCursor>(
         std::move(channel), std::move(budget), std::move(producer),
-        std::move(stop));
+        std::move(stop), std::move(dyn_prune), v.plan_->files, time_scale,
+        std::move(fnames), v.plan_->bloom_cache);
 }
 
 dftracer::utils::dataframe::ScanResult ViewSource::scan(
@@ -483,7 +576,7 @@ dftracer::utils::dataframe::ScanResult ViewSource::scan(
     }
     if (!req.projection.empty()) v = v.select(req.projection);
 
-    r.cursor = open_stream(v, req.memory_budget);
+    r.cursor = open_stream(v, req.memory_budget, fnames);
     return r;
 }
 

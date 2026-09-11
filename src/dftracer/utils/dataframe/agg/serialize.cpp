@@ -41,7 +41,7 @@ std::string agg_serialize(const AggState& st) {
     std::string s;
     put(s, static_cast<std::uint32_t>(st.specs.size()));
     put(s, static_cast<std::uint32_t>(st.nkeys));
-    for (char b : st.key_is_str) put(s, static_cast<std::uint8_t>(b));
+    for (char b : st.key_is_bytes) put(s, static_cast<std::uint8_t>(b));
     for (std::size_t k = 0; k < st.nkeys; ++k)
         put(s, static_cast<std::uint8_t>(k < st.key_domain.size()
                                              ? st.key_domain[k]
@@ -56,6 +56,15 @@ std::string agg_serialize(const AggState& st) {
     for (std::size_t k = 0; k < st.nkeys; ++k)
         put_bytes(
             s, k < st.key_timezone.size() ? st.key_timezone[k] : std::string());
+    for (std::size_t k = 0; k < st.nkeys; ++k)
+        put(s, k < st.key_byte_width.size() ? st.key_byte_width[k]
+                                            : std::int32_t{0});
+    for (std::size_t k = 0; k < st.nkeys; ++k)
+        put(s, k < st.key_decimal_precision.size() ? st.key_decimal_precision[k]
+                                                   : std::int32_t{0});
+    for (std::size_t k = 0; k < st.nkeys; ++k)
+        put(s, k < st.key_decimal_scale.size() ? st.key_decimal_scale[k]
+                                               : std::int32_t{0});
     for (const AggSpec& sp : st.specs) {
         put(s, static_cast<std::int32_t>(sp.op));
         put(s, sp.value_col);
@@ -74,7 +83,7 @@ std::string agg_serialize(const AggState& st) {
     const std::int64_t ng = st.ngroups();
     put(s, ng);
     for (std::size_t k = 0; k < st.nkeys; ++k) {
-        if (st.key_is_str[k])
+        if (st.key_is_bytes[k])
             for (const std::string& v : st.skey_cols[k]) put_bytes(s, v);
         else
             for (std::int64_t v : st.ikey_cols[k]) put(s, v);
@@ -215,9 +224,9 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     const std::uint32_t ns = r.get<std::uint32_t>();
     const std::uint32_t nkeys = r.get<std::uint32_t>();
     st->nkeys = nkeys;
-    st->key_is_str.resize(nkeys);
+    st->key_is_bytes.resize(nkeys);
     for (std::uint32_t k = 0; k < nkeys; ++k)
-        st->key_is_str[k] = static_cast<char>(r.get<std::uint8_t>());
+        st->key_is_bytes[k] = static_cast<char>(r.get<std::uint8_t>());
     st->key_domain.resize(nkeys);
     for (std::uint32_t k = 0; k < nkeys; ++k)
         st->key_domain[k] = static_cast<FieldStatDomain>(r.get<std::uint8_t>());
@@ -230,6 +239,15 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     st->key_timezone.resize(nkeys);
     for (std::uint32_t k = 0; k < nkeys; ++k)
         st->key_timezone[k] = r.get_bytes();
+    st->key_byte_width.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k)
+        st->key_byte_width[k] = r.get<std::int32_t>();
+    st->key_decimal_precision.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k)
+        st->key_decimal_precision[k] = r.get<std::int32_t>();
+    st->key_decimal_scale.resize(nkeys);
+    for (std::uint32_t k = 0; k < nkeys; ++k)
+        st->key_decimal_scale[k] = r.get<std::int32_t>();
     st->specs.resize(ns);
     for (std::uint32_t i = 0; i < ns; ++i) {
         st->specs[i].op = static_cast<AggOp>(r.get<std::int32_t>());
@@ -254,7 +272,7 @@ AggStatePtr agg_deserialize(const std::string& blob) {
     st->ikey_cols.resize(nkeys);
     st->skey_cols.resize(nkeys);
     for (std::uint32_t k = 0; k < nkeys; ++k) {
-        if (st->key_is_str[k]) {
+        if (st->key_is_bytes[k]) {
             st->skey_cols[k].resize(static_cast<std::size_t>(ng));
             for (std::int64_t g = 0; g < ng; ++g)
                 st->skey_cols[k][static_cast<std::size_t>(g)] = r.get_bytes();

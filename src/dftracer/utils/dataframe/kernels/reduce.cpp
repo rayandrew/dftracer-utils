@@ -254,14 +254,20 @@ dftu_scalar dftu_series_reduce(const dftu_series* v, dftu_reduce_op op) {
     using dftracer::utils::dataframe::physical_type;
     using dftracer::utils::dataframe::promote_for_arithmetic;
     using dftracer::utils::dataframe::type_name;
+    using dftracer::utils::dataframe::TypeId;
     dftu_scalar out{};
     out.kind = DFTU_SCALAR_TAG_I64;
     if (v->encoding != dftracer::utils::dataframe::Encoding::Flat) return out;
 
-    // MIN/MAX on a temporal column dispatches on its physical Int32/Int64
-    // layout; every other op is temporal arithmetic, refused below.
+    // MIN/MAX on any temporal column dispatch on its physical Int32/Int64
+    // layout. SUM is additionally defined for Duration (a sum of durations
+    // is a duration, in the same unit); every other temporal type has no
+    // meaningful SUM (summing instants or times-of-day is not a rule this
+    // engine defines) and every other op stays refused.
     if (is_temporal_type(v->type)) {
-        if (op != DFTU_REDUCE_MIN && op != DFTU_REDUCE_MAX) {
+        const bool sum_ok =
+            op == DFTU_REDUCE_SUM && v->type == TypeId::Duration;
+        if (op != DFTU_REDUCE_MIN && op != DFTU_REDUCE_MAX && !sum_ok) {
             DFTRACER_UTILS_LOG_ERROR(
                 "reduce: op %d is not defined for temporal type '%s'",
                 static_cast<int>(op), type_name(v->type));

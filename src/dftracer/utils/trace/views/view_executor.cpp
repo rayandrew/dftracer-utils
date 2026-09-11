@@ -419,9 +419,11 @@ coro::CoroTask<ExportStats> run_export_trace(const ViewPlan& plan,
 
 coro::CoroTask<ExportStats> run_folds(const ViewPlan& plan,
                                       std::span<Fold* const> folds,
-                                      dftracer::utils::StringIntern& intern) {
+                                      dftracer::utils::StringIntern& intern,
+                                      DynamicPrune* dyn_prune) {
     ViewDefinition vdef = make_vdef(plan, /*for_aggregation=*/false);
-    co_return co_await fuse(plan, vdef, folds, intern);
+    co_return co_await fuse(plan, vdef, folds, intern, /*covered=*/nullptr,
+                            /*limit=*/0, dyn_prune);
 }
 
 namespace {

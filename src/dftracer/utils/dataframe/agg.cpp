@@ -17,7 +17,7 @@ std::vector<std::string> agg_group_key(const AggState& st, std::int64_t g) {
     std::vector<std::string> out;
     out.reserve(st.nkeys);
     for (std::size_t k = 0; k < st.nkeys; ++k) {
-        if (st.key_is_str[k]) {
+        if (st.key_is_bytes[k]) {
             out.push_back(st.skey_cols[k][static_cast<std::size_t>(g)]);
             continue;
         }
@@ -37,7 +37,7 @@ std::vector<std::string> agg_group_key(const AggState& st, std::int64_t g) {
 std::size_t agg_approx_bytes(const AggState& st) {
     std::size_t total = 0;
     for (std::size_t k = 0; k < st.nkeys; ++k) {
-        if (st.key_is_str[k])
+        if (st.key_is_bytes[k])
             for (const std::string& v : st.skey_cols[k])
                 total += v.size() + sizeof(std::string);
         else
@@ -167,7 +167,7 @@ DataType agg_output_type(AggOp op, TypeId value_type) {
 int agg_key_cmp(const AggState& a, std::int64_t ga, const AggState& b,
                 std::int64_t gb) {
     for (std::size_t k = 0; k < a.nkeys; ++k) {
-        if (a.key_is_str[k]) {
+        if (a.key_is_bytes[k]) {
             const std::string& x = a.skey_cols[k][static_cast<std::size_t>(ga)];
             const std::string& y = b.skey_cols[k][static_cast<std::size_t>(gb)];
             if (x != y) return x < y ? -1 : 1;

@@ -15,10 +15,17 @@
 #ifdef DFTRACER_UTILS_ENABLE_ARROW
 // clang-format off
 #include <nanoarrow/nanoarrow.h>
-#include <dftracer/utils/dataframe/arrow.h>
 #include <dftracer/utils/dataframe/abi.h>
+#include <dftracer/utils/dataframe/agg.h>
+#include <dftracer/utils/dataframe/arrow.h>
 // clang-format on
 
+namespace df = dftracer::utils::dataframe;
+
+using dftracer::utils::dataframe::AggOp;
+using dftracer::utils::dataframe::AggSpec;
+using dftracer::utils::dataframe::AggStatePtr;
+using dftracer::utils::dataframe::DataFrame;
 using dftracer::utils::dataframe::is_wide_offset_type;
 using dftracer::utils::dataframe::narrow_varwidth_type;
 using dftracer::utils::dataframe::OwnedArrow;
@@ -361,20 +368,77 @@ TEST_SUITE("dataframe_arrow_large_types_compute") {
     }
 
     TEST_CASE(
-        "DataFrame::group_by refuses a LargeString key loudly, not "
-        "wrong groups") {
+        "DataFrame::group_by groups a LargeString key by exact value, "
+        "keeping the wide-offset layout") {
         using dftracer::utils::dataframe::Agg;
-        using dftracer::utils::dataframe::DataFrame;
         using dftracer::utils::dataframe::GroupAgg;
-        Series keys = make_large_utf8({"a", "b", "a"});
-        std::vector<std::int64_t> ones = {1, 1, 1};
-        Series values = Series::flat_i64(ones.data(), 3);
+        Series keys = make_large_utf8({"x", "y", "x", "z", "y", "x"});
+        std::vector<std::int64_t> ones(6, 1);
+        Series values = Series::flat_i64(ones.data(), 6);
         DataFrame df;
         df.names = {"k", "v"};
         df.columns.push_back(keys.share());
         df.columns.push_back(values.share());
-        CHECK_THROWS_AS(df.group_by("k", {GroupAgg{Agg::Count, "v", "n"}}),
-                        std::invalid_argument);
+        DataFrame grouped = df.group_by("k", {GroupAgg{Agg::Count, "v", "n"}});
+        REQUIRE(grouped.num_rows() == 3);
+        Series gk = grouped.column("k");
+        REQUIRE(gk.type() == TypeId::LargeString);
+        CHECK(is_wide_offset_type(gk.type()));
+        const std::int64_t* n = grouped.column("n").data<std::int64_t>();
+        REQUIRE(n != nullptr);
+        for (std::int64_t r = 0; r < 3; ++r) {
+            const std::string key(gk.string_at(r));
+            if (key == "x")
+                CHECK(n[r] == 3);
+            else if (key == "y")
+                CHECK(n[r] == 2);
+            else if (key == "z")
+                CHECK(n[r] == 1);
+            else
+                FAIL("unexpected LargeString group key: " << key);
+        }
+    }
+
+    TEST_CASE(
+        "LargeString group keys merge correctly across two partial "
+        "AggStates and survive a spill round trip") {
+        Series k1 = make_large_utf8({"x", "y", "x"});
+        Series k2 = make_large_utf8({"z", "y", "x"});
+        std::vector<std::int64_t> ones3(3, 1);
+        Series v1 = Series::flat_i64(ones3.data(), 3);
+        Series v2 = Series::flat_i64(ones3.data(), 3);
+
+        AggStatePtr st1 = df::agg_new({AggSpec{AggOp::Count, -1, "n"}});
+        df::agg_accumulate(*st1, std::vector<const Series*>{&k1},
+                           std::vector<const Series*>{&v1});
+        AggStatePtr st2 = df::agg_new({AggSpec{AggOp::Count, -1, "n"}});
+        df::agg_accumulate(*st2, std::vector<const Series*>{&k2},
+                           std::vector<const Series*>{&v2});
+        df::agg_merge(*st1, *st2);
+        REQUIRE(df::agg_num_groups(*st1) == 3);
+
+        // Round-trip the merged partial through the spill blob before
+        // finalizing, exercising the same path agg/serialize.cpp writes.
+        const std::string blob = df::agg_serialize(*st1);
+        AggStatePtr back = df::agg_deserialize(blob);
+        REQUIRE(df::agg_num_groups(*back) == 3);
+
+        DataFrame out = df::agg_finalize(*back, "k");
+        REQUIRE(out.num_rows() == 3);
+        CHECK(out.column("k").type() == TypeId::LargeString);
+        const std::int64_t* n = out.column("n").data<std::int64_t>();
+        for (std::int64_t g = 0; g < df::agg_num_groups(*st1); ++g) {
+            const std::vector<std::string> key = df::agg_group_key(*st1, g);
+            REQUIRE(key.size() == 1);
+            if (key[0] == "x")
+                CHECK(n[g] == 3);
+            else if (key[0] == "y")
+                CHECK(n[g] == 2);
+            else if (key[0] == "z")
+                CHECK(n[g] == 1);
+            else
+                FAIL("unexpected LargeString group key: " << key[0]);
+        }
     }
 }
 #else

@@ -18,6 +18,7 @@ class StringIntern;
 namespace dftracer::utils::trace::views::detail {
 
 class Fold;
+class DynamicPrune;
 
 // True when a first-touch query would take the raw-gzip bootstrap (answer the
 // query and build the index in one pass); the exact gate the export/collect
@@ -90,10 +91,13 @@ coro::CoroTask<std::string> run_flamegraph_partial(
     std::vector<std::string> group = {});
 
 // Run caller-owned `folds` as one fused scan of `plan`, sharing `intern` so
-// their ids agree and per-worker slices merge.
+// their ids agree and per-worker slices merge. `dyn_prune` (optional) is
+// forwarded to fuse() so a cursor's narrow() can still prune units not yet
+// claimed.
 coro::CoroTask<ExportStats> run_folds(const ViewPlan& plan,
                                       std::span<Fold* const> folds,
-                                      dftracer::utils::StringIntern& intern);
+                                      dftracer::utils::StringIntern& intern,
+                                      DynamicPrune* dyn_prune = nullptr);
 
 // Build-only terminal: materialize the filtered-trace MV (row query) or the
 // rollup (aggregation) and return scan stats. A no-op when the MV already

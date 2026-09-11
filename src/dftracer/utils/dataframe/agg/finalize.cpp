@@ -90,6 +90,54 @@ Series flat_temporal(TypeId type, TimeUnit unit, const std::string& timezone,
     return Series{col};
 }
 
+// A LargeString group key column: skey_cols already holds each group's raw
+// bytes (its distinct value). dftu_series_new_string only builds the 32-bit
+// offset String/Binary pair, so this is built directly, mirroring
+// flat_temporal above.
+Series large_string_key(const std::vector<std::string>& values) {
+    auto* col = new dftu_series();
+    col->type = TypeId::LargeString;
+    col->encoding = Encoding::Flat;
+    col->length = static_cast<std::int64_t>(values.size());
+    std::vector<std::int64_t> off(values.size() + 1, 0);
+    std::string data;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        data += values[i];
+        off[i + 1] = static_cast<std::int64_t>(data.size());
+    }
+    col->offsets64 = Buffer::allocate(off.size() * sizeof(std::int64_t));
+    std::memcpy(col->offsets64->data(), off.data(),
+                off.size() * sizeof(std::int64_t));
+    col->data = Buffer::allocate(data.size());
+    if (!data.empty()) std::memcpy(col->data->data(), data.data(), data.size());
+    return Series{col};
+}
+
+// A FixedSizeBinary/Decimal128/Decimal256 group key column: each group's
+// value is already `key_byte_width` raw bytes in skey_cols. dftu_series_
+// new_flat validates via byte_width(type), which is 0 for FixedSizeBinary
+// (its width is a DataType parameter, not a per-TypeId constant), so this is
+// built directly; see kernels/group_by.cpp's build_groups for the same
+// shape.
+Series bytes_flat_key(TypeId type, std::int32_t fixed_size,
+                      std::int32_t decimal_precision,
+                      std::int32_t decimal_scale,
+                      const std::vector<std::string>& values) {
+    auto* col = new dftu_series();
+    col->type = type;
+    col->encoding = Encoding::Flat;
+    col->length = static_cast<std::int64_t>(values.size());
+    col->fixed_size = fixed_size;
+    col->decimal_precision = decimal_precision;
+    col->decimal_scale = decimal_scale;
+    std::string bytes;
+    for (const std::string& v : values) bytes += v;
+    col->data = Buffer::allocate(bytes.size());
+    if (!bytes.empty())
+        std::memcpy(col->data->data(), bytes.data(), bytes.size());
+    return Series{col};
+}
+
 // One list<string> column from a per-group vector of already-ordered reprs.
 Series strings_list(const std::vector<std::vector<std::string>>& rows) {
     std::vector<std::int32_t> off{0};
@@ -150,8 +198,19 @@ DataFrame agg_finalize(const AggState& st,
                 std::vector<std::string>(static_cast<std::size_t>(ng))));
             continue;
         }
-        if (st.key_is_str[k]) {
-            out.columns.push_back(Series::strings(st.skey_cols[k]));
+        if (st.key_is_bytes[k]) {
+            const TypeId kt =
+                k < st.key_type.size() ? st.key_type[k] : TypeId::String;
+            if (kt == TypeId::LargeString) {
+                out.columns.push_back(large_string_key(st.skey_cols[k]));
+            } else if (kt == TypeId::FixedSizeBinary ||
+                       kt == TypeId::Decimal128 || kt == TypeId::Decimal256) {
+                out.columns.push_back(bytes_flat_key(
+                    kt, st.key_byte_width[k], st.key_decimal_precision[k],
+                    st.key_decimal_scale[k], st.skey_cols[k]));
+            } else {
+                out.columns.push_back(Series::strings(st.skey_cols[k]));
+            }
             continue;
         }
         const FieldStatDomain kd =

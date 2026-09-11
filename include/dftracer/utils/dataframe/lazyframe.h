@@ -17,6 +17,14 @@
 
 namespace dftracer::utils::dataframe {
 
+/// Whether `batch_index` says anything about row order. Sequence means it is
+/// contiguous from 0 and morsels arrive in production order; a producer that
+/// cannot promise that reports Unordered.
+enum class Ordering {
+    Unordered,
+    Sequence,
+};
+
 /// A chunk of columns flowing through the lazy pipeline. Carries no names - the
 /// schema lives in the plan. Columns are FLAT.
 struct Morsel {
@@ -34,6 +42,10 @@ struct Morsel {
     /// morsel.
     std::vector<std::string> dyn_names;
     std::vector<Series> dyn_columns;
+    /// -1 when the producer keeps none.
+    std::int64_t batch_index = -1;
+    /// Opt in explicitly; an operation that reorders rows must reset this.
+    Ordering ordering = Ordering::Unordered;
 };
 
 /// A stateful reader over one Source. next() returns the next morsel, or
@@ -59,6 +71,22 @@ class Cursor {
     /// static schema is authoritative. Valid only after the cursor is drained.
     virtual std::optional<std::vector<std::string>> out_names() const {
         return std::nullopt;
+    }
+
+    /// Offer `predicate` (positional against this cursor's own schema, like a
+    /// ScanRequest filter) as a narrowing of the work this cursor has not yet
+    /// produced - a join build side or a plugin that learns a bound partway
+    /// through the scan. ADVISORY: a cursor may ignore this entirely, or
+    /// narrow only part of what remains; the caller must still evaluate
+    /// `predicate` itself over every row next()/try_next() yields afterward,
+    /// the same discipline as an unpushed (Pushed::No/Inexact) filter, so
+    /// ignoring or partially applying it can only change how much work the
+    /// cursor does, never the result. The return value reports whether the
+    /// cursor did anything with it, for diagnostics only. Modelled on Velox's
+    /// canAddDynamicFilter/addDynamicFilter.
+    virtual coro::CoroTask<bool> narrow(const Expr& predicate) {
+        (void)predicate;
+        co_return false;
     }
 };
 
@@ -313,6 +341,10 @@ class LazyFrame {
     /// from the LazyFrame to restart. `morsel_rows` is the scan chunk size;
     /// <= 0 means auto. collect() drains this.
     coro::AsyncGenerator<DataFrame> stream(std::int64_t morsel_rows = 0) const;
+
+    /// The plan's cursor chain, undrained, so a caller can read each morsel's
+    /// ordering before stream() materializes it away. One-shot, as stream().
+    std::unique_ptr<Cursor> open_cursor() const;
 
     /// Run the pipeline and materialize the surviving rows. `morsel_rows` is
     /// the scan chunk size; <= 0 (the default) means auto; one pass over a

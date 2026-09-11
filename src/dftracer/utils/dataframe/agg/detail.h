@@ -29,6 +29,7 @@ namespace dftracer::utils::dataframe {
 
 FieldStatDomain col_domain(TypeId t);
 std::uint64_t read_bits(const Series& c, std::int64_t i, FieldStatDomain d);
+bool is_bytes_key_type(TypeId t);
 
 /// Default sketch width when AggSpec::param does not set one.
 inline constexpr std::size_t AGG_DISTINCT_DEFAULT_K = 1024;
@@ -119,12 +120,16 @@ class AggState {
     bool inited = false;
 
     // Composite key over N columns: each column keeps its own type (Int64
-    // stays Int64, String stays String) - `key_is_str[k]` selects which of
-    // `ikey_cols[k]` / `skey_cols[k]` holds column k's per-group values. Groups
-    // are located by a combined hash of the N cells (hash_combine, no string
-    // concatenation) with a column-by-column equality check on collision.
+    // stays Int64, String stays String) - `key_is_bytes[k]` selects which of
+    // `ikey_cols[k]` / `skey_cols[k]` holds column k's per-group values.
+    // `skey_cols` holds raw bytes regardless of logical type (String/
+    // LargeString length-prefixed via string_at, FixedSizeBinary/Decimal128/
+    // Decimal256 fixed-width via key_byte_width), so hashing and equality on
+    // it are always plain byte comparison. Groups are located by a combined
+    // hash of the N cells (hash_combine, no string concatenation) with a
+    // column-by-column equality check on collision.
     std::size_t nkeys = 0;
-    std::vector<char> key_is_str;  // nkeys
+    std::vector<char> key_is_bytes;  // nkeys
     // Domain the raw bits in ikey_cols reinterpret to on finalize/render, so a
     // Uint64 hash key > 2^63 or a Float64 key keeps its real type.
     std::vector<FieldStatDomain> key_domain;  // nkeys
@@ -136,8 +141,19 @@ class AggState {
     // Timestamp, the timezone) the raw I64 bits in ikey_cols are expressed
     // in, so finalize retags the group key with the source's own unit
     // instead of defaulting to Micro/naive.
-    std::vector<TimeUnit> key_time_unit;               // nkeys
-    std::vector<std::string> key_timezone;             // nkeys
+    std::vector<TimeUnit> key_time_unit;    // nkeys
+    std::vector<std::string> key_timezone;  // nkeys
+    // FixedSizeBinary/Decimal128/Decimal256 key_type only: the per-row byte
+    // width (FixedSizeBinary's own fixed_size, or 16/32 for Decimal128/256)
+    // read_bits-of-the-bytes-domain slices skey_cols cells at, and finalize
+    // retags the group key with. 0 (unused) for String/LargeString, whose
+    // cells are already length-delimited.
+    std::vector<std::int32_t> key_byte_width;  // nkeys
+    // Decimal128/Decimal256 key_type only: the source column's precision and
+    // scale, so finalize retags the group key with the exact decimal type
+    // instead of a bare Decimal128(0, 0).
+    std::vector<std::int32_t> key_decimal_precision;   // nkeys
+    std::vector<std::int32_t> key_decimal_scale;       // nkeys
     std::vector<std::vector<std::int64_t>> ikey_cols;  // nkeys * ngroups
     std::vector<std::vector<std::string>> skey_cols;   // nkeys * ngroups
     std::unordered_map<std::uint64_t, std::vector<std::int64_t>> key_buckets;
@@ -586,8 +602,8 @@ class AggState {
         std::size_t h = 0;
         for (std::size_t k = 0; k < nkeys; ++k) {
             const std::size_t cv =
-                key_is_str[k] ? std::hash<std::string_view>{}(get_str(k))
-                              : static_cast<std::size_t>(get_int(k));
+                key_is_bytes[k] ? std::hash<std::string_view>{}(get_str(k))
+                                : static_cast<std::size_t>(get_int(k));
             dftracer::utils::hash_combine(h, cv);
         }
         auto it = key_buckets.find(static_cast<std::uint64_t>(h));
@@ -595,7 +611,7 @@ class AggState {
             for (std::int64_t g : it->second) {
                 bool match = true;
                 for (std::size_t k = 0; k < nkeys && match; ++k)
-                    match = key_is_str[k]
+                    match = key_is_bytes[k]
                                 ? (skey_cols[k][static_cast<std::size_t>(g)] ==
                                    get_str(k))
                                 : (ikey_cols[k][static_cast<std::size_t>(g)] ==
@@ -605,7 +621,7 @@ class AggState {
         }
         const std::int64_t g = ngroups();
         for (std::size_t k = 0; k < nkeys; ++k) {
-            if (key_is_str[k])
+            if (key_is_bytes[k])
                 skey_cols[k].emplace_back(get_str(k));
             else
                 ikey_cols[k].push_back(get_int(k));
@@ -626,7 +642,13 @@ class AggState {
                     read_bits(*keys[k], i, col_domain(keys[k]->type())));
             },
             [&](std::size_t k) -> std::string_view {
-                return keys[k]->string_at(i);
+                // String/LargeString are length-delimited (string_at handles
+                // both offset widths); FixedSizeBinary/Decimal128/Decimal256
+                // are `key_byte_width[k]` raw bytes per row, no offsets.
+                const std::int32_t w = key_byte_width[k];
+                if (w <= 0) return keys[k]->string_at(i);
+                return std::string_view(keys[k]->data<char>() + i * w,
+                                        static_cast<std::size_t>(w));
             });
     }
     std::int64_t group_of_other(const AggState& other, std::int64_t j) {
@@ -647,7 +669,7 @@ class AggState {
             std::size_t h = 0;
             for (std::size_t k = 0; k < nkeys; ++k) {
                 const std::size_t cv =
-                    key_is_str[k]
+                    key_is_bytes[k]
                         ? std::hash<std::string_view>{}(
                               skey_cols[k][static_cast<std::size_t>(g)])
                         : static_cast<std::size_t>(

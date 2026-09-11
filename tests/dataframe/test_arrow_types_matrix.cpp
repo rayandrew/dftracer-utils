@@ -113,28 +113,28 @@ const TypeRow TYPE_ROWS[] = {
     {TypeId::Decimal128,
      build_decimal128,
      needle_decimal128,
-     {C, C, C, C, C, R, C, R, R, R, C, C, R},
+     {C, C, C, C, C, C, C, R, R, R, C, C, R},
      100.0,
      300.0,
      700.0},
     {TypeId::Decimal256,
      build_decimal256,
      needle_decimal256,
-     {C, C, C, C, C, R, C, R, R, R, C, C, R},
+     {C, C, C, C, C, C, C, R, R, R, C, C, R},
      100.0,
      300.0,
      700.0},
     {TypeId::FixedSizeBinary,
      build_fixed_size_binary,
      needle_fixed_size_binary,
-     {C, R, C, C, C, R, C, R, R, R, C, R, R},
+     {C, R, C, C, C, C, C, R, R, R, C, R, R},
      0.0,
      0.0,
      0.0},
     {TypeId::LargeString,
      build_large_string,
      needle_large_string,
-     {C, R, C, C, C, R, C, R, R, C, C, R, R},
+     {C, R, C, C, C, C, C, R, R, C, C, R, R},
      0.0,
      0.0,
      0.0},
@@ -521,8 +521,12 @@ TEST_SUITE("dataframe_arrow_types_matrix") {
                 continue;
             }
             REQUIRE(sum.valid());
-            CHECK((sum.type() == TypeId::Float32 ||
-                   sum.type() == TypeId::Float64));
+            if (row.id == TypeId::Decimal128 || row.id == TypeId::Decimal256) {
+                CHECK(sum.type() == row.id);
+            } else {
+                CHECK((sum.type() == TypeId::Float32 ||
+                       sum.type() == TypeId::Float64));
+            }
             CHECK(sum.length() == 4);
         }
     }
