@@ -98,6 +98,72 @@ std::size_t agg_approx_bytes(const AggState& st) {
     return total;
 }
 
+DataType agg_output_type(AggOp op, TypeId value_type) {
+    auto widened = [&] {
+        switch (col_domain(value_type)) {
+            case FieldStatDomain::U64:
+                return scalar(TypeId::Uint64);
+            case FieldStatDomain::F64:
+                return scalar(TypeId::Float64);
+            default:
+                return scalar(TypeId::Int64);
+        }
+    };
+    switch (op) {
+        case AggOp::Count:
+        case AggOp::CountValid:
+        case AggOp::Distinct:
+            return scalar(TypeId::Int64);
+        case AggOp::Sum:
+        case AggOp::Min:
+        case AggOp::Max:
+            return widened();
+        case AggOp::First:
+        case AggOp::Last:
+            return value_type == TypeId::String ? scalar(TypeId::String)
+                                                : widened();
+        case AggOp::Mean:
+        case AggOp::Var:
+        case AggOp::Std:
+        case AggOp::Skew:
+        case AggOp::Kurt:
+        case AggOp::Pct:
+        case AggOp::SumSq:
+        case AggOp::Busy:
+        case AggOp::Concurrency:
+        case AggOp::Utilization:
+        case AggOp::Active:
+        case AggOp::Corr:
+        case AggOp::CovarPop:
+        case AggOp::CovarSamp:
+        case AggOp::RegrSlope:
+        case AggOp::RegrIntercept:
+        case AggOp::RegrR2:
+            return scalar(TypeId::Float64);
+        case AggOp::ArgMax:
+        case AggOp::ArgMin:
+        case AggOp::SetUnion:
+            return scalar(TypeId::String);
+        case AggOp::BitOr:
+            return scalar(TypeId::Uint64);
+        case AggOp::Hist:
+            return list_of(
+                struct_of({Field{"lo", scalar(TypeId::Float64), true},
+                           Field{"hi", scalar(TypeId::Float64), true},
+                           Field{"count", scalar(TypeId::Uint64), true}}));
+        case AggOp::ListSorted:
+        case AggOp::TopK:
+        case AggOp::BottomK:
+        case AggOp::Sample:
+            return list_of(scalar(TypeId::String));
+        case AggOp::ApproxTopK:
+            return list_of(
+                struct_of({Field{"value", scalar(TypeId::String), true},
+                           Field{"count", scalar(TypeId::Uint64), true}}));
+    }
+    return scalar(TypeId::Unknown);
+}
+
 int agg_key_cmp(const AggState& a, std::int64_t ga, const AggState& b,
                 std::int64_t gb) {
     for (std::size_t k = 0; k < a.nkeys; ++k) {

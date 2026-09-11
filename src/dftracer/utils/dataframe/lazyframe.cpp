@@ -2383,6 +2383,175 @@ std::vector<std::string> out_schema(const LazyOp& op,
         op.node);
 }
 
+const Field* find_field(const Schema& s, const std::string& name) {
+    for (const Field& f : s.fields)
+        if (f.name == name) return &f;
+    return nullptr;
+}
+
+TypeId field_type_or_unknown(const Schema& s, const std::string& name) {
+    const Field* f = find_field(s, name);
+    return f ? f->type.id : TypeId::Unknown;
+}
+
+// Aggregate output types for one GroupByOp/GroupByDynamicOp: each spec's
+// value column type feeds agg_output_type (shared with agg_finalize's own
+// dispatch, so this can never disagree with collect()).
+std::vector<Field> group_agg_fields(const Schema& in,
+                                    const std::vector<GroupAgg>& aggs) {
+    std::vector<Field> out;
+    out.reserve(aggs.size());
+    for (const GroupAgg& a : aggs) {
+        TypeId vt = a.column.empty() ? TypeId::Unknown
+                                     : field_type_or_unknown(in, a.column);
+        out.push_back(Field{a.out, agg_output_type(to_agg_op(a.op), vt), true});
+    }
+    return out;
+}
+
+// Mirrors dfops::unpivot's value-column type resolution (batch_ops.cpp):
+// value_vars sharing one type keep it exactly (params included); otherwise,
+// if every value_var is numeric, the common type is Int64 unless any is a
+// float, else the plan is invalid and collect() will throw (report Unknown).
+DataType unpivot_value_type(const Schema& in,
+                            const std::vector<std::string>& value_vars) {
+    if (value_vars.empty()) return scalar(TypeId::Unknown);
+    const Field* first = find_field(in, value_vars.front());
+    if (!first) return scalar(TypeId::Unknown);
+    bool all_same = true, any_float = false, all_numeric = true;
+    for (const std::string& name : value_vars) {
+        const Field* f = find_field(in, name);
+        if (!f) return scalar(TypeId::Unknown);
+        if (f->type != first->type) all_same = false;
+        if (f->type.id == TypeId::Float32 || f->type.id == TypeId::Float64)
+            any_float = true;
+        if (!is_numeric_dispatchable(f->type.id)) all_numeric = false;
+    }
+    if (all_same) return first->type;
+    if (all_numeric) return scalar(any_float ? TypeId::Float64 : TypeId::Int64);
+    return scalar(TypeId::Unknown);
+}
+
+Schema out_types(const LazyOp& op, Schema in) {
+    return std::visit(
+        overloaded{
+            [&](const FilterOp&) { return in; },
+            [&](const SliceOp&) { return in; },
+            [&](const TailOp&) { return in; },
+            [&](const DropNullsOp&) { return in; },
+            // dftu_series_fillna only runs on a numeric-dispatchable column
+            // (Int8-64/Uint8-64/Float32/64, none of which carry nested
+            // parameters) and leaves every other column untouched, so
+            // fill_null never changes a field's type.
+            [&](const FillNullOp&) { return in; },
+            [&](const SelectOp& o) {
+                Schema out;
+                out.fields.reserve(o.names.size());
+                for (const std::string& name : o.names) {
+                    const Field* f = find_field(in, name);
+                    out.fields.push_back(
+                        f ? *f : Field{name, scalar(TypeId::Unknown), true});
+                }
+                return out;
+            },
+            [&](const RenameOp& o) {
+                Schema out;
+                out.fields.reserve(o.names.size());
+                for (std::size_t i = 0; i < o.names.size(); ++i) {
+                    DataType t = i < in.fields.size() ? in.fields[i].type
+                                                      : scalar(TypeId::Unknown);
+                    out.fields.push_back(Field{o.names[i], t, true});
+                }
+                return out;
+            },
+            [&](const WithColumnOp& o) {
+                std::vector<DataType> types;
+                types.reserve(in.fields.size());
+                for (const Field& f : in.fields) types.push_back(f.type);
+                DataType t = infer_type(o.expr, types);
+                auto it = std::find_if(
+                    in.fields.begin(), in.fields.end(),
+                    [&](const Field& f) { return f.name == o.name; });
+                if (it != in.fields.end())
+                    it->type = t;
+                else
+                    in.fields.push_back(Field{o.name, t, true});
+                return in;
+            },
+            [&](const WithRowIndexOp& o) {
+                in.fields.insert(in.fields.begin(),
+                                 Field{o.name, scalar(TypeId::Int64), true});
+                return in;
+            },
+            [&](const NullCountOp&) {
+                for (Field& f : in.fields) f.type = scalar(TypeId::Int64);
+                return in;
+            },
+            [&](const ExplodeOp& o) {
+                for (Field& f : in.fields) {
+                    if (f.name != o.column) continue;
+                    const bool is_list = f.type.id == TypeId::List ||
+                                         f.type.id == TypeId::LargeList ||
+                                         f.type.id == TypeId::FixedSizeList;
+                    f.type = is_list && !f.type.fields.empty()
+                                 ? f.type.fields.front().type
+                                 : scalar(TypeId::Unknown);
+                }
+                return in;
+            },
+            [&](const TopkOp&) { return in; },
+            [&](const UnpivotOp& o) {
+                Schema out;
+                for (const std::string& name : o.id_vars) {
+                    const Field* f = find_field(in, name);
+                    out.fields.push_back(
+                        f ? *f : Field{name, scalar(TypeId::Unknown), true});
+                }
+                out.fields.push_back(
+                    Field{"variable", scalar(TypeId::String), true});
+                out.fields.push_back(
+                    Field{"value", unpivot_value_type(in, o.value_vars), true});
+                return out;
+            },
+            [&](const GroupByOp& o) {
+                if (!o.dyn.empty()) return Schema{};
+                Schema out;
+                for (const std::string& key : o.keys) {
+                    const Field* f = find_field(in, key);
+                    out.fields.push_back(
+                        f ? *f : Field{key, scalar(TypeId::Unknown), true});
+                }
+                std::vector<Field> aggf = group_agg_fields(in, o.aggs);
+                out.fields.insert(out.fields.end(), aggf.begin(), aggf.end());
+                return out;
+            },
+            [&](const SortByOp&) { return in; },
+            [&](const UniqueOp&) { return in; },
+            [&](const SampleOp&) { return in; },
+            [&](const IsDupOp& o) {
+                return Schema{{Field{o.unique ? "is_unique" : "is_duplicated",
+                                     scalar(TypeId::Bool), true}}};
+            },
+            [&](const GroupByDynamicOp& o) {
+                Schema out;
+                const Field* tf = find_field(in, o.time_col);
+                out.fields.push_back(
+                    tf ? *tf
+                       : Field{o.time_col, scalar(TypeId::Unknown), true});
+                std::vector<Field> aggf = group_agg_fields(in, o.aggs);
+                out.fields.insert(out.fields.end(), aggf.begin(), aggf.end());
+                return out;
+            },
+            [&](const PivotOp&) { return Schema{}; },
+            [&](const ToDummiesOp&) { return Schema{}; },
+            [&](const DescribeOp&) { return Schema{}; },
+            [&](const ReverseOp&) { return in; },
+            [&](const TakeOp&) { return in; },
+            [&](const FilterMaskOp&) { return in; },
+            [&](const SortByMultiOp&) { return in; }},
+        op.node);
+}
+
 std::string describe_op(const LazyOp& op) {
     return std::visit(
         overloaded{
@@ -3190,10 +3359,18 @@ LazyFrame LazyFrame::describe() const {
     return with_ops(std::move(ops));
 }
 
-std::vector<std::string> LazyFrame::schema() const {
-    std::vector<std::string> s = source_->names();
-    for (const auto& op : ops_) s = out_schema(*op, std::move(s));
+Schema LazyFrame::output_schema() const {
+    Schema s = source_->schema();
+    for (const auto& op : ops_) s = out_types(*op, std::move(s));
     return s;
+}
+
+std::vector<std::string> LazyFrame::schema() const {
+    Schema s = output_schema();
+    std::vector<std::string> names;
+    names.reserve(s.fields.size());
+    for (const Field& f : s.fields) names.push_back(f.name);
+    return names;
 }
 
 std::string LazyFrame::explain() const {

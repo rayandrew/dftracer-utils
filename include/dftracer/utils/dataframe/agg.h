@@ -114,6 +114,14 @@ inline bool agg_uses_raw_value(AggOp op) {
            op == AggOp::Sample;
 }
 
+/// The DataType agg_finalize actually writes for `op` over a value column of
+/// `value_type`: Sum/Min/Max/First/Last widen through the same
+/// integer/unsigned/float domain agg_finalize keys on (Int64/Uint64/Float64),
+/// String columns pass First/Last through unchanged, and every other op's
+/// type is fixed regardless of `value_type`. Never guesses: every AggOp is
+/// covered, so schema code built on this can never disagree with collect().
+DataType agg_output_type(AggOp op, TypeId value_type);
+
 /// One aggregate: `op` over the value column at index `value_col` in the values
 /// passed to accumulate (ignored for Count), named `out` in the result.
 struct AggSpec {

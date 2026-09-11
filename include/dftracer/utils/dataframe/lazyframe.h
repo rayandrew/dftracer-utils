@@ -272,6 +272,13 @@ class LazyFrame {
     /// in a data-dependent op (pivot/to_dummies/describe).
     std::vector<std::string> schema() const;
 
+    /// The typed output schema without running the query: walks the plan from
+    /// the source's Schema, transforming it per op the same way schema()
+    /// transforms names. Empty for a data-dependent op (pivot/to_dummies/
+    /// describe), matching schema(). A field whose type an op cannot
+    /// determine statically is TypeId::Unknown, never a guess.
+    Schema output_schema() const;
+
     /// The optimized plan as text (source then one op per line), for
     /// introspection and tests.
     std::string explain() const;
